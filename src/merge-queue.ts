@@ -1027,7 +1027,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // compare ejects nothing, and a file carried from another item's commits on this head is excused
   // exactly as the build gate excuses it (GY-871): nothing that passed build is ejected over it.
   const verdict = landability ?? evaluateLandability(work, all, now);
-  const landing = landabilityEjection(verdict, 'build');
+  const landing = landabilityEjection(verdict, 'landing');
   if (landing) return landing;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
@@ -1090,7 +1090,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // about the tip, not a missing one: the entry leaves instead of holding everything behind it.
   // A trusted `manual:` proof that executed nothing (GY-868) is not one — the verdict holds the
   // entry for the attestation a criterion of this item can request (GY-875, GY-910).
-  return landabilityEjection(verdict, 'acceptance');
+  return landabilityEjection(verdict, 'proof');
   return null;
 }
 

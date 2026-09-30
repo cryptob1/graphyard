@@ -130,7 +130,7 @@ test('unit:queue-and-gates-share-verdict — ejectionReason and the landing guar
   const gy871 = queueAgrees(carried, [predecessor, carried]);
   assert.match(landabilityRefusals(gy871.verdict, 'build')[0], /^Carried from another item's tip: 1 file .* belongs to GY-P/);
   assert.equal(gy871.reason, null, 'a carried file ejects nothing');
-  assert.equal(landabilityEjection(gy871.verdict, 'build'), null);
+  assert.equal(landabilityEjection(gy871.verdict, 'landing'), null);
   // An uncarried out-of-plan file is this change's own: the verdict gives the ejection, the queue takes it.
   const stranger = item({ key: 'GY-U', files: ['src/own.ts', 'src/stranger.ts'], queued: 2 });
   const own = queueAgrees(stranger, [predecessor, stranger]);
@@ -151,9 +151,12 @@ test('unit:queue-and-gates-share-verdict — ejectionReason and the landing guar
   const answered = queueAgrees(retried, [retried]);
   assert.equal(answered.verdict.verdict, 'landable');
   assert.equal(answered.reason, null);
-  // A failing record for a proof no criterion requires refuses nothing and ejects nothing.
+  // A judged failure of a proof no criterion requires is still a failure of the change (GY-868):
+  // the build gate returns the head to its worker and the queue ejects on the same verdict reason.
   const stray = item({ key: 'GY-S', evidence: [evidence('unit:own-proof', sha('7')), evidence('unit:unrequired', sha('7'), { result: 'fail' })] });
-  assert.deepEqual(queueAgrees(stray, [stray]), { verdict: evaluateLandability(stray, [stray], now), reason: null });
+  const strayed = queueAgrees(stray, [stray]);
+  assert.equal(strayed.reason, 'Proof unit:unrequired failed on speculative tip 777777777777');
+  assert.deepEqual(landabilityRefusals(strayed.verdict, 'build'), ['unit:unrequired, which no criterion requires, failed on 777777777777 (trusted evidence from independent-producer); the head returns to its worker before review']);
   // A revoked proof is refused by the gate and ejects with the revocation named.
   const revoked = item({ key: 'GY-V', evidence: [evidence('unit:own-proof', sha('7'), { revocation: { reason: 'producer withdrew it', at, actor: 'operator' } } as Partial<Evidence>)] });
   assert.equal(queueAgrees(revoked, [revoked]).reason, 'Proof unit:own-proof was revoked on speculative tip 777777777777: producer withdrew it');
@@ -227,7 +230,7 @@ test('unit:landability-consumers-agree — over generated work items the gates, 
       assert.equal(!!placed.queue, verdict.verdict === 'landable', label);
     }
     // The landing guard: its ejection is a build refusal of the same verdict, never a separate answer.
-    const landing = landabilityEjection(verdict, 'build');
+    const landing = landabilityEjection(verdict, 'landing');
     if (landing) assert.equal(gates.build.passed, false, label);
     seen[verdict.verdict]++;
   }
@@ -310,7 +313,7 @@ test('unit:ejection-not-sticky — an entry ejected on landability grounds re-en
   // worker, so the item is not eligible yet — but nothing about the ejection itself holds it.
   const carriedVerdict = evaluateLandability(gy472, all, now);
   assert.match(landabilityRefusals(carriedVerdict, 'build')[0], /^Carried from another item's tip/);
-  assert.equal(landabilityEjection(carriedVerdict, 'build'), null, 'the verdict no longer ejects over the carried file');
+  assert.equal(landabilityEjection(carriedVerdict, 'landing'), null, 'the verdict no longer ejects over the carried file');
   // GY-509 lands, the landing check no longer names it foreign: the same head is landable, and it
   // re-enters the queue without a new head.
   const landed = { ...gy509, stage: 'done', queue: null, observation: { ...gy509.observation!, merged: true } } as Work;

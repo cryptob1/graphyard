@@ -2,7 +2,7 @@ import { baseRefreshConflict, restoringAfterEjection, staleSpeculativeTip } from
 import type { QueueEjection } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
-import { inheritedObligations } from './bootstrap.js';
+import { inheritedObligations, requiredProofs } from './bootstrap.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
 import { queuedRegressions, regressionRefusals, staleTipRegressions } from '../regression-guard.js';
@@ -30,7 +30,10 @@ export interface LandabilityReason {
   reason: string;
   /** The merge queue's ejection wording, when this refusal is an adverse conclusion about the queued tip. */
   eject?: string;
+  /** Where the queue reads that ejection: with the landing check on the tip's tree, or with its proofs after CI and review. */
+  ground?: LandabilityGround;
 }
+export type LandabilityGround = 'landing' | 'proof';
 /** What the verdict was computed from: the candidate identity, the policy revision and the evidence it read. */
 export interface LandabilityInputs {
   key: string; sha: string | null; baseSha: string | null; policyRevision: number;
@@ -93,13 +96,13 @@ function buildFamily(work: Work, all: Work[], now: Date): LandabilityReason[] {
   // the first of this change's own regressions. Every adverse landing conclusion is a build
   // refusal, so the fallback only keeps the rule total: nothing ejects that the verdict lacks.
   const carrier = (stale && restoring ? reasons.find(entry => entry.reason === restoring) : undefined) ?? reasons.find(entry => own.includes(entry));
-  if (carrier) carrier.eject = eject;
-  else reasons.push({ gate: 'build', reason: eject, eject });
+  if (carrier) Object.assign(carrier, { eject, ground: 'landing' });
+  else reasons.push({ gate: 'build', reason: eject, eject, ground: 'landing' });
   return reasons;
 }
 
-/** The acceptance family: exactly the acceptance gate's refusals, with an adverse proof conclusion's ejection attached. */
-function acceptanceFamily(work: Work, all: Work[], now: Date): LandabilityReason[] {
+/** The acceptance family: exactly the acceptance gate's refusals, each tagged with the proof it demands. */
+function acceptanceFamily(work: Work, all: Work[], now: Date): (LandabilityReason & { proof?: string })[] {
   // GY-895: the pass rule is per family — a manual: proof is judged as an attestation, so its
   // trusted pass proves it whatever it executed, while every other proof keeps the title-count rule.
   const unproven = (proof: string) => {
@@ -125,22 +128,38 @@ function acceptanceFamily(work: Work, all: Work[], now: Date): LandabilityReason
   // Independence is re-decided on every evaluation, so evidence minted before its
   // producer joined the implementer set refuses acceptance with a named reason.
   reasons.push(...evidenceIndependenceRefusals(work, now).map(reason => ({ gate: 'acceptance' as const, reason })));
-  // An unproven proof whose evidence binding this tip failed or was withdrawn is an adverse
-  // conclusion about the tip, not a missing one: the queue ejects it rather than hold everything
-  // behind it. One failing record is not: a trusted `manual:` proof whose executed is 0 (GY-868)
-  // judged nothing — the unexercised finding answered by an attestation the loop requests for a
-  // proof a criterion of this item names (GY-875, GY-910) — so the entry is held for it instead.
+  return reasons;
+}
+
+/**
+ * The adverse proof conclusion about the tip, attached to the refusal it comes from. A proof whose
+ * evidence binding this tip failed or was withdrawn is an adverse conclusion, not a missing one:
+ * the queue ejects it rather than hold everything behind it. A required proof's is the acceptance
+ * refusal of that proof, so a failure the newest record has answered refuses and ejects nothing. A
+ * judged failure of a proof no criterion or obligation requires is still a failure of the change
+ * (GY-868): the build family refuses it, returning the head to its worker, and the queue ejects on
+ * it. One failing record is no conclusion: a trusted `manual:` proof whose executed is 0 judged
+ * nothing — the unexercised finding answered by an attestation the loop requests for a proof a
+ * criterion of this item names (GY-875, GY-910) — so the entry is held for that instead.
+ */
+function attachProofEjection(work: Work, all: Work[], now: Date, build: LandabilityReason[], acceptance: (LandabilityReason & { proof?: string })[], judged: boolean): LandabilityReason[] {
   const candidate = work.candidate;
-  const refused = new Set(reasons.flatMap(entry => entry.proof ? [entry.proof] : []));
-  const binds = (item: Work['evidence'][number]) => item.trusted && refused.has(item.proof) && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision;
-  const failed = candidate ? work.evidence.find(item => binds(item) && item.result === 'fail'
-    && !(item.proof.startsWith('manual:') && item.executed === 0 && work.criteria.some(criterion => criterion.proofs.includes(item.proof)))) : undefined;
-  const revoked = candidate && !failed ? work.evidence.find(item => binds(item) && !!item.revocation) : undefined;
-  const tip = candidate?.sha.slice(0, 12);
-  const adverse = failed ? { proof: failed.proof, eject: `Proof ${failed.proof} failed on speculative tip ${tip}` }
-    : revoked ? { proof: revoked.proof, eject: `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}` } : null;
-  const carrier = adverse ? reasons.findIndex(entry => entry.proof === adverse.proof) : -1;
-  return reasons.map(({ proof: _proof, ...entry }, index) => index === carrier ? { ...entry, eject: adverse!.eject } : entry);
+  const plain = () => acceptance.map(({ proof: _proof, ...entry }) => entry);
+  if (!candidate) return plain();
+  const refused = new Set(acceptance.flatMap(entry => entry.proof ? [entry.proof] : []));
+  const required = new Set(requiredProofs(work, all));
+  const stray = (proof: string) => judged && !required.has(proof) && !(currentEvidence(work, proof, now) && evidenceProves(proof, currentEvidence(work, proof, now)!));
+  const binds = (item: Work['evidence'][number]) => item.trusted && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision;
+  const failed = work.evidence.find(item => binds(item) && item.result === 'fail' && (refused.has(item.proof) || stray(item.proof))
+    && !(item.proof.startsWith('manual:') && item.executed === 0 && work.criteria.some(criterion => criterion.proofs.includes(item.proof))));
+  const revoked = failed ? undefined : work.evidence.find(item => binds(item) && !!item.revocation && refused.has(item.proof));
+  const tip = candidate.sha.slice(0, 12);
+  const adverse = failed ? { proof: failed.proof, eject: `Proof ${failed.proof} failed on speculative tip ${tip}`, ground: 'proof' as const }
+    : revoked ? { proof: revoked.proof, eject: `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}`, ground: 'proof' as const } : null;
+  if (!adverse) return plain();
+  const carrier = acceptance.findIndex(entry => entry.proof === adverse.proof);
+  if (carrier < 0) build.push({ gate: 'build', reason: `${adverse.proof}, which no criterion requires, failed on ${tip} (trusted evidence from ${failed!.producer}); the head returns to its worker before review`, eject: adverse.eject, ground: adverse.ground });
+  return acceptance.map(({ proof: _proof, ...entry }, index) => index === carrier ? { ...entry, eject: adverse.eject, ground: adverse.ground } : entry);
 }
 
 /**
@@ -149,7 +168,14 @@ function acceptanceFamily(work: Work, all: Work[], now: Date): LandabilityReason
  * item, peers and instant always give the same verdict, and nothing stored is consulted.
  */
 export function evaluateLandability(work: Work, all: Work[], now: Date): LandabilityVerdict {
-  const reasons = [...buildFamily(work, all, now), ...acceptanceFamily(work, all, now)];
+  const build = buildFamily(work, all, now);
+  // A stray judged failure is read where the build family reads the tree: on the observed candidate
+  // of a submitted attempt that is not waiting for its branch restore.
+  const candidate = work.candidate, obs = work.observation;
+  const judged = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha
+    && !!work.submission && !work.reworkRequested && !restoringAfterEjection(work, all);
+  const acceptance = attachProofEjection(work, all, now, build, acceptanceFamily(work, all, now), judged);
+  const reasons = [...build, ...acceptance];
   const audit = { version: LANDABILITY_VERSION, inputs: inputsOf(work) };
   return reasons.length ? { verdict: 'refused', reasons, ...audit } : { verdict: 'landable', ...audit };
 }
@@ -159,9 +185,9 @@ export function landabilityRefusals(verdict: LandabilityVerdict, gate: Landabili
   return verdict.verdict === 'refused' ? verdict.reasons.filter(entry => entry.gate === gate).map(entry => entry.reason) : [];
 }
 
-/** The queue ejection a gate family's refusal carries, or null: the queue ejects on landability grounds only for this. */
-export function landabilityEjection(verdict: LandabilityVerdict, gate: LandabilityGate): string | null {
-  return verdict.verdict === 'refused' ? verdict.reasons.find(entry => entry.gate === gate && entry.eject)?.eject ?? null : null;
+/** The queue ejection the verdict gives on one ground, or null: the queue ejects on landability grounds only for this. */
+export function landabilityEjection(verdict: LandabilityVerdict, ground: LandabilityGround): string | null {
+  return verdict.verdict === 'refused' ? verdict.reasons.find(entry => entry.ground === ground && entry.eject)?.eject ?? null : null;
 }
 
 /** Every queue ejection the verdict gives. */
