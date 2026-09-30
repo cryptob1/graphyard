@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type DecidePayload } from '../src/runner/payloads.js';
 import { detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
 import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, liveRunCheckouts, runsDirectory, unendedRunOnDisk, type Applied } from '../src/runner/registry.js';
-import { approverRunAdopter, approverRunContext, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
+import { approverRunAdopter, approverRunContext, approverRunOptions, confiningSpawn, startNarrowRun } from '../src/runner/roles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
 import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunches, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { maxLostApproverRuns } from '../src/daemon/decisions.js';
@@ -273,6 +273,44 @@ test('unit:restart-leaves-runs a run launched from a systemd service gets its ow
   assert.equal(plain.file, '/bin/sh');
   assert.match(plain.args[1], /trap : TERM INT HUP/);
   assert.match(plain.args[1], /'\/runs\/r1\/exit'/, 'the shell records Pi\'s exit in the run directory');
+});
+
+test('unit:restart-leaves-runs a confined run from a systemd service starts its scope outside the confinement, which masks the user bus', async () => {
+  // Production spawns every headless run through confiningSpawn (GY-888), whose bubblewrap masks
+  // the user bus and systemd runtime directory: a systemd-run inside it could never start a scope.
+  const base = await mkdtemp(join(tmpdir(), 'graphyard-headless-scope-'));
+  try {
+    const root = join(base, 'coordinator'), cwd = join(root, '.graphyard', 'worktrees', 'GY-1-1'), runs = join(base, 'runs');
+    await mkdir(cwd, { recursive: true });
+    const spawned: { command: string; args: readonly string[] }[] = [];
+    const capture = ((command: string, args: readonly string[]) => {
+      spawned.push({ command, args });
+      return Object.assign(new EventEmitter(), { pid: undefined, unref() {} });
+    }) as unknown as typeof import('node:child_process').spawn;
+    const runner = piRunner({ command: 'pi', containment: 'systemd', spawn: confiningSpawn(capture, { coordinatorRoot: root, bwrap: 'bwrap' }), pollMs: 20 });
+    const run = runner.start('Judge it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd, runs });
+    run.cancel('the test only inspects the launch');
+    await run.result();
+    assert.equal(spawned.length, 1);
+    const [{ command, args }] = spawned;
+    assert.equal(command, 'systemd-run', 'the transient scope is the outermost command, reachable to the user manager');
+    const separator = args.indexOf('--');
+    assert.deepEqual(args.slice(0, separator), ['--user', '--scope', '--quiet', '--collect', `--unit=graphyard-run-${run.id}.scope`]);
+    assert.equal(args[separator + 1], 'bwrap', 'the confinement wraps what the scope runs');
+    const inner = args.slice(separator + 1);
+    assert.ok(inner.includes('--unshare-pid') && inner.includes(root) && inner.includes(cwd), 'the run is still confined: the coordinator read-only, its own checkout re-exposed');
+    const shell = inner.indexOf('/bin/sh');
+    assert.ok(shell > 0 && inner[shell - 1] === '--' && inner[shell + 1] === '-c', 'the run\'s shell follows the confinement');
+    assert.ok(!inner.includes('systemd-run'), 'systemd-run never runs inside the confinement');
+    // A run without its own scope is confined whole, as before.
+    spawned.length = 0;
+    const plain = piRunner({ command: 'pi', containment: 'setsid', spawn: confiningSpawn(capture, { coordinatorRoot: root, bwrap: 'bwrap' }), pollMs: 20 })
+      .start('Judge it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd, runs });
+    plain.cancel('the test only inspects the launch');
+    await plain.result();
+    assert.equal(spawned[0].command, 'bwrap');
+    assert.equal(spawned[0].args[spawned[0].args.indexOf('/bin/sh') - 1], '--');
+  } finally { await rm(base, { recursive: true, force: true }); }
 });
 
 test('unit:headless-run-survives-restart a lost approver run is relaunched without spending a launch only a bounded number of times, then counts, so the decision still escalates', () => {

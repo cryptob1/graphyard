@@ -26,6 +26,12 @@ export function confiningSpawn(base: typeof spawn = spawn, options: { coordinato
   if (!root) return base;
   const confined = ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
     const wrapper = headlessConfinementWrapper(root, typeof spawnOptions?.cwd === 'string' ? spawnOptions.cwd : undefined, options.bwrap !== undefined ? options.bwrap : bwrapOnPath());
+    // A run in its own transient scope (GY-453) starts `systemd-run … -- SHELL`: the scope stays
+    // outermost and only the run's shell is confined, because the confinement masks the user bus
+    // and systemd runtime directory (GY-888), so a `systemd-run` inside it could never reach the
+    // user manager and every run from a systemd-supervised loop or executor would fail at spawn.
+    const separator = command === 'systemd-run' ? args.indexOf('--') : -1;
+    if (separator >= 0) return base(command, [...args.slice(0, separator + 1), ...wrapper, ...args.slice(separator + 1)], spawnOptions);
     return base(wrapper[0], [...wrapper.slice(1), command, ...args], spawnOptions);
   }) as typeof spawn;
   return confined;
