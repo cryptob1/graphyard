@@ -355,6 +355,17 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.deepEqual(applied, ['persisted'], 'the record of the failed run persisted after the momentary refusal');
   clearDoctorRuns();
 
+  // When the recovery record cannot persist either, the failed run stays queued for posting: it is
+  // never reaped as lost, so without the marker it and its per-item history would be dropped.
+  let stuckFailures = 2;
+  const unrecorded = cycle(work, { doctor: unappliable, effects: { persist: async () => { if (stuckFailures-- > 0) throw new Error('the cursor is unwritable'); } } });
+  await doctorStep(unrecorded);
+  await doctorRunsSettled();
+  const unrecordedRun = unrecorded.state.doctor.runs[0];
+  assert.equal(unrecordedRun.state, 'failed', 'the run is still recorded failed');
+  assert.ok(unrecorded.state.doctor.unposted.includes(unrecordedRun.at), 'a run whose recovery record failed stays queued for a later cycle to post');
+  clearDoctorRuns();
+
   // A filing the control plane did not accept is kept on the cursor and filed again on a later
   // cycle under the same stable key — a briefly unreachable control plane loses no P0/P1 fault
   // item — and a filing whose fault class an open item comes to cover meanwhile is dropped.

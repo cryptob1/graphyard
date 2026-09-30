@@ -404,10 +404,14 @@ export async function doctorStep(cycle: Cycle) {
       if (!current || current.state !== 'running') return;
       current.state = 'failed';
       current.detail = `Applying the report failed: ${message(error)}`.slice(0, 1000);
+      // Queued for posting before anything that can throw: a failed run is never reaped as lost, so
+      // the unposted marker is what keeps it retryable — the next cycle posts it and the next
+      // successful persist carries the marker, even when persisting fails here as well.
+      state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);
       try {
         await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: current.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist);
         await postRun(cycle, doctor, current, now);
-      } catch { /* the failed run stands on the cursor; a persist failure past this point is reaped by the lost-run bound */ }
+      } catch { /* the run stays queued in `unposted`; a later cycle posts it and persists the cursor */ }
     })
     .finally(() => { live = null; });
 }
