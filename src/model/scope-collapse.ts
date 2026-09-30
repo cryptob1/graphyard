@@ -139,6 +139,22 @@ export function routableScopeRequest(item: { plannedFiles?: readonly string[]; c
 }
 
 /**
+ * True when the item's standing refusal is the terminal over-cap one (GY-906): a purely additive
+ * request the widening rule refused that no fold represents under `plannedFilesMax`, so `master
+ * scope` — the plain exact-path union — is refused by that same bound and can never carry the ask.
+ * The liveness escalation and the status actions name `master requirements`, whose plannedFiles
+ * can fold or split the ask under the cap, rather than an impossible command (GY-936).
+ */
+export function terminalScopeRefusal(item: { plannedFiles?: readonly string[]; criteria?: readonly ScopeCriterion[]; scopeRequest?: ScopeRequestState | null }): boolean {
+  const request = item.scopeRequest;
+  if (request?.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard') return false;
+  if (request.remove?.length || request.criteria?.length) return false;
+  const paths = unplannedPaths(item.plannedFiles, request.paths);
+  if (!paths.length) return false;
+  return collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles.length > plannedFilesMax;
+}
+
+/**
  * What the worker reads in its own session once its request is judged (GY-176) — from its own
  * `scope-request --wait` or `status`, never a message pasted into the session: carry on, or the
  * approver's reason and that the attempt stays inside plannedFiles, withdrawing the ask, which
