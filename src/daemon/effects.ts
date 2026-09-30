@@ -66,6 +66,8 @@ export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
  */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
+/** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
+export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
 export interface DaemonEffects extends BaseFailureEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
@@ -316,7 +318,7 @@ export interface DaemonEffects extends BaseFailureEffects {
    * operator-agent identity, under an idempotency key naming the class and its instances. Absent
    * while no such identity is provisioned: the classes are still recorded and reported.
    */
-  fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
+  fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
   /**
    * The diagnostician (GY-439): its settings, the runners of its primary and fallback runs, the
    * excerpts it reads, and filing and deciding as the master's operator-agent identity. Absent while
@@ -760,7 +762,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get refreshCandidate() { return current().operatorAgent ? (work: Work, reason: string, key: string) => asOperatorAgent('POST', `work/${work.id}/refresh`, { reason, base: work.observation?.baseTip }, key) as Promise<Work> : undefined; },
     // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
-    get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
+    get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
       () => herdrJson(['status', 'server', '--json'], run)) }),
