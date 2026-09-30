@@ -67,6 +67,9 @@ test('unit:risk-lane-assigned — the repository\u2019s real schema and authenti
   assert.equal(determineLane(['src/store/tables.ts']), 'high', 'the table registry is high-risk');
   assert.equal(determineLane(['src/server/auth.ts']), 'high', 'authentication is high-risk');
   assert.equal(determineLane(['src/server/principals.ts']), 'high', 'principal identity is high-risk');
+  assert.equal(determineLane(['src/server/main.ts']), 'high', 'the server bootstrap that loads credentials is high-risk');
+  assert.equal(determineLane(['src/operator-agent.ts']), 'high', 'the operator agent\'s credential handling is high-risk');
+  assert.equal(determineLane(['src/proof-grants.ts']), 'high', 'proof-authority grants are high-risk');
   assert.equal(determineLane(['src/store/pools.ts']), 'high', 'the persistence layer around the schema rides with it');
   assert.equal(determineLane(['src/store/tables/work.ts', 'src/store/schema.ts']), 'high', 'not lowered by the single-module rule');
 });

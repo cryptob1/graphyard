@@ -21,11 +21,14 @@ export type Lane = typeof lanes[number];
  * compose.yaml. The schema and credential surfaces are the repository's real ones: the database
  * schema and its persistence layer under `src/store/`, authentication and principals under
  * `src/server/`, beside the public-API routes and the assembler that wires them
- * (`src/server/index.ts`).
+ * (`src/server/index.ts`); the server bootstrap that loads credentials (`src/server/main.ts`), the
+ * operator agent's credential handling (`src/operator-agent.ts`) and the proof-authority grants
+ * (`src/proof-grants.ts`).
  */
 export const highRiskPaths = [
   /^migrations\/schema/, /^auth\/credentials/,
-  /^src\/store\//, /^src\/server\/(routes|auth|principals|index)/,
+  /^src\/store\//, /^src\/server\/(routes|auth|principals|index|main)/,
+  /^src\/operator-agent\.ts$/, /^src\/proof-grants\.ts$/,
   /^src\/install\//, /^deploy\//, /^Dockerfile(\.|$)/, /^compose\.ya?ml$/,
 ] as const;
 
