@@ -20,6 +20,8 @@ import { blockedFeatures, controlPlanePermissions, describeShortfall, permission
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
+import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
+export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -574,7 +576,7 @@ export class GitHub {
   private blockedUntil = 0;
   private rateFailures = 0;
   private authentication?: Promise<void>;
-  private cache = new Map<string, { etag: string; value: any }>();
+  private cache = new EtagCache();
   private ancestry = new Map<string, boolean>();
   private usage = { since: Date.now(), total: 0, notModified: 0, byKind: new Map<string, number>(), remaining: null as string | null, reset: null as string | null, token: '' };
   /** Once a minute, logs what the App spent: requests, free 304s, the costliest endpoints, and GitHub's own remaining budget of the token that last answered. */
@@ -602,7 +604,7 @@ export class GitHub {
    */
   optimisticLaneEnabled: boolean | null = null;
   /** Blob bytes by sha (GY-863's landing merge-result judgement); a blob's content is immutable, so each is asked once. */
-  private blobContents = new Map<string, Buffer>();
+  private blobContents = new BoundedCache<Buffer>(ancestryEntries, blobContentBytes, blobContentValueBytes, content => content.length);
   /** The persisted cold layer under the four maps above (src/github-cache.ts), when attached. */
   private persisted: GitHubCacheStore | null = null;
   private warming: Promise<void> | null = null;
@@ -941,18 +943,19 @@ export class GitHub {
     this.meter(method, path, response, token);
     this.record(path, response, true, Date.now(), true, token);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
-    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.delete(path); this.cache.set(path, cached); this.persisted?.touch('etag', path); return structuredClone(cached.value); }
+    if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.keep(path, cached.etag, cached.text); this.persisted?.touch('etag', path); return JSON.parse(cached.text); }
     const refused = await this.refusal(response, `${method} ${path}`);
     if (refused) throw refused;
     this.rateFailures = 0;
-    const value = response.status === 204 ? null : await response.json();
+    const text = response.status === 204 ? null : await response.text();
+    const value = text === null ? null : JSON.parse(text);
     const etag = response.headers.get('etag');
     if (method === 'GET') {
       this.cache.delete(path);
-      if (etag) {
-        this.cache.set(path, { etag, value: structuredClone(value) });
+      // The entry keeps the answer's text, not its object graph, within the cache's byte bound (GY-975).
+      if (etag && text !== null) {
+        this.cache.keep(path, etag, text);
         this.persisted?.put('etag', path, value, etag);
-        if (this.cache.size > etagCacheEntries) this.cache.delete(this.cache.keys().next().value!);
       }
     }
     return value;
@@ -1408,7 +1411,6 @@ export class GitHub {
     demand(entry && typeof entry === 'object' && typeof entry.content === 'string', `GitHub did not return the content of blob ${sha.slice(0, 12)}`, 502);
     const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
     this.blobContents.set(sha, content);
-    if (this.blobContents.size > ancestryEntries) this.blobContents.delete(this.blobContents.keys().next().value!);
     return content;
   }
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
@@ -2411,11 +2413,6 @@ async function restoreBranch(engine: Engine, github: GitHub, work: Work, owed: B
 }
 /** A held job waits this long before one bounded re-check, unless a preflight sees the installation change first. */
 export const permissionHoldMs = 30 * 60_000;
-/**
- * Conditional-request cache size. One observation round reads roughly ten paths per open PR; a cache
- * smaller than a round evicts every entry before its reuse, so no request earns a free 304.
- */
-export const etagCacheEntries = 4096;
 /** Commit-pair ancestry answers kept; each is immutable, so the bound only limits memory. */
 export const ancestryEntries = 16384;
 /** Commit-pair histories kept; each is immutable. */
