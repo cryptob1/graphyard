@@ -7,6 +7,7 @@
 // failure was swallowed, and the reviewer approved without judging or resolving any thread.
 import type { ChildRun } from './child-runner.js';
 import type { FollowUpEntry } from './model/machine-backlog.js';
+import { plannedFilesMax } from './model/scope.js';
 
 /** An unresolved review thread as the reviewer's launch prompt names it: an input to the verdict, not a merge blocker. */
 export interface LaunchThread { id: string; author: string; path: string; line: number | null; outdated: boolean; excerpt: string; createdAt?: string; url?: string }
@@ -326,8 +327,6 @@ export function plannedScope(path: string): string | null {
   return cut > 0 ? path.slice(0, cut + 1) : null;
 }
 
-/** The most plannedFiles entries one work item carries (the work schema's bound). */
-const plannedFilesMax = 100;
 /**
  * Scopes for every follow-up path within the plannedFiles count: while there are more than the bound,
  * the deepest entries are replaced by their containing directory, so each path stays covered by some

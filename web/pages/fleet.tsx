@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { capabilityTiers, fleetRoles, looksLikeSecret, quotaStates, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
+import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
 
@@ -46,7 +47,7 @@ function SignInCode({ connect, onAnswer }: { connect: ConnectView; onAnswer: (id
 }
 
 /** One connect in flight or finished: what the provider's login printed, and why it failed when it did. */
-export function ConnectCard({ connect, onCancel, onAnswer }: { connect: ConnectView; onCancel?: (id: string) => void; onAnswer?: (id: string, code: string) => Promise<void> }) {
+export function ConnectCard({ connect, onCancel, onAnswer, onRetry, onRemove }: { connect: ConnectView; onCancel?: (id: string) => void; onAnswer?: (id: string, code: string) => Promise<void>; onRetry?: (connect: ConnectView) => void; onRemove?: (id: string) => void }) {
   return <div className="criterion" data-connect={connect.id} data-provider={connect.provider}>
     <strong className={connect.state === 'failed' ? 'amber' : undefined}>{connect.provider} · {stateText(connect)}{connect.name ? ` · ${connect.name}` : ''}</strong>
     {(connect.url || connect.code) && <p data-connect-login={connect.state}>{connect.state === 'waiting-login' ? 'Finish the sign-in in your own browser:' : 'Signed in'}{connect.url ? <> <a href={connect.url} rel="noreferrer">{connect.url}</a></> : null}{connect.url && connect.code ? ' · code ' : connect.code ? ' code ' : null}{connect.code ? <code data-connect-code>{connect.code}</code> : null}</p>}
@@ -55,16 +56,53 @@ export function ConnectCard({ connect, onCancel, onAnswer }: { connect: ConnectV
     {connect.placement && <p className="muted" data-connect-placement>Joins by default: {connect.placement.join(', ')}</p>}
     <p className="muted">On {connect.host} · asked {when(connect.at)}</p>
     {openState(connect.state) && onCancel && <button data-cancel-connect onClick={() => onCancel(connect.id)}>Cancel</button>}
+    {connect.state === 'failed' && onRetry && <button data-retry-connect title="Connect this provider again on this host" onClick={() => onRetry(connect)}>Retry</button>}
+    {connect.state === 'failed' && onRemove && <button data-remove-connect title="Take this card off this page; the record stays in the ledger" onClick={() => onRemove(connect.id)}>Remove</button>}
   </div>;
 }
 
 /** One account as the registry sees it: what it runs, which roles it serves, what it is doing, and why it cannot launch when it cannot. */
-export function AccountCard({ account, connect, onChangeRoles }: { account: FleetAccountView; connect?: ConnectView; onChangeRoles?: (account: string) => void }) {
-  return <div className="criterion" data-account={account.name}>
-    <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ''} · {account.eligible ? 'eligible' : 'ineligible'}</strong>
+// Whether a form carries a secret-shaped value in its launch data. The audit reason is prose, not launch data,
+// so it may name a token prefix without being refused (GY-397).
+export const pastesCredential = (form: FormData) => [...form.entries()].some(([name, value]) => name !== 'reason' && typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret));
+
+/**
+ * How old an account's quota reading may be before the fleet panel calls it an old probe
+ * (GY-945): executors fold what they observe into the registry on every action, so on a working
+ * fleet a reading is minutes old, and one that has stood for over an hour says nothing about a
+ * wall the provider may have lifted since. The one freshness bound every reader applies;
+ * docs/dashboard.md states it.
+ */
+export const quotaStaleThresholdMs = 60 * 60_000;
+
+/**
+ * An account's probe health, for the fleet panel (GY-945): `failed` when its last smoke test
+ * failed (the probe that proves the account works failed it), `stale` when its quota was never
+ * observed or was observed longer than `quotaStaleThresholdMs` ago — an old reading, however
+ * alarming it reads — and `fresh` otherwise. `text` is what the card shows beside the observation
+ * time; every tone draws its own class, so an operator can tell a real wall from an old probe.
+ */
+export function probeStatus(account: Pick<FleetAccountView, 'observedAt' | 'smoke' | 'quotaSource'>, now: number): { tone: 'fresh' | 'stale' | 'failed'; text: string } {
+  if (account.smoke?.result === 'fail') return { tone: 'failed', text: `probe failed${account.smoke.reason ? `: ${account.smoke.reason}` : ''}` };
+  const verb = account.quotaSource === 'operator' ? 'marked' : 'observed';
+  if (account.observedAt === null || !Number.isFinite(Date.parse(account.observedAt))) return { tone: 'stale', text: `quota never ${verb}` };
+  const age = formatAge(account.observedAt, now);
+  return Date.parse(account.observedAt) < now - quotaStaleThresholdMs
+    ? { tone: 'stale', text: `old probe — quota ${verb} ${age} ago` }
+    : { tone: 'fresh', text: `quota ${verb} ${age} ago` };
+}
+
+/** A usage window's reading with the reset the registry carries for it, when it carries one. */
+export const usageText = (usage: FleetAccountView['usage']) => usage.map(entry => `${entry.window} ${entry.percent}%${entry.resetsAt ? ` (resets ${when(entry.resetsAt)})` : ''}`).join(', ');
+
+export function AccountCard({ account, connect, onChangeRoles, now = Date.now() }: { account: FleetAccountView; connect?: ConnectView; onChangeRoles?: (account: string) => void; now?: number }) {
+  const probe = probeStatus(account, now);
+  const live = account.liveSessions.length;
+  return <div className="criterion" data-account={account.name} data-probe={probe.tone}>
+    <strong className={account.eligible ? undefined : 'amber'}>{account.name} · {account.runtime} · {account.model}{account.modelId ? ` (${account.modelId})` : ''}{ connect?.provider ? ` · ${connect.provider}` : '' } · {account.eligible ? 'eligible' : 'ineligible'}</strong>
     {account.ineligible && <p role="status" className="amber">Ineligible: {account.ineligible}</p>}
-    <p>Roles: {account.roles.length ? account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`).join(', ') : 'none'} · Live sessions: {account.liveSessions.length ? account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''} since ${when(session.since)}`).join('; ') : 'none'}{account.maxSessions !== null ? ` (limit ${account.maxSessions})` : ''}{onChangeRoles && <> <button data-change-roles={account.name} onClick={() => onChangeRoles(account.name)}>change</button></>}</p>
-    <p>Quota: {account.quota}{account.usage.length ? ` — ${account.usage.map(entry => `${entry.window} ${entry.percent}%`).join(', ')}` : ''} · Resets: {when(account.resetsAt)} · Login: {account.loggedIn === null ? 'not observed' : account.loggedIn ? 'logged in' : 'logged out'} · Observed {when(account.observedAt)}{account.quotaSource === 'operator' ? ' (marked by an operator)' : ''}</p>
+    <p>Roles: {account.roles.length ? account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`).join(', ') : 'none'} · Live sessions: {live}{live ? ` — ${account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''} since ${when(session.since)}`).join('; ')}` : ''}{account.maxSessions !== null ? ` (limit ${account.maxSessions})` : ''}{onChangeRoles && <> <button data-change-roles={account.name} onClick={() => onChangeRoles(account.name)}>change</button></>}</p>
+    <p>Quota: {account.quota}{account.usage.length ? ` — ${usageText(account.usage)}` : ''} · Resets: {when(account.resetsAt)} · Login: {account.loggedIn === null ? 'not observed' : account.loggedIn ? 'logged in' : 'logged out'} · Observed {when(account.observedAt)}{account.quotaSource === 'operator' ? ' (marked by an operator)' : ''} <span className={`probe ${probe.tone}`} data-probe={probe.tone}>{probe.text}</span></p>
     {connect?.placement && <p className="muted">Joined by default: {connect.placement.join(', ')}</p>}
     <p className="muted">Capability: {account.capability?.tier ?? 'unknown'}{account.capability?.contextTokens ? ` · ${account.capability.contextTokens.toLocaleString()} token context` : ''} · {cost(account)} · Credential by reference: {account.home ?? 'the runtime\'s own default login'} on {account.host}{account.enabled ? '' : ' · disabled'}</p>
   </div>;
@@ -76,16 +114,16 @@ export const policyText = (policy: RolePolicy | undefined) => {
   return parts.join(' · ');
 };
 
-/** The Agents page body, pure over the view so it renders the same in a test as in the browser. */
-export function FleetOverview({ fleet, connects = [], onChangeRoles, onCancelConnect, onAnswerConnect }: { fleet: FleetView; connects?: ConnectView[]; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void> }) {
+/** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the probe clock (tests); the page passes the dashboard's server snapshot clock (GY-952). */
+export function FleetOverview({ fleet, connects = [], now, onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; now?: number; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
   const running = fleet.sessions.filter(session => !session.endedAt);
   const byName = new Map(connects.filter(connect => connect.name).map(connect => [connect.name!, connect]));
   return <>
     {!fleet.configured && <div className="notice">No role is configured yet, so sessions still launch from each host's local profiles. Connect an account below — or run <code>graphyard master registry propose --apply</code> on a host whose agent CLIs are logged in.</div>}
     {fleet.attention.map(line => <div role="alert" className="notice danger" key={line}>{line}</div>)}
     <section><div className="section-title"><h2>Accounts <span className="count">{fleet.accounts.length}</span></h2></div>
-      {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect}/>)}
-      {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles}/>)}
+      {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect} onRetry={onRetryConnect} onRemove={onRemoveConnect}/>)}
+      {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles} now={now}/>)}
       {!fleet.accounts.length && !connects.length && <p>No account is connected yet. Connect an account above: pick a provider, paste its key or finish its sign-in — no shell, no configuration files.</p>}
     </section>
     <section><div className="section-title"><h2>Roles <span className="count">{fleet.roles.length}</span></h2></div>
@@ -140,12 +178,15 @@ export function ConnectWizard({ providers, hosts, wizard, setWizard, onConnect, 
 }
 
 /** Settings › Agents: connect an account without a shell, and every agent the control plane launches (GY-409). */
-export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'status'>) {
+export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, 'api' | 'status' | 'observedAt'>) {
   const [fleet, setFleet] = useState<FleetView | null>(status?.fleet ?? null);
   const [connects, setConnects] = useState<ConnectView[]>(status?.connects ?? []);
   const [providers, setProviders] = useState<ConnectProviderView[]>([]);
   const [hosts, setHosts] = useState<ConnectHostView[]>([]);
   const [wizard, setWizard] = useState<WizardState>(closedWizard);
+  // A removed failed connect comes off this page for this browser (the ledger keeps the record):
+  // the control plane holds no removal action for a finished connect, so the page keeps the ids here.
+  const [removed, setRemoved] = useState<string[]>(() => { try { return JSON.parse(typeof localStorage === 'undefined' ? '[]' : localStorage.getItem('graphyard.removedConnects') ?? '[]') as string[]; } catch { return []; } });
   const [loadError, setLoadError] = useState('');
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -153,6 +194,10 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
   const advanced = useRef<HTMLDetailsElement>(null);
   const roleAccounts = useRef<HTMLInputElement | null>(null);
   const canEdit = ['admin', 'coordinator'].includes(status?.actor?.role);
+  // Probe freshness reads the dashboard's server snapshot clock, not this workstation's (GY-952):
+  // registry timestamps come from the control plane's database, so a browser clock skewed past the
+  // one-hour threshold would label a fresh observation old or keep a stale one fresh.
+  const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const load = useCallback(async () => {
     const version = ++request.current; setLoadError('');
     try {
@@ -172,8 +217,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     event.preventDefault();
     const target = event.currentTarget, form = new FormData(target);
     // The registry holds references, never secrets: a pasted credential is refused before it leaves the browser.
-    // The audit reason is prose, not launch data, so it may name a token prefix without being refused (GY-397).
-    if ([...form.entries()].some(([name, value]) => name !== 'reason' && typeof value === 'string' && value.split(/[\s,]+/).some(looksLikeSecret))) { setFormError('That looks like a credential. The registry stores where a login lives (host and home), never the secret itself; connect the account at the top of this page instead.'); return; }
+    if (pastesCredential(form)) { setFormError('That looks like a credential. The registry stores where a login lives (host and home), never the secret itself; connect the account at the top of this page instead.'); return; }
     setBusy(true); setFormError('');
     try { await api(path(form), body(form)); target.reset(); await load(); }
     catch (error) { setFormError((error as Error).message); }
@@ -210,6 +254,10 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     await load();
   };
   const cancel = async (id: string) => { try { await api(`agent-registry/connect/${id}/cancel`, { reason: 'Cancelled from Settings › Agents' }); await load(); } catch (error) { setFormError((error as Error).message); } };
+  /** Take a failed connect's card off this page for this browser; the ledger record is untouched. */
+  const remove = (id: string) => setRemoved(current => { const next = [...new Set([...current, id])]; try { localStorage.setItem('graphyard.removedConnects', JSON.stringify(next)); } catch { /* a private window keeps it for the session */ } return next; });
+  /** Retry reconnects the same provider on the same host: an api key is sealed again (it was never stored), a subscription login starts afresh. Admins only, like answering the login code: retrying re-enters the credential; coordinators keep inspect, cancel and remove. */
+  const retry = (failed: ConnectView) => setWizard({ ...closedWizard, open: true, provider: failed.provider, host: failed.host });
   /** The card's 'change': open Advanced and name the account in the role editor's order. */
   const changeRoles = (account: string) => {
     if (advanced.current) advanced.current.open = true;
@@ -224,7 +272,7 @@ export default function FleetPage({ api, status }: Pick<Dashboard, 'api' | 'stat
     {fleet && canEdit && <section><div className="section-title"><h2>Connect an account</h2>{!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</div>
       {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
     </section>}
-    {fleet && <FleetOverview fleet={fleet} connects={connects} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined}/>}
+    {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} now={now} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={status?.actor?.role === 'admin' ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
     {fleet && canEdit && <section><details className="advanced more-details" ref={advanced}><summary>Advanced: runtimes, models, roles and policies</summary>
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
