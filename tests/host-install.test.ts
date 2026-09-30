@@ -4,10 +4,11 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { parseEnv } from 'node:util';
 import { dirname } from 'node:path';
 import { applyInstall, buildPlan, prepareInstall, type InstallInputs } from '../src/install/index.js';
-import { claimHash, hostRuntimes, CONNECT_PATH, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
+import { claimHash, hostRuntimes, CONNECT_PATH, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
 import { hostSizing, recommendServerType, parseServerTypes } from '../src/install/pricing.js';
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
+import { workerConfinementRefusal } from '../src/master/profiles.js';
 import { authenticate } from '../src/server/auth.js';
 import { signinRoutes, claimHashOf } from '../src/server/routes/signin.js';
 import { claimFromHash } from '../web/pages/login.js';
@@ -76,6 +77,13 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     const lines = hostLines(fixture);
     const files = fixture.hostFiles;
 
+    // Workers install dependencies and run unit proofs under bubblewrap, so the bootstrap provides it
+    // and proves the unprivileged user namespaces it needs by running it.
+    const bootstrap = lines.find(line => line.startsWith('sh -c set -eu'))!;
+    assert.match(bootstrap, /command -v bwrap >\/dev\/null \|\| apt-get install -y bubblewrap/);
+    assert.match(bootstrap, /kernel\.apparmor_restrict_unprivileged_userns=0/);
+    assert.match(bootstrap, /\nbwrap --unshare-user --ro-bind \/ \/ true/);
+
     for (const name of ['graphyard-postgres.service', 'graphyard-server.service', 'graphyard-proxy.service']) {
       const unit = files.get(`/etc/systemd/system/${name}`)!;
       assert.ok(unit, name);
@@ -137,6 +145,17 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     for (const token of session.tokens.values()) assert.ok(!replanned.includes(token));
     assert.ok(!replanned.includes(session.context.databasePassword));
     assert.match(replanned, /"fingerprint":"[0-9a-f]{12}"/);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — every installed worker profile passes the launch confinement check, opencode included', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    await applyHost(fixture, hostInputs({ workers: 3 }));
+    const profiles = [...fixture.hostFiles.entries()].filter(([path]) => path.startsWith(`${CONFIG}/profiles/`)).map(([, file]) => JSON.parse(file.content));
+    assert.deepEqual(profiles.map(profile => profile.kind).sort(), ['claude', 'codex', 'opencode']);
+    for (const profile of profiles) assert.equal(workerConfinementRefusal(profile), null, profile.name);
+    assert.equal(profiles.find(profile => profile.kind === 'opencode').environment.OPENCODE_PERMISSION, OPENCODE_WORKER_PERMISSION);
   } finally { await fixture.cleanup(); }
 });
 
@@ -336,6 +355,34 @@ test('unit:host-migration — --migrate moves the database (backup/restore) onto
     assert.equal(record.provider, 'host');
     assert.equal(record.selfContained, true);
     assert.equal(record.migratedFrom?.provider, 'railway');
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-migration — a migration that fails before cutover releases the old database\'s fence, so the old installation keeps its work writable', async () => {
+  const OLD_DATABASE = 'postgres://graphyard:old-database-password-0123456789@old.example.test:5432/graphyard';
+  const BACKUP = JSON.stringify({ format: 'graphyard-backup-v1', digest: `sha256:${'c'.repeat(64)}`, tables: [], sequences: [] });
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
+    extraResponses: [
+      { match: 'is-active graphyard-master.service', result: { stdout: 'inactive\n', stderr: '', code: 3 } },
+      { match: 'db backup', result: (line: string) => {
+        const file = line.split(' ').pop()!;
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, BACKUP, { mode: 0o600 });
+        return JSON.stringify({ file });
+      } },
+      { match: 'db restore', result: { stdout: '', stderr: 'db restore: the target database is not empty', code: 1 } },
+    ] });
+  try {
+    const deps = { ...fixture.deps, environment: { [MIGRATE_SOURCE_VARIABLE]: OLD_DATABASE } };
+    const session = await prepareInstall(fixture.root, hostInputs({ migrate: true }), deps);
+    await assert.rejects(applyInstall(session, await buildPlan(session)), /not empty/);
+    const local = fixture.transport.commands.map(command => [command.program, ...command.args].join(' '));
+    const fence = local.findIndex(line => line.includes(' db fence') && !line.includes('--release'));
+    const release = local.findIndex(line => line.includes(' db fence --release'));
+    assert.ok(fence >= 0 && release > fence, local.join('\n'));
+    assert.equal(fixture.transport.commands[release].input, OLD_DATABASE, 'the old database reaches the release on standard input');
+    assert.ok(!hostLines(fixture).includes('systemctl restart graphyard-server.service graphyard-proxy.service'), 'the host server never starts on a failed restore');
+    assert.ok(!fixture.hostFiles.has(`${CONFIG}/migration/restored`));
   } finally { await fixture.cleanup(); }
 });
 

@@ -290,7 +290,8 @@ export function asUser(remote: Transport, cwd: string, program: string, args: st
 }
 
 /**
- * Idempotent machine preparation, run as root: Docker, Node 24 and git when missing, the graphyard
+ * Idempotent machine preparation, run as root: Docker, Node 24, git and bubblewrap (with the
+ * unprivileged user namespaces it needs, checked by running it) when missing, the graphyard
  * account with lingering (so its user units run without a login), and the private directories.
  */
 export function bootstrapScript(layout: HostLayout) {
@@ -302,6 +303,11 @@ export function bootstrapScript(layout: HostLayout) {
     'systemctl enable --now docker',
     `node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 24 ? 0 : 1)' 2>/dev/null || (curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs)`,
     'command -v git >/dev/null || apt-get install -y git',
+    // Worktree dependency installs and non-Actions unit proofs run under bubblewrap, which refuses
+    // without it; Ubuntu 24.04 also restricts the unprivileged user namespaces it needs by default.
+    'command -v bwrap >/dev/null || apt-get install -y bubblewrap',
+    `if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/60-graphyard-bwrap.conf && sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0; fi`,
+    'bwrap --unshare-user --ro-bind / / true',
     `id -u ${HOST_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ${HOST_USER}`,
     `loginctl enable-linger ${HOST_USER}`,
     `install -d -m 0700 -o ${HOST_USER} -g ${HOST_USER} ${[`${HOST_HOME}/.config`, `${HOST_HOME}/.config/environment.d`, `${HOST_HOME}/.config/graphyard`, layout.configDirectory, layout.tokensDirectory, layout.accountsDirectory, layout.migrationDirectory, layout.profilesDirectory, layout.userUnitDirectory, `${HOST_HOME}/code`].map(q).join(' ')}`,
@@ -363,7 +369,8 @@ async function migrateLedger(ctx: AdapterContext, remote: Transport) {
   const host = ctx.host!;
   const layout = host.layout;
   if ((await remote.exec('test', ['-f', restoredMarker(layout)], { allowFailure: true, timeout: 60_000 })).code === 0) return;
-  if (!host.migrationSource) throw new Error(`--migrate needs the old database in ${MIGRATE_SOURCE_VARIABLE}`);
+  const source = host.migrationSource;
+  if (!source) throw new Error(`--migrate needs the old database in ${MIGRATE_SOURCE_VARIABLE}`);
   await freezeOldLoop(ctx);
   const local = ctx.transport;
   const migration = `${host.localDirectory}/migration`;
@@ -373,21 +380,33 @@ async function migrateLedger(ctx: AdapterContext, remote: Transport) {
   const withDatabase = (command: string) => `DATABASE_URL="$(cat)"; export DATABASE_URL; exec "$0" "$1" ${command} "$2"`;
   // Every old writer is fenced before the snapshot, wherever it runs: the old server keeps serving
   // reads (and errors on writes) until its operator retires it, and nothing it accepts is lost.
-  await local.exec('sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec "$0" "$1" db fence`, host.localNode, host.localCli], { input: host.migrationSource, timeout: 300_000 });
-  await local.exec('sh', ['-c', withDatabase('db backup'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 1_800_000 });
-  await local.exec('sh', ['-c', withDatabase('db verify'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 600_000 });
-  // Read the file from this machine's disk rather than through a command's output buffer: a grown
-  // ledger exceeds the transport's exec cap, while db verify and db restore already hold the whole
-  // file in memory, so the copy to the host can too.
-  const backup = await readFile(file, 'utf8');
-  const target = `${layout.migrationDirectory}/backup.json`;
-  await remote.putFile(target, backup, 0o600, host.owner ?? undefined);
-  const hostDatabase = `postgres://graphyard:${ctx.databasePassword}@127.0.0.1:${HOST_DATABASE_PORT}/graphyard`;
-  await asUser(remote, layout.graphyard, 'sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec node "$0" db restore "$1"`, layout.cli, target], { input: hostDatabase, timeout: 1_800_000 });
+  const fence = (release: boolean) => local.exec('sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec "$0" "$1" db fence${release ? ' --release' : ''}`, host.localNode, host.localCli], { input: source, timeout: 300_000 });
+  await fence(false);
+  let backup: string;
+  try {
+    await local.exec('sh', ['-c', withDatabase('db backup'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 1_800_000 });
+    await local.exec('sh', ['-c', withDatabase('db verify'), host.localNode, host.localCli, file], { input: host.migrationSource, timeout: 600_000 });
+    // Read the file from this machine's disk rather than through a command's output buffer: a grown
+    // ledger exceeds the transport's exec cap, while db verify and db restore already hold the whole
+    // file in memory, so the copy to the host can too.
+    backup = await readFile(file, 'utf8');
+    const target = `${layout.migrationDirectory}/backup.json`;
+    await remote.putFile(target, backup, 0o600, host.owner ?? undefined);
+    const hostDatabase = `postgres://graphyard:${ctx.databasePassword}@127.0.0.1:${HOST_DATABASE_PORT}/graphyard`;
+    await asUser(remote, layout.graphyard, 'sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec node "$0" db restore "$1"`, layout.cli, target], { input: hostDatabase, timeout: 1_800_000 });
+  } catch (error) {
+    // Nothing has cut over yet: lift the fence so a failed migration leaves the old installation
+    // writable (its loop restarts with systemctl --user enable --now graphyard-master.service).
+    await fence(true).catch(() => undefined);
+    throw error;
+  }
   let digest = '';
   try { digest = String(JSON.parse(backup)?.digest ?? ''); } catch { digest = ''; }
   await remote.putFile(restoredMarker(layout), `${JSON.stringify({ restoredAt: new Date().toISOString(), digest })}\n`, 0o600, host.owner ?? undefined);
 }
+
+/** The confinement workerConfinementRefusal requires of an opencode worker: no edits outside its worktree. */
+export const OPENCODE_WORKER_PERMISSION = '{"edit":"allow","bash":"allow","webfetch":"allow","external_directory":"deny"}';
 
 // ---------------------------------------------------------------------------
 // The adapter
@@ -620,7 +639,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   const launchable = hostRuntimes.filter(runtime => runtime.kind !== 'pi');
   for (const [index, principal] of workerPrincipals(host.principals).entries()) {
     const runtime = launchable[index % launchable.length];
-    const profile = { name: `${runtime.kind}-${index + 1}`, principal: principal.id, agentName: `${ctx.installId}-${runtime.kind}-${index + 1}`, mode: 'launch', kind: runtime.kind, credentialFile: hostTokenFile(layout, principal.id), agentArgs: [], environment: {} };
+    const profile = { name: `${runtime.kind}-${index + 1}`, principal: principal.id, agentName: `${ctx.installId}-${runtime.kind}-${index + 1}`, mode: 'launch', kind: runtime.kind, credentialFile: hostTokenFile(layout, principal.id), agentArgs: [], environment: runtime.kind === 'opencode' ? { OPENCODE_PERMISSION: OPENCODE_WORKER_PERMISSION } : {} };
     const file = `${layout.profilesDirectory}/${profile.name}.json`;
     await remote.putFile(file, `${JSON.stringify(profile, null, 2)}\n`, 0o600, owner);
     const added = await asUser(remote, layout.checkout, 'node', [layout.cli, 'master', 'worker', 'add', file], { allowFailure: true });

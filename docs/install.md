@@ -66,11 +66,11 @@ Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; sign in with the printed link.
+`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; bootstrap installs bubblewrap and enables unprivileged user namespaces. Sign in with the printed link.
 
 **Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare; confirmed with `--confirm-price` / `--max-monthly`.
 
-**Moving:** `--migrate` stops the old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; local logins move, others reconnect.
+**Moving:** `--migrate` stops the old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; a failure before cutover releases the fence. Local logins move, others reconnect.
 
 ## Upgrading an existing installation
 
