@@ -1,9 +1,11 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import pg from 'pg';
@@ -13,7 +15,8 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
+import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
+import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
@@ -197,6 +200,24 @@ const padded = (n: number) => String(n).padStart(3, '0');
 /** Item `unrepresentable`'s planned files: plannedFilesMax entries, none in the asked path's directories. */
 const bulk18 = [file(scopePlan.unrepresentable), ...Array.from({ length: scopePlan.unrepresentablePlanned }, (_, index) => `tests/bulk-18/bulk-${padded(index)}.test.ts`)];
 
+/**
+ * GY-888: the day's session launches are confined by the launcher's own logic, not asserted
+ * beside it. Every dispatch and approver launch runs the real sessionConfinement against a
+ * fixture coordinator checkout — the worker in a linked worktree under it, the approver from the
+ * checkout itself, as each role really runs — and the same launch on a host that cannot build the
+ * mount namespace is judged to be refused with the reason named, never started unconfined. A
+ * change that drops the confinement from the per-cycle launch fails the soak, not only the unit
+ * suite.
+ */
+let coordinatorBase: string | null = null, coordinatorRoot: string | null = null, soakWorktrees = 0;
+/** The session's own worktree: a linked worktree of the fixture checkout, as the launcher prepares them. */
+function soakSessionDirectory(): string {
+  const directory = join(coordinatorRoot!, '.graphyard', 'worktrees', `wt-${++soakWorktrees}`);
+  mkdirSync(dirname(directory), { recursive: true });
+  execFileSync('git', ['-C', coordinatorRoot!, 'worktree', 'add', '--detach', '--quiet', directory, 'HEAD'], { stdio: 'ignore' });
+  return directory;
+}
+
 let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
@@ -217,8 +238,19 @@ before(async () => {
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  // The fixture coordinator checkout the simulated launches confine against (GY-888).
+  coordinatorBase = mkdtempSync(join(tmpdir(), 'graphyard-soak-coordinator-'));
+  coordinatorRoot = join(coordinatorBase, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', coordinatorRoot!, ...args], { stdio: 'ignore' });
+  mkdirSync(join(coordinatorRoot, 'src'), { recursive: true });
+  writeFileSync(join(coordinatorRoot, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  git('init', '-b', 'main');
+  git('config', 'user.email', 'graphyard@localhost');
+  git('config', 'user.name', 'Graphyard');
+  git('add', '.');
+  git('commit', '-m', 'coordinator');
 });
-after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
+after(async () => { clock.uninstall(); if (coordinatorBase) rmSync(coordinatorBase, { recursive: true, force: true }); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
 async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
@@ -327,6 +359,27 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed'; syncs: number; syncedFor?: string; refusedSince?: number;
     scopeAt: number | null; misreadAt: number | null; misread: boolean }
   const sessions: Session[] = [], lost: string[] = [];
+  // GY-888: every session launch the day makes carries the coordinator confinement through the
+  // launcher's own logic, and the same launch where the mount namespace cannot be built is
+  // refused with the reason named — never started unconfined. The fixture worktree each launch
+  // needs is built serially: git refuses concurrent worktree registrations on one checkout.
+  const confined: { role: 'worker' | 'approver' | 'producer'; key: string; directory: string; mechanism: string; reexposed: readonly string[] }[] = [];
+  const unconfinedRefusals: string[] = [];
+  const reexposedWritable = (wrapper: readonly string[]) => wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
+  let confining: Promise<void> = Promise.resolve();
+  const confine = (role: 'worker' | 'approver', key: string, directory?: string) => {
+    const done = confining.then(async () => {
+      // The worker's own worktree is built here too: git refuses concurrent worktree
+      // registrations on one checkout, as concurrent launches would race them.
+      const session = directory ?? soakSessionDirectory();
+      const launch = await sessionConfinement('claude', [], { directory: session }, coordinatorRoot!);
+      confined.push({ role, key, directory: session, mechanism: launch!.mechanism, reexposed: reexposedWritable(launch!.wrapper) });
+      const refusal = await coordinatorConfinementRefusal({ kind: 'claude', args: [], coordinatorRoot: coordinatorRoot!, sessionDirectory: session, platform: 'linux', bwrap: null });
+      if (refusal) unconfinedRefusals.push(refusal);
+    });
+    confining = done.catch(() => {});
+    return done;
+  };
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
   const dispatch: DaemonEffects['dispatch'] = async (work, profile) => {
@@ -336,6 +389,9 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     // A rework attempt pushes to the pull request already linked, from a fresh workspace.
     const branch = work.candidate?.branch ?? `graphyard/${key.toLowerCase()}-${epoch}`;
     const path = `/tmp/soak/${key}-${epoch}`;
+    // The launch is confined before its pane opens: the session's own worktree is a linked
+    // worktree of the coordinator checkout, exactly as the launcher prepares them (GY-888).
+    await confine('worker', key);
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     // GY-852: the reassigned item's first session takes the lease and then sits at its prompt for
@@ -476,14 +532,22 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       throw Object.assign(new Error('No healthy agent account for the approver: every approver account is spent until its quota resets'), { capacityExhausted: true });
     }
     const unjudged = hand.get(decision);
-    if (!unjudged) capacityLaunched.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
+    // The relaunch bound is counted in cycles, so the launch is recorded on the day's own schedule
+    // (`elapsed`, advanced one simulated minute per cycle): the simulated clock also runs real time
+    // forward since the day was installed, and a launch recorded on it would overrun a two-cycle
+    // bound by however slow the host was, not by any cycle the loop spent.
+    if (!unjudged) capacityLaunched.push({ decision, key: work.key, elapsed });
     if (unjudged) {
       unjudged.launches += 1;
       if (unjudged.key === items[plan.items - 1].key && unjudged.launches === 1) { unjudged.refused += 1; throw new Error('the agent registry for the approver role is unreachable: timeout'); }
+      // The relaunch is confined like the launch it retries (GY-888); an approver session runs
+      // from the coordinator checkout itself, so the wrapper re-exposes nothing of it.
+      await confine('approver', work.key, coordinatorRoot!);
       const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
       pending.push(async () => { herdr.status(pane, 'done'); });
       return { agentName, pane };
     }
+    await confine('approver', work.key, coordinatorRoot!);
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
     approverPanes.push(pane);
     pending.push(async () => {
@@ -519,7 +583,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       : `the headless run ended (exit: pi exited with code 1) without trusted evidence for ${PROOF} (fail)` });
     const retry = sessionRetry(producerRuns, requestId, now);
     if (retry.exhausted) abandoned.set(requestId, { requestId, work: item.key, sha: item.candidate.sha, group: 'unit', proofs: [PROOF], reason: `${retry.started} of its sessions failed`, attempts: runs().map(run => `${run.state}: ${run.resolution}`) });
-    else if (retry.launch) producerRuns.push({ requestId, state: 'pending', requestedAt: at, closedAt: null, resolution: null });
+    else if (retry.launch) {
+      // A headless producer run is wrapped at its spawn by the launcher's own seam (GY-888), and
+      // a host that cannot confine one refuses it instead of starting it unconfined.
+      confined.push({ role: 'producer', key: item.key, directory: coordinatorRoot!, mechanism: 'read-only-mount', reexposed: reexposedWritable(headlessConfinementWrapper(coordinatorRoot!, coordinatorRoot!)) });
+      try { headlessConfinementWrapper(coordinatorRoot!, coordinatorRoot!, null); unconfinedRefusals.push('the headless run was not refused'); }
+      catch (error) { unconfinedRefusals.push(error instanceof Error ? error.message : String(error)); }
+      producerRuns.push({ requestId, state: 'pending', requestedAt: at, closedAt: null, resolution: null });
+    }
   };
   const requestProof: DaemonEffects['requestProof'] = work => {
     pending.push(async () => {
@@ -715,7 +786,10 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
-  for (let elapsed = 0; elapsed <= options.hours * hour;) {
+  // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
+  // simulated minute, and a launch the cycle handed over settles before the position advances.
+  let elapsed = 0;
+  for (; elapsed <= options.hours * hour;) {
     const now = clock.now();
     // Scheduled events: releases, the file split on main, the deploys. The queue-only day runs with
     // the split past its end: the re-plan and its stale-tip flush are the main day's scenario, and
@@ -923,12 +997,40 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen, reassign };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen, reassign, confined, unconfinedRefusals };
+}
+
+/**
+ * GY-888: every session launch the day made ran the launcher's real confinement — a worker in its
+ * linked worktree, an approver from the checkout itself, a headless producer run wrapped at its
+ * spawn — and the same launch on a host that cannot build the mount namespace was refused with
+ * the reason named, never started unconfined. Nothing that keeps the checkout authoritative — its
+ * tree, its index, the refs only the guarded merge moves — is re-exposed writable.
+ */
+function assertLaunchesConfined(day: { confined: { role: string; key: string; directory: string; mechanism: string; reexposed: readonly string[] }[]; unconfinedRefusals: string[]; sessions: unknown[]; producerRuns: unknown[] }, root: string) {
+  const gitDir = join(root, '.git');
+  const shared = [join(gitDir, 'objects'), join(gitDir, 'worktrees'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'FETCH_HEAD')];
+  const sharedWritable = (path: string) => shared.some(base => path === base || path.startsWith(`${base}/`));
+  const workerLaunches = day.confined.filter(launch => launch.role === 'worker');
+  assert.equal(workerLaunches.length, day.sessions.length, `every worker dispatch the loop made was confined before its pane opened (${workerLaunches.length} of ${day.sessions.length})`);
+  assert.equal(day.confined.filter(launch => launch.role === 'producer').length, day.producerRuns.length, 'every headless producer run was wrapped at its spawn');
+  for (const launch of day.confined) {
+    assert.equal(launch.mechanism, 'read-only-mount', `the ${launch.role} launch for ${launch.key} carries the read-only mount`);
+    assert.ok(!launch.reexposed.includes(root) && ![join(gitDir, 'refs', 'heads'), join(gitDir, 'logs', 'refs', 'heads'), join(root, 'src'), join(gitDir, 'index')].some(path => launch.reexposed.includes(path)),
+      `the ${launch.role} launch for ${launch.key} never re-exposes the checkout, its tree, index or every branch's refs writable: ${launch.reexposed.join(', ')}`);
+    assert.ok(launch.reexposed.every(path => path === launch.directory || path.startsWith(`${launch.directory}/`) || sharedWritable(path)),
+      `the ${launch.role} launch for ${launch.key} re-exposes only its own directory and the shared Git areas: ${launch.reexposed.join(', ')}`);
+  }
+  assert.ok(workerLaunches.every(launch => launch.reexposed.includes(launch.directory)), 'each worker launch re-exposes its own worktree writable');
+  assert.ok(day.unconfinedRefusals.length >= day.confined.length && day.unconfinedRefusals.every(text => /Graphyard never starts a session unconfined|bubblewrap \(bwrap\) is not installed/.test(text)),
+    `the same launches are refused where the confinement cannot be built: ${day.unconfinedRefusals[0] ?? 'none'}`);
 }
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen } = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  const day = await simulateDay({ hours: Number(process.env.SOAK_HOURS ?? 24) });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -1152,8 +1254,9 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   const began = performance.now();
   const reconfigure = { at: 75 * minute, window: 2 };
   const failTip = 4;
-  const { items, final, github, sessions, violations, failures, lost, mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, dayStart } =
-    await simulateDay({ hours: 4, queued: { window: 4, reconfigure, failTip, releaseEveryMs: 3 * minute } });
+  const day = await simulateDay({ hours: 4, queued: { window: 4, reconfigure, failTip, releaseEveryMs: 3 * minute } });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { items, final, github, sessions, violations, failures, lost, mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, dayStart } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
@@ -1208,7 +1311,9 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
 test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {
   // GY-551: for every decision a master put to an approver by hand the loop now launches up to two
   // more sessions itself and keeps the spent watch past the bound, so both repeat per item here.
-  const { final, violations, failures, state, herdr, hand, escalations, spent } = await simulateDay({ hours: 6, handApprovers: true });
+  const day = await simulateDay({ hours: 6, handApprovers: true });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { final, violations, failures, state, herdr, hand, escalations, spent } = day;
   // Every item is delivered, so the day after starts from a clean board.
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the relaunches and the kept spent watches');
@@ -1323,8 +1428,9 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   // within a couple of cycles of the window closing — with no hand action, and both items delivered.
   const began = performance.now();
   const window = { from: 50 * minute, to: 130 * minute };
-  const { items, final, violations, failures, escalations, capacityRefused, capacityLaunched, capacityWaiters } =
-    await simulateDay({ hours: 6, capacityWait: window });
+  const day = await simulateDay({ hours: 6, capacityWait: window });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { items, final, violations, failures, escalations, capacityRefused, capacityLaunched, capacityWaiters } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the capacity waits and the ordered relaunches');
   assert.deepEqual(failures, [], 'no cycle failed');
@@ -1363,7 +1469,9 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   // refusal and is accepted on the first attempt, where a scan blind to the binding would send an
   // uncited request, take the 409 the server answers it with, and spend one of the three bounded
   // refusal answers per item.
-  const { final, violations, observed, failures, lost, escalations, herdr, refused, decideCalls, restarted, state } = await simulateDay({ hours: 6, refuseReworkOf: [3, 7] });
+  const day = await simulateDay({ hours: 6, refuseReworkOf: [3, 7] });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { final, violations, observed, failures, lost, escalations, herdr, refused, decideCalls, restarted, state } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the refusals, the restart and the cited re-requests');
   assert.deepEqual(failures, [], 'no cycle failed');
@@ -1395,7 +1503,9 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
 });
 
 test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 300_000 }, async () => {
-  const { items, final, violations, failures, state, escalations } = await simulateDay({ hours: 4, scope: true });
+  const day = await simulateDay({ hours: 4, scope: true });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { items, final, violations, failures, state, escalations } = day;
   assert.deepEqual(violations, [], 'every system invariant holds with the scope scenarios in the day');
   assert.deepEqual(failures, [], 'no cycle failed');
 
@@ -1442,7 +1552,9 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   // approver sessions pile up all day), and CI measured it past the old 120s budget while the
   // simulated hour held, so its budget is sized like the other days' — about twice its measured
   // run (GY-630).
-  const { violations, state } = await simulateDay({ hours: 3, regression: 'approvers-left-open' });
+  const day = await simulateDay({ hours: 3, regression: 'approvers-left-open' });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { violations, state } = day;
   assert.ok(violations.some(line => /lingering-sessions: VIOLATED — .*approver session graphyard-approver-gy-\d+-/.test(line)), `the soak names the lingering approver: ${violations.slice(0, 3).join('\n')}`);
   assert.ok(violations.every(line => /lingering-sessions/.test(line)), `nothing else is violated: ${violations.filter(line => !/lingering-sessions/.test(line)).slice(0, 3).join('\n')}`);
   // The violation is a fault of its class on the loop's record, which files one item when it recurs.
