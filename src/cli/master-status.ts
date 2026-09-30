@@ -1,8 +1,10 @@
 import { leaseHealthStatus } from './lease-health-attention.js';
-import { probeCandidateConflicts } from '../conflicts.js';
-import { mergeBatchSize } from '../master.js';
+import { probeCandidateConflictsWithBudget } from '../conflicts.js';
+import { dataDirectory } from '../install/worktree-root.js';
+import { mergeQueueStatus } from '../master/profiles.js';
+import { landingAttention, optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
+import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
@@ -13,7 +15,7 @@ import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHead
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
+import { approverLaunchAttention, directMergeLine, docsBudgetAttention, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -22,6 +24,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
+import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
 import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
@@ -36,20 +39,18 @@ import { releaseLagStatus } from '../master/release-lag.js';
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
-import { repairLaneAttention } from '../master/repair-lane.js';
+import { coordinationStep } from './coordination-snapshot.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget measure is a daemon metric (src/daemon/metrics.ts); it is read from here,
-// as it always was, by `master status` and its tests.
+// The cycle-budget daemon metric, read from here as it always was.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module; it is read from here as it always was.
+// `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they read
-// (src/github.ts); the report reads them from here, as do the tests.
+// Observation throughput and the queue head's lag live beside the observation schedule they read;
+// the report reads them from here, as do the tests.
 export { observationThroughputStatus };
-// The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that was reading them from here before the split.
+// The attention builders live in `status-attention.ts`; the report reads them from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
@@ -64,7 +65,7 @@ export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewA
  */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number; reportReadBoundMs?: number } = {}) {
   // Every phase of the build is timed, and every server read of a second or more is named with its
-  // route and the phase it was made in: the report carries both under `timings` (GY-377).
+  // route and the phase it was made in: both are carried under `timings` (GY-377).
   const timings = new Timings(dependencies.now);
   const report = await withTimings(timings, () => buildStatusReport(root, master, timedApi(masterApi), coordinator, cli, dependencies));
   return { ...report, timings: timings.report() };
@@ -74,10 +75,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const runtime = await timedStep('herdr', () => observeHerdrAgents());
   const credentials = await timedStep('credentials', () => inspectWorkerCredentials(root, master.workers));
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
-  const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot')));
+  const { snapshot, clockOffset } = await coordinationStep(run => timedStep('snapshot', run), masterApi);
   const sections = new ReportSections(); // optional sections (GY-422)
-  // Sessions the automatic dispatcher launched are settled against this same snapshot: a
-  // head change cancels them here as well as in the loop, so status never shows a stale one.
+  // Sessions the dispatcher launched are settled against this snapshot: a head change cancels them here too.
   try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
   catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
   let producerRecords = (await readProducerLedger(root)).producers;
@@ -87,32 +87,29 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
   // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
   const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
-  // Status reads the cursor as the loop would, repairing an over-long string in memory; the loop
-  // is what logs and persists that repair, so status reports the cursor rather than announcing it.
+  // Status reads the cursor as the loop would; the loop logs and persists any repair it makes.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
   // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is exactly the condition that stops it. The plan is the one `master reclaim` computes,
-  // over the inventory the loop's reclaim step cached (GY-360): walking a thousand trees here, on
-  // every call, is what made status take minutes.
+  // Disk is reported from the host, not from the cursor: the volume filling is what stops it. The
+  // plan is `master reclaim`'s, over the cached inventory (GY-360): a thousand tree walks per call
+  // made status take minutes.
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
   // The managed worktree root is a volume of its own as often as not: proof and review checkouts
-  // live there, and it is judged against its own minimum and budget, before a write there fails.
+  // live there, and it is judged against its own minimum and budget before a write there fails.
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
-  // The loop's own health comes before every work item: a coordinator that is absent or stalled is
-  // why nothing else on this list is moving, and no other attention item would say so; a cycle that
-  // outgrew its interval names its costly step and whether it computed or waited.
+  // The loop's own health comes before every work item: an absent or stalled coordinator is why
+  // nothing else on this list is moving; a cycle past its interval names its costly step.
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
@@ -122,18 +119,23 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A worker session Herdr no longer reports, on an assignment whose lease is still advancing, is
   // an orphaned supervisor rather than a session that finished; it is named with what reclaims it.
   // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
-  // role, the sessions running against the declared limit and the longest wait for a slot.
-  const sessions = await timedStep('build status', () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probeCandidateConflicts(root, snapshot.work), { reviewers: master.reviewers, producers: master.producers }, master.cliPath, { batchSize: mergeBatchSize(master) }), snapshot.work, agentOwner),
+  // role, sessions running against the limit and the longest wait for a slot.
+  const mergeQueue = mergeQueueStatus(master, snapshot, coordinator);
+  const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
+  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
-  // A waiting sudo prompt is the operator confirming their own GitHub credential on their device,
-  // the one step no agent may take for them; a timed-out one is the master's to rerun.
+  // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
+  // inventory (GY-725); a failed read marks the section.
+  try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot, 100, { root }); }
+  catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
+  // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
-  // refused, and nothing will launch again until it is named here with the command that answers it.
+  // refused, and nothing relaunches until it is named here with the command that answers it.
   // A review every session settled on a dismissal for is the stronger statement of the same
-  // request (GY-100) and is reported once, as the review that cannot be obtained on that commit.
+  // request (GY-100), reported once as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
   // An open item the control plane names no action for. Those waiting on another item or on a
@@ -141,14 +143,15 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
-  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+  const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report is slow: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), queue-head lag (GY-492), slow renewals (GY-558).
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // queue-head lag (GY-492), slow renewals (GY-558).
   const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...repairLaneAttention(snapshot.work), ...health.attention];
+  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...landingAttention(snapshot.work), ...health.attention];
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -177,9 +180,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     unavailable: sections.unavailable,
+    docsBudget: docs,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
-    // Every open item the control plane names no action for, with the account it names instead
-    // and how long it has held its failing gate; the bound the stalled ones were judged against.
+    // Every open item the control plane names no action for, with the account it names and how
+    // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },
     liveness,
     backlog,
@@ -187,7 +191,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
-    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue: { batchSize: mergeBatchSize(master) }, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, ...optimisticStatus(master, snapshot.work), mergeQueue, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    conflictProbe: probe,
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation, leaseHealth: health.report,
     versionSkew: mergeProtocolSkew(coordinator, cli), cli,
@@ -239,8 +244,9 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
+  const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
   // The report's last step, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
+  return { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }

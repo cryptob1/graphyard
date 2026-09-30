@@ -1,12 +1,12 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { advisoryLocks, Store } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // A new release boots while the live replica is mid-coordination: holding the advisory lock
 // every coordination transaction takes, with a transaction open on the ledger's tables.
@@ -15,7 +15,7 @@ const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:$
 
 before(async () => {
   port = Number(process.env.GRAPHYARD_STORE_INIT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 181);
-  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-store-init-'));
+  const scratch = await temporaryDirectory('store-init');
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
   for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock']) await postgres.createDatabase(name);
@@ -239,9 +239,15 @@ test('integration:migration-deadlock-retried a live writer queued behind the mig
   } finally { await blocker.end(); await live.end(); await next.close(); await deployed.close(); }
 });
 
-test('unit:startup-lock-documented operations.md states how startup takes coordination locks', async () => {
+test('unit:startup-lock-documented operations.md states how a release migrates under live traffic', async () => {
   const page = await readFile(new URL('../docs/operations.md', import.meta.url), 'utf8');
   assert.match(page, /up-to-date release starts without taking coordination locks/);
   assert.match(page, /migrating release fails fast/);
   assert.match(page, /health check/);
+  // GY-773: only changed tables are touched, the lock budget, the retry.
+  assert.match(page, /touches only the tables whose DDL changed since it recorded a digest per table/);
+  assert.match(page, /unchanged tables are skipped without any lock/);
+  assert.match(page, /30-second lock budget/);
+  assert.match(page, /retries a deadlock or expired lock wait with backoff/);
+  assert.match(page, /each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer/);
 });

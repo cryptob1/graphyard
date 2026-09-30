@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { assertDispatchable, assessContainment, buildMasterStatus, containmentHold, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, reconcilePendingActions, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { annotatePaneShell, containmentSettlementRefusals, countHeldChildren, isInteractiveShell, paneShellReport, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const observedAt = '2030-01-01T12:00:00.000Z';
 const at = (offsetMs: number) => new Date(Date.parse(observedAt) + offsetMs).toISOString();
@@ -128,7 +128,7 @@ const refusals = (work: Work, verification: ContainmentVerification) => containm
 const still = /Process 4242 of the contained worker is still present on coordinator-host \(matched by assigned workspace\); pid 4242 cmdline "/;
 
 async function loop(work: Work, overrides: Partial<DaemonEffects> = {}, carried?: DaemonState) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-pane-shell-'));
+  const directory = await temporaryDirectory('pane-shell');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const profile = { name: 'opencode-1', principal: 'worker-a', agentName: 'graphyard-opencode-1', mode: 'launch', kind: 'claude', credentialFile: join(directory, 'worker.token'), agentArgs: [], environment: {} } as unknown as WorkerProfile;
@@ -156,8 +156,8 @@ test('unit:idle-pane-shell-not-a-worker the pane\'s childless interactive shell 
   const work = stranded();
   assert.deepEqual(refusals(work, paneShellProbe()), [], 'an idle pane shell beside a not-found scope is no worker');
   assert.deepEqual(refusals(work, paneShellProbe({ activeState: 'inactive' })), [], 'an inactive (ended) scope is ended too');
-  for (const command of ['/usr/bin/bash', '-bash', 'bash -i', '/bin/zsh -l', 'fish', 'bash -il', 'bash --login', 'bash --noprofile --norc -i']) assert.equal(isInteractiveShell(command), true, command);
-  for (const command of ['bash -c sleep 100', 'bash -lc watch', '/usr/bin/bash script.sh', 'node server.js', 'claude', 'bash --rcfile x', 'bash --init-file x', 'bash --rcfile=x', 'bash --init-file=/tmp/rc', 'bash -O extglob', 'bash -o vi', 'zsh -x', 'bash --debugger', 'bash -s', 'bash -is', 'sh -', 'zsh -s arg']) assert.equal(isInteractiveShell(command), false, command);
+  for (const command of ['/usr/bin/bash', '-bash', 'bash -i', '/bin/zsh -l', 'fish', 'bash -il', 'bash --login', 'bash --noprofile --norc -i', 'bash --noediting', 'bash --norc --noediting', 'zsh --no-rcs', 'zsh --no-globalrcs', 'fish --private', 'fish --no-config', 'fish --private --no-config']) assert.equal(isInteractiveShell(command), true, command);
+  for (const command of ['bash -c sleep 100', 'bash -lc watch', '/usr/bin/bash script.sh', 'node server.js', 'claude', 'bash --rcfile x', 'bash --init-file x', 'bash --rcfile=x', 'bash --init-file=/tmp/rc', 'bash -O extglob', 'bash -o vi', 'zsh -x', 'bash --debugger', 'bash -s', 'bash -is', 'sh -', 'zsh -s arg', 'bash --posix', 'dash --private', 'fish --noediting', 'sh --noediting', 'zsh --no-global-rcs']) assert.equal(isInteractiveShell(command), false, command);
 
   // One cycle: the pane is closed, the item re-probed with the pane gone, and the quarantine settled.
   let probes = 0;

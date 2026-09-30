@@ -174,6 +174,14 @@ export function listRunDirectories(runsRoot: string) {
     return owner ? [{ directory, owner, record: readEndedRecord(directory) }] : [];
   });
 }
+/**
+ * Whether a run for this subject has a directory under the registry with no record yet: detached
+ * from whoever launched it, so its launcher being gone says nothing about it — adoption watches it
+ * and resolves it as lost itself if its process is gone (`adoptRuns`).
+ */
+export function unendedRunOnDisk(root: string, subject: string) {
+  return listRunDirectories(runsDirectory(root)).some(({ owner, record }) => owner.subject === subject && !record);
+}
 /** Removes ended runs past their retention, and directories no owner was ever written to. */
 export function pruneRunDirectories(runsRoot: string, now = Date.now()) {
   let names: string[];

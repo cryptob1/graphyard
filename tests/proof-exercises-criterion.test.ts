@@ -1,15 +1,20 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { exerciseRefusal, type Principal, type Work } from '../src/model.js';
+import { evaluate, exerciseRefusal, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { producerPrompt, proofOutcome } from '../src/producer.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { nextAction } from '../src/model/next-action.js';
+import { neededDecision } from '../src/daemon/decisions.js';
+import { describeDispatch } from '../src/master/status.js';
+import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 
 // GY-135: a proof that passes against an unchanged tree proves nothing. A pass is trusted only
 // beside the producer's run of the same proof failing against a tree with its criterion's
@@ -29,7 +34,7 @@ const id = () => randomUUID();
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 135;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-exercise-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('exercise'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('exercise_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/exercise_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
@@ -138,4 +143,68 @@ test('unit:refusal-names-criterion-and-behaviour the recorded reason carries all
   const [refused] = await refusals(work);
   for (const named of [PROOF, 'AC-1', BEHAVIOUR]) assert.ok(refused.reason.includes(named), `${named} appears in the ledger reason`);
   assert.deepEqual({ proof: refused.proof, criteria: refused.criteria, behaviour: refused.behaviour }, { proof: PROOF, criteria: ['AC-1'], behaviour: BEHAVIOUR });
+});
+
+// GY-817: a mechanical proof recorded as not exercising its criterion is answered with a rework
+// request carrying the producer's finding, as a failing proof is — never left as a producer
+// request no executor launches. Pure: the item is built by hand and graded by the real evaluator.
+const CI_APP = 15368, clock = new Date('2026-09-26T12:00:00.000Z');
+const ago = (minutes: number) => new Date(clock.getTime() - minutes * 60_000).toISOString();
+const UNIT = 'unit:tmp-reclaim', MUTATION = 'the guarded unlink in reclaimTmp()';
+function unexercisedItem(options: { finding?: boolean } = {}): Work {
+  const finding = exerciseRefusal({ key: 'GY-421', criteria: [{ id: 'AC-3', text: 'x', proofs: [UNIT] }] } as unknown as Work, [], { proof: UNIT, result: 'pass', exercise: { criterion: 'AC-3', behaviour: MUTATION, result: 'pass', executed: 3 } })!;
+  const record = { id: '00000000-0000-4000-8000-000000000001', proof: UNIT, sha: head, baseSha: base, policyRevision: 1, producer: 'proof-runner', trusted: false, result: 'pass', executed: 3, skipped: 0, at: ago(5),
+    exercise: { criterion: 'AC-3', behaviour: MUTATION, result: 'pass', executed: 3 }, unexercised: finding } as Evidence;
+  const observation: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: 421, branch: 'graphyard/gy-421-1', author: 'implementer' },
+    checks: [{ name: 'test', result: 'success', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null,
+    files: ['src/tmp.ts'], scopeFiles: [], at: ago(1), prState: 'open', draft: false, baseTip: base, baseTipContained: true } as Observation;
+  const work = { id: '22222222-3333-4444-8555-666666666666', key: 'GY-421', title: 'Unexercised fixture', description: '', type: 'bug', priority: 2, dependencies: [],
+    criteria: [{ id: 'AC-3', text: 'An old tsx directory is reclaimed', proofs: [UNIT] }], policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], producerProofs: [],
+    stage: 'build', revision: 5, policyRevision: 1, createdAt: ago(120), updatedAt: ago(5), stageEnteredAt: ago(60), ready: true, epoch: 1, lease: null,
+    workspaces: [{ host: 'machine-a', path: '/tmp/gy-421', branch: 'graphyard/gy-421-1', epoch: 1, owner: 'agent-a' }], implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 },
+    candidate: observation.candidate, submission: { epoch: 1, pr: 421 }, evidence: options.finding === false ? [] : [record], observation,
+    gates: [], violations: [], blocker: null, queue: null, queueSequence: 0, queueHistory: [] } as unknown as Work;
+  const graded = evaluate(work, [work], clock, [CI_APP]);
+  const copy = structuredClone({ ...work, stage: graded.stage, gates: graded.gates, violations: graded.violations });
+  reconcileAutoDispatch(copy, [copy], clock);
+  return copy;
+}
+
+test('unit:nonexercising-proof-reworks a unit proof recorded as not exercising its criterion names request-rework and the loop requests that rework', () => {
+  const work = unexercisedItem();
+  assert.ok(openProducerRequest(work, 'unit'), 'the unit request stands, as it did on GY-421');
+  const action = nextAction(work, [work], clock)!;
+  assert.equal(action.kind, 'request-rework', `a rework, not a producer dispatch no executor launches: ${action.reason}`);
+  assert.equal(action.inputs.kind, 'request-rework');
+  const detail = action.inputs.kind === 'request-rework' ? action.inputs.detail : '';
+  for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(detail.includes(named), `the detail names ${named}: ${detail}`);
+  assert.match(detail, /survived/);
+  assert.deepEqual(action.inputs.kind === 'request-rework' ? [action.inputs.pr, action.inputs.sha] : [], [421, head]);
+  // The loop's decision input is the rework a failing proof gets, carrying the producer's finding.
+  const decision = neededDecision(work, { autoMerge: true })!;
+  assert.equal(decision.action, 'rework');
+  assert.equal(decision.binding, `${head}:proof:unexercised:${UNIT}`);
+  for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(decision.reason.includes(named), `the decision names ${named}: ${decision.reason}`);
+  // Without the finding the same head is a proof dispatch: only the recorded finding reroutes it.
+  const plain = unexercisedItem({ finding: false });
+  const dispatch = nextAction(plain, [plain], clock)!;
+  assert.equal(dispatch.kind, 'dispatch');
+  assert.equal(neededDecision(plain, { autoMerge: true }), null);
+});
+
+test('unit:nonexercising-proof-named master status names the item as awaiting rework for a non-exercising proof, not an unanswered producer request', () => {
+  const work = unexercisedItem();
+  const request = openProducerRequest(work, 'unit')!;
+  const session = { requestId: request.id, producer: 'p-1', profile: 'producer-a', agentName: 'producer-a-1', state: 'completed', attempt: 1, requestedAt: ago(51),
+    resolution: `evidence does not exercise its criterion: ${work.evidence[0].unexercised}` };
+  const dispatch = describeDispatch(work, { pending: [], completed: [] }, { producers: { pending: [], completed: [session] }, failures: [] }, clock.getTime());
+  const [item, ...rest] = unansweredRequestAttention([{ key: work.key, dispatch: dispatch as any }]);
+  assert.equal(rest.length, 0);
+  assert.match(item.text, /^GY-421 is awaiting rework for a non-exercising proof: /);
+  for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(item.text.includes(named), `the attention names ${named}: ${item.text}`);
+  assert.doesNotMatch(item.text, /stood unanswered|Producer request for/);
+  // A producer session that settled with no finding is still the unanswered request it was.
+  const plain = describeDispatch(work, { pending: [], completed: [] }, { producers: { pending: [], completed: [session] }, failures: [] }, clock.getTime());
+  const bare = { ...plain!, producers: plain!.producers.map(({ unexercised: _unexercised, ...entry }: any) => entry) };
+  assert.match(unansweredRequestAttention([{ key: work.key, dispatch: bare as any }])[0].text, /^Producer request for unit proofs for GY-421 has stood unanswered/);
 });

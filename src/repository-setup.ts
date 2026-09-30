@@ -5,6 +5,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
+import { defaultOptimisticExclude } from './optimistic-merge.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
@@ -455,17 +456,34 @@ export async function writeDocumentationConfig(root: string, proposed: Documenta
   try { existing = await readFile(file, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (existing !== null) {
     const policy = parseRepositoryConfig(existing).documentation;
-    return { state: canonicalJson(policy) === canonicalJson(proposed) ? 'unchanged' : 'drift', policy };
+    // A scan never proposes a word budget (GY-574), so a committed one is the repository's own and no drift.
+    const { wordBudget: _budget, ...scanned } = policy;
+    return { state: canonicalJson(scanned) === canonicalJson(proposed) ? 'unchanged' : 'drift', policy };
   }
   await atomicWrite(file, `${JSON.stringify({ documentation: proposed }, null, 2)}\n`, 0o644);
   return { state: 'written', policy: proposed };
 }
 
-/** The policy a checkout's committed configuration declares, or null when it has none. */
+/**
+ * The documentation policy a checkout's committed configuration declares, or null when it has none.
+ * A word budget is not part of the policy the control plane is deployed with: it is read from the
+ * committed file at each counted commit (GY-574), so it is left out here and never reads as drift.
+ */
 export async function readDocumentationConfig(root: string): Promise<DocumentationPolicy | null> {
-  try { return parseRepositoryConfig(await readFile(resolve(root, repositoryConfigFile), 'utf8')).documentation; }
+  try { const { wordBudget: _budget, ...policy } = parseRepositoryConfig(await readFile(resolve(root, repositoryConfigFile), 'utf8')).documentation; return policy; }
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
 }
+
+// --- Merge-queue exclusions: the shared infrastructure onboarding names per repository (GY-503) ---
+
+/**
+ * The `mergeQueue` configuration onboarding writes when a repository's master config names none:
+ * the product-default shared-infrastructure globs (`defaultOptimisticExclude`, optimistic-merge.ts)
+ * under the key `mergeQueue.optimisticExclude`, where the operator tunes them for this repository.
+ * A later `master init` keeps what is written, exactly as it keeps an operator-tuned profile, so
+ * the defaults are named once per repository and the product hardcodes nobody's file list.
+ */
+export const onboardingMergeQueue = (): { optimisticExclude: string[] } => ({ optimisticExclude: [...defaultOptimisticExclude] });
 
 // --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
 
