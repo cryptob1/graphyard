@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { approverSessionName, assertSessionName, atomicPrivateWrite, distinctSessionName, launchApprover, saveWorkerProfile, loadMasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, sessionName, sessionNameLimit, sessionNameRefusal, SessionNameRefusedError, setupMaster, startAgentSession, startMaster, workerProfileSchema, type HerdrAgent, type MasterConfig, type MasterRun } from '../src/master.js';
@@ -11,6 +10,7 @@ import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '.
 import { approverLaunchAttention } from '../src/cli/master-status.js';
 import { buildProposal, proposedWorkerProfileSchema } from '../src/onboarding.js';
 import { escalationTriggers, type Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-101: a per-decision approver session name that no runtime would accept meant no approver
 // could be launched at all, so every two-party decision stood unjudged. One case per proof:
@@ -27,8 +27,8 @@ const hour = 3_600_000;
 const clock = Date.parse('2030-01-01T00:00:00Z');
 const iso = (offsetMs = 0) => new Date(clock + offsetMs).toISOString();
 
-async function repository(prefix: string, remote = 'owner/project') {
-  const root = await mkdtemp(join(tmpdir(), prefix));
+async function repository(label: string, remote = 'owner/project') {
+  const root = await temporaryDirectory(label);
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${remote}.git`], { cwd: root });
   return root;
@@ -108,8 +108,8 @@ test('unit:generated-session-names-valid — every session name Graphyard genera
     const name = sessionName('graphyard-master', repository);
     assert.ok(launchable(name), `${repository}: ${name}`);
   }
-  const root = await repository('graphyard-session-names-', 'owner/a-repository-with-a-very-long-name-indeed');
-  const credentials = await mkdtemp(join(tmpdir(), 'graphyard-session-names-credentials-'));
+  const root = await repository('session-names', 'owner/a-repository-with-a-very-long-name-indeed');
+  const credentials = await temporaryDirectory('session-names-credentials');
   try {
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials },
       (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/a-repository-with-a-very-long-name-indeed', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
@@ -184,7 +184,7 @@ function mergeable(): Work {
 }
 
 test('integration:approver-launch-refusal-visible — a launch a runtime refuses for the name it was given is reported as that, and master status shows the decision as awaiting an approver that could not start', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-approver-refusal-'));
+  const directory = await temporaryDirectory('approver-refusal');
   try {
     const credentialFile = join(directory, 'coordinator.token');
     await writeFile(credentialFile, coordinatorToken, { mode: 0o600 });
@@ -200,8 +200,8 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
     // The launcher against a runtime that refuses the name it is given: `master approver` builds
     // the name, Herdr answers with its naming rule, and the launcher reports that refusal rather
     // than a generic failed start — and leaves no tab behind for a session that never started.
-    const root = await repository('graphyard-approver-refusal-root-');
-    const credentials = await mkdtemp(join(tmpdir(), 'graphyard-approver-refusal-credentials-'));
+    const root = await repository('approver-refusal-root');
+    const credentials = await temporaryDirectory('approver-refusal-credentials');
     let refusal!: SessionNameRefusedError;
     try {
       await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials },

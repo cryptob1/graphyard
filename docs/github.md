@@ -46,7 +46,7 @@ Before merging, the reviewer App re-posts a carried approval missing from the PR
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors. Each entry validates on its own tip, one CI duration covering four positions costing concurrent CI; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later ones rebuild.
+`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip: one CI duration covers four default positions, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the entry whose docs change crossed the budget — the first at which the running total exceeds it — and the refusal names the words over and the pages that grew; the entries ahead of it fit and still merge. The word budget itself is never a merge gate (see [development](development.md#documentation)): a total over it warns.
 
 ### Optimistic merges
 
