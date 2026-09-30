@@ -125,7 +125,7 @@ export async function prepareAgentEnvironment(environment: AgentEnvironment) {
 export function loginCommand(environment: AgentEnvironment) {
   const home = shellQuote(environment.home);
   return { claude: `CLAUDE_CONFIG_DIR=${home} claude, then /login`, codex: `CODEX_HOME=${home} codex login`,
-    opencode: `XDG_DATA_HOME=${home} opencode auth login`, cursor: `CURSOR_CONFIG_DIR=${home} cursor-agent login` }[environment.kind];
+    opencode: `XDG_DATA_HOME=${home} opencode auth login`, cursor: `CURSOR_CONFIG_DIR=${home} agent login` }[environment.kind];
 }
 
 export interface AccountUsage { window: string; percent: number; resetsAt: string | null }
