@@ -18,10 +18,10 @@ const pages = ['README.md', ...readdirSync(`${root}docs`, { recursive: true, wit
 // Graphyard's own documentation budget (this repository's rule, not a product rule for managed
 // projects; GY-574 moves it into graphyard.json). Raised from 12,000 on 2026-09-26: at exactly
 // 12,000 every queued change that documented itself overflowed on its merge-queue tip and was
-// ejected. Raised from 13,000 on 2026-09-28 for the same reason: main stood at 12,995, five words
-// under the ceiling, so every change documenting itself overflowed again. The per-page budget is
-// unchanged, so no page grows past 1,200 words.
-const TOTAL_BUDGET = 13_200, PAGE_BUDGET = 1_200;
+// ejected. Raised from 13,000 on 2026-09-29 (GY-945): the set sat at 12,999 — one word of room —
+// and the fleet panel's documentation needed ~60. The per-page budget is unchanged, so no page
+// grows past 1,200 words.
+const TOTAL_BUDGET = 13_100, PAGE_BUDGET = 1_200;
 /** Words as `wc -w` counts them: maximal runs of non-whitespace, markup and code included. */
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 
@@ -42,7 +42,7 @@ function headings(text: string) {
   return [...text.replace(/```[\s\S]*?```/g, '').matchAll(/^#{1,6}\s+(.+)$/gm)].map(match => normalize(match[1])).filter(heading => !GENERIC_HEADINGS.has(heading));
 }
 
-test('unit:docs-word-budget — README.md plus every docs page total at most 13,000 words and no page exceeds 1,200, counted as wc -w counts them', () => {
+test('unit:docs-word-budget — README.md plus every docs page total at most 13,100 words and no page exceeds 1,200, counted as wc -w counts them', () => {
   assert.equal(words('one  two\tthree\n\nfour — `five six` [seven](eight.md)'), 8, 'words are whitespace-separated runs, as wc -w counts them');
   const wc = spawnSync('wc', ['-w', 'README.md'], { cwd: root, encoding: 'utf8' });
   if (wc.status === 0) assert.equal(Number(wc.stdout.trim().split(/\s+/)[0]), words(read('README.md')), 'the count agrees with wc -w');

@@ -126,7 +126,8 @@ yourself, and never submit evidence. Reconcile branch protection with
 GitHub administration of the managed repository is yours, not the operator's:
 control-plane App permission updates, acceptance of the installation permission
 request they raise, and branch-protection reconciliation. Use the API first
-(`graphyard master protection --apply`, `gh api` on protection and installations).
+(`graphyard master protection --apply`, `gh api` on protection; installation state
+comes from the control plane's App credential, not your gh token).
 When GitHub only offers a page — App manifest confirmation, permission-request
 acceptance, a sudo prompt — run `graphyard master browser app-permissions`,
 `graphyard master browser installation-accept`, or `graphyard master browser protection`.
