@@ -47,10 +47,9 @@ export const evidenceProves = (proof: string, evidence: { result: string; execut
 export type ProofOutcome = 'proven' | 'unproven' | 'failed';
 /**
  * Every automatable required proof with what the trusted evidence bound to this head says about
- * it. GY-883: the item's lane adds ceremony beside its criteria and removes none of them, so the
- * proofs tracked here — and the producer sessions and review holds that follow — are the same in
- * every lane. An inherited obligation is tracked beside the item's own criteria exactly as it
- * always was.
+ * it. GY-883: `requiredProofs` applies the item's risk lane, so a low item's producer-run proofs
+ * and a low or medium item's manual attestations are neither tracked here nor dispatched, and no
+ * review is held for them. An inherited obligation is tracked in every lane.
  */
 export function automatableOutcomes(work: Work, all: Work[], now: Date): { proof: string; group: ProducerGroup; outcome: ProofOutcome; producer?: string }[] {
   return requiredProofs(work, all).filter(proof => automatableProof(work, proof)).map(proof => {

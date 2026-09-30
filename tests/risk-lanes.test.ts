@@ -1,4 +1,11 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
+import { randomUUID } from 'node:crypto';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Engine } from '../src/engine.js';
+import { server } from '../src/server.js';
+import { Store } from '../src/store.js';
+import type { Principal } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { determineLane, laneRequiresProof, laneSpeedTargets, laneRequirements, reworkNeedsApprover, type Lane } from '../src/model/policy.js';
 import { requiredProofs } from '../src/model/bootstrap.js';
@@ -183,6 +190,56 @@ test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap 
   assert.equal(gate.reasons.some(reason => reason.includes('Bootstrap obligation inherited') && reason.includes('unit:deferred-contract')), true,
     `the inherited obligation stands in the low lane: ${gate.reasons.join('; ')}`);
   assert.equal(gate.reasons.some(reason => reason.includes('unit:core-flow')), false, 'the item’s own producer-run proof is not required in low');
+});
+
+// The rework waiver is applied where the decision is requested: a low- or medium-lane rework is
+// applied at once, recorded as approved by the risk lane; a high-lane one waits for its approver.
+let teardown: (() => Promise<void>) | null = null;
+after(async () => { await teardown?.(); });
+test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied as it is requested, and a high-lane one waits for its independent approver', { timeout: 120_000 }, async () => {
+  const repository = 'owner/lanes';
+  const operator: Principal = { id: 'lane-operator', role: 'admin', sessionKind: 'human' };
+  const implementer: Principal = { id: 'lane-implementer', role: 'worker', sessionKind: 'ai' };
+  const credentials = [operator, implementer].map(principal => ({ ...principal, token: `lanes-${principal.id}-${'x'.repeat(32)}` }));
+  const master = { id: 'lane-master', token: `lane-master-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'decision:rework'] };
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 883;
+  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('risk-lanes'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('lanes_test');
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/lanes_test`); await store.init();
+  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const http = server(engine, credentials);
+  teardown = async () => { http.close(); await store.close(); await database.stop(); };
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  const call = async (token: string, path: string, body: unknown) => {
+    const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body) });
+    const result = await response.json() as any;
+    assert.equal(response.status, 200, JSON.stringify(result));
+    return result;
+  };
+  await call(credentials[0].token, 'operator-agents', { id: master.id, displayName: master.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: master.token, reason: 'The master requests reworks' });
+  let pr = 880;
+  const submitted = async (title: string, paths: string[]) => {
+    let work = await call(master.token, 'work', { title, plannedFiles: paths, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Lane fixture' }) as Work;
+    work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+    work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+    work = await engine.execute(implementer, 'workspace', work.id, { epoch: work.epoch, host: 'lane-host', path: `/tmp/lanes/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, randomUUID());
+    work = await engine.execute(implementer, 'submit', work.id, { epoch: work.epoch, pr: ++pr }, randomUUID());
+    return engine.observe(work.id, work.revision, { ...observed(paths), candidate: { ...observed(paths).candidate, pr, branch: work.workspaces.at(-1)!.branch } });
+  };
+  for (const [title, paths, lane] of [['low-rework', ['src/model/lanes.ts'], 'low'], ['medium-rework', ['src/model/lanes.ts', 'src/cli/lanes.ts'], 'medium']] as [string, string[], Lane][]) {
+    const work = await submitted(title, paths);
+    assert.equal(work.lane, lane);
+    const decision = await call(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' });
+    assert.equal(decision.state, 'applied', `${lane}: the rework is applied with no approver decision`);
+    assert.equal(decision.approvedBy, 'graphyard-risk-lane', `${lane}: the ledger names the lane as its ground`);
+    assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, true);
+  }
+  const high = await submitted('high-rework', ['src/server/routes/lanes.ts']);
+  assert.equal(high.lane, 'high');
+  const pending = await call(master.token, `work/${high.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' });
+  assert.equal(pending.state, 'requested', 'a high-lane rework waits for its independent approver');
+  assert.equal((await store.list()).find(item => item.id === high.id)!.reworkRequested, false);
 });
 
 // AC-3: lanes are inputs to the single landability verdict (GY-878), not separate required-check
