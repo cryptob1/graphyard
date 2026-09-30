@@ -629,7 +629,9 @@ export async function launchReview(root: string, work: Work, profileName: string
     // prompt names exactly them. The fixed launch prompt demonstrably did not converge — a session
     // approved over the same omission its predecessor was withdrawn for — so the relaunch says
     // which listed threads were passed over instead of repeating the rule they broke.
-    const unaccounted = [...new Set(ledger.reviews.filter(entry => entry.requestId === dependencies.requestId && entry.unaccountedThreads?.length)
+    // A launch without a request matches only this item's requestless records of this head.
+    const sameRequest = (entry: ReviewRecord) => dependencies.requestId ? entry.requestId === dependencies.requestId : !entry.requestId && entry.key === binding.key && entry.sha === binding.sha;
+    const unaccounted = [...new Set(ledger.reviews.filter(entry => sameRequest(entry) && entry.unaccountedThreads?.length)
       .flatMap(entry => entry.unaccountedThreads!))].slice(0, listedThreadLimit);
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
