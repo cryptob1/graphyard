@@ -124,7 +124,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
   const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
-  // A check failed on the clock says so, against its budget; a routed scope request, its approver.
+  // Name clock failures' budgets, routed scopes' approvers, base breaks' tests.
   const status = routedScopeStatus(nameBaseBreaks(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work), snapshot.work, cycling?.approvals);
   // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
   // inventory (GY-725); a failed read marks the section.
