@@ -320,7 +320,7 @@ async function simulateDay(options: { hours: number; regression?: ('approvers-le
     page: (n: number) => n === 1 ? 'README.md' : `docs/grown-${n}.md`,
   };
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days, ...(docs ? { docs: { budget: docs.budget, pages: docs.pages } } : {}) },
-    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md', plan.docsConflict.page]);
+    [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md', ...(docs ? [] : [plan.docsConflict.page])]);
   const herdr = new SimulatedHerdr(() => clock.now());
   const adapter = github.adapter();
   // ---- The host's /tmp: a scratch root the loop's reclaim step sweeps every cycle (GY-421). ----
@@ -1016,7 +1016,7 @@ async function simulateDay(options: { hours: number; regression?: ('approvers-le
     github.tick(now);
     // The docs-conflict scenario is a main-day and regression-day fault: the other days' own
     // rework accounting and windows would only absorb a base move this day must hold.
-    if (!options.queued && !options.scope && !options.handApprovers && !options.capacityWait && !options.refuseReworkOf?.length) docsTick();
+    if (!options.queued && !options.scope && !options.handApprovers && !options.capacityWait && !options.refuseReworkOf?.length && !docs) docsTick();
     await workersTick(now);
     docsSyncTick(now);
     await producersTick(now);
