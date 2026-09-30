@@ -285,6 +285,8 @@ test('unit:launcher-knows-its-checkout — the launcher derives its coordinator 
   // only the first, so every launcher-started session ran unconfined in production (review finding).
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/bin/graphyard.mjs', false), '/srv/graphyard');
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/src/cli.ts', false), '/srv/graphyard');
+  assert.equal(launcherCoordinatorRoot('/srv/graphyard/scripts/graphyard-executor.mjs', false), '/srv/graphyard', 'an executor slot launches workers in-process, so it confines them too');
+  assert.equal(launcherRootUndetermined('/graphyard-executor.mjs', false) !== null, true, 'an executor that cannot name its checkout refuses instead of launching unconfined');
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/src/cli.ts', true), null, 'nothing is confined under the test runner');
   assert.equal(launcherCoordinatorRoot('/usr/bin/node', false), null, 'a foreign entry is not a launcher');
   assert.equal(launcherCoordinatorRoot(undefined, false), null);
