@@ -10,9 +10,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +27,7 @@ import type { HerdrAgent } from '../src/master/herdr.js';
 import type { Runner } from '../src/runner/types.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -63,8 +63,8 @@ const machineFiled = (): Work => ({ ...ready(), id: 'work-901', key: 'GY-901', t
  * exists for the loop's scratch checkout.
  */
 async function installed(options: { research?: boolean } = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-'));
-  const credentials = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-credentials-'));
+  const directory = await temporaryDirectory('session-cwd');
+  const credentials = await temporaryDirectory('session-cwd-credentials');
   execFileSync('git', ['init', '-q', '-b', 'main', directory]);
   await writeFile(join(directory, '.gitignore'), '.graphyard/\n');
   await mkdir(join(directory, 'src'), { recursive: true });
@@ -134,7 +134,7 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
   const fixture = await installed();
   try {
     const { root, cleanup } = fixture;
-    const home = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-claude-home-'));
+    const home = await temporaryDirectory('session-cwd-claude-home');
     try {
       const stub = herdr();
       await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', environment: { CLAUDE_CONFIG_DIR: home } });
@@ -197,7 +197,7 @@ test('unit:session-cwd-own-checkout — a worker session opens its pane in its a
     const { root, cleanup } = fixture;
     const stub = herdr();
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: await fixture.token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
-    const assigned = await mkdtemp(join(tmpdir(), 'graphyard-session-cwd-worktree-'));
+    const assigned = await temporaryDirectory('session-cwd-worktree');
     try {
       await dispatchWork(root, ready(), profile, [], stub.run, [ready()], async () => ({ epoch: 4, path: assigned, base: 'c'.repeat(40) }), async () => {}, 5_000);
       assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the worker');
@@ -329,6 +329,32 @@ test('unit:coordinator-checkout-drift-detected — a HEAD that moves under a run
     assert.ok(escalation.detail.includes('review-claude-1 (pane wC:p1'), 'the session whose pane points at the checkout is named');
     assert.ok(escalation.detail.includes(`cwd ${root}`), 'the pane cwd is named');
     assert.ok(!escalation.detail.includes('produce-claude-2'), 'a session in its own managed checkout is not named');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:coordinator-checkout-drift-detected — during a Herdr outage the drifted checkout is still attention, with its sessions reported unknown, and the loop keeps running', async () => {
+  const fixture = await installed();
+  try {
+    const { root, config, cleanup } = fixture;
+    let phase = 0;
+    const checkout = async () => {
+      phase++;
+      return { root, commit: phase === 1 ? C1 : C2, modified: [] as string[], untracked: [] as string[] };
+    };
+    for (const agents of [async () => null, async () => { throw new Error('herdr is not running'); }]) {
+      phase = 0;
+      let upgrades = 0;
+      const state = emptyDaemonState(config);
+      const result = await runDaemon(config, state, loopEffects([], { agents, selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }),
+        loopOptions(fixture, { checkout }));
+      assert.equal(result.cycles.length + result.failed.length, 1, 'the loop ran its cycle and the guard after it did not end the loop on the unreadable inventory');
+      assert.equal(upgrades, 0, 'nothing self-upgrades from the moved HEAD');
+      const escalation = state.actions['escalation:dirty-checkout'];
+      assert.ok(escalation, 'the moved HEAD is raised as attention while Herdr is down');
+      assert.match(escalation.detail, new RegExp(`moved from ${C1.slice(0, 12)} to ${C2.slice(0, 12)}`));
+      assert.match(escalation.detail, /sessions whose panes point at it are unknown/);
+    }
     await cleanup();
   } finally { await fixture.cleanup(); }
 });
