@@ -17,8 +17,10 @@ import type pg from 'pg';
  *   asks GitHub, exactly as it did before the cache was persisted.
  */
 export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history';
+/** The map operations `load` needs; the adapter's etag map is a byte-bounded cache (src/github-response-cache.ts). */
+interface LoadableMap<V> { readonly size: number; has(key: string): boolean; set(key: string, value: V): unknown; delete(key: string): boolean; keys(): IterableIterator<string> }
 export interface GitHubCacheMaps {
-  etag: Map<string, { etag: string; value: any }>;
+  etag: LoadableMap<{ etag: string; value: any }>;
   ancestry: Map<string, boolean>;
   blob: Map<string, string | null>;
   history: Map<string, Set<string> | null>;
@@ -65,7 +67,7 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
         loaded++;
       }
       for (const kind of Object.keys(caps) as GitHubCacheKind[]) {
-        const map = maps[kind] as Map<string, unknown>;
+        const map = maps[kind] as LoadableMap<unknown>;
         while (map.size > caps[kind]) map.delete(map.keys().next().value!);
       }
       return loaded;
