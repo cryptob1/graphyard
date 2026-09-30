@@ -56,7 +56,7 @@ export const faultCatalogue = {
     'action:decision', 'action:escalation'],
   'scope': ['scope-request', 'scope-violation', 'escalation:requirement-weakening', 'action:scope'],
   'overlap-hold': ['hold-overdue'],
-  'observation': ['github-budget', 'integration-job', 'action:refresh'],
+  'observation': ['github-budget', 'github-budget-projection', 'integration-job', 'action:refresh'],
   'deployment': ['production', 'throughput', 'action:deployment', 'action:smoke'],
   'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],

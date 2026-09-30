@@ -280,8 +280,11 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       : refresh!.conflict
       ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: ${refresh!.conflict}`
       : `${item.key}${trigger}: brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}`;
+    // A confirmed conflict is the refresh doing what it is for (github.ts): it returns the candidate to its worker with the
+    // conflict named, and the item's own record holds that conflict (base-conflict, the merge class). The row stays failed so
+    // it is not tried again, but it is no observation fault: counting it made one base move over two candidates recur (GY-537).
     performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
-      attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, refresh!.conflict ? null : undefined));
   });
   return { capacities, approversSpent };
 }
