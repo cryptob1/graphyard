@@ -72,14 +72,10 @@ export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
-  /**
-   * Asks the control plane to decide the item's open scope request and returns the decided
-   * document. The loop carries no verdict of its own: it asks, and Graphyard decides from the
-   * item's own criteria. A loop wired without it simply never decides one, and every request
-   * waits for the operator exactly as it did before.
-   */
+  /** Asks the control plane to decide the item's open scope request and returns the decided document: Graphyard decides from the item's own criteria, the loop carries no verdict, and a loop wired without it leaves every request to the operator. */
   decideScope?: (work: Work) => Promise<Work>;
-  /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */ observe?: (work: Work, waitMs: number) => Promise<Work | null>;
+  /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
+  observe?: (work: Work, waitMs: number) => Promise<Work | null>;
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
