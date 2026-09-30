@@ -3,6 +3,7 @@ import { writeFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { researchWorkerSection } from '../research.js';
+import { mechanicalWorkerSection, readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
@@ -149,7 +150,8 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   // The worker's own rules go into its worktree before the session starts, so pushing its
   // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
   const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
-  const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null);
+  // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes.
+  const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, await readMechanicalFixRequests(root));
   // The worker loads its own role rules, never the master's: it may push its assigned branch.
   const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
   let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
@@ -217,7 +219,7 @@ export function autonomousSession(outcome: string, blocker: string) {
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
-export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null) {
+export function workerPrompt(config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null, mechanical: readonly MechanicalFixRequest[] = []) {
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
@@ -228,6 +230,7 @@ export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<W
     // The standard documentation criterion the control plane stamped at create time (GY-215).
     + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
     + destructivePromptGuidance
+    + (config.repository ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical) : '')
     + resumedAttempt(work)
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide), which ends your lease and parks the item for the human, then stop. `
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);

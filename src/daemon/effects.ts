@@ -46,6 +46,7 @@ import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import { readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -140,6 +141,7 @@ export interface DaemonEffects {
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each. */ mechanicalFixes?: () => Promise<MechanicalFixRequest[]>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
    * base branch, checks out its tip when the checkout is a clean detached checkout, and, when the
@@ -708,6 +710,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
+    mechanicalFixes: () => readMechanicalFixRequests(root),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
