@@ -39,7 +39,7 @@ Never attest a stop you have not confirmed. Merged work changes only through a f
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
 - Only guarded or audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
-- History is append-only.
+- History is append-only; only routine rows past their retention window are [compacted](operations-reference.md#storage-retention), each batch audited.
 
 ## Deeper references
 

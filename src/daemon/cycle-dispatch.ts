@@ -99,6 +99,8 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       approver: open.filter(item => unjudged.has(item.key)),
       // An item waits on the escalation-handler role while a handler for it ended on spent quota with no account left.
       'escalation-handler': open.filter(item => waitingEscalations.has(item.key)),
+      // No item waits on the master role: its capacity is the loop's own wait, not an item's (GY-898).
+      master: [],
     };
     for (const capacity of capacities) {
       const key = capacityKey(capacity.role), previous = state.actions[key];
