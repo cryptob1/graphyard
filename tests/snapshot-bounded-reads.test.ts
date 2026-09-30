@@ -2,8 +2,8 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
-import { tmpdir, hostname } from 'node:os';
+import { rm, writeFile, readFile, mkdir } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -15,6 +15,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { approveScopeRequest, masterStatusReport } from '../src/cli/master-status.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-864: CLI reads use a bounded snapshot: master status, master scope and the worker commands
@@ -45,7 +46,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<t
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 864;
   database = new EmbeddedPostgres({
-    databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-')),
+    databaseDir: await temporaryDirectory('bounded-reads'),
     user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {},
     postgresFlags: ['-h', '127.0.0.1'],
   });
@@ -127,8 +128,8 @@ function recordingControlPlane() {
 }
 
 const masterFixture = async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-master-'));
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-credentials-'));
+  const root = await temporaryDirectory('bounded-reads-master');
+  const directory = await temporaryDirectory('bounded-reads-credentials');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile,
@@ -163,7 +164,7 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
 
     // Master scope: the one item by key, and no snapshot read at all.
     control.state.reads.length = 0; control.state.violations.length = 0;
-    const workRoot = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-scope-'));
+    const workRoot = await temporaryDirectory('bounded-reads-scope');
     const decided = await approveScopeRequest(workRoot, { url: origin } as unknown as MasterConfig, ['GY-900', 'The extra doc is part of the layout work'],
       { coordinator: path => fetch(`${origin}/api/${path}`).then(response => response.json()), operatorToken: async () => 'operator-agent-token-'.padEnd(40, 'o') });
     assert.deepEqual(control.state.violations, [], 'master scope issues no full work-snapshot read');
@@ -172,7 +173,7 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
     await rm(workRoot, { recursive: true, force: true });
 
     // The worker's sync: the attribution read on a conflict is the trimmed coordination view.
-    const cwd = await mkdtemp(join(tmpdir(), 'graphyard-bounded-reads-sync-'));
+    const cwd = await temporaryDirectory('bounded-reads-sync');
     const originRepo = join(cwd, 'origin'), clone = join(cwd, 'clone');
     const git = async (repo: string, ...args: string[]) => (await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repo })).stdout.trim();
     const commit = async (repo: string, message: string) => { await execFile('git', ['add', '-A'], { cwd: repo }); await git(repo, 'commit', '-q', '-m', message); return git(repo, 'rev-parse', 'HEAD'); };

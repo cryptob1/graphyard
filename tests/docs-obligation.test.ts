@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -16,6 +15,7 @@ import { documentationGlobMatches } from '../src/model/documentation-glob.js';
 import { decideScopeRequest, documentationScopes } from '../src/model/scope.js';
 import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationDrift, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-215: every ticket keeps its project's documentation current. Documentation is a
 // per-repository setting (its committed graphyard.json, deployed as GRAPHYARD_DOCUMENTATION), the
@@ -30,7 +30,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine, dataDirectory: str
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_DOCS_OBLIGATION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 215);
-  dataDirectory = await mkdtemp(join(tmpdir(), 'graphyard-docs-obligation-db-'));
+  dataDirectory = await temporaryDirectory('docs-obligation-db');
   database = new EmbeddedPostgres({ databaseDir: dataDirectory, user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('docs_obligation_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/docs_obligation_test`); await store.init();
@@ -63,7 +63,7 @@ test('unit:docs-paths-per-repository — the repository configuration names its 
   assert.deepEqual(proposeDocumentation({ files: ['main.go'] }), { paths: ['README.md'], changelog: null }, 'a repository with no docs is proposed its README');
 
   // …and writes it to the repository's committed Graphyard configuration, keeping an existing choice.
-  const repository = await mkdtemp(join(tmpdir(), 'graphyard-docs-paths-'));
+  const repository = await temporaryDirectory('docs-paths');
   try {
     for (const file of ['site/index.md', 'CHANGELOG.md', 'src/cli/deploy.ts']) { await mkdir(join(repository, dirname(file)), { recursive: true }); await writeFile(join(repository, file), '# page\n'); }
     const scanned = proposeDocumentation(await collectScanInput(repository));

@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -12,6 +10,7 @@ import { currentEvidence, type Observation, type Principal, type Work } from '..
 import { configuredResponder, responderConfigSchema, type Responder, type ResponderRequest } from '../src/closed-question.js';
 import { accuracyStudy, type StudyCase } from '../src/model/closed-question.js';
 import { httpClosedQuestionJudge, judgeClosedQuestions } from '../src/producer.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-109: a mechanical criterion is judged by a calibrated typed answer instead of a producer
 // session. The control plane binds the declared state to the exact candidate, asks the configured
@@ -91,7 +90,7 @@ const judge = (principal: Principal, work: Work, proof: string) => call(token(pr
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_CLOSED_QUESTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 109);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-closed-question-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('closed-question'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('closed_question_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/closed_question_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
