@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +12,7 @@ import { describeTimings, mapBounded, serverCallName, slowCallMs, timedFetch, ti
 import { interventionReportPath, reportCachePath, reportReadBoundMs } from '../src/master/report-cache.js';
 import type { Work } from '../src/model.js';
 import { listDecisions } from '../src/server/decision-ledger.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-377. On 2026-09-25 loop cycles went from ~10 s to 3-4 minutes and `master status` to 2-4
@@ -108,7 +108,7 @@ function loopEffects(root: string, master: MasterConfig, server: ReturnType<type
 }
 
 async function fixture(open: number, worktrees: number) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-latency-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-latency-secrets-'));
+  const root = await temporaryDirectory('latency-root'), secrets = await temporaryDirectory('latency-secrets');
   execFileSync('git', ['init', '-q', root]);
   const credential = join(secrets, 'coordinator.token');
   await writeFile(credential, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });

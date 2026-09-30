@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, Refusal, type Work, type Observation } from '../src/model.js';
 import { regressionRefusals } from '../src/regression-guard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-function fixture() {
-  const directory = mkdtempSync(join(tmpdir(), 'landing-live-base-'));
+async function fixture() {
+  const directory = await temporaryDirectory('landing-live-base');
   const git = (...args: string[]) => execFileSync('git', args, { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init', '-b', 'main'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
   const commit = (path: string, text: string) => { writeFileSync(join(directory, path), text); git('add', path); git('commit', '-m', path); return git('rev-parse', 'HEAD'); };
@@ -46,12 +46,12 @@ function fixture() {
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString() } as unknown as Work;
   return { github, work, calls, root, base, git, diff, blob, head: () => head,
     revert: () => { git('merge', '--no-edit', base); head = commit('A', 'old\n'); },
-    clean: () => rmSync(directory, { recursive: true, force: true }) };
+    clean: async () => {} };
 }
 const build = (work: Work, observation: Observation) => evaluate({ ...work, candidate: observation.candidate, observation }, [], new Date(), []).gates.find(gate => gate.name === 'build')!;
 
 test('unit:landing-check-three-way-live-base — main changes unrelated file, candidate built on old base, no regression', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     // GY-472's shape: the candidate was built on root, where A read 'old', and main has since
     // changed A to 'shipped'. A three-way merge of the head onto the live base inherits main's
@@ -66,11 +66,11 @@ test('unit:landing-check-three-way-live-base — main changes unrelated file, ca
     const refused = await f.github.observe(f.work);
     assert.match(regressionRefusals(f.work, refused, []).join('\n'), /A: .*differs from the base branch tip/);
     assert.equal(build(f.work, refused).passed, false, build(f.work, refused).reasons.join('; '));
-  } finally { f.clean(); }
+  } finally { await f.clean(); }
 });
 
 test('unit:landing-live-base-refusal-clears — refusal clears on re-observation without new head', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     const clean = await f.github.observe(f.work);
     // Simulate a stale observation that incorrectly has a refusal for A
@@ -82,5 +82,5 @@ test('unit:landing-live-base-refusal-clears — refusal clears on re-observation
     assert.equal(f.head(), stale.candidate.sha, 'no push or sync');
     assert.equal(build(work, next).passed, true, build(work, next).reasons.join('; '));
     assert.deepEqual(regressionRefusals(work, next, []), []);
-  } finally { f.clean(); }
+  } finally { await f.clean(); }
 });

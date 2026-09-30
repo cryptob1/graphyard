@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -12,6 +10,7 @@ import { DEPLOYMENT_GRACE_MS, INCIDENT_EVENT, ProductionWatch, RECOVERY_EVENT, a
 import { buildIdentity } from '../src/protocol-version.js';
 import { buildMasterStatus, controlPlaneAttention, mergeToProductionMs, productionSummary } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-59 AC-3: after a merge, a failed or missing provider deployment of the merged commit
 // becomes a delivery incident within five minutes, master status reports how far main is
@@ -20,7 +19,7 @@ import type { Work } from '../src/model.js';
 let database: EmbeddedPostgres, store: Store;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_DEPLOY_OBSERVATION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 12);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-deploy-observation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('deploy-observation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('deploy_observation_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/deploy_observation_test`); await store.init();
 });
