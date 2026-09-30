@@ -102,7 +102,7 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     assert.deepEqual(buttons(page).map(text), ['Use another token']);
     check.cancel();
   }
-  // Timeout: 10 seconds without a status reply → can't reach the control plane, with Retry and a secondary escape.
+  // Timeout: VERIFY_TIMEOUT_MS without a status reply → can't reach the control plane, with Retry and a secondary escape.
   {
     const clock = fakeClock(), network = fakeFetch();
     const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock).result);
