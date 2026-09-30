@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -11,12 +10,13 @@ import { assertDispatchable, assertMasterBinding, assessContainment, snapshotWit
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const workerToken = 'worker-token-'.padEnd(40, 'x');
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-master-'));
+  const root = await temporaryDirectory('master');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
@@ -46,7 +46,7 @@ test('master instructions are managed idempotently without replacing repository 
 });
 
 test('master init verifies a coordinator and repository before writing private local configuration', async () => {
-  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-'));
+  const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials');
   try {
     const result = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
     assert.equal(result.autoMerge, true); assert.equal(result.role, 'coordinator');
@@ -79,7 +79,7 @@ test('master init verifies a coordinator and repository before writing private l
 });
 
 test('master init refuses a coordinator destination in a sibling worktree before writing a token', async () => {
-  const root = await repository(); const siblingParent = await mkdtemp(join(tmpdir(), 'graphyard-master-sibling-')); const sibling = join(siblingParent, 'worktree');
+  const root = await repository(); const siblingParent = await temporaryDirectory('master-sibling'); const sibling = join(siblingParent, 'worktree');
   try {
     execFileSync('git', ['-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture'], { cwd: root });
     execFileSync('git', ['worktree', 'add', '--detach', sibling], { cwd: root, stdio: 'ignore' });
@@ -151,7 +151,7 @@ test('master commands refuse a changed repository or managed base binding', () =
 });
 
 test('dispatch launches through watch, with the instruction on the supervised command line, and accepts a session already working on it', async () => {
-  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: string[][] = [];
+  const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const calls: string[][] = [];
   try {
     const credential = join(credentialDirectory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
@@ -211,7 +211,7 @@ test('dispatch launches through watch, with the instruction on the supervised co
 });
 
 test('Muse dispatch runs the installed binary through claim, assigned worktree, Herdr, and watch with its own credential only', async () => {
-  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: string[][] = [];
+  const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const calls: string[][] = [];
   const previousToken = process.env.GRAPHYARD_TOKEN; process.env.GRAPHYARD_TOKEN = coordinatorToken;
   try {
     const credential = join(credentialDirectory, 'muse-1.token'); await writeFile(credential, workerToken, { mode: 0o600 });
@@ -288,7 +288,7 @@ test('dispatch claimability permits operator-authorized rework independent of di
 });
 
 test('master start creates a visible non-focused coordinator session with no credential argument', async () => {
-  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const calls: string[][] = [];
+  const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const calls: string[][] = [];
   try {
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
     const result = await startMaster(root, 'codex', ['--model', 'reviewer'], [], (_command, args) => {
@@ -324,7 +324,7 @@ test('master start creates a visible non-focused coordinator session with no cre
 });
 
 test('launch profiles verify a private worker credential and match its principal', async () => {
-  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const credential = join(credentialDirectory, 'worker.token'); const siblingParent = await mkdtemp(join(tmpdir(), 'graphyard-sibling-')); const sibling = join(siblingParent, 'worktree');
+  const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const credential = join(credentialDirectory, 'worker.token'); const siblingParent = await temporaryDirectory('sibling'); const sibling = join(siblingParent, 'worktree');
   try {
     await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, hostId: 'stable-host', autoMerge: false, mergeMethod: 'squash' }, coordinatorStatus as typeof fetch);
@@ -363,7 +363,7 @@ test('a launch profile token file overrides ambient Graphyard credentials', asyn
 });
 
 test('worker preparation claims and creates the assigned worktree from the current managed base', async () => {
-  const root = await repository(); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-')); const credential = join(credentialDirectory, 'worker.token'); const calls: { args: string[]; options: any }[] = [];
+  const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const credential = join(credentialDirectory, 'worker.token'); const calls: { args: string[]; options: any }[] = [];
   try {
     await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);

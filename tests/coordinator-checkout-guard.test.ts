@@ -1,8 +1,8 @@
 import { test } from 'node:test';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
@@ -28,7 +28,7 @@ const openCodeConfined = JSON.stringify({ edit: 'allow', bash: 'allow', webfetch
 
 /** A coordinator checkout laid out like a Graphyard installation, with one managed assignment worktree. */
 async function coordinatorFixture() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-checkout-guard-')));
+  const root = await temporaryDirectory('checkout-guard');
   const credentials = join(root, 'credentials');
   await mkdir(credentials, { recursive: true, mode: 0o700 });
   const credentialFile = join(credentials, 'coordinator.token');
@@ -52,7 +52,7 @@ async function coordinatorFixture() {
   git(main, 'worktree', 'add', '-q', '-b', 'graphyard/gy-1-1', worktree);
   const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: join(main, 'bin', 'graphyard.mjs'),
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  return { root, main, worktree, credentials, credentialFile, config, dispose: () => rm(root, { recursive: true, force: true }) };
+  return { root, main, worktree, credentials, credentialFile, config, dispose: () => Promise.resolve() };
 }
 
 type Fixture = Awaited<ReturnType<typeof coordinatorFixture>>;

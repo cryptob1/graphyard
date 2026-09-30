@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { repositoryFromRemote, saveDiscovery } from '../src/onboarding.js';
 import { appManifest, reviewerAppManifest, startGithubSetup } from '../src/github-setup.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-async function repository() { const root = await mkdtemp(join(tmpdir(), 'graphyard-setup-')); execFileSync('git', ['init', '-q', root]); return root; }
+async function repository() { const root = await temporaryDirectory('setup'); execFileSync('git', ['init', '-q', root]); return root; }
 test('discovery identifies GitHub without exposing embedded credentials and preserves repository instructions', async () => {
   assert.equal(repositoryFromRemote('https://test-only-password@github.com/owner/repo.git'), 'owner/repo');
   assert.equal(repositoryFromRemote('git@github.com:owner/repo.git'), 'owner/repo');
@@ -108,7 +108,7 @@ test('the permission migration reads the App and its installation back, prints t
     const { mkdir: makeDirectory } = await import('node:fs/promises');
     await makeDirectory(join(root, '.graphyard'), { recursive: true });
     await writeFile(join(root, '.graphyard', 'github-app.json'), JSON.stringify({ appId: 123, slug: 'graphyard-owner-repo', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), webhookSecret: 'test-only', repository: 'owner/repo', installationId: 456 }), { mode: 0o600 });
-    const legacy = { administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
+    const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
     let registered: Record<string, string> = { ...legacy }, granted: Record<string, string> = { ...legacy };
     const requests: string[] = [];
     const fetcher = (async (url: unknown, options: any) => {

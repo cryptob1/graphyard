@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, checkRerunHeld, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, requiredCheck, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -214,6 +214,11 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
   if (research) return { action: 'rework', ...research };
+  // The guarded merge refused this very candidate for the same reason past the loop's bound, and
+  // no carried approval was there to re-require (GY-831): nothing the control plane holds re-binds
+  // it, so the candidate returns to a worker rather than holding the queue head.
+  const refused = work.reworkRequested ? null : repeatedMergeRefusal(work);
+  if (refused) return { action: 'rework', reason: `${work.key}: the guarded merge refused candidate ${refused.sha.slice(0, 12)} on every attempt since ${refused.since} with the same reason: ${refused.reason.slice(0, 1200)}. Nothing the control plane holds re-binds it, so the candidate returns to a worker.`, binding: `${refused.sha}:merge-refused` };
   // An unexercised `manual:` proof is answered by an attestation carrying its exercise record
   // (GY-523), never by rework: nothing in the change is wrong, only the record of the attestation.
   const attestation = attestationDecision(work);
@@ -250,8 +255,7 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const failed = work.policy.checks.filter(name => {
-    const runs = observation.checks.filter(check => check.name === name);
-    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
+    const latest = requiredCheck(work, name);
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
     return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name);
@@ -587,3 +591,9 @@ export function approvalStep(watch: ApprovalWatch, decision: { state: string; ou
 }
 /** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
 export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);
+/** GY-831. The repeated merge refusal the control plane recorded for exactly the current candidate that calls for a rework decision, or null. */
+export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidate' | 'policyRevision'>) {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
+}
+

@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +12,7 @@ import { buildMasterStatus, masterConfigSchema, mergedWithoutAuthorization, type
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { queuePlacement, queueRef, unpublishableEntry, type QueueSpeculation } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-94: the record a reconciliation re-checks is the last snapshot that precedes the merge itself,
@@ -43,7 +42,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 25;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-reconciliation-snapshot-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reconciliation-snapshot'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('reconciliation_snapshot_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reconciliation_snapshot_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
