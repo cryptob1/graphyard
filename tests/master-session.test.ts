@@ -34,12 +34,13 @@ interface Harness {
   ended: [string, string][];
   held: [string, { reason: string; role: string; profile: string }][];
   outputs: Record<string, string>;
+  unavailable?: boolean;
 }
 
 function effects(config: MasterConfig, state: { master: Harness }, work: Work[], at: { value: number }, extra: Partial<DaemonEffects> = {}): DaemonEffects {
   return {
     agents: () => state.master.agents,
-    herdr: () => ({ agents: state.master.agents, available: true }),
+    herdr: () => state.master.unavailable ? { agents: [], available: false } : { agents: state.master.agents, available: true },
     credentials: async () => ({}),
     snapshot: async () => ({ work, now: new Date(at.value).toISOString() }),
     closeSession: pane => { state.master.closed.push(pane); state.master.agents = state.master.agents.filter(agent => agent.pane_id !== pane); },
@@ -112,6 +113,18 @@ test('unit:master-session-supervised-and-rotated — the loop launches its maste
   await cycle(100_000);
   assert.equal(harness.wakes.length, 2);
   assert.match(harness.wakes[1], /dispatch:GY-3/);
+
+  // Herdr unavailable: an inventory that could not be read is not an exit. However many cycles
+  // it lasts, the healthy session is neither counted as a miss, rotated nor relaunched beside.
+  harness.unavailable = true;
+  for (const offset of [200_000, 220_000, 240_000]) await cycle(offset);
+  assert.equal(harness.launches.length, 1, 'an unobservable master is never relaunched');
+  assert.deepEqual(harness.ended, [], 'an unobservable master keeps its registry session');
+  assert.equal(state.master.misses, 0, 'an unreadable inventory is never a liveness miss');
+  assert.equal(state.master.pane, 'pane-1');
+  harness.unavailable = false;
+  await cycle(260_000);
+  assert.equal(harness.launches.length, 1, 'the next reading that answers finds the same session');
 
   // Exit: the session is gone from Herdr. One miss waits; the second rotates and relaunches.
   harness.agents = [];

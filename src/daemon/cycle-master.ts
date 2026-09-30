@@ -44,6 +44,10 @@ export async function masterSessionStep(cycle: Cycle) {
   // rotation re-reads the inventory before anything below acts on it: the pane it closed is gone
   // from Herdr, and a stale list would read the dying session as one to adopt.
   let rotated = false;
+  // An inventory Herdr could not answer (`available: false`) says nothing about the session: a
+  // healthy master is never counted as a miss, rotated, adopted over or relaunched beside while
+  // the runtime is unobservable — supervision resumes on the next reading that answers.
+  if (herdr.available === false) return;
   if (master.agentName && master.startedAt && !launching) {
     const age = clock - Date.parse(master.startedAt);
     // A runtime that has left its pane (Herdr lists the pane with no agent in it: status unknown)
