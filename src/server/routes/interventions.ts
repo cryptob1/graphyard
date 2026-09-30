@@ -3,6 +3,8 @@ import { demand, stages } from '../../model.js';
 import { plannedFilesMax } from '../../model/scope.js';
 import { interventionKinds, interventionRecordSchema, interventionWindows, judgementSchema, type InterventionWindow } from '../../model/interventions.js';
 import { judgementToWork, openPatternItems, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
+import { retroJudgementSchema, retroStanding } from '../../model/retro-synthesis.js';
+import { judgeRetroArtefact, readRetroArtefacts, readRetroReport, synthesizeRetro } from '../../retro-synthesis.js';
 import { defineRoutes, parseJson } from '../routes.js';
 
 /** The recurrence policy the server reads at boot, beside the routes that apply it. */
@@ -55,5 +57,31 @@ export const interventionRoutes = defineRoutes('interventions', [
   {
     method: 'POST', path: /^\/api\/judgements\/([0-9a-f-]{36})\/work$/,
     handle: async (context, [id]) => judgementToWork(context.services.engine, context.actor, id, workFromJudgementSchema.parse(await parseJson(context, undefined, '{}')), context.idempotencyKey()),
+  },
+  // Retro synthesis (GY-970): prevention artefacts drafted from recurring refusal and rework
+  // causes, judged by an independent agent identity, and the governed registries they apply to.
+  {
+    method: 'GET', path: '/api/retro',
+    handle: ({ services }) => readRetroReport(services.engine.store),
+  },
+  {
+    // What every session reads before it works: the applied requirements, checks and catalogue entries.
+    method: 'GET', path: '/api/retro/standing',
+    async handle({ services }) {
+      const standing = retroStanding(await readRetroArtefacts(services.engine.store.reportPool));
+      return { standing: standing.map(registry => ({ ...registry, entries: registry.entries.map(({ id, kind, target, title, proposal, check, entry, application }) => ({ id, kind, target, title, proposal, ...(check ? { check } : {}), ...(entry ? { entry } : {}), revision: application!.revision })) })) };
+    },
+  },
+  {
+    method: 'POST', path: '/api/retro/synthesize',
+    async handle({ actor, services }) {
+      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+      const { drafted, truncated } = await synthesizeRetro(services.engine.store, services.interventionPolicy);
+      return { drafted, truncated, policy: services.interventionPolicy };
+    },
+  },
+  {
+    method: 'POST', path: /^\/api\/retro\/([0-9a-f-]{36})\/(approve|refuse)$/,
+    handle: async (context, [id, verdict]) => judgeRetroArtefact(context.services.engine.store, context.actor, context.services.repository, id, verdict as 'approve' | 'refuse', retroJudgementSchema.parse(await parseJson(context)).reason),
   },
 ]);

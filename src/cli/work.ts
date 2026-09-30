@@ -6,6 +6,18 @@ import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
 
+/**
+ * The item with the retro registries in force beside it, when any artefact has been applied: the
+ * requirements and checks a worker or producer follows were approved from recurring refusals and
+ * rework, so the session that reads its item reads them too. A server without the route adds nothing.
+ */
+export async function withRetroStanding(work: any, api: (path: string) => Promise<any>) {
+  let standing: any[] = [];
+  try { standing = (await api('retro/standing')).standing ?? []; } catch { return work; }
+  const inForce = standing.filter(registry => registry.entries?.length);
+  return inForce.length ? { ...work, retroStanding: inForce } : work;
+}
+
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
 export const workCommands = defineCommands([
   {
@@ -13,7 +25,8 @@ export const workCommands = defineCommands([
     scope: 'work',
     help: ['  status [GY-N]                Control-plane or work status'],
     unscoped: async ({ api, print }) => print(await api('status')),
-    run: async ({ print }, work) => print(work),
+    // The applied retro requirements and checks (GY-970) travel with the item a session reads first.
+    run: async ({ api, print }, work) => print(await withRetroStanding(work, api)),
   },
   {
     name: 'diagnose',

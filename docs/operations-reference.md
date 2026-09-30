@@ -21,6 +21,10 @@ On the worker `graphyard master settle-containment GY-N "reason"` verifies nothi
 
 Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by recorded reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding out-of-item causes. GY-643 (2026-09-26) measured 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
 
+## Retro synthesis
+
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's pattern scan also groups refusal and rework interventions by cause: a declared refusal shape (`build/out-of-scope-count`), a loop refusal trigger, or a rework reason with heads, keys and numbers removed. A cause reaching `GRAPHYARD_INTERVENTION_PATTERN_THRESHOLD` inside the window gets drafted prevention artefacts (`retro.drafted`): a coding-standards or criteria wording update, a mechanical check, a producer-method correction, and always a fault-catalogue entry. Drafts are never applied and never filed as work. An independent agent identity holding `decision:approve` approves one, applying it at the next revision of its registry (`requirements` revision, `checks` registration, `catalogue` update) and recording the cause, fingerprint and instances it closes, or refuses it. Instances named by any draft never count again; a cause recurring after an applied artefact is redrafted naming it (`recurredAfter`). Workers see applied entries as `retroStanding` in `graphyard status GY-N`. Routes: [work commands](protocol/work-commands.md).
+
 ## Flaky CI check
 
 A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile; a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
