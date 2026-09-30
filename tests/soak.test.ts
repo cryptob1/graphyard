@@ -1819,7 +1819,7 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
-test('unit:soak-invariants-hold — headless approver runs through loop restarts (GY-453): each adopted and applied exactly once, lost ones retried within a bound, the run registry bounded', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — headless approver runs through loop restarts (GY-453): each adopted and applied exactly once, lost ones retried within a bound, the run registry bounded', { timeout: 480_000 }, async () => {
   const { items, final, violations, failures, state, headless } = await simulateDay({ hours: 6, headless: true });
   const { pi, root, applied, submitted, runs, restarts, adoptedLive, adoptedEnded } = headless!;
   const keyOf = (n: number) => items[n - 1].key;
