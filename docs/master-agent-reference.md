@@ -33,7 +33,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-Protection reconciles via `master protection --apply`; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile.
+Protection reconciles via `master protection --apply`; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
 
 | Flow | Effect |
 | --- | --- |
@@ -53,7 +53,7 @@ Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `re
 
 A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`, its claim time; the server wakes the item's observation job, answering `observed`, `observedAt` and its `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. Unobserved, the claim fails at once with `no observation newer than the claim was saved` and its job's condition, then backs off. Three stall it (`master status`). Row bookkeeping (claim, renew, settle) never refuses an observation read before it; other changes do.
 
-Three failures with an unchanged reason stall a row rather than retrying: it shows in `actions.stalled` and on the item's card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
@@ -61,7 +61,7 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, and stale `/tmp/graphyard-*`, `tsx-<uid>` directories (dead owner or 6h idle; unheld; ≤100/cycle, one pass in flight); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes a Graphyard launch on this host left behind are swept each cycle (6/pass, 120 s launch bound, never foreign/agent/live-lease panes); counts on `daemon.actions`, attention past 20 agentless ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, and stale `/tmp/graphyard-*`, `tsx-<uid>` directories (dead owner or 6h idle; unheld; ≤100/cycle, one pass in flight); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes a Graphyard launch on this host left behind are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
 
 ## Recovery
 
@@ -77,4 +77,4 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤ 30 min, p90 ≤ 60 min, over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
