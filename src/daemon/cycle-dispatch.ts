@@ -171,6 +171,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
+    // GY-860: a workspace failure hands the epoch back, so the next dispatch reuses this key; it
+    // waits out the usual doubling backoff instead of retrying the same host git state every cycle.
+    const failed = state.actions[key];
+    if (failed && workspaceDispatchFailure(failed.detail) && state.cycle - failed.cycle < Math.min(2 ** failed.attempts, 30)) return;
     const free = await effects.agents();
     // After an attempt ended as reblocked (GY-867), a profile on another runtime is tried first.
     const order = preferOtherRuntime(health, runtimeToAvoid(item));
@@ -249,7 +253,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         // item's record here keeps that message.
         const workspace = workspaceDispatchFailure(message(error));
         if (!workspace) recordProfileFailure(state, current.profile, message(error), now());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the attempt epoch was released)" : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off, the attempt epoch was released, and the item's next dispatch waits out a doubling backoff)" : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       }
     }

@@ -213,9 +213,15 @@ export const workspaceCommands = defineCommands([
       let startPoint = args[1] ?? 'HEAD';
       if (work.submission) {
         const remoteBranch = `refs/remotes/origin/${branch}`;
-        execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { stdio: ['ignore', 'ignore', 'inherit'] });
-        const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
-        if (!work.candidate?.sha || remoteSha !== work.candidate.sha) throw new Error('Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace');
+        // GY-860 AC-2: a PR branch that cannot be fetched, or moved past the observed head, is the
+        // item's workspace failing on this host; the claim is released as one, so no attempt is spent.
+        let refused: string | null = null;
+        try {
+          execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
+          const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+          if (!work.candidate?.sha || remoteSha !== work.candidate.sha) refused = 'Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace';
+        } catch (error) { refused = `Git worktree creation failed while fetching ${branch}: ${error instanceof Error ? error.message : 'git failed'}`; }
+        if (refused) { await releaseUnderFailure(mutate, epoch, refused); throw new Error(`${refused}. The claim was released as a workspace failure, so the attempt costs nothing.`); }
         startPoint = remoteBranch;
       }
       const hostId = context.individualHostId();

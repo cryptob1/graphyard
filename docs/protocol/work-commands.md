@@ -9,8 +9,8 @@ Create with `POST /api/work` ([example](../../examples/work.json)): `title` and 
 - `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`).
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; a human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` for an explained `lease-loss`.
 - `rework`, `recover`: `{"reason":…, "previousWorkerStopped":true}`; `admin` (`recover` for a delivered quarantine).
-- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason":…}` (null clears).
-- `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.
+- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason":…}` (null clears). `release` with `"failure":{"message":…}` records a `workspace.failed` event (the git message) and, on a still-untouched claim, hands the epoch back.
+- `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`; an optional `preserved` (`path`, `head`, `branchTip`, `op`, `refs`, `diff`, `at`) records a released earlier holder of the branch as a `workspace.preserved` event.
 - `submit`: `{"epoch":1,"pr":123}`, refused (`409`) when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator or admin, delivered work, once.
 - `followups` `{findings,reason}` (master; `409` unless open), `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).

@@ -271,7 +271,7 @@ export async function releaseWorkerLaunch(root: string, key: string, epoch: numb
  * so the failure costs no attempt, and the item's dispatch record keeps the message.
  */
 export const workspaceDispatchFailure = (reason: string) =>
-  /Git worktree creation failed|did not receive an assigned workspace|already has a workspace|Branch or host\/path is already reserved|already linked PR branch|Submitted PR branch changed/.test(reason);
+  /Git worktree creation failed|already has a workspace|Branch or host\/path is already reserved|already linked PR branch|Submitted PR branch changed/.test(reason);
 
 /**
  * `claimBy` is a hand dispatch's deadline on this host's clock (GY-175): it is checked again

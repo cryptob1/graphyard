@@ -5,7 +5,7 @@ Claims last 120 seconds, renewed at least every 30. Every owner mutation carries
 
 ## Workspaces
 
-Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/`, globally unique; paths are unique per host (historical reservations included); put the epoch in both.
+Register the exact branch, path and host ID (`graphyard register GY-1 workspace.json`) before submitting. Branches begin `graphyard/`, globally unique; paths are unique per host (historical reservations included); put the epoch in both. `graphyard worktree` frees a branch an earlier attempt's worktree still holds (checked out or mid rebase, merge or cherry-pick): it records that worktree's refs and diff, ends the operation and detaches it; the branch never moves. A worktree it cannot build releases the claim as a workspace failure: no epoch spent, no profile cooled off, and the item's next dispatch waits a doubling backoff.
 
 ## `watch`
 
