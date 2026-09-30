@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createPublicKey, createVerify } from 'node:crypto';
-import { mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parseEnv } from 'node:util';
@@ -13,6 +13,8 @@ import { hostSizing, recommendServerType, parseServerTypes } from '../src/instal
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
 import { workerConfinementRefusal } from '../src/master/profiles.js';
+import { connectProvider } from '../src/fleet.js';
+import { createPiHome, writeProviderAuthFile } from '../src/master/connect-accounts.js';
 import { authenticate } from '../src/server/auth.js';
 import { signinRoutes, claimHashOf } from '../src/server/routes/signin.js';
 import { claimFromHash } from '../web/pages/login.js';
@@ -252,8 +254,30 @@ test('unit:self-contained-auth-plan — self-contained authentication needs no S
       assert.ok(action.title.includes(CONNECT_PATH), action.title);
       assert.match(action.human!, /nobody logs into the host/);
       assert.ok(runtime.connections.length, runtime.kind);
-      for (const entry of runtime.connections) assert.ok(entry.dashboard.startsWith(CONNECT_PATH) && entry.file, entry.provider);
+      for (const entry of runtime.connections) {
+        assert.ok(entry.dashboard.startsWith(CONNECT_PATH) && entry.file, entry.provider);
+        // The path is one the dashboard really offers: a connect provider for this same runtime, writing this same file.
+        const provider = connectProvider(entry.provider);
+        assert.ok(provider, `${entry.provider} is offered by ${CONNECT_PATH}`);
+        assert.equal(provider!.runtime, runtime.kind, `${entry.provider} connects a ${runtime.kind} account`);
+        assert.equal(provider!.kind, entry.method === 'api-key' ? 'api-key' : 'subscription', entry.provider);
+        assert.equal(entry.method === 'api-key' ? provider!.authFile : provider!.loginFile, entry.file, entry.provider);
+      }
     }
+    // Each account's credential is a file one of its runtime's connections writes in its own login home.
+    for (const account of plan.host!.accounts) assert.ok(account.connections.some(entry => account.credentialFile === `${account.home}/${entry.file}`), `${account.name}: ${account.credentialFile}`);
+    // Pi, end to end on disk: the pasted key lands in Pi's own auth document in a pi-<letter> home, 0600,
+    // with z.ai as the default provider the registry account launches with — no OpenCode account involved.
+    const accounts = await temporaryDirectory('gy717-accounts');
+    const pi = await createPiHome(accounts);
+    assert.equal(pi.name, 'pi-a');
+    const zaiKey = 'zai-fixture-key-for-the-pi-connect';
+    const written = await writeProviderAuthFile(connectProvider('pi-zai')!, pi.home, zaiKey);
+    assert.equal(written, join(pi.home, 'auth.json'));
+    assert.deepEqual(JSON.parse(readFileSync(written, 'utf8')), { zai: { type: 'api_key', key: zaiKey } });
+    assert.equal(statSync(written).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(readFileSync(join(pi.home, 'settings.json'), 'utf8')).defaultProvider, 'zai');
+    assert.equal((await createPiHome(accounts)).name, 'pi-b', 'a second Pi connect takes the next free home');
     assert.deepEqual(hostRuntimes.find(runtime => runtime.kind === 'claude')!.connections.map(entry => entry.method), ['login', 'api-key']);
     assert.match(plan.actions.find(action => action.id === 'dashboard.connect.pi')!.title, /seals it to the host, the server keeps only ciphertext and never returns it/);
     assert.match(plan.actions.find(action => action.id === 'dashboard.connect.codex')!.title, /shows its URL and code/);

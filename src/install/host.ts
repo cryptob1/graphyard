@@ -101,13 +101,14 @@ export interface HostRuntime { kind: 'claude' | 'codex' | 'opencode' | 'pi'; pro
 export const CONNECT_PATH = 'Settings › Agents › Connect an account';
 const connection = (provider: string, label: string, method: HostConnection['method'], file: string): HostConnection => ({ provider, label, method, file, dashboard: `${CONNECT_PATH} › ${label}` });
 const zai = connection('z.ai', 'z.ai (GLM coding plan)', 'api-key', 'opencode/auth.json');
+const piZai = connection('pi-zai', 'Pi (z.ai key)', 'api-key', 'auth.json');
 
-/** Pi runs from the z.ai key of an OpenCode account, through the wrapper the host's executor writes when that key is connected (GY-409). */
+/** Each connection is a provider of the connect flow (src/fleet.ts connectProviders) for the same runtime, writing the file named here. */
 export const hostRuntimes: readonly HostRuntime[] = [
   { kind: 'claude', program: 'claude', package: '@anthropic-ai/claude-code', connections: [connection('claude', 'Claude (subscription)', 'login', '.credentials.json'), connection('anthropic-api', 'Anthropic API', 'api-key', 'settings.json')] },
   { kind: 'codex', program: 'codex', package: '@openai/codex', connections: [connection('chatgpt', 'ChatGPT / Codex (subscription)', 'login', 'auth.json'), connection('openai-api', 'OpenAI API', 'api-key', 'auth.json')] },
   { kind: 'opencode', program: 'opencode', package: 'opencode-ai', connections: [zai] },
-  { kind: 'pi', program: 'pi', package: '@mariozechner/pi-coding-agent', connections: [zai] },
+  { kind: 'pi', program: 'pi', package: '@mariozechner/pi-coding-agent', connections: [piZai] },
 ];
 
 const contractFor = (kind: string): FleetRuntime => {
@@ -130,7 +131,7 @@ export interface HostAccount {
 /**
  * The first account of each runtime a fresh installation connects: `claude-a`, `codex-a`,
  * `opencode-a` — the name and login home the host's executor gives the first connect of that runtime
- * under `<install>/accounts` — and `pi-a`, the Pi directory of the wrapper over `opencode-a`'s key.
+ * under `<install>/accounts` — and `pi-a`, the PI_CODING_AGENT_DIR of the first Pi (z.ai key) connect.
  */
 export const defaultAccountName = (kind: string) => `${kind}-a`;
 
@@ -146,9 +147,7 @@ export function hostAccounts(layout: HostLayout, registry: Pick<AgentRegistry, '
     const runtime = hostRuntimes.find(candidate => candidate.kind === entry.runtime)!;
     const contract = contractFor(runtime.kind).launch;
     const home = `${layout.accountsDirectory}/${entry.name}`;
-    // A fresh Pi account reads the z.ai key the OpenCode account holds; every other account holds its own.
-    const credentialFile = runtime.kind === 'pi' && !entry.moved ? `${layout.accountsDirectory}/${defaultAccountName('opencode')}/${runtime.connections[0].file}` : `${home}/${contract.loginFile}`;
-    return { ...entry, home, homeVariable: contract.homeVariable!, credentialFile, connections: runtime.connections };
+    return { ...entry, home, homeVariable: contract.homeVariable!, credentialFile: `${home}/${contract.loginFile}`, connections: runtime.connections };
   });
 }
 
@@ -588,7 +587,7 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
       ? [{ id: 'host.accounts', target: 'host' as const, state, title: `Move every registry account of an installed runtime onto this host at ${host.layout.accountsDirectory}/<account> (mode 0700), copying its login (0600) when it is on this machine; any other is disabled until connected again in ${CONNECT_PATH}` }]
       : [{ id: 'host.accounts', target: 'host' as const, state, title: `Create ${host.layout.accountsDirectory} (mode 0700): each account connected from the dashboard gets its login home there (${plan.accounts.map(account => account.home).join(', ')} first) and is registered in the agent registry when its smoke prompt passes` }]),
     ...hostRuntimes.map(runtime => ({ id: `dashboard.connect.${runtime.kind}`, target: 'graphyard' as const, state: 'create' as const,
-      title: `Connect ${runtime.kind} in ${CONNECT_PATH}: ${runtime.connections.map(entry => `${entry.label} (${entry.method === 'api-key' ? 'paste the key once; the browser seals it to the host, the server keeps only ciphertext and never returns it' : 'the host runs the provider\'s own sign-in and the dashboard shows its URL and code'}; the host writes ${entry.file}, mode 0600)`).join('; ')}${runtime.kind === 'pi' ? ' — Pi runs through the wrapper the host writes over that key' : ''}`,
+      title: `Connect ${runtime.kind} in ${CONNECT_PATH}: ${runtime.connections.map(entry => `${entry.label} (${entry.method === 'api-key' ? 'paste the key once; the browser seals it to the host, the server keeps only ciphertext and never returns it' : 'the host runs the provider\'s own sign-in and the dashboard shows its URL and code'}; the host writes ${entry.file}, mode 0600)`).join('; ')}`,
       human: 'Connected in the dashboard after install; nobody logs into the host.' })),
     { id: 'host.session-viewer', target: 'host', state: 'satisfied', title: 'Session viewer: Herdr runs on the same machine as the dashboard, so sessions are reached locally and no relay is provisioned' },
     { id: 'host.signin', target: 'graphyard', state: 'create', title: 'Print one single-use dashboard sign-in link for the admin; only its SHA-256 is stored on the host' },

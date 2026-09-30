@@ -68,17 +68,42 @@ export function unsealToHost(privateKey: KeyObject, sealed: { ephemeral: string;
   return Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString('utf8');
 }
 
-/** The provider's own auth file inside a fresh login home, merged over whatever was there, at mode 0600. */
-export async function writeProviderAuthFile(provider: ConnectProvider, home: string, key: string): Promise<string> {
-  const file = resolve(home, provider.authFile!);
+/** A JSON document inside the login home, laid over whatever was there, at mode 0600. */
+async function mergeHomeDocument(file: string, document: (existing: Record<string, unknown>) => Record<string, unknown>) {
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   let existing: Record<string, unknown> = {};
   try {
     const parsed = JSON.parse(await readFile(file, 'utf8'));
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
   } catch { /* a fresh home */ }
-  await atomicPrivateText(file, `${JSON.stringify(provider.authDocument!(existing, key), null, 2)}\n`);
+  await atomicPrivateText(file, `${JSON.stringify(document(existing), null, 2)}\n`);
+}
+
+/** The provider's own auth file inside a fresh login home (and its settings, when it names any), merged over whatever was there, at mode 0600. */
+export async function writeProviderAuthFile(provider: ConnectProvider, home: string, key: string): Promise<string> {
+  const file = resolve(home, provider.authFile!);
+  await mergeHomeDocument(file, existing => provider.authDocument!(existing, key));
+  if (provider.settings) await mergeHomeDocument(resolve(home, provider.settings.file), provider.settings.document);
   return file;
+}
+
+/**
+ * A Pi account's login home: `pi-<letter>` under the agent environment root, the directory Pi reads
+ * through PI_CODING_AGENT_DIR. Pi is no agent environment kind of the loop's own, so the letter is
+ * chosen here: never one a `pi-<letter>` directory holds, nor one an `opencode-<letter>` account's
+ * research wrapper points its Pi directory at. The exclusive mkdir is what claims it.
+ */
+export async function createPiHome(root: string, name?: string | null): Promise<{ name: string; home: string }> {
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  if (name && /^pi-[a-z]$/.test(name) && existsSync(resolve(root, name))) return { name, home: resolve(root, name) };
+  const taken = new Set((await discoverAgentEnvironments(root)).filter(entry => entry.kind === 'opencode').map(entry => entry.name.slice('opencode-'.length)));
+  for (const letter of 'abcdefghijklmnopqrstuvwxyz') {
+    if (taken.has(letter)) continue;
+    const home = resolve(root, `pi-${letter}`);
+    try { await mkdir(home, { mode: 0o700 }); return { name: `pi-${letter}`, home }; }
+    catch (error: any) { if (error.code !== 'EEXIST') throw error; }
+  }
+  throw new Error(`Every pi-<letter> login home is taken under ${root}`);
 }
 
 /** The one-line smoke prompt inside the login home: healthy when the runtime answers, the provider's error when it does not. */
@@ -127,8 +152,9 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
       const root = agentEnvironmentRoot(options.root);
       const discovered = await discoverAgentEnvironments(root);
       // A request this host already started keeps the login home it created.
-      const environment = (connect.name ? discovered.find(entry => entry.name === connect.name) : undefined)
-        ?? await createAgentEnvironment(root, provider.runtime as EnvironmentKind, discovered);
+      const environment = provider.runtime === 'pi' ? await createPiHome(root, connect.name)
+        : (connect.name ? discovered.find(entry => entry.name === connect.name) : undefined)
+          ?? await createAgentEnvironment(root, provider.runtime as EnvironmentKind, discovered);
       const name = environment.name, home = environment.home;
       const report = async (healthy: boolean, error: string | null, research = false) => {
         await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: healthy ? { state: 'healthy', name, home, ...(research ? { research: true } : {}) } : { state: 'failed', name, error: error!.slice(0, 2000) }, fetch: fetcher });
@@ -138,7 +164,8 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
       // Research is this host's own configuration (GY-409 AC-4): a cheap account joins it only
       // once this host has made the account's Pi wrapper its research command, and the result is
       // what reports it — the card never claims a placement the fleet cannot launch.
-      const researchJoined = async () => provider.tier !== 'fast' ? false
+      // The wrapper reads an OpenCode account's key, so a Pi account (which holds its own) has none.
+      const researchJoined = async () => provider.tier !== 'fast' || provider.runtime === 'pi' ? false
         : await ensureResearchWrapper(name, home, options).catch(() => null)
             .then(wrapper => wrapper ? appendResearchCommand(wrapper, options).catch(() => false) : false);
       if (provider.kind === 'api-key') {
