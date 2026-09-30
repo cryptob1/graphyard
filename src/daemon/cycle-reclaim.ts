@@ -1,7 +1,7 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim, paneReclaimStatus, agentlessPaneAttentionBound } from '../master-resources.js';
-import { diskThresholdBytes, containmentPhase } from '../master.js';
-import { containmentClock } from '../master/containment.js';
+import { diskThresholdBytes, containmentPhase, containmentQuarantines } from '../master.js';
+import { containmentClock, unmeasured } from '../master/containment.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -214,8 +214,11 @@ export async function reclaimStep(cycle: Cycle) {
   //     The clock is bounded by a light timed read taken just before the probe, not by the
   //     snapshot's read: that read takes seconds on a loaded plane, and a bound that wide refused
   //     every automatic settlement as unmeasurable (GY-811). Should the timed read fail, the
-  //     snapshot's bounds stand and the refusal names their round trip.
-  const measured = effects.containment && snapshot.work.some(item => item.containmentQuarantine) ? await containmentClock(clockOffset, effects.controlPlaneClock) : null;
+  //     snapshot's bounds stand and the refusal names their round trip. The read is taken only
+  //     when a quarantine here is assessable — registered on this host and no longer live — so a
+  //     cycle with nothing to settle never pays for it.
+  const assessable = effects.containment && containmentQuarantines(snapshot.work, config.hostId).some(item => containmentPhase(item, clock)?.state !== 'live');
+  const measured = assessable ? await containmentClock(clockOffset, effects.controlPlaneClock) : null;
   const observed: ContainmentObservation = measured ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source } : { now: snapshot.now, clockOffset };
   const assessments = await effects.containment?.(snapshot.work, observed) ?? {};
   await closeEndedWorkerPanes(state, effects, open, assessments, observed, now, performed);
@@ -229,7 +232,10 @@ export async function reclaimStep(cycle: Cycle) {
     if (!assessment.settleable) {
       const escalationKey = `escalation:containment:${item.id}:${epoch}`;
       const detail = `${item.key}: containment quarantine from epoch ${epoch} cannot be settled automatically: ${assessment.refusals.join('; ')}`;
-      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
+      // The refusal names each cycle's measured round trip, which differs every read: the
+      // escalation is recorded again only when what blocks the settlement changes, not the number.
+      const previous = state.actions[escalationKey];
+      if (detailChanged(previous && { detail: unmeasured(previous.detail) }, unmeasured(detail))) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
       return;
     }
     if (!effects.settleContainment) return;

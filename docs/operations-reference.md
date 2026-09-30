@@ -15,7 +15,7 @@ A lease expires 120 s after the last heartbeat, or one further lease period afte
 
 ## Supervisor died leaving a containment quarantine
 
-`graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)). Automatic settlement bounds the clock with a timed `HEAD /` (plane `Date` header), not the snapshot read, falling back on failure; a too-slow read is refused naming the round trip.
+`graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)). Automatic settlement bounds the clock with a timed `HEAD /` (plane `Date` header), read once a cycle and only while a non-live quarantine is registered on this host, not the snapshot read, falling back on failure; a too-slow read is refused naming the round trip, escalated again only when the cause changes, not the number.
 
 ## Submitted implementation needs rework
 

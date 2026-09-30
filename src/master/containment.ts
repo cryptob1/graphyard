@@ -96,6 +96,10 @@ export async function containmentClock(snapshotOffset: { min: number; max: numbe
   if (!read) return fallback;
   try { return await read(); } catch { return fallback; }
 }
+/** A containment refusal with its measured round trip masked: two cycles' refusals for the same cause compare equal. */
+export function unmeasured(detail: string) {
+  return detail.replace(/control-plane clock took \d+ms round trip/g, 'control-plane clock took …ms round trip');
+}
 /** The clock-width refusal, rewritten to name the measured round trip: the uncertainty is the read's, not a disagreement of clocks. */
 function namedClockBound(refusal: string, clock: { roundTripMs?: number; source?: ControlPlaneClock['source'] }, width: number) {
   if (!refusal.startsWith('Verifying host could not bound its clock against the control plane within ')) return refusal;
