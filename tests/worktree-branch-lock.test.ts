@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -126,6 +126,44 @@ test('unit:stale-worktree-releases-branch — a stopped merge or cherry-pick hol
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+/** An earlier attempt's worktree stopped inside a conflicting rebase of its branch. */
+async function stoppedRebase(root: string, key: string, epoch: number) {
+  const old = attemptWorktree(root, key, epoch);
+  await writeFile(join(old.path, 'source.ts'), 'export const value = 2;\n');
+  execFileSync('git', ['commit', '-qam', 'attempt work'], { cwd: old.path });
+  await writeFile(join(root, 'source.ts'), `export const value = ${epoch + 10};\n`);
+  execFileSync('git', ['commit', '-qam', 'base moved'], { cwd: root });
+  assert.notEqual(spawnSync('git', ['rebase', 'main'], { cwd: old.path, stdio: 'ignore' }).status, 0, 'the rebase must stop mid-way');
+  return old;
+}
+
+test('unit:stale-worktree-releases-branch — the preserved state is registered before the holder is touched: a refused registration leaves it as it was, and a failed abort rejects the release', async () => {
+  const root = await host();
+  try {
+    const old = await stoppedRebase(root, 'GY-863', 1);
+    // A huge uncommitted diff is kept within the ledger's limit, truncation notice included.
+    await writeFile(join(old.path, 'large.txt'), 'x'.repeat(150_000));
+    execFileSync('git', ['add', 'large.txt'], { cwd: old.path });
+    const refused = releaseHeldBranch(root, old.branch, worktreePath(root, 'GY-863', 2), runChild, async preserved => {
+      assert.ok(preserved);
+      assert.ok(preserved.diff.length <= 100_000, 'a truncated diff still fits the schema limit');
+      assert.match(preserved.diff, /truncated to 100000 characters$/);
+      throw new Error('Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
+    });
+    await assert.rejects(refused, /already reserved/);
+    assert.equal(existsSync(gitPath(old.path, 'rebase-merge')), true, 'a refused registration leaves the rebase in progress');
+
+    // A step that changes the holder and fails rejects the release instead of reporting it done.
+    let registered = 0;
+    const failingAbort = async (command: string, args: string[]) => {
+      if (args.includes('--abort')) throw new Error('fatal: could not abort the rebase');
+      return runChild(command, args);
+    };
+    await assert.rejects(releaseHeldBranch(root, old.branch, worktreePath(root, 'GY-863', 2), failingAbort, async () => { registered++; }), /could not abort/);
+    assert.equal(registered, 1, 'the state was recorded before the failing step');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('unit:workspace-failure-spares-profile — the engine keeps the preserved-attempt record on the item and undoes a workspace-failed claim, so the epoch returns', async () => {
   const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
   const worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' };
@@ -166,6 +204,17 @@ test('unit:workspace-failure-spares-profile — the engine keeps the preserved-a
   // The next dispatch claims the same epoch afresh, and the branch is free to allocate again.
   const again = await engine.execute(worker, 'claim', item.id, {}, id());
   assert.equal(again.epoch, firstEpoch, 'the same epoch is claimed again, not the next one');
+
+  // An attempt whose lease was renewed is no longer the untouched claim: a workspace failure it
+  // reports is recorded, but its epoch is only ended, never handed back for reuse.
+  let renewed = await claimed();
+  const renewedEpoch = renewed.epoch;
+  await new Promise(resolve => setTimeout(resolve, 5));
+  renewed = await engine.execute(worker, 'heartbeat', renewed.id, { epoch: renewedEpoch }, id());
+  renewed = await engine.execute(worker, 'release', renewed.id, { epoch: renewedEpoch, failure: { message: 'Git worktree creation failed: late' } }, id());
+  assert.equal(renewed.epoch, renewedEpoch, 'a renewed attempt keeps its epoch');
+  assert.equal(pipelineTimeline(renewed).attempts.at(-1)?.end, 'released');
+  assert.equal((await events(renewed, 'workspace.failed')).length, 1);
 
   // A release naming another epoch reaches nothing: the live lease is the one it must name.
   let worked = await claimed();
@@ -265,7 +314,7 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
 /** `git rev-parse --git-path` resolved inside the worktree it was asked in. */
 function gitPath(cwd: string, name: string) {
   const printed = execFileSync('git', ['-C', cwd, 'rev-parse', '--git-path', name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  return join(cwd, printed);
+  return resolve(cwd, printed);
 }
 
 // The engine tests above run against a temporary real Postgres, isolated from every other file's.

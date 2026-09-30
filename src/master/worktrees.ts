@@ -586,8 +586,12 @@ async function rebaseHeadName(git: BranchGit, path: string): Promise<string> {
  * The branch ref itself never moves. A holder that is the new attempt's own path (the same epoch
  * allocated again after a failed attempt) keeps its worktree: it is re-attached to the branch and
  * returned with `reused`, so the caller skips creation instead of failing on the existing path.
+ * `register` receives the captured state (or null when nothing holds the branch) before anything is
+ * changed, so a refused registration leaves the holder as it was and nothing is released unrecorded.
+ * Probes answer empty on a refusal; a step that changes the holder and fails rejects the release.
  */
-export async function releaseHeldBranch(root: string, branch: string, targetPath: string, run: ChildRun): Promise<{ preserved: PreservedWorktree; reused: boolean } | null> {
+export async function releaseHeldBranch(root: string, branch: string, targetPath: string, run: ChildRun,
+  register: (preserved: PreservedWorktree | null) => Promise<unknown> = async () => {}): Promise<{ preserved: PreservedWorktree; reused: boolean } | null> {
   const ref = `refs/heads/${branch}`;
   // Quiet git answers empty on a refusal; the caller decides what a refusal means.
   const quiet = async (...args: string[]) => { try { return await run('git', args); } catch { return ''; } };
@@ -595,7 +599,7 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
   // Registrations whose directory is gone hold nothing but still refuse a new checkout.
   await quiet('-C', root, 'worktree', 'prune');
   const raw = await git(root, 'worktree', 'list', '--porcelain', '-z');
-  if (!raw.trim()) return null;
+  if (!raw.trim()) { await register(null); return null; }
   const branchTip = (await git(root, 'rev-parse', '--verify', ref)).trim();
   for (const record of raw.split('\0\0')) {
     const fields = record.split('\0');
@@ -606,7 +610,7 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     const op = await inProgressOperation(git, holderPath);
     const headName = op === 'rebase' ? await rebaseHeadName(git, holderPath) : '';
     if (!fields.includes(`branch ${ref}`) && headName !== ref) continue;
-    const diffLimit = 100_000;
+    const diffLimit = 100_000, truncated = `\n… truncated to ${diffLimit} characters`;
     const tracked = await git(holderPath, 'diff', 'HEAD');
     const untracked = (await git(holderPath, 'ls-files', '--others', '--exclude-standard')).trim();
     const fullDiff = tracked + (untracked ? `${tracked ? '\n' : ''}-- untracked files --\n${untracked}` : '');
@@ -616,17 +620,20 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
       branchTip,
       op,
       refs: (await git(holderPath, 'show-ref')).trim().slice(0, 20_000),
-      diff: fullDiff.length > diffLimit ? `${fullDiff.slice(0, diffLimit)}\n… truncated after ${diffLimit} characters` : fullDiff,
+      // The suffix counts toward the limit, so a truncated diff still fits the ledger's schema.
+      diff: fullDiff.length > diffLimit ? `${fullDiff.slice(0, diffLimit - truncated.length)}${truncated}` : fullDiff,
       at: new Date().toISOString(),
     };
     const reused = resolve(holderPath) === resolve(targetPath);
-    const letGo = (args: string[]) => quiet('-C', holderPath, ...args);
+    await register(preserved);
+    const letGo = async (args: string[]) => { await run('git', ['-C', holderPath, ...args]); };
     if (op === 'rebase') await letGo(['rebase', '--abort']);
     if (op === 'merge') await letGo(['merge', '--abort']);
     if (op === 'cherry-pick') await letGo(['cherry-pick', '--abort']);
     await letGo(reused ? ['checkout', '--quiet', branch] : ['checkout', '--detach', '--quiet']);
     return { preserved, reused };
   }
+  await register(null);
   return null;
 }
 

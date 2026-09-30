@@ -215,14 +215,18 @@ export const workspaceCommands = defineCommands([
       // GY-860 AC-1: an earlier attempt's worktree that still holds this branch — checked out, or
       // stopped inside a rebase, merge or cherry-pick — never fails this allocation: its state is
       // preserved onto the item, its operation ended, its HEAD detached; the branch ref never moves.
+      // The reservation, with what the holder carried, is registered before the holder is touched;
+      // a refused registration or a failed release is a workspace failure that costs no attempt.
       let released: { preserved: PreservedWorktree; reused: boolean } | null;
-      try { released = await releaseHeldBranch(root, branch, path, runChild); }
+      try {
+        released = await releaseHeldBranch(root, branch, path, runChild,
+          preserved => mutate('workspace', { epoch, host: hostId, path, branch, ...(preserved ? { preserved } : {}) }));
+      }
       catch (error) {
         const detail = error instanceof Error ? error.message : 'git failed';
-        await releaseUnderFailure(mutate, epoch, `Releasing an earlier attempt's hold on ${branch} failed: ${detail}`);
-        throw new Error(`Git worktree creation failed while releasing an earlier attempt's hold on ${branch}: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; repair the host and it redispatches.`);
+        await releaseUnderFailure(mutate, epoch, `Reserving ${branch} or releasing an earlier attempt's hold on it failed: ${detail}`);
+        throw new Error(`Git worktree creation failed while reserving ${branch} or releasing an earlier attempt's hold on it: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; repair the host and it redispatches.`);
       }
-      await mutate('workspace', { epoch, host: hostId, path, branch, ...(released ? { preserved: released.preserved } : {}) });
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
       try {

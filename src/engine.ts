@@ -1101,8 +1101,13 @@ export class Engine {
         // while the attempt is still the untouched claim it released, undoes it: the timeline entry
         // and the reservation go, the epoch returns, and the next dispatch claims it afresh. An
         // attempt that already did work is only ended — its release is an ordinary attempt end.
+        // Untouched means nothing but the worktree command ever held this epoch: the lease was never
+        // renewed, no session was launched under it and nothing was submitted, so no delayed
+        // command from another holder can reach the epoch number when it is claimed again.
         const timeline = pipelineTimeline(work);
-        const untouched = data.failure ? timeline.attempts.find(entry => entry.epoch === data.epoch && entry.endedAt === null) : undefined;
+        const open = data.failure ? timeline.attempts.find(entry => entry.epoch === data.epoch && entry.endedAt === null) : undefined;
+        const untouched = open && work.lease && Date.parse(work.lease.expiresAt) === Date.parse(open.claimedAt) + this.leaseSeconds * 1000
+          && work.containmentQuarantine?.epoch !== data.epoch && work.submission?.epoch !== data.epoch ? open : undefined;
         if (data.failure) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.failed', JSON.stringify({ details: { epoch: data.epoch, message: data.failure.message, at: now.toISOString() } })]);
         if (untouched && work.epoch === data.epoch) {
           timeline.attempts.splice(timeline.attempts.indexOf(untouched), 1);
