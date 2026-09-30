@@ -1,5 +1,5 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered } from './scope-collapse.js';
+import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
 export function pathScope(value: string) {
@@ -176,9 +176,12 @@ export function decideScopeRequest(
   if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
   // An implied ask no fold can represent under the plannedFiles cap is refused, never applied or
   // routed: the schemas hold the same bound, and no narrower fold exists to grant instead (GY-630).
+  // The refusal names the action that can carry it (GY-906): a requirements revision whose
+  // plannedFiles can fold or split the ask under the cap — the plain union `master scope` posts is
+  // refused by that same bound, so it can never carry an ask this refusal answered.
   const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
   if (folded.length > plannedFilesMax)
-    return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); an operator decides scope the item cannot carry file by file`);
+    return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); decide it with graphyard master requirements GY-N FILE REASON, whose plannedFiles can fold or split the ask under the cap — a plain union of exact paths is refused by the same bound`);
   return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
 }
 
@@ -249,7 +252,9 @@ export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]
 // ---------------------------------------------------------------------------
 
 /** The additive widening a refused request asks the approver for (GY-549): defined beside the fold it proposes, in model/scope-collapse.ts. */
-export { routableScopeRequest } from './scope-collapse.js';
+export { routableScopeRequest };
+/** Whether the standing refusal is the terminal over-cap one `master scope` can never carry (GY-936): defined beside the fold, in model/scope-collapse.ts. */
+export { terminalScopeRefusal };
 
 /** The requested paths the item's plannedFiles do not yet cover — what is still being asked for. */
 export const unplannedPaths = (plannedFiles: readonly string[] | undefined, paths: readonly string[]) =>
@@ -280,38 +285,7 @@ export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState
  * What the worker reads in its own session once its request is judged (GY-176) — from its own
  * `scope-request --wait` or `status`, never a message pasted into the session: carry on, or the
  * approver's reason and that the attempt stays inside plannedFiles, withdrawing the ask, which
- * lifts the refusal holding the item, rather than waiting on a master that will not come.
+ * lifts the refusal holding the item, rather than waiting on a master that will not come. The
+ * outcome reader lives beside the merge of pending asks, in model/scope-collapse.ts.
  */
-export function scopeOutcomeMessage(key: string, epoch: number, outcome: { state: 'approved' | 'refused'; paths: readonly string[]; approver: string | null; reason: string | null }, cli = 'graphyard') {
-  const paths = outcome.paths.join(', ');
-  return outcome.state === 'approved'
-    ? `Graphyard: your scope request on ${key} (epoch ${epoch}) was approved${outcome.approver ? ` by ${outcome.approver}` : ''}${outcome.reason ? `: ${outcome.reason}` : ''}. plannedFiles now include ${paths} and you keep your lease: continue the work.`
-    : `Graphyard: your scope request on ${key} (epoch ${epoch}) for ${paths} was refused by the independent approver${outcome.approver ? ` ${outcome.approver}` : ''}: ${outcome.reason ?? 'no reason recorded'}. Stay inside plannedFiles: withdraw the request with ${cli} scope-request ${key} ${epoch} - and finish the work without those files, or record a blocker if the criteria cannot be met without them.`;
-}
-
-export type ScopeRequestOutcome = { state: 'pending' | 'ended'; text: string } | { state: 'approved' | 'refused'; text: string };
-/**
- * The outcome of one ask (its epoch and instant, or the later ask of its attempt it merged into: GY-549), read from the item as the
- * control plane holds it now. A refusal by the widening rule (`decidedBy` graphyard) is not the
- * answer: the loop puts it to the independent approver, so it is still pending. An approval by
- * any path — the rule, a finding, the approver or a master — shows as the paths now planned.
- * A lease past its deadline ends the wait even before reconciliation clears it: no approval or
- * refusal can reach that attempt any more. `now` is the control plane's time (a snapshot's `now`),
- * since the deadline is one it issued: a worker host's clock is never compared with it.
- */
-export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly string[]; lease?: { epoch: number; expiresAt: string } | null; scopeRequest?: ScopeRequestState | null; scopeDecision?: ScopeDecision | null },
-  ask: { epoch: number; at: string; paths: readonly string[] }, now: number, cli = 'graphyard'): ScopeRequestOutcome {
-  const own = item.scopeRequest?.epoch === ask.epoch && (item.scopeRequest.at === ask.at || unplannedPaths(item.plannedFiles, ask.paths).every(path => item.scopeRequest!.paths.includes(path))) ? item.scopeRequest : null;
-  const decided = item.scopeDecision?.requestedAt === ask.at ? item.scopeDecision : null;
-  const outside = unplannedPaths(item.plannedFiles, ask.paths), covered = !outside.length;
-  // Liveness comes first: an outcome, even one decided before the deadline, is not this attempt's
-  // to act on once its lease has lapsed or been reconciled away.
-  if (item.lease?.epoch !== ask.epoch || Date.parse(item.lease.expiresAt) <= now) return { state: 'ended', text: `Graphyard: your lease on ${item.key} (epoch ${ask.epoch}) is no longer live, so no scope outcome applies to this attempt; stop the work` };
-  if (!own && covered) return { state: 'approved', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'approved', paths: ask.paths, approver: decided?.state === 'approved' && decided.decidedBy !== 'graphyard' ? decided.decidedBy : null, reason: decided?.state === 'approved' ? decided.reason : null }, cli) };
-  const refusal = own?.decision ?? decided;
-  // A refusal names only the paths still outside plannedFiles: one widened meanwhile, by any path,
-  // is planned, and the worker is not told to finish without it.
-  if (refusal?.state === 'refused' && refusal.decidedBy !== 'graphyard') return { state: 'refused', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'refused', paths: outside.length ? outside : ask.paths, approver: refusal.decidedBy, reason: refusal.reason }, cli) };
-  if (!own) return { state: 'ended', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) is no longer open — withdrawn or re-asked — and nothing widened plannedFiles for it` };
-  return { state: 'pending', text: `Graphyard: your scope request on ${item.key} (epoch ${ask.epoch}) for ${ask.paths.join(', ')} is ${own.decision ? 'with the independent approver: the widening rule could not ground it' : 'waiting for the widening rule'}; you keep your lease` };
-}
+export { type ScopeRequestOutcome, scopeOutcomeMessage, scopeRequestOutcome } from './scope-collapse.js';
