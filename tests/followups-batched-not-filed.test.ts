@@ -1,8 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
@@ -12,6 +9,7 @@ import { followUpItem, type LaunchThread } from '../src/review-threads.js';
 import { followUpEntries, followUpParent, openFollowUpItem } from '../src/model/machine-backlog.js';
 import { followUpParent as invariantParent } from '../src/model/invariants.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-896 AC-1 against the real control plane: an approved review's non-blocking findings are
 // recorded on the parent's one follow-up item, and a second approval of the same parent appends
@@ -46,7 +44,7 @@ const fileApproval = async (parent: Work, reviewId: number, threads: LaunchThrea
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 460;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-batched-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('batched-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('batched_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/batched_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;

@@ -1,8 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
@@ -12,6 +9,7 @@ import { followUpItem, type LaunchThread } from '../src/review-threads.js';
 import { followUpEntries, followUpParent } from '../src/model/machine-backlog.js';
 import { workCommands } from '../src/cli/work.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-896 AC-2 against the real control plane: a recorded follow-up batch stays retrievable by
 // item and by PR, and the `work promote-followup` command promotes one finding to its own item —
@@ -46,7 +44,7 @@ const runPromote = async (id: string, index: string) => {
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 470;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-promotion-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('promotion-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('promotion_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/promotion_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
