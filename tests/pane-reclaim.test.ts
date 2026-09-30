@@ -520,6 +520,12 @@ test('unit:sweep-closes-finished-agent-panes — an agent pane named for a Graph
       item('GY-35', {}, [handle({ id: 'rev-35', kind: 'review', host: local, pane: 'pane-renamed', agentName: 'review-claude-3', state: 'finished' })]),
       // Another host's finished handle naming a local pane coordinate.
       item('GY-36', {}, [handle({ id: 'rev-36', kind: 'review', host: 'machine-b', pane: 'pane-remote', state: 'finished' })]),
+      // An ended handle that recorded no agent name, its pane coordinate reused by a live agent
+      // working under another item's live lease: the handle names nobody, so the agent is not its.
+      item('GY-38', {}, [handle({ id: 'rev-38', kind: 'review', host: local, pane: 'pane-reused', state: 'finished' })]),
+      item('GY-39', { stage: 'build', lease: live }, []),
+      // An ended handle that did record a name, its pane now holding an agent Herdr reports unnamed.
+      item('GY-40', {}, [handle({ id: 'rev-40', kind: 'review', host: local, pane: 'pane-unnamed-agent', agentName: 'review-claude-4', state: 'finished' })]),
     ];
     const inventory: HerdrAgent[] = [
       { name: 'graphyard-opencode-2', pane_id: 'pane-finished-worker', agent: 'opencode', agent_status: 'idle', cwd: `${worktrees}/GY-30-7` },
@@ -531,6 +537,8 @@ test('unit:sweep-closes-finished-agent-panes — an agent pane named for a Graph
       { name: 'operator-claude', pane_id: 'pane-remote', agent: 'claude', agent_status: 'idle', cwd: '/home/vish' },
       // An agent Graphyard never recorded, even in a lease-less worktree, is named for no Graphyard session.
       { name: 'someone', pane_id: 'pane-unrecorded-agent', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-37-1` },
+      { name: 'graphyard-claude-3', pane_id: 'pane-reused', agent: 'claude', agent_status: 'working', cwd: '/elsewhere/GY-39' },
+      { pane_id: 'pane-unnamed-agent', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review-40' },
     ];
     const closed: string[] = [];
     const state = emptyDaemonState(config);
@@ -543,7 +551,7 @@ test('unit:sweep-closes-finished-agent-panes — an agent pane named for a Graph
     assert.deepEqual([...closed].sort(), ['pane-finished-reviewer', 'pane-finished-worker'], 'the ended sessions\' idle agents close after their grace');
     for (let at = clockStart + 200_000; at <= clockStart + 800_000; at += 100_000) await pass(at);
     assert.deepEqual([...closed].sort(), ['pane-finished-reviewer', 'pane-finished-worker'],
-      'a working agent under a live lease, a running session, a renamed pane, another host\'s record and an unrecorded agent are never closed');
+      'a working agent under a live lease, a running session, a renamed pane, another host\'s record, an unrecorded agent, and an agent in a pane whose ended handle or whose agent carries no name are never closed');
     assert.match(state.actions['sweep:pane:pane-finished-worker'].detail, /implementation session worker-b:7 is finished and GY-30 epoch 7 holds no live lease/);
   } finally { await cleanup(); }
 });

@@ -130,7 +130,9 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
     if (agent.agent) {
       // An agent in the pane is a live session unless the record says it is Graphyard's, ended, and
       // its item and epoch hold no live lease: an idle finished agent is closed after its grace.
-      if (!hit || hit.handle.state === 'running' || (hit.handle.agentName && agent.name && hit.handle.agentName !== agent.name)) continue;
+      // Pane coordinates are reused, so the agent must be named, and named for that very session:
+      // a handle or an agent without a name identifies nobody, and its occupant is left alone.
+      if (!hit || hit.handle.state === 'running' || !hit.handle.agentName || !agent.name || hit.handle.agentName !== agent.name) continue;
       if (leased(hit.item.key, hit.handle.epoch ?? tree?.epoch)) continue;
       agentless.push({ pane: agent.pane_id, name: agent.name, key: hit.item.key, item: hit.item, boundMs: finishedSessionGraceMs,
         why: `still holds its ${agent.agent} agent, though its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state} and ${hit.item.key}${hit.handle.epoch != null ? ` epoch ${hit.handle.epoch}` : ''} holds no live lease` });
