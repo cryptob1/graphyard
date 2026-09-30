@@ -64,6 +64,8 @@ export async function snapshotWithClock<T extends { now: string }>(read: () => P
 
 /** A clock offset bound against the control plane and the round trip of the read that measured it. */
 export interface ControlPlaneClock { clockOffset: { min: number; max: number }; roundTripMs: number; source: 'timed read' | 'snapshot read' }
+/** The control-plane time and clock bounds a containment assessment is judged with, and the read that measured them. */
+export interface ContainmentObservation { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source'] }
 /** How long the timed clock read may take before the loop falls back to the snapshot's bounds. */
 export const controlPlaneClockTimeoutMs = 10_000;
 /**

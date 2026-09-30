@@ -7,7 +7,7 @@ import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './s
 import { readyToRetry } from './sessions.js';
 import { detailChanged } from './decisions.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
-import type { ContainmentObservation } from './effects.js';
+import type { ContainmentObservation } from '../master/containment.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { SessionHandle } from '../model/sessions.js';

@@ -21,7 +21,7 @@ import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
-import { readControlPlaneClock, type ControlPlaneClock } from '../master/containment.js';
+import { readControlPlaneClock, type ControlPlaneClock, type ContainmentObservation } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
@@ -208,13 +208,8 @@ export interface DaemonEffects {
    * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
-  /** Verifies on this host which quarantined supervisors are demonstrably gone. */
+  /** Verifies on this host which quarantined supervisors are demonstrably gone, against clock bounds `controlPlaneClock` measures with a light timed read, not the slow snapshot read (GY-795). */
   containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
-  /**
-   * Bounds this host's clock against the control plane with a light timed read (GY-795), taken
-   * just before containment is assessed. The work snapshot's read takes seconds on a loaded plane,
-   * and its round trip alone exceeded the settlement's clock tolerance.
-   */
   controlPlaneClock?: () => Promise<ControlPlaneClock>;
   /** Settles one quarantine this host verified dead, so the item can be claimed again. */
   settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
@@ -457,9 +452,6 @@ export async function relaunchSession(config: MasterConfig, session: LaunchedSes
   if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
   throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
 }
-
-/** The control-plane time and clock bounds a containment assessment is judged with, and the read that measured them. */
-export interface ContainmentObservation { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source'] }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
