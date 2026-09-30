@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -176,6 +176,8 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
   if (cwd === undefined) throw new Error(`${head}: the run has no working directory to confine around. Graphyard never starts a session unconfined.`);
   if (!bwrap) throw new Error(`${head}: bubblewrap (bwrap) is not installed. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap).`);
   if (mountNamespaceProbeResult(bwrap) === false) throw new Error(`${head}: this host refuses the unprivileged namespaces bubblewrap needs. Graphyard never starts a session unconfined; allow unprivileged user namespaces on this host.`);
+  const gitProblem = checkoutGitProblem(root);
+  if (gitProblem) throw new Error(`${head}: the Git directory it writes through cannot be resolved — ${gitProblem}. Graphyard never starts a session unconfined.`);
   prepareConfinedGitPaths(root);
   return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap });
 }

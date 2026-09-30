@@ -101,7 +101,11 @@ jobs:
     # tests/soak.test.ts alone runs about seventeen minutes on a runner (its nine simulated days;
     # the confinement it checks on every launch reuses a pool of fixture worktrees and costs
     # seconds, GY-957), far past its baseline entry, and runs from 16 to 21 minutes on one tree
-    # across runs; the shard that holds it needs this bound to fit the file as it runs.
+    # across runs; the shard that holds it needs this bound to fit the file as it runs. Its entry in
+    # tests/helpers/timing-baseline.json is deliberately not refreshed (GY-957 declines that
+    # follow-up): at its measured ~1,222,000 ms no four-shard split stays within the 20% that
+    # unit:ci-sharded holds, since one file outweighs a fair share of the suite; splitting the soak
+    # into several files is what would let the baseline record it.
     timeout-minutes: 25
     strategy:
       fail-fast: false

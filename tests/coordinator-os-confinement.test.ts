@@ -177,7 +177,10 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
 });
 
 test('unit:linked-worktree-coordinator-confined — a coordinator that is itself a linked worktree protects its real Git directory, not the `.git` pointer file', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-linked-'));
+  // The install path holds whitespace: Git writes the pointer's path verbatim to the end of the
+  // line, and a pointer parse that stopped at the first space fell back to the pointer file and left
+  // the coordinator writable (GY-957, acceptance finding).
+  const base = mkdtempSync(join(tmpdir(), 'graphyard confinement linked '));
   try {
     const { main, root, worktree } = linkedWorktreeCoordinatorFixture(base);
     const gitDir = join(main, '.git');
@@ -230,6 +233,28 @@ test('unit:linked-worktree-coordinator-confined — a coordinator that is itself
     assert.ok(run.stdout.includes('REF-BLOCKED'), 'a ref outside the shared graphyard namespace is unwritable');
     assert.ok(run.stdout.includes('SESSION-WROTE'), 'the session worktree still takes its writes');
     assert.ok(!run.stdout.includes('WRITE-ALLOWED') && !run.stdout.includes('COMMIT-ALLOWED') && !run.stdout.includes('REF-ALLOWED'), 'no probe escapes');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer names no Git directory refuses every launch instead of confining the pointer file', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-pointer-'));
+  try {
+    const { root, worktree } = linkedWorktreeCoordinatorFixture(base);
+    const input = { kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux' as const, mountNamespaceWorks: true, bwrap: 'bwrap' };
+    const codex = { ...input, kind: 'codex', args: ['--sandbox', 'workspace-write'] };
+    for (const [pointer, named] of [['not a pointer\n', 'not a readable'], [`gitdir: ${join(base, 'missing admin')}\n`, 'is not a directory']] as const) {
+      writeFileSync(join(root, '.git'), pointer);
+      assert.throws(() => checkoutGitDirectory(root), new RegExp(named), `checkoutGitDirectory refuses a pointer that ${named}`);
+      for (const launch of [input, codex]) {
+        const refusal = await coordinatorConfinementRefusal(launch);
+        assert.match(refusal ?? '', /the Git directory it writes through cannot be resolved/, `a ${launch.kind} launch is refused, never confined around the pointer file`);
+        await assert.rejects(coordinatorConfinement(launch), /never starts a session unconfined/);
+      }
+      assert.throws(() => headlessConfinementWrapper(root, worktree, 'bwrap'), /the Git directory it writes through cannot be resolved/, 'a headless run is refused too');
+      assert.throws(() => prepareConfinedGitPaths(root), new RegExp(named), 'the launcher prepares nothing under the pointer file');
+    }
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
