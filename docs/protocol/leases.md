@@ -11,6 +11,10 @@ Register the exact branch, path and host ID (`graphyard register GY-1 workspace.
 
 `graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials from the child and on lease loss sends SIGTERM, then SIGKILL, to the process group; it is no sandbox. A contained launch first records a **quarantine** naming its systemd scope unit. If the supervisor dies, the item is fenced until `POST /api/work/UUID/autosettle` (`coordinator` or `admin`) proves authority expired 120 seconds ago and no supervisor, workspace process or scope member is alive, or an operator attests the stop. Settlement excuses only the recorded pane's idle, childless shell, which the loop closes.
 
+### Push credential
+
+A worker never pushes with the host's `gh` login, which a confined session cannot reach. `POST /api/work/UUID/push-credential` with `{"epoch": N}` (the lease holder only; CLI `graphyard push-credential GY-N EPOCH DIR`) mints a Graphyard App installation token for this repository alone with `contents` and `pull_requests` write, its stated expiry capped at the **lease bound** (claim plus the 4-hour implementation time box); nothing is minted for a lapsed, submitted or overdue epoch, and the token is never stored. When `GH_CONFIG_DIR` holds that attempt's credential, `watch` re-mints it within 15 minutes of expiry on a renewal, revoking the old token, and revokes and removes it when the session ends.
+
 ## How a lease ends
 
 - `submit` (CLI `complete`) ends it; later heartbeats are refused with `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
