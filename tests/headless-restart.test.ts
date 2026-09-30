@@ -7,13 +7,16 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type DecidePayload } from '../src/runner/payloads.js';
 import { detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
-import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, liveRunCheckouts, runsDirectory, type Applied } from '../src/runner/registry.js';
+import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, liveRunCheckouts, runsDirectory, unendedRunOnDisk, type Applied } from '../src/runner/registry.js';
 import { approverRunAdopter, approverRunContext, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
 import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunches, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { EventEmitter } from 'node:events';
 import type { RunResult } from '../src/runner/types.js';
+
+/** The coordinator checkout the loop reads at its start (GY-857), clean: this test is not about it. */
+const cleanCheckout = () => ({ root: '/', commit: null, modified: [], untracked: [] });
 
 // GY-453. Headless Pi runs are detached from the process that launched them: a restart of the loop
 // or an executor leaves them running, and the restarted process adopts them from the run registry
@@ -78,6 +81,8 @@ test('unit:headless-run-survives-restart a detached run survives a restart of it
     assert.equal(liveRun('graphyard-approver-gy-1'), null, 'the restarted process starts with an empty registry');
     await delay(200);
     assert.ok(runAlive(meta), 'the run survived its launcher\'s restart');
+    // Its launcher being gone says nothing about it (the GY-496 launcher-pid rule): the unended run on disk is adoption's to judge.
+    assert.ok(unendedRunOnDisk(root, 'decision-1'), 'the detached run stands unended in the registry on disk');
 
     // The restarted loop adopts it: it is registered again under its session name and watched until it ends.
     const adopted = await adoptRuns(root, adopters);
@@ -90,6 +95,7 @@ test('unit:headless-run-survives-restart a detached run survives a restart of it
     assert.deepEqual(record.result, { ok: true, tool: graphyardTools.decide, submitted: 1 });
     assert.deepEqual(applied, [{ decision: verdict.decision, ok: true, reason: null }], 'the verdict was applied exactly once');
     assert.equal(liveRun('graphyard-approver-gy-1'), null);
+    assert.equal(unendedRunOnDisk(root, 'decision-1'), false, 'once applied its record is on disk');
 
     // Nothing applies it again: not a further restart's adoption, not a stale watcher's late apply.
     detachRuns();
@@ -122,7 +128,7 @@ test('unit:headless-run-survives-restart a run that ended while unwatched is app
     assert.equal(record.result?.ok === false && record.result.reason, 'lost');
     assert.deepEqual(applied.at(-1), { decision: '', ok: false, reason: 'lost' }, 'a lost run applies no verdict');
 
-    // A producer session whose run was lost is retried after the base wait and spends no attempt.
+    // A producer session whose run was lost is retried at once (GY-496) and spends no attempt.
     const now = Date.parse('2030-01-01T00:10:00.000Z');
     const records = [
       { requestId: 'r1', state: 'failed', requestedAt: '2030-01-01T00:00:00.000Z', closedAt: '2030-01-01T00:05:00.000Z', resolution: 'the headless run ended (exit: pi exited with code 3) without trusted evidence' },
@@ -131,7 +137,7 @@ test('unit:headless-run-survives-restart a run that ended while unwatched is app
     assert.ok(lostRun(records[1]) && !lostRun(records[0]));
     const retry = sessionRetry(records, 'r1', now);
     assert.equal(retry.started, 1, 'only the run that ran counts against the budget');
-    assert.equal(retry.nextAt, '2030-01-01T00:09:00.000Z', 'retried after the base wait, not a widened one');
+    assert.equal(retry.nextAt, '2030-01-01T00:08:00.000Z', 'retried at once, with no widening wait');
     assert.equal(retry.launch, true);
   } finally { await cleanup(); }
 });
@@ -187,7 +193,7 @@ test('unit:headless-run-survives-restart a run an executor launched is re-adopte
         if (adopted.length) { host.emit('SIGUSR2'); }
         return adopted;
       } } as unknown as DaemonEffects;
-    const loop = runDaemon(config, emptyDaemonState(config), effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], process: host as never, log: line => lines.push(line) });
+    const loop = runDaemon(config, emptyDaemonState(config), effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], checkout: cleanCheckout, process: host as never, log: line => lines.push(line) });
     await executorRestarted;
     await loop;
     assert.ok(runAlive(meta), 'the executor\'s restart left the run running');
@@ -233,7 +239,7 @@ test('unit:restart-leaves-runs the loop\'s shutdown signals no headless run, log
     const persisted: unknown[] = [];
     const effects = { persist: async (state: unknown) => { persisted.push(state); }, snapshot: async () => { throw new Error('the control plane is offline'); } } as unknown as DaemonEffects;
     // A planned restart: the loop is stopped by its signal, and its shutdown hook runs.
-    const result = await runDaemon(config, emptyDaemonState(config), effects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => lines.push(line) });
+    const result = await runDaemon(config, emptyDaemonState(config), effects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], checkout: cleanCheckout, log: line => lines.push(line) });
     assert.equal(result.cycles.length + result.failed.length, 1);
     assert.ok(lines.some(line => /stopping: left 1 headless run\(s\) running, detached/.test(line)), lines.join('\n'));
     await delay(200);
@@ -243,7 +249,7 @@ test('unit:restart-leaves-runs the loop\'s shutdown signals no headless run, log
     // The next loop adopts it on start, and its verdict is applied once when it ends.
     const next: string[] = [];
     const adoptEffects = { ...effects, adoptRuns: () => adoptRuns(root, adopters) } as unknown as DaemonEffects;
-    const restarted = runDaemon(config, emptyDaemonState(config), adoptEffects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => next.push(line) });
+    const restarted = runDaemon(config, emptyDaemonState(config), adoptEffects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], checkout: cleanCheckout, log: line => next.push(line) });
     await restarted;
     assert.ok(next.some(line => /adopted 1 headless run\(s\) left running by a restart: graphyard-approver-gy-4 \(approver for GY-1\)/.test(line)), next.join('\n'));
     // Its shutdown left the adopted run running too; a third watcher applies it.

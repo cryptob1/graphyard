@@ -333,12 +333,10 @@ export async function approverClone(root: string, target: string, sha?: string, 
  */
 async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, attest: boolean, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
-  let started: ReturnType<typeof startNarrowRun>;
+  let started: ReturnType<typeof startNarrowRun>; const timeoutMs = piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000;
   try {
-    const timeoutMs = piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000;
     await approverClone(root, checkout.worktree, work.candidate?.sha);
-    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory, root,
-      context: approverRunContext(config.url, work.id, decision, timeoutMs, checkout.directory),
+    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory, root, context: approverRunContext(config.url, work.id, decision, timeoutMs, checkout.directory),
       prompt: attest ? piApproverWithAttestation(config, work, decision, checkout.worktree) : piApproverPrompt(config, work.key, decision, config.approver!.id, checkout.worktree),
       options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, timeoutMs),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
