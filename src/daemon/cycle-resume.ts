@@ -1,11 +1,10 @@
-// Concern: the live worker attempt's session record — the handle the loop writes for it, how its attempt ends — and cycle steps 1e–1f: the resume and idle-with-lease re-prompts that prompt each resolution once, on dedup rows the resolved-action prune never retires (GY-524, GY-923).
+// Concern: cycle steps 1e–1f — what a live attempt waits on, the re-prompt when its wait clears, the one idle-lease reminder and the reclaim that hands a stalled attempt to a new one (GY-524), each resolution prompting once on a dedup row the resolved-action prune never retires (GY-923), with the pane-binding check every paste through these paths must pass (GY-852, GY-940).
 import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master.js';
-import type { DaemonAction } from './state.js';
-import { message } from './state.js';
+import { message, type DaemonAction } from './state.js';
 import { boundDetail } from './decisions.js';
 import { readyToRetry } from './sessions.js';
-import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedReason } from './reblocked-attempts.js';
+import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
 import { preserveInterruptedAttempt, record } from './effects.js';
 import { roleSessionMaximumMs } from '../model/sessions.js';
 import type { Cycle } from './cycle.js';
@@ -80,19 +79,23 @@ function scopeChange(item: Work) {
  * the dispatch registered — and once the runtime has started it carries the pane the session
  * occupies. That pane is the only address a paste may go to. A launch write cannot record the
  * epoch itself (only the lease holder's writes may, `engine.ts`), so the attempt a handle belongs
- * to is read from its id, not from an epoch field. Before the pane is recorded, the runtime's
- * agent-name listing is all the address there is; then the pane the name resolved to is refused
- * when this item's record ties it to another attempt's session. Anything pasted after such a
- * refusal would land on whichever session holds the name now, which is how one item's re-prompt
- * reached another item's pane (2026-09-26).
+ * to is read from its id, not from an epoch field. Before the runtime's coordinates are recorded —
+ * and while no handle of this attempt exists at all — the agent-name listing is all the address
+ * there is; then the pane the name resolved to is refused when this item's record ties it to
+ * another attempt's session, and (GY-940) when this attempt's own handle exists but records no
+ * pane yet: its coordinate write failed or has not completed, so the pane the name resolves to
+ * cannot be verified as this attempt's, and one no session of this item holds may be another
+ * item's. Anything pasted after such a refusal would land on whichever session holds the name
+ * now, which is how one item's re-prompt reached another item's pane (2026-09-26).
  */
 export function checkPaneStillBelongs(item: Work, handleId: string, pane: string | undefined): string | null {
   if (!pane) return 'no pane recorded';
-  const recorded = (item.sessions ?? []).filter(s => s.kind === 'implementation' && s.pane);
-  const own = recorded.find(s => s.id === handleId);
-  if (own) return own.pane === pane ? null : `pane ${pane} is not where ${item.key}'s session ${handleId} is recorded (pane ${own.pane}); the profile's agent name has been reassigned`;
-  const other = recorded.find(s => s.pane === pane);
+  const sessions = (item.sessions ?? []).filter(s => s.kind === 'implementation');
+  const own = sessions.find(s => s.id === handleId);
+  if (own?.pane) return own.pane === pane ? null : `pane ${pane} is not where ${item.key}'s session ${handleId} is recorded (pane ${own.pane}); the profile's agent name has been reassigned`;
+  const other = sessions.find(s => s.pane === pane);
   if (other) return `pane ${pane} is recorded for ${item.key}'s session ${other.id}, not for the attempt this paste concerns`;
+  if (own) return `pane ${pane} cannot be verified as ${item.key}'s session ${handleId}: its handle records no pane yet (its coordinate write has not completed), so the profile's agent name is no address`;
   return null;
 }
 
@@ -220,7 +223,14 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
       const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0]?.at ?? decision!.at}`, previous = state.actions[promptKey];
       if (previous && previous.state !== 'failed') { await drop(keys.blocker, keys.scope); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
-      if (!agent || !pane || status === 'blocked') return;
+      if (!agent || !pane || status === 'blocked') {
+        // A recorded pane a live runtime no longer lists cannot be told (GY-940): 1d reads the
+        // profile's agent name, which another session may now hold, so it would believe this
+        // attempt alive for ever and the cleared wait would hold the item indefinitely. The
+        // attempt is ended here; the next one the item is dispatched to carries on from its branch.
+        if (own && !agent && listingLive) await reclaimIdle(`its pane ${own.pane} has been gone from the runtime since it waited, so the cleared wait cannot be delivered to it, and its agent name is no address`, null);
+        return;
+      }
       // The pane the name resolved — only before this attempt's own pane was recorded — must still
       // be the one the item's record ties to this attempt's session (GY-852): otherwise the
       // resolution is refused with the reason on the record. The waits stand, so the resolution is
@@ -259,7 +269,13 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
       // answered the listing may say the pane is gone; an unreadable one is believed by nobody here.
       if (own && (!agent || !agent.agent) && listingLive) {
         const idle = state.actions[keys.idle];
-        if (!idle) return;
+        if (!idle) {
+          // The pane vanished while the session was still active (GY-940): no idle marker was ever
+          // created, so this first gone-pane observation starts the same reclaim bound — otherwise
+          // the name-based absence checks, reading the name's new holder, end nothing.
+          await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: its pane ${own.pane} has been gone from the runtime since this cycle while its session held the lease, and its agent name is no address; the reclaim bound starts here`);
+          return;
+        }
         const reprompted = state.actions[`resume:idle:${item.id}:${epoch}:${idle.at}`];
         if ((reprompted?.state === 'done' ? now() - Date.parse(reprompted.at) : now() - Date.parse(idle.at)) <= idleLeaseMs) return;
         await reclaimIdle(`idle with a live lease: its pane ${own.pane} has been gone from the runtime since ${idle.at}, so it cannot be re-prompted, and its agent name is no address`, null);

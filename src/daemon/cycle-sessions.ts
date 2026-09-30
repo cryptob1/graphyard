@@ -1,4 +1,4 @@
-// Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers, and close implementation sessions whose runtime exited; steps 1e–1f, the resume re-prompts, are cycle-resume's.
+// Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
 import { detectExhaustion, type CapacityRole } from '../model/capacity.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
@@ -9,10 +9,9 @@ import { closeKey } from './reconcile.js';
 import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
-import type { Cycle } from './cycle.js';
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
+import type { Cycle } from './cycle.js';
 
-// The resume concern keeps its public names importable from this original path (GY-177).
 export { idleLeaseMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
@@ -334,9 +333,12 @@ export async function closeStep(cycle: Cycle) {
   for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('session', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
     const item = open.find(candidate => candidate.key === session.work);
     // The session is found by the pane its launcher recorded for it (GY-852); the name is the
-    // fallback for a launch that recorded none, and its reuse across sessions is exactly why.
-    const agent = agents.find(candidate => !!session.pane && candidate.pane_id === session.pane)
-      ?? agents.find(candidate => candidate.name === session.agentName);
+    // fallback only for a launch that recorded no pane at all. A recorded pane the runtime no
+    // longer lists is the original session being gone: the name is reusable and may now hold
+    // another blocked session, which must never receive this request's continuation (GY-940).
+    const agent = session.pane
+      ? agents.find(candidate => candidate.pane_id === session.pane)
+      : agents.find(candidate => candidate.name === session.agentName);
     if (!agent?.pane_id || !item || agent.agent_status !== 'blocked' || state.actions[failoverKey(session.role, item, session.record)]?.state === 'done') return;
     // The session's own handle on the item — the one its launcher registered — carries the prompt
     // and the loop's answer, as a worker's does (GY-223). One the launcher never registered has
