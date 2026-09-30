@@ -1,6 +1,6 @@
-// Concern: the base-failure reads (GY-528) — a CI job's failing tests, the base head's latest run
-// of a required check, and a job's rerun, all through the master's own gh, outside any
-// coordination transaction.
+// Concern: the base-failure effects (GY-528) — a CI job's failing tests, the base head's latest run
+// of a required check and a job's rerun, all through the master's own gh outside any coordination
+// transaction, and the P0 filing and candidate refresh made as the operator-agent.
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
@@ -23,7 +23,10 @@ export interface BaseFailureEffects {
   refreshCandidate?: (work: Work, reason: string, key: string) => Promise<Work>;
 }
 
-export function baseFailureReads(run: ChildRun, current: () => MasterConfig) {
+type OperatorAgentCall = (method: 'GET' | 'POST', path: string, body?: unknown, key?: string) => Promise<unknown>;
+
+/** The base-failure effects over the master's gh and, while one is provisioned, its operator-agent identity. */
+export function baseFailureEffects(run: ChildRun, current: () => MasterConfig, asOperatorAgent: OperatorAgentCall): BaseFailureEffects {
   // A completed job's log never changes: each is read once, bounded, and a failed read is tried again.
   const logs = new Map<number, Promise<string[]>>();
   const failedTests = (jobId: number): Promise<string[]> => {
@@ -46,5 +49,9 @@ export function baseFailureReads(run: ChildRun, current: () => MasterConfig) {
     return { check, baseSha, state, jobId: completed.id, url: completed.html_url ?? null, tests: state === 'failed' ? await failedTests(completed.id).catch(() => null) : null };
   };
   const rerunJob = async (jobId: number) => { await run('gh', ['api', '--method', 'POST', `repos/${current().repository}/actions/jobs/${jobId}/rerun`]); };
-  return { failedTests, baseCheck, rerunJob };
+  return {
+    failedTests, baseCheck, rerunJob,
+    get fileBaseFailure() { return current().operatorAgent ? (input: ReturnType<typeof baseFailureItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
+    get refreshCandidate() { return current().operatorAgent ? (work: Work, reason: string, key: string) => asOperatorAgent('POST', `work/${work.id}/refresh`, { reason, base: work.observation?.baseTip }, key) as Promise<Work> : undefined; },
+  };
 }

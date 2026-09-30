@@ -33,8 +33,7 @@ import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault
 import type { ControlPlaneStatus } from '../master.js';
 import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
-import type { baseFailureItem } from '../model/base-failure.js';
-import { type BaseFailureEffects, baseFailureReads } from './base-failure-reads.js';
+import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
@@ -572,7 +571,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
-  return {
+  // The base-failure effects (GY-528) keep their getters: the operator-agent is read per call.
+  return Object.defineProperties({
     agents: () => listHerdrAgents(run).catch(() => []),
     panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
@@ -757,9 +757,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
-    ...baseFailureReads(run, current),
-    get fileBaseFailure() { return current().operatorAgent ? (input: ReturnType<typeof baseFailureItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
-    get refreshCandidate() { return current().operatorAgent ? (work: Work, reason: string, key: string) => asOperatorAgent('POST', `work/${work.id}/refresh`, { reason, base: work.observation?.baseTip }, key) as Promise<Work> : undefined; },
     // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
@@ -797,5 +794,5 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     persist: persistLoop,
-  };
+  }, Object.getOwnPropertyDescriptors(baseFailureEffects(run, current, asOperatorAgent)));
 }
