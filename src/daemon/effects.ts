@@ -31,8 +31,7 @@ import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
-import type { ControlPlaneStatus } from '../master.js';
-import { readCredentialFile } from '../master.js';
+import { type ControlPlaneStatus, readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
@@ -573,7 +572,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
-  // The base-failure effects (GY-528) keep their getters: the operator-agent is read per call.
   return Object.defineProperties({
     agents: () => listHerdrAgents(run).catch(() => []),
     panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
