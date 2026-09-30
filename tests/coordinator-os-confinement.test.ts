@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { closeSync, existsSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
@@ -10,6 +9,7 @@ import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coor
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-888: every session the launcher starts — worker, reviewer, producer and approver, in a Herdr
 // pane or headless — is launched so that the coordinator checkout is unwritable at the OS level,
@@ -59,7 +59,7 @@ function linkedWorktreeCoordinatorFixture(base: string) {
 }
 
 test('unit:coordinator-write-blocked-for-shell — every runtime kind launches confined, and a confined shell cannot write, commit in or switch the coordinator checkout by any means', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-'));
+  const base = await temporaryDirectory('confinement');
   try {
     const { root, worktree } = coordinatorFixture(base);
     // Every runtime kind builds a launch whose confinement is present, by the mechanism its runtime
@@ -261,7 +261,7 @@ test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer
 });
 
 test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-session-'));
+  const base = await temporaryDirectory('confinement-session');
   try {
     const { root } = coordinatorFixture(base);
     // The terminal reviewer and producer launch shape (reviewer.ts, producer.ts): the pane starts
@@ -376,7 +376,7 @@ test('unit:launcher-knows-its-checkout — the launcher derives its coordinator 
 });
 
 test('integration:launch-carries-confinement — a session launch types the confinement into the pane and a headless run is wrapped at its spawn', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-launch-'));
+  const base = await temporaryDirectory('confinement-launch');
   try {
     const { root, worktree } = coordinatorFixture(base);
     const bwrap = bwrapOnPath();

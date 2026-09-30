@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +19,7 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../s
 import { controlPlaneHandlers } from '../src/executor.js';
 import { routineDecision, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-124: one review request yields one reviewer session and one verdict. Each test is named for
 // the proof it produces: unit:one-reviewer-per-request and integration:conflicting-verdicts-surfaced.
@@ -45,7 +45,7 @@ function work(overrides: Partial<Work> = {}): Work {
 
 /** A master with a bound reviewer App and two reviewer profiles — the two runtimes the incident launched. */
 async function reviewerMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'gy124-')), credentials = await mkdtemp(join(tmpdir(), 'gy124-cred-'));
+  const root = await temporaryDirectory('gy124'), credentials = await temporaryDirectory('gy124-cred');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinator = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinator as typeof fetch);
@@ -165,7 +165,7 @@ const proven = (item: Work) => engine.execute(producer, 'evidence', item.id, { p
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_ONE_REVIEWER_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 81);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'gy124-pg-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy124-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, implementer, producer];
