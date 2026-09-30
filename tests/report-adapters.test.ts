@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { readFile, writeFile, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { adapterContracts, genericInventory, inventoryFormat, junitTestIdentity, normaliseJunit, parseXml, reportAdapter, reportAdapters, reportFormats } from '../src/report-adapters.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const run = promisify(execFile);
 // Node's runner marks its own children; a nested `--test` under that mark skips every file.
@@ -114,7 +114,7 @@ test('the Playwright adapter still accepts only the built-in reporter structure,
 });
 
 test('a real node:test JUnit report verifies against an offline inventory and a broken assertion fails with no leaked text', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-junit-'));
+  const root = await temporaryDirectory('junit');
   try {
     const spec = join(root, 'orders.test.mjs');
     const write = (assertion: string) => writeFile(spec, `import { test, describe } from 'node:test'; import assert from 'node:assert';

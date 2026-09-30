@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +10,7 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import { listedThreadLimit, threadSection } from '../src/review-threads.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // The reviewer names the threads it verified fixed on a `Resolved threads:` line of its approval and
 // the ones it overrides on an `Overridden threads:` line; the loop records both with the verdict and
@@ -29,7 +29,7 @@ const submittedAt = '2026-09-23T12:00:00Z';
 const verdict = (state = 'APPROVED') => ({ state, reviewer, reviewId: 77, submittedAt });
 
 async function boundMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-threads-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-threads-credentials-'));
+  const root = await temporaryDirectory('threads'), credentialDirectory = await temporaryDirectory('threads-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
