@@ -196,11 +196,7 @@ export const workspaceCommands = defineCommands([
   {
     name: 'worktree',
     scope: 'work',
-    help: [
-      '  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier',
-      '                                attempt\'s worktree still holding the branch is preserved and',
-      '                                released, so the allocation succeeds (GY-860)',
-    ],
+    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier attempt\'s hold on the branch is preserved and released'],
     async run(context, work) {
       const { args, api, print } = context;
       const mutate = workMutation(context, work);
@@ -213,8 +209,7 @@ export const workspaceCommands = defineCommands([
       let startPoint = args[1] ?? 'HEAD';
       if (work.submission) {
         const remoteBranch = `refs/remotes/origin/${branch}`;
-        // GY-860 AC-2: a PR branch that cannot be fetched, or moved past the observed head, is the
-        // item's workspace failing on this host; the claim is released as one, so no attempt is spent.
+        // GY-860 AC-2: an unfetchable or moved PR branch is a workspace failure, so no attempt is spent.
         let refused: string | null = null;
         try {
           execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
