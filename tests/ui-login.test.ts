@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createElement, isValidElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { HELPER_TEXT, LoginView, REJECTED_NOTICE, VERIFY_TIMEOUT_MS, verifyToken, type LoginState, type LoginViewProps, type VerifyClock, type VerifyOutcome } from '../web/pages/login.js';
+import { HELPER_TEXT, LOGIN_USERNAME, LoginView, REJECTED_NOTICE, VERIFY_TIMEOUT_MS, offerToSavePassword, verifyToken, type LoginState, type LoginViewProps, type VerifyClock, type VerifyOutcome } from '../web/pages/login.js';
 
 // GY-198: the sign-in page. One column with one left edge, a verifying state that shows progress and always
 // resolves (accepted, rejected, or unreachable after VERIFY_TIMEOUT_MS), and "Use another token" as an escape
@@ -133,7 +133,7 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     const page = tree({ kind: 'form' }, REJECTED_NOTICE);
     const alert = all(page).find(host => host.props.role === 'alert')!;
     assert.equal(text(alert), 'That token was not accepted');
-    const input = all(page).find(host => host.type === 'input')!;
+    const input = all(page).find(host => host.type === 'input' && host.props.type === 'password')!;
     assert.equal(input.props.autoFocus, true, 'the token input takes focus');
     assert.deepEqual(buttons(page).map(text), ['Open control plane ↗']);
   }
@@ -178,7 +178,28 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
   }
 });
 
-test('unit:login-secondary-escape while verifying, Use another token is a link-styled secondary action and no primary button shows', () => {
+test('unit:login-password-manager-saves-token the form is a username/password login a password manager saves, and an accepted token is offered to the browser password store', () => {
+  const page = tree({ kind: 'form' });
+  const form = all(page).find(host => host.type === 'form')!;
+  const inputs = all(form).filter(host => host.type === 'input');
+  const username = inputs.find(host => host.props.autoComplete === 'username');
+  const password = inputs.find(host => host.props.type === 'password');
+  assert.ok(username, 'a username field pairs with the token, so 1Password and the browser offer to save it');
+  assert.equal(username!.props.value, LOGIN_USERNAME); assert.equal(username!.props.name, 'username');
+  assert.equal(username!.props.tabIndex, -1, 'the username is never a tab stop'); assert.equal(username!.props['aria-hidden'], 'true');
+  assert.equal(password!.props.autoComplete, 'current-password', 'the token is a saveable, fillable password, never autocomplete=off');
+  assert.equal(password!.props.name, 'password');
+  assert.ok(inputs.indexOf(username!) < inputs.indexOf(password!), 'the username precedes the password, as password managers expect');
+  // The browser's own password store is offered the accepted token where it exists, and skipped where it does not.
+  const stored: unknown[] = [];
+  class FakeCredential { constructor(readonly data: { id: string; password: string; name?: string }) {} }
+  const scope = { PasswordCredential: FakeCredential, navigator: { credentials: { store: async (credential: unknown) => { stored.push(credential); } } } };
+  assert.equal(offerToSavePassword('token-1', scope), true);
+  assert.deepEqual((stored[0] as FakeCredential).data, { id: LOGIN_USERNAME, password: 'token-1', name: 'Graphyard control plane' });
+  assert.equal(offerToSavePassword('token-1', {}), false, 'a browser without the Credential Management API is left to the extension');
+});
+
+test('unit:login-secondary-escapewhile verifying, Use another token is a link-styled secondary action and no primary button shows', () => {
   const page = tree({ kind: 'verifying' });
   const escape = named(page, 'Use another token')!;
   assert.ok(escape, 'the escape is offered');
