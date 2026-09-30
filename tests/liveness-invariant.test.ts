@@ -12,6 +12,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import type { NextAction } from '../src/model/action-kinds.js';
 import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction, settleDelivered } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
+import { plannedFilesMax } from '../src/model/scope.js';
 import { livenessCarry, livenessOf, livenessRetryLimit, livenessViolations, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
 import { livenessStatus } from '../src/cli/liveness-report.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -142,6 +143,15 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   const unroutable = { ...stored, scopeRequest: { ...stored.scopeRequest!, criteria: [{ id: 'AC-9', text: 'A new criterion' }] } } as Work;
   const master = livenessOf(unroutable, everything.map(item => item.id === scope.id ? unroutable : item), new Date()).violation!.successor!;
   assert.ok(master.inputs.kind === 'escalate' && master.inputs.detail.includes(`graphyard master scope ${scope.key}`), JSON.stringify(master));
+  // The over-cap refusal GY-906 made terminal: no fold represents the ask under the cap, so the
+  // escalation names the requirements revision that can fold or split it, never the plain union
+  // `master scope` posts, which the same bound refuses (GY-936).
+  const capped = { ...stored, plannedFiles: Array.from({ length: plannedFilesMax }, (_, index) => `tests/bulk/case-${index}.ts`),
+    scopeRequest: { ...stored.scopeRequest!, paths: ['src/other/next.ts'] } } as unknown as Work;
+  const cappedSuccessor = livenessOf(capped, everything.map(item => item.id === scope.id ? capped : item), new Date()).violation!.successor!;
+  assert.ok(cappedSuccessor.inputs.kind === 'escalate' && cappedSuccessor.inputs.trigger === 'scope'
+    && cappedSuccessor.inputs.detail.includes(`graphyard master requirements ${scope.key} FILE REASON`)
+    && !cappedSuccessor.inputs.detail.includes(`graphyard master scope ${scope.key}`), JSON.stringify(cappedSuccessor));
   const escalation = (await judge(stale)).violation!.successor!;
   assert.ok(escalation.inputs.kind === 'escalate' && escalation.inputs.trigger === 'stale-wait', JSON.stringify(escalation));
 
