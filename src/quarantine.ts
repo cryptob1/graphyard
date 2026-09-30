@@ -224,7 +224,14 @@ type UnboundedScope = { unit: string; activeState: string; processes: number[]; 
  */
 export function boundContainmentVerification<T extends { processes: unknown[]; scopes: UnboundedScope[]; held?: unknown[]; unverifiable: string[] }>(probe: T): T {
   const bounds = containmentVerificationBounds;
-  const scopes = probe.scopes.slice(0, bounds.scopes).map(scope => {
+  const totals: Record<string, number> = {};
+  const cut = <V>(name: 'processes' | 'scopes' | 'held' | 'unverifiable', list: V[]) => {
+    if (list.length > bounds[name]) totals[name] = list.length;
+    return list.slice(0, bounds[name]);
+  };
+  // The scope list is counted before it is cut, so a host with more scopes than the bound records
+  // the full count and the settlement check refuses on the unrecorded ones.
+  const scopes = cut('scopes', probe.scopes).map(scope => {
     const attributed = scope.attributed ?? [];
     if (scope.processes.length <= bounds.scopeProcesses && attributed.length <= bounds.scopeProcesses) return scope;
     return {
@@ -233,12 +240,7 @@ export function boundContainmentVerification<T extends { processes: unknown[]; s
       ...attributed.length > bounds.scopeProcesses ? { attributedTotal: attributed.length } : {},
     };
   });
-  const totals: Record<string, number> = {};
-  const cut = <V>(name: 'processes' | 'scopes' | 'held' | 'unverifiable', list: V[]) => {
-    if (list.length > bounds[name]) totals[name] = list.length;
-    return list.slice(0, bounds[name]);
-  };
-  const bounded = { ...probe, processes: cut('processes', probe.processes), scopes: cut('scopes', scopes), unverifiable: cut('unverifiable', probe.unverifiable), ...probe.held ? { held: cut('held', probe.held) } : {} };
+  const bounded = { ...probe, processes: cut('processes', probe.processes), scopes, unverifiable: cut('unverifiable', probe.unverifiable), ...probe.held ? { held: cut('held', probe.held) } : {} };
   return Object.keys(totals).length ? { ...bounded, truncated: totals } : bounded;
 }
 
