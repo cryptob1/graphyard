@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +14,7 @@ import { actionAccount } from '../src/model/next-action.js';
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, failedCheckRework, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { nameBaseBreaks } from '../src/cli/status-attention.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { baseBreakHold, baseBreakRefreshNeeded, describeBaseBreak, failedTestsAnnotation, failedTestsFromLog, judgeBaseBreak, parseFailedTests, wakeOwnObservation, type BaseBreak } from '../src/master/base-break-refresh.js';
 
 // GY-793. On 2026-09-26 main was briefly broken; every candidate whose CI ran in that window failed
@@ -135,7 +135,7 @@ const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_BASE_BREAK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 793);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-base-break-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('base-break'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
