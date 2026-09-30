@@ -255,7 +255,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     assert.equal(unsupervised.outcome, 'failed');
     assert.match(unsupervised.outcome === 'failed' ? unsupervised.reason : '', /could not re-execute itself through its supervisor/);
     assert.equal(selfThrew, 1);
-    assert.match([...Object.values(alone.actions)].at(-1)!.detail, /keeps running [0-9a-f]{12} and retries the re-execution next cycle/);
+    assert.match([...Object.values(alone.actions)].at(-1)!.detail, /keeps running [0-9a-f]{12} and retries the re-execution at \d{4}-/);
 
     // The wiring: runDaemon performs the upgrade between the cycle and its wait, never mid-cycle —
     // through the shipped performSelfUpgrade here. The process before it loaded the first commit
@@ -443,6 +443,16 @@ test('manual:fault-class-configuration — upgrade:6544afbe: a supervisor restar
     const hung = await performSelfUpgrade(master, timedOut, { root: '/srv/graphyard', run: slow.run, now: () => clock, persist: async () => {}, restartExecutors: async to => restarted(to),
       restartSelf: async () => { throw new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', 'graphyard-master.service'], { stdout: '', stderr: '', status: null, signal: 'SIGTERM', timedOut: true, timeoutMs: 30_000 }); } });
     assert.equal(hung.outcome, 'failed');
+    // Any signal but the stop's own SIGTERM — the OOM killer's SIGKILL, a crash — proves nothing was queued.
+    for (const signal of ['SIGKILL', 'SIGSEGV'] as const) {
+      const crashed = emptyDaemonState(master), git = new FakeGit(loaded, tip);
+      git.diffPaths = ['src/daemon/upgrade.ts'];
+      crashed.deployment = verified(tip);
+      const ended = await performSelfUpgrade(master, crashed, { root: '/srv/graphyard', run: git.run, now: () => clock, persist: async () => {}, restartExecutors: async to => restarted(to),
+        restartSelf: async () => { throw new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', 'graphyard-master.service'], { stdout: '', stderr: '', status: null, signal, timedOut: false }); } });
+      assert.equal(ended.outcome, 'failed', `a restart ended by ${signal} stays a failure`);
+      assert.equal(crashed.upgrade.pending?.selfOnly, true, `a restart ended by ${signal} stays owed`);
+    }
 
     // A re-execution that really failed is not written off: the cursor owes it, the next cycle
     // retries only it (the fleet already runs the tip), and it is settled once the loop runs the tip.
@@ -451,22 +461,37 @@ test('manual:fault-class-configuration — upgrade:6544afbe: a supervisor restar
     owed.deployment = verified(tip);
     owed.release = { commit: loaded, dirty: false };
     const retried: string[] = [];
-    let self = 0, refuse = true;
-    const deps = { root: '/srv/graphyard', run: again.run, now: () => clock, persist: async () => {},
+    let self = 0, refuse = true, at = clock;
+    const deps = { root: '/srv/graphyard', run: again.run, now: () => at, persist: async () => {},
       restartExecutors: async (to: string) => { retried.push(to); return restarted(to); },
       restartSelf: async () => { self += 1; if (refuse) throw new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', 'graphyard-master.service'], { stdout: '', stderr: 'Failed to connect to bus', status: 1, signal: null, timedOut: false }); } };
     assert.equal((await performSelfUpgrade(master, owed, deps)).outcome, 'failed');
-    assert.deepEqual(owed.upgrade.pending, { from: loaded, to: tip, code: true, selfOnly: true }, 'the re-execution stays owed');
+    assert.deepEqual(owed.upgrade.pending, { from: loaded, to: tip, code: true, selfOnly: true, retries: 1, retryAt: new Date(clock + 5 * 60_000).toISOString() }, 'the re-execution stays owed, retried after five minutes');
+    // A persistent cause is retried on a doubling backoff, never every cycle: the cycles inside the
+    // wait skip without a fetch, and every failure stays on the one action.
+    const fetches = () => again.fetches;
+    for (let minute = 1; minute <= 60; minute += 1) {
+      at = clock + minute * 60_000;
+      const before = fetches();
+      const cycle = await performSelfUpgrade(master, owed, deps);
+      if (cycle.outcome === 'skipped') assert.equal(fetches(), before, 'a cycle inside the backoff fetches nothing');
+    }
+    assert.equal(self, 4, 'an hour of failures costs three retries (at 5, 15 and 35 minutes), not sixty');
+    assert.equal(owed.upgrade.pending?.retries, 4);
+    assert.equal(fetches(), 1, 'a retry re-executes the loop alone: no fetch, no new checkout');
+    assert.equal(Object.keys(owed.actions).filter(key => key.startsWith('upgrade:')).length, 1, 'one action for the release');
+    assert.equal(owed.faults.instances.filter(entry => entry.faultClass === 'configuration').length, 1, 'a standing failure is one fault instance, however often it is retried');
     refuse = false;
+    at = Date.parse(owed.upgrade.pending!.retryAt!);
     const retry = await performSelfUpgrade(master, owed, deps);
-    assert.equal(retry.outcome === 'upgraded' && retry.self, true, 'the next cycle re-executes the loop');
-    assert.equal(self, 2);
+    assert.equal(retry.outcome === 'upgraded' && retry.self, true, 'the retry past the backoff re-executes the loop');
+    assert.equal(self, 5);
     assert.deepEqual(retried, [tip], 'the executors are not restarted a second time');
     // The process the supervisor started loaded the tip: nothing is owed any more.
     owed.release = { commit: tip, dirty: false };
     assert.equal((await performSelfUpgrade(master, owed, deps)).outcome, 'upgraded');
     assert.equal(owed.upgrade.pending, null);
-    assert.equal(self, 2, 'a loop already running the tip is not restarted');
+    assert.equal(self, 5, 'a loop already running the tip is not restarted');
     assert.equal((await performSelfUpgrade(master, owed, deps)).outcome, 'skipped');
   } finally { await dispose(); }
 });
@@ -492,12 +517,30 @@ test('manual:fault-class-configuration — escalation:watchdog:600000: a supervi
       { once: true, intervalMs: () => interval, identity: { pid: process.pid, host: master.hostId }, now: () => clock, log: () => {}, signals: [], environment,
         reload: async () => { interval = 1_200_000; return { config: master, at: iso(0), changed: [], refused: null }; } });
     assert.deepEqual(again, [1_800_000, 7_200_000]);
+    // An unchanged interval after a reload fits nothing again: no notification per cycle.
+    const steady: number[] = [];
+    await runDaemon(master, emptyDaemonState(master), quiet({ setWatchdog: async (windowMs: number) => { steady.push(windowMs); } }),
+      { once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: () => clock, log: () => {}, signals: [], environment,
+        reload: async () => ({ config: master, at: iso(0), changed: [], refused: null }) });
+    assert.deepEqual(steady, [1_800_000]);
 
     // Only a window the loop cannot raise is the fault, and it says why.
     const stuck = emptyDaemonState(master);
     await runDaemon(master, stuck, quiet({ setWatchdog: async () => { throw new Error('systemd-notify: No such file or directory'); } }),
       { once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: () => clock, log: () => {}, signals: [], environment });
     assert.match(stuck.actions['escalation:watchdog:600000']?.detail ?? '', /could not raise it to 1800s itself: systemd-notify: No such file or directory/);
+
+    // A cursor an older process left with the bare refusal: the next process that cannot raise the
+    // window replaces it with the reason, and one that raises it settles it.
+    const inherited = emptyDaemonState(master);
+    await runDaemon(master, inherited, quiet(), { once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: () => clock, log: () => {}, signals: [], environment });
+    assert.doesNotMatch(inherited.actions['escalation:watchdog:600000']?.detail ?? '', /could not raise/);
+    await runDaemon(master, inherited, quiet({ setWatchdog: async () => { throw new Error('refused'); } }), { once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: () => clock, log: () => {}, signals: [], environment });
+    assert.match(inherited.actions['escalation:watchdog:600000']?.detail ?? '', /could not raise it to 1800s itself: refused/);
+    assert.equal(inherited.actions['escalation:watchdog:600000']?.attempts, 2);
+    await runDaemon(master, inherited, quiet({ setWatchdog: async () => {} }), { once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: () => clock, log: () => {}, signals: [], environment });
+    assert.equal(inherited.actions['escalation:watchdog:600000']?.state, 'done', 'a raised window settles the refusal an earlier process recorded');
+    assert.deepEqual(configurationFaults(inherited), []);
   } finally { await dispose(); }
 });
 

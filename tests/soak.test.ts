@@ -33,6 +33,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { ChildProcessError } from '../src/child-runner.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
@@ -108,7 +109,11 @@ const basePlan = {
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour],
+  // GY-947: for an hour from the first deploy the supervisor refuses the loop's re-execution (no
+  // user bus), so the restart it owes is retried on its backoff until the refusal clears.
+  selfRestartFails: { from: 2 * hour + 30 * minute, to: 3 * hour + 30 * minute },
+  dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -806,7 +811,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
   // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
   const checkout = { head: github.tip, origin: github.tip, dirty: false };
-  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][] };
+  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, selfAt: [] as number[], selfRefused: [] as number[], outcomes: [] as SelfUpgradeOutcome['outcome'][] };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
   const changedPaths = (from: string, to: string) => {
     const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
@@ -840,7 +845,14 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
     restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
-    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
+    restartSelf: async () => {
+      const elapsed = clock.now() - dayStart;
+      if (elapsed >= plan.selfRestartFails.from && elapsed < plan.selfRestartFails.to) {
+        upgrades.selfRefused.push(elapsed);
+        throw new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', 'graphyard-master.service'], { stdout: '', stderr: 'Failed to connect to bus: No medium found', status: 1, signal: null, timedOut: false });
+      }
+      upgrades.self++; upgrades.selfAt.push(elapsed); state.release = { commit: checkout.head, dirty: checkout.dirty };
+    },
   });
 
   // ---- The day. ----
@@ -1081,7 +1093,8 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
       const upgraded = await selfUpgrade(state);
       upgrades.outcomes.push(upgraded.outcome);
-      if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
+      // The refused re-execution (GY-947) is the day's own fault, asserted on its own below.
+      if (upgraded.outcome === 'failed' && !/could not re-execute itself through its supervisor: Command failed: systemctl/.test(upgraded.reason)) failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
       if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
       for (const check of state.invariants.report as InvariantCheck[]) {
         if (check.observed) observed.add(check.invariant);
@@ -1332,6 +1345,18 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // GY-947: the hour the supervisor refused the loop's re-execution. The restart it owed was
+  // retried on its backoff — a handful of tries, not one a cycle — all on the first deploy's one
+  // action and one fault instance, so the retries alone never make a recurring class; the first
+  // try past the refusal re-executed the loop and the debt cleared.
+  const refusedMinutes = upgrades.selfRefused.map(at => Math.round(at / minute));
+  assert.ok(upgrades.selfRefused.length >= 2 && upgrades.selfRefused.length <= 4, `the refused re-execution was retried on its backoff, not every cycle: +${refusedMinutes.join(', +')} min`);
+  assert.ok(upgrades.selfRefused.every(at => at >= basePlan.selfRestartFails.from && at < basePlan.selfRestartFails.to), 'a retry runs only while it is owed');
+  assert.ok(upgrades.selfAt[0] >= basePlan.selfRestartFails.to && upgrades.selfAt[0] <= basePlan.selfRestartFails.to + 45 * minute, `the owed re-execution ran once the refusal cleared (+${Math.round(upgrades.selfAt[0] / minute)} min)`);
+  assert.equal(state.upgrade.pending, null, 'nothing is owed at the day\'s end');
+  assert.equal(state.actions[`upgrade:${production.deploys[0].sha}`]?.attempts, upgrades.selfRefused.length + 3, 'every refused try is one more attempt on the first deploy\'s one action');
+  const owedInstances = state.faults.instances.filter(entry => entry.subject === `upgrade:${production.deploys[0].sha}`);
+  assert.ok(owedInstances.length <= 1, `the retried re-execution is one fault instance, never one per try toward a recurring class: ${owedInstances.map(entry => entry.at).join(', ')}`);
   // GY-842 across the day: every pane the day's launches opened went somewhere — closed once, by
   // the step that ended its session or by the bounded sweep — the operator's own pane was never
   // touched, the previous day's backlog drained over successive bounded passes, and the drain

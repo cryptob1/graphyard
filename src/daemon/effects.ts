@@ -213,11 +213,7 @@ export interface DaemonEffects {
   settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
-  /**
-   * Sets this process's watchdog window with the supervisor (GY-947): systemd's WATCHDOG_USEC
-   * notification, which a unit with NotifyAccess=all accepts from the service at runtime. The loop
-   * uses it only to lengthen a window too short for its interval.
-   */
+  /** Lengthens this process's watchdog window through systemd's WATCHDOG_USEC notification (GY-947). */
   setWatchdog?: (windowMs: number) => void | Promise<void>;
   /**
    * Mid-session capacity (GY-89). `sessionOutput` reads the tail of a stopped session's own
