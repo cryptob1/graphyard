@@ -27,7 +27,7 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 
 ### Base-branch breakages
 
-A failed `test` run names failed tests (`graphyard-failed-tests:`); failing on the head's base but passing on the tip, the tip merges in (`baseBreak`, trigger `base breakage`), not reworked; `master status` names test, breaking and fixing commits; decisions awaiting observation wake it.
+A failed `test` run names failed tests (`graphyard-failed-tests:`); failing on the head's base, passing on the tip, the tip merges in (`baseBreak`) without rework; `master status` names test, breaking and fixing commits. Awaiting decisions wake observation.
 
 ### Session liveness is reconciled, not trusted
 
@@ -38,13 +38,15 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past, delivered items included. Implementation sessions are left to the lease.
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+  way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**So what an operator or a master does instead of closing sessions by hand:** nothing for a finished or dead session
-(`master run --once` sweeps); attach to an overlong one via its handle's command. Never mark another session's handle finished to free a slot.
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+another session's handle finished to free a slot.
 
 ### System invariants
 
