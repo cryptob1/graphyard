@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,7 @@ import { executionAttestationPayload } from '../src/runner-collector.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -96,7 +97,7 @@ test('fresh prelaunch state rejects stale receipt replay, expiry, workspace and 
 });
 
 test('stale quarantine replay never launches or settles against another owner', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-stale-replay-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('stale-replay'), marker = join(cwd, 'launched');
   const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
   let settlements = 0;
   try {
@@ -110,7 +111,7 @@ test('stale quarantine replay never launches or settles against another owner', 
 });
 
 test('authorized prelaunch mismatch settles once without launching', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-owned-mismatch-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('owned-mismatch'), marker = join(cwd, 'launched');
   const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
   let settlements = 0;
   try {
@@ -188,7 +189,7 @@ test('containment settlement does not retry confirmed refusal and fails closed o
 });
 
 test('containment settlement bounds persistent ambiguity after one child launch without capability leakage', async () => {
-  const credentials = containmentCredentials(); const cwd = await mkdtemp(join(tmpdir(), 'graphyard-settlement-')); const launches = join(cwd, 'launches'); let attempts = 0;
+  const credentials = containmentCredentials(); const cwd = await temporaryDirectory('settlement'); const launches = join(cwd, 'launches'); let attempts = 0;
   const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
   const child = `const fs=require('node:fs'),crypto=require('node:crypto');const hash=${JSON.stringify(credentials.settlementHash)};if(Object.values(process.env).some(value=>crypto.createHash('sha256').update(value??'').digest('hex')===hash))process.exit(91);fs.appendFileSync(${JSON.stringify(launches)},'launched\\n')`;
   const containment = { command: process.execPath, args: ['-e', child], signal: () => {}, empty: () => true };
@@ -211,7 +212,7 @@ test('containment settlement bounds persistent ambiguity after one child launch 
 test('a prelaunch signal reconciles and settles a committed quarantine without launching a child', async () => {
   const credentials = containmentCredentials();
   const expected = { epoch: 9, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-prelaunch-signal-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('prelaunch-signal'), marker = join(cwd, 'launched');
   const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
   const establishKeys: string[] = [], settleKeys: string[] = []; const settleBodies: unknown[] = [];
   let establishCalls = 0, settleCalls = 0;
@@ -254,7 +255,7 @@ test('a prelaunch signal reconciles and settles a committed quarantine without l
 
 test('a prelaunch signal fails closed on persistent establishment ambiguity and cleans up handlers', async () => {
   const credentials = containmentCredentials(); const expected = { epoch: 6, settlementHash: credentials.settlementHash, exclusiveResources: [], requestId: credentials.requestId };
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-prelaunch-ambiguous-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('prelaunch-ambiguous'), marker = join(cwd, 'launched');
   const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
   let attempts = 0, settlements = 0;
   const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
@@ -282,7 +283,7 @@ test('foreground establishment refusal removes prelaunch signal handlers without
 });
 
 test('master-only commands ignore an unrelated unavailable worker token file', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));
+  const cwd = await temporaryDirectory('master-lazy-token');
   try {
     await exec('git', ['init', '-q'], { cwd });
     await mkdir(join(cwd, '.graphyard')); await writeFile(join(cwd, '.graphyard/connection.json'), '{broken', { mode: 0o644 });
@@ -292,7 +293,7 @@ test('master-only commands ignore an unrelated unavailable worker token file', a
 });
 
 test('github-setup --update-permissions is a migration command that needs no deployment URL and reports what is missing locally', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-permissions-'));
+  const cwd = await temporaryDirectory('permissions');
   try {
     await exec('git', ['init', '-q'], { cwd }); await exec('git', ['remote', 'add', 'origin', 'git@github.com:owner/repo.git'], { cwd });
     const env = { ...process.env, GRAPHYARD_TOKEN: undefined, GRAPHYARD_TOKEN_FILE: undefined, GRAPHYARD_URL: undefined };
@@ -305,7 +306,7 @@ test('github-setup --update-permissions is a migration command that needs no dep
 });
 
 test('installed CLI resolves its runtime from another repository and includes submitted rework in next using the work snapshot clock', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard cli '));
+  const cwd = await temporaryDirectory('cli ');
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({now:'2026-01-01T00:01:00Z',work:[{ id: 'rework', stage: 'build', ready: true, reworkRequested: true, submission: { pr: 1 }, dependencies: [], priority: 1 },{id:'active',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:02:00Z'}},{id:'expired',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:00:00Z'}},{id:'quarantined',key:'GY-Q',stage:'build',ready:true,dependencies:[],priority:1,exclusiveResources:['staging'],lease:{expiresAt:'2026-01-01T00:00:00Z'},containmentQuarantine:{epoch:1}},{id:'shared',stage:'ready',ready:true,dependencies:[],priority:1,exclusiveResources:['staging']},{id:'unrelated',stage:'ready',ready:true,dependencies:[],priority:1,exclusiveResources:['other']}]})); });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   try {
@@ -316,7 +317,7 @@ test('installed CLI resolves its runtime from another repository and includes su
 });
 
 test('CLI preserves admin ready and sends the current revision and audit reason for scoped mutations', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-operator-cli-'));
+  const cwd = await temporaryDirectory('operator-cli');
   const requests: { url: string; body: any }[] = [];
   const work = { id: 'task-id', key: 'GY-7', revision: 12 };
   const http = createServer(async (req, res) => {
@@ -340,7 +341,7 @@ test('CLI preserves admin ready and sends the current revision and audit reason 
 });
 
 test('watch refuses the wrong workspace and uses a fresh heartbeat key despite command retry configuration', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-watch-'));
+  const cwd = await temporaryDirectory('watch');
   let registeredPath = tmpdir(), role = 'worker'; const keys: string[] = [];
   const http = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -392,7 +393,7 @@ test('Muse remains inside the common supervisor and is terminated on lease loss 
 });
 
 test('supervisor kills surviving descendants even after their group leader exits successfully', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-descendants-')), output = join(cwd, 'ticks');
+  const cwd = await temporaryDirectory('descendants'), output = join(cwd, 'ticks');
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); process.send('ready'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
   const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore','ignore','ignore','ipc']}); c.on('message',()=>process.exit(0))`;
   try {
@@ -403,7 +404,7 @@ test('supervisor kills surviving descendants even after their group leader exits
 });
 
 test('foreground Herdr containment kills a descendant forked after SIGTERM and reparented', { skip: !hasSystemdUserScope }, async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-foreground-descendants-')), output = join(cwd, 'ticks');
+  const cwd = await temporaryDirectory('foreground-descendants'), output = join(cwd, 'ticks');
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
   const leader = `process.on('SIGTERM',()=>{require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});process.exit(0)});setInterval(()=>{},20)`;
   try {
@@ -588,7 +589,7 @@ test('foreground containment refuses to launch before a durable quarantine exist
 });
 
 test('macOS foreground Herdr supervision refuses before launch without durable containment', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-darwin-refusal-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('darwin-refusal'), marker = join(cwd, 'launched');
   try {
     await assert.rejects(supervise(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], 1, async () => renewal(), { detached: false, platform: 'darwin' }), /not supported on darwin/);
     await assert.rejects(stat(marker), { code: 'ENOENT' });
@@ -596,7 +597,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
 });
 
  test('handoff pairs ownership with its work observation rather than a later status clock', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-handoff-'));const requests:string[]=[];
+  const cwd=await temporaryDirectory('handoff');const requests:string[]=[];
   const http=createServer((req,res)=>{requests.push(req.url!);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url==='/api/status'?{actor:{id:'worker-a',role:'worker'},now:'2026-01-01T00:02:00Z'}:{now:'2026-01-01T00:00:00Z',work:[{id:'task',key:'GY-1',lease:{owner:'worker-a',epoch:7,expiresAt:'2026-01-01T00:01:00Z'},workspaces:[{epoch:7,host:'machine-a',path:cwd}]}]}))});
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
   try{const result=await exec(process.execPath,[launcher,'handoff','GY-1'],{cwd,env:{...process.env,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`}});assert.match(JSON.parse(result.stdout).commands.join(' '),/watch/);assert.deepEqual(requests.sort(),['/api/status','/api/work-snapshot']);}
@@ -604,7 +605,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
  });
 
  test('worktree verifies the checkout before reserving a workspace or creating a branch', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-repository-fence-'));let reservations=0;
+  const cwd=await temporaryDirectory('repository-fence');let reservations=0;
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
     if(req.url==='/api/status')res.end(JSON.stringify({repository:'OWNER/project',actor:{id:'worker-a',role:'worker'}}));
     else if(req.method==='POST'){reservations++;res.end('{}');}
@@ -627,7 +628,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
  });
 
 test('rework worktree reopens the exact observed PR branch while preserving its prior checkout', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-rework-'));let reservations=0;let candidate='';
+  const cwd=await temporaryDirectory('rework');let reservations=0;let candidate='';
   const branch='graphyard/gy-1-1';
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
     if(req.url==='/api/status')res.end(JSON.stringify({repository:'owner/project',actor:{id:'worker-a',role:'worker'}}));
@@ -657,7 +658,7 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
 });
 
  test('handoff uses the active CLI or explicit override instead of a stale saved launcher', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-active-cli-'));
+  const cwd=await temporaryDirectory('active-cli');
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url==='/api/status'?{actor:{id:'worker-a',role:'worker'}}:{now:'2026-01-01T00:00:00Z',work:[{id:'task',key:'GY-1',lease:{owner:'worker-a',epoch:1,expiresAt:'2026-01-01T00:01:00Z'},workspaces:[{epoch:1,host:'machine-a',path:cwd}]}]}));});
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${(http.address() as any).port}`;
   const env:NodeJS.ProcessEnv={...process.env,GRAPHYARD_URL:url,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a'};delete env.GRAPHYARD_CLI;
@@ -673,7 +674,7 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
  });
 
 test('the packaged runner path is usable from the CLI and refuses evidence-producer credentials', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-runner-cli-'));
+  const cwd = await temporaryDirectory('runner-cli');
   let role = 'producer';
   let collectionAuthority: unknown;
   const posts: string[] = [];
@@ -768,7 +769,7 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
 });
 
 test('the runner holds authority while the host attestor executes and signs the attempt', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-supervision-'));
+  const cwd = await temporaryDirectory('supervision');
   const posts: string[] = [];
   const requestId = randomUUID(), attemptId = randomUUID();
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -893,7 +894,7 @@ test('the runner holds authority while the host attestor executes and signs the 
 });
 
 test('the runner retries a lost acknowledgement response idempotently and starts nothing before the replay confirms it', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-ack-retry-'));
+  const cwd = await temporaryDirectory('ack-retry');
   const requestId = randomUUID(), attemptId = randomUUID();
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   const attestationPublicKey = publicKey.export({ type: 'spki', format: 'pem' }).toString();
@@ -981,8 +982,8 @@ test('the runner retries a lost acknowledgement response idempotently and starts
 });
 
 test('master run executes the durable loop as a supervised process and master status reports its cursor', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-master-run-'));
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-run-credentials-'));
+  const root = await temporaryDirectory('master-run');
+  const credentialDirectory = await temporaryDirectory('master-run-credentials');
   const credentialFile = join(credentialDirectory, 'coordinator.token');
   let proofScoped = false, skewed = false;
   const now = () => new Date().toISOString();
@@ -1044,7 +1045,7 @@ test('master run executes the durable loop as a supervised process and master st
 });
 
 test('sync merges origin/BASE without rebasing, passes in-scope and new files, and refuses every out-of-scope file that no longer matches the base', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-sync-'));
+  const cwd = await temporaryDirectory('sync');
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
     const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] };
     res.end(JSON.stringify(req.url === '/api/status' ? { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }

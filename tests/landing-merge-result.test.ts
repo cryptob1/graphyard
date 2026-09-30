@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, Refusal, type Work, type Observation } from '../src/model.js';
 import { regressionRefusals } from '../src/regression-guard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-472's blobs: the merge base holds state.ts at X, the candidate's head at Y (a partial
 // change), and the landing base at Z (Y plus more). A three-way merge of the head onto the
@@ -16,8 +16,8 @@ const X = 'state() {\n  read\n  hold\n  tick\n  persist\n}\n';
 const Y = 'state() {\n  read\n  hold\n  tock\n  persist\n}\n';
 const Z = 'state() {\n  scan\n  hold\n  tock\n  persist\n}\n';
 
-function fixture(restore = false) {
-  const directory = mkdtempSync(join(tmpdir(), 'landing-merge-result-'));
+async function fixture(restore = false) {
+  const directory = await temporaryDirectory('landing-merge-result');
   const git = (...args: string[]) => execFileSync('git', args, { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   const bytes = (...args: string[]) => execFileSync('git', args, { cwd: directory, stdio: ['ignore', 'pipe', 'pipe'] });
   git('init', '-b', 'main'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
@@ -70,12 +70,12 @@ function fixture(restore = false) {
     workspaces: [{ host: 'test', path: directory, branch: 'candidate', epoch: 1, owner: 'worker' }], submission: { pr: 1, epoch: 1 }, candidate: { pr: 1, sha: git('rev-parse', 'candidate'), baseSha: bound, branch: 'candidate', author: 'worker' }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString() } as unknown as Work;
   return { github, work, mergeBase, partial, base, git, bytes, diff, blob, head: () => git('rev-parse', 'candidate'),
-    clean: () => rmSync(directory, { recursive: true, force: true }) };
+    clean: async () => {} };
 }
 const build = (work: Work, observation: Observation) => evaluate({ ...work, candidate: observation.candidate, observation }, [], new Date(), []).gates.find(gate => gate.name === 'build')!;
 
 test('unit:landing-merge-result-per-file — the landing check judges each file by the three-way merge result: a subsumed partial change is no regression, a head restoring the merge-base version over the base\'s is refused', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     // GY-472's shape: the head's state.ts (Y) differs from the landing base's (Z), but the branch
     // carries an earlier version of the change the base extended. The three-way merge of the head
@@ -88,17 +88,19 @@ test('unit:landing-merge-result-per-file — the landing check judges each file 
     assert.equal(record.baseSha, f.blob(f.base, 'state.ts'), 'the landing record lists the landing base blob');
     assert.equal(record.mergeSha, record.baseSha, 'the guard judged the merged result, and it is the base\'s version');
     // The refusing shape: a head that restores X over Z is still refused, and the build gate holds.
-    const r = fixture(true);
-    const refused = await r.github.observe(r.work);
-    const text = regressionRefusals(r.work, refused, []).join('\n');
-    assert.match(text, /Landing the candidate/, text);
-    assert.match(text, /state\.ts/, text);
-    assert.equal(build(r.work, refused).passed, false, build(r.work, refused).reasons.join('; '));
-  } finally { f.clean(); }
+    const r = await fixture(true);
+    try {
+      const refused = await r.github.observe(r.work);
+      const text = regressionRefusals(r.work, refused, []).join('\n');
+      assert.match(text, /Landing the candidate/, text);
+      assert.match(text, /state\.ts/, text);
+      assert.equal(build(r.work, refused).passed, false, build(r.work, refused).reasons.join('; '));
+    } finally { await r.clean(); }
+  } finally { await f.clean(); }
 });
 
 test('unit:landing-gy472-fixture — the fixture reproduces GY-472\'s three commits, and the guard\'s verdict agrees with git\'s own merge', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     // The three commits hold three distinct blobs: X at the merge base, Y the partial change the
     // head holds, Z the extended change the landing base holds.
@@ -114,11 +116,11 @@ test('unit:landing-gy472-fixture — the fixture reproduces GY-472\'s three comm
     assert.equal(record.baseSha, f.blob(f.base, 'state.ts'));
     assert.equal(record.mergeSha, record.baseSha, 'the merged result the guard judged is the base version');
     assert.deepEqual(regressionRefusals(f.work, seen, []), []);
-  } finally { f.clean(); }
+  } finally { await f.clean(); }
 });
 
 test('manual:gy472-refusal-cleared — a landing refusal recorded before the fix, in GY-472\'s shape, clears on the next observation without a new head', async () => {
-  const f = fixture();
+  const f = await fixture();
   try {
     const clean = await f.github.observe(f.work);
     // The stale observation GY-472 recorded: state.ts listed with the head blob and the base blob
@@ -131,5 +133,5 @@ test('manual:gy472-refusal-cleared — a landing refusal recorded before the fix
     assert.equal(f.head(), stale.candidate.sha, 'no push or sync');
     assert.deepEqual(regressionRefusals(work, next, []), [], 'the refusal cleared without a new head');
     assert.equal(build(work, next).passed, true, build(work, next).reasons.join('; '));
-  } finally { f.clean(); }
+  } finally { await f.clean(); }
 });

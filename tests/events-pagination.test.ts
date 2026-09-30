@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
@@ -15,6 +13,7 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { eventHistoryLimits, routineEventKinds } from '../src/events-history.js';
 import { reconstructTimeline, type LedgerEntry } from '../src/pipeline-speed.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
@@ -29,7 +28,7 @@ const NOISE = 600;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_EVENTS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 25);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-events-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('events'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_events');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_events`);
   await store.init();
@@ -103,7 +102,7 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 async function cli(...args: string[]) {
   const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GRAPHYARD_')));
   const { stdout } = await exec(process.execPath, [launcher, 'events', ...args], {
-    cwd: await mkdtemp(join(tmpdir(), 'graphyard-events-cli-')),
+    cwd: await temporaryDirectory('events-cli'),
     env: { ...environment, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: tokens.operator }, maxBuffer: 64 * 1024 * 1024,
   });
   return JSON.parse(stdout);
