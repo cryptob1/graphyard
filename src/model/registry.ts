@@ -107,8 +107,8 @@ export const accountSchema = z.object({
 export type FleetAccountInput = z.infer<typeof accountSchema>;
 export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; smoke?: AccountSmoke | null; unjudged?: Partial<Record<FleetRoleName, UnjudgedRuns>> }
 
-/** The roles setup proposes and a configured registry is expected to name. */
-export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler'] as const;
+/** The roles a configured registry is expected to name. The master role (GY-898) is never proposed by setup: the operator names its accounts. */
+export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler', 'master'] as const;
 /**
  * Every role the registry may define: the proposed ones, and the diagnostician (GY-439), which turns
  * a recurring-fault item into its root cause and a fix item. The diagnostician runs headless on Pi
@@ -240,7 +240,7 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     demandRegistry(!unknown.length, `Unknown account${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')}; add an account before the role that names it`);
     const model = role.policy?.model;
     demandRegistry(!model || next.models.some(entry => entry.name === model), `Unknown model ${model}; add the model before the role policy that runs it`);
-    upsert(next.roles, role);
+    upsert(next.roles, role.name === 'master' ? { ...role, concurrency: Math.min(role.concurrency, 1) } : role); // GY-898: two masters break single-coordinator; pinned to one
   };
   let reasonText: string;
   if (kind === 'runtime.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setRuntime(data.runtime); }
