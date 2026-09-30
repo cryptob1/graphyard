@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { demand, stages } from '../../model.js';
-import { flowDrilldown, flowExport, flowWindows, invalidateFlowReports, pooledFlowReport, resolvedProductionEnvironment, type FlowWindow } from '../../flow-analytics.js';
+import { flowDrilldown, flowExport, flowWindowMessage, flowWindows, invalidateFlowReports, pooledFlowReport, resolvedProductionEnvironment, type FlowWindow } from '../../flow-analytics.js';
 import { Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** Roles that may see exact pull-request, commit and evidence identities behind an aggregate. */
@@ -21,7 +21,7 @@ const deploymentSchema = z.object({
   details: z.record(z.string().max(100), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
 }).strict();
 const flowQuerySchema = z.object({
-  window: z.coerce.number().int().refine(value => (flowWindows as readonly number[]).includes(value), 'Window must be 7, 30, or 90 days').default(30),
+  window: z.coerce.number().int().refine(value => (flowWindows as readonly number[]).includes(value), flowWindowMessage).default(30),
   type: z.enum(['feature', 'bug', 'chore']).nullish(), stage: z.enum(stages).nullish(),
   slice: z.string().max(200).nullish(), asOf: z.string().datetime().nullish(),
   metric: z.string().max(60).nullish(), key: z.string().max(200).nullish(), format: z.enum(['json', 'csv']).default('json'),

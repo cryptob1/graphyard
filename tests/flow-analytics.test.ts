@@ -241,6 +241,12 @@ test('integration:flow-analytics-filters-windows', async () => {
   assert.ok(week.availableSlices.includes(slice) && week.availableTypes.includes('bug'));
   const rejected = await api(`/api/analytics/flow?window=45`);
   assert.equal(rejected.status, 400);
+  assert.match(JSON.stringify(rejected.body), /Window must be 24 hours, 7 days, 30 days, 90 days/);
+  const lastDay = await api(`/api/analytics/flow?window=1`);
+  assert.equal(lastDay.status, 200);
+  const lastDayReport = lastDay.body;
+  assert.equal(lastDayReport.window.days, 1);
+  assert.equal(Date.parse(lastDayReport.window.to) - Date.parse(lastDayReport.window.from), day);
 });
 
 // A provider merge timestamp is rounded up to a whole second, so it can briefly sit in the

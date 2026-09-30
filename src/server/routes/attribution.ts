@@ -2,12 +2,13 @@ import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Work } from '../../model.js';
 import { attributionDrilldown, attributionHistory, attributionWindows, computeAttribution, readAttribution, releaseManifest } from '../../attribution.js';
 import type { Release } from '../../delivery.js';
+import { flowWindowMessage, type FlowWindow } from '../../flow-analytics.js';
 import { defineRoutes } from '../routes.js';
 
 /** Roles that may see request, attempt, evidence and artifact identifiers behind an aggregate. */
 const auditRoles = ['admin', 'coordinator', 'producer'];
 const querySchema = z.object({
-  window: z.coerce.number().int().refine(value => (attributionWindows as readonly number[]).includes(value), 'Window must be 7, 30, or 90 days').default(30),
+  window: z.coerce.number().int().refine(value => (attributionWindows as readonly number[]).includes(value), flowWindowMessage).default(30),
   asOf: z.iso.datetime().nullish(), metric: z.string().max(60).nullish(), key: z.string().max(200).nullish(),
 }).strict();
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
@@ -22,7 +23,7 @@ export const attributionRoutes = defineRoutes('attribution', [
     method: 'GET', path: /^\/api\/analytics\/attribution(?:\/(drilldown))?$/,
     async handle({ url, actor, services: { engine } }, [part]) {
       const query = querySchema.parse(Object.fromEntries([...url.searchParams].filter(([, value]) => value !== '')));
-      const dataset = await readAttribution(engine.store, { days: query.window as 7 | 30 | 90, asOf: query.asOf ?? null });
+      const dataset = await readAttribution(engine.store, { days: query.window as FlowWindow, asOf: query.asOf ?? null });
       if (!part) return computeAttribution(dataset);
       return attributionDrilldown(dataset, { metric: query.metric ?? 'targetMismatches', key: query.key ?? null, authorized: auditRoles.includes(actor.role) });
     },

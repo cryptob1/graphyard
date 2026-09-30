@@ -14,8 +14,12 @@ import { eventHistoryLimits } from './events-history.js';
 // Upstream retention (GitHub deleting a PR, a provider pruning a deployment) cannot
 // erase an already normalized fact. The tables live in src/store/tables/flow.ts.
 
-export const flowWindows = [7, 30, 90] as const;
+export const flowWindows = [1, 7, 30, 90] as const;
 export type FlowWindow = typeof flowWindows[number];
+/** How a window reads to people: the one-day window is the last 24 hours. */
+export const flowWindowLabel = (days: number) => days === 1 ? '24 hours' : `${days} days`;
+/** The schema message for a window outside `flowWindows`, derived so it cannot drift from the set. */
+export const flowWindowMessage = `Window must be ${flowWindows.map(flowWindowLabel).join(', ')}`;
 // Every aggregation is bounded: date range, rows scanned, buckets, drill-down rows and payload size.
 export const flowLimits = { batch: 400, batches: 20, scan: 20_000, work: 2000, buckets: 90, drilldown: 200, distinct: 25, deployments: 500, deploymentMerges: 5000, payloadBytes: 4_000_000, remainingProbe: 100_000 };
 export const sparseSampleSize = 5;

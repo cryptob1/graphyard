@@ -3,7 +3,7 @@ import Dialog from './dialog';
 import AttributionSection from './attribution';
 import Term from './components/term';
 import { stages } from '../src/model';
-import { flowWindows } from '../src/flow-analytics';
+import { flowWindowLabel, flowWindows } from '../src/flow-analytics';
 
 type Report = any;
 // Stage colours are the design tokens (web/style.css), mixed toward the background for the early stages.
@@ -247,7 +247,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial, folde
     {folded ? <div className="page-heading"><h1 id="flow-analytics-title">Flow analytics</h1></div> : <div className="section-title"><h2 id="flow-analytics-title">Flow analytics</h2></div>}
 
     <form className="flow-filters" aria-label="Flow analytics filters" onSubmit={event => event.preventDefault()}>
-      <label>Window<select value={days} aria-label="Window" onChange={event => setDays(Number(event.target.value))}>{flowWindows.map(value => <option key={value} value={value}>{value} days</option>)}</select></label>
+      <label>Window<select value={days} aria-label="Window" onChange={event => setDays(Number(event.target.value))}>{flowWindows.map(value => <option key={value} value={value}>{flowWindowLabel(value)}</option>)}</select></label>
       <button type="button" onClick={() => void load()} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
     </form>
 
