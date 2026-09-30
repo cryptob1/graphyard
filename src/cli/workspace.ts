@@ -18,7 +18,10 @@ import { installUnderLease } from '../daemon/sessions.js';
 // The installer lives with the session-lease helpers it renews; the CLI path is kept for tests.
 export { installUnderLease };
 import type { CliContext } from './context.js';
+import { installUnderLease } from './install-under-lease.js';
 import { defineCommands, workMutation } from './registry.js';
+
+export { installUnderLease };
 
 /**
  * The generated files a repository declares for sync: `scripts/check-docs.mjs --manifest` names
@@ -103,9 +106,16 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
   conflicts = unmerged();
   if (conflicts.length) {
     const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
-    // Attribution is a courtesy: an unreadable snapshot never hides the conflict list.
-    const all: Work[] = await api('work-snapshot').then((snapshot: any) => Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
-    const remaining = attributeConflicts(conflicts, all, sha => landed.has(sha), generated?.files ?? []);
+    // Attribution is a courtesy: an unreadable snapshot never hides the conflict list. A busy
+    // runner can retire the keep-alive socket while the merge runs, so a failed read retries
+    // twice on a fresh connection before the conflicts are reported unattributed (GY-864); an
+    // answer, even an empty one, is taken as it is.
+    let all: Work[] | null = null;
+    for (let attempt = 0; attempt < 3 && all === null; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 250));
+      all = await api('work-snapshot?view=coordination').then((snapshot: any) => Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => null);
+    }
+    const remaining = attributeConflicts(conflicts, all ?? [], sha => landed.has(sha), generated?.files ?? []);
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
       next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
     process.exitCode = 1; return;
@@ -299,7 +309,7 @@ export const workspaceCommands = defineCommands([
               requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash, ...(scope ? { scope } : {}) }, requestId),
               { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId, ...(scope ? { scope } : {}) },
             ),
-            revalidate: async () => revalidateContainment(await api('work-snapshot'), {
+            revalidate: async () => revalidateContainment(await api('work-snapshot?view=coordination'), {
               workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,
               exclusiveResources, workspace,
             }),

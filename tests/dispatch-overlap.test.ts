@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import { approveScopeRequest } from '../src/cli/master-status.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Optimistic dispatch: planned-file overlap never holds an item. Holding on overlap (GY-112, then
 // bounded, then relaxed for open pull requests in GY-194) still left most of the fleet idle behind
@@ -52,7 +52,7 @@ function daemonConfig(credentialFile: string, workers: WorkerProfile[]): MasterC
 }
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 async function daemon(profiles: string[]) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatch-overlap-'));
+  const directory = await temporaryDirectory('dispatch-overlap');
   const token = join(directory, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
   const credential = join(directory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
   const master = daemonConfig(token, profiles.map(name => launchProfile(name, credential)));
@@ -83,7 +83,7 @@ test('unit:broad-scope-refused — a tests/ claim is refused where planned files
   assert.equal(guardBroadScope({ plannedFiles: ['tests/', 'src/a.ts'] }, reason, { allow: false, command: 'master requirements', existing: ['tests/'] }), reason, 'a revision is judged on the scopes it introduces');
 
   // The commands that set planned files enforce it: `master create`, `master requirements` and `master scope`.
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-broad-scope-')); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-broad-scope-credentials-'));
+  const root = await temporaryDirectory('broad-scope'); const credentialDirectory = await temporaryDirectory('broad-scope-credentials');
   try {
     execFileSync('git', ['init', '-q', root]);
     const operatorFile = join(credentialDirectory, 'operator.token'); await writeFile(operatorFile, 'operator-agent-token-'.padEnd(40, 'o'), { mode: 0o600 });
@@ -153,7 +153,7 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
   assert.ok(!('held' in status.counts) && !('holdsOverdue' in status.counts));
 
   // The launcher dispatches over the overlap without any override, and records it.
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-optimistic-')); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-optimistic-credentials-'));
+  const root = await temporaryDirectory('optimistic'); const credentialDirectory = await temporaryDirectory('optimistic-credentials');
   try {
     execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
     const credential = join(credentialDirectory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });

@@ -1,17 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { cp, readFile, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const checker = resolve(repository, 'scripts/check-docs.mjs');
 const run = (cwd: string) => spawnSync('node', [checker], { cwd, encoding: 'utf8' });
 
 async function documentationCopy() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-docs-'));
+  const directory = await temporaryDirectory('docs');
   await cp(resolve(repository, 'docs'), join(directory, 'docs'), { recursive: true });
   await cp(resolve(repository, 'README.md'), join(directory, 'README.md'));
   await cp(resolve(repository, 'examples'), join(directory, 'examples'), { recursive: true });

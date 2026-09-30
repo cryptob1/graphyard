@@ -1,9 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -13,6 +11,7 @@ import { Engine, LeaseHealth, RenewalFault, heartbeatLatencyAttentionMs, renewal
 import { Refusal } from '../src/model/refusal.js';
 import { renewalGraceMs } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-671: follow-ups from the approved review of GY-558 (PR #299). Each test is named for the proof
 // it produces and pins one behaviour the review asked for: the fault record no longer rides the
@@ -26,7 +25,7 @@ let database: EmbeddedPostgres, connection: string;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 890;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-gy671-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy671'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('gy671_followups');
   connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/gy671_followups`;
   const store = new Store(connection); await store.init(); await store.close();
