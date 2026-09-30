@@ -7,7 +7,7 @@ import { emptyDaemonState, reconcilePendingActions, runCycle, type DaemonEffects
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { annotatePaneShell, containmentSettlementRefusals, countHeldChildren, isInteractiveShell, paneShellReport, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
-import { containmentClock, readControlPlaneClock } from '../src/master/containment.js';
+import { containmentClock, readControlPlaneClock, withoutMeasuredRoundTrip } from '../src/master/containment.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const observedAt = '2030-01-01T12:00:00.000Z';
@@ -396,6 +396,27 @@ test('unit:settle-clock-bound-named a timed read too slow to bound the offset is
   const row = buildMasterStatus({ work: [lapsedQuarantine], now: observedAt }, [worker], [herdr], {}, assessed).work[0];
   assert.equal(row.attention, `Containment quarantine from epoch 1 blocks dispatch: worker lease lapsed at ${at(-600_000)}, past the 120s grace window; ${refusal}`);
   assert.doesNotMatch(row.attention!, /clocks disagree/);
+});
+
+test('unit:settle-clock-bound-named a persistent slow-read refusal is recorded once across cycles although its measured round trip differs every cycle, and master status names the live measurement', async () => {
+  let state: DaemonState | undefined;
+  const escalation = `escalation:containment:${lapsedQuarantine.id}:1`;
+  const recorded: string[] = [];
+  for (const trip of [6_000, 6_400, 7_100, 5_600]) {
+    const plane = slowPlane({ snapshotMs: 12_000, timedReadMs: trip });
+    const run = await loop(lapsedQuarantine, { ...plane.overrides, persist: async (next: DaemonState) => { if (next.actions[escalation]) recorded.push(next.actions[escalation].detail); } } as Partial<DaemonEffects>, state, plane.clock);
+    state = run.state;
+    assert.deepEqual(run.settled, []);
+    const assessed = await assessContainment([lapsedQuarantine], { hostId: 'coordinator-host', observedAt, clockOffset: { min: -trip / 2, max: trip / 2 }, clockRoundTripMs: trip, clockSource: 'timed read',
+      localNow: new Date(observedAt), probe: () => clean } as any);
+    const row = buildMasterStatus({ work: [lapsedQuarantine], now: observedAt }, [worker], [herdr], {}, assessed).work[0];
+    assert.match(row.attention!, new RegExp(`took ${trip}ms round trip, so settlement waits on a faster control-plane read`), 'master status names this cycle\'s measurement');
+  }
+  assert.equal(state!.actions[escalation]?.attempts, 1, 'the escalation is recorded once, not once per cycle');
+  assert.match(state!.actions[escalation]?.detail ?? '', /took 6000ms round trip/, 'the recorded detail keeps the first measurement');
+  assert.equal(new Set(recorded).size, 1, `the escalation detail is persisted unchanged across cycles (${[...new Set(recorded)].join(' | ')})`);
+  assert.equal(withoutMeasuredRoundTrip('the timed read of the control-plane clock took 6000ms round trip'), withoutMeasuredRoundTrip('the timed read of the control-plane clock took 612ms round trip'));
+  assert.notEqual(withoutMeasuredRoundTrip('the timed read took 6000ms round trip'), withoutMeasuredRoundTrip('the snapshot read took 6000ms round trip'), 'a change of read is a change of refusal');
 });
 
 test('unit:settle-clock-bound-fast-read the fresh probe after a pane close is judged with the timed read\'s bounds too, so the same cycle still settles on a slow plane', async () => {

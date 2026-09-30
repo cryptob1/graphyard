@@ -1,11 +1,11 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim, paneReclaimStatus, agentlessPaneAttentionBound } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
-import { containmentClock } from '../master/containment.js';
+import { containmentClock, withoutMeasuredRoundTrip } from '../master/containment.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged } from './decisions.js';
+import { boundDetail, detailChanged } from './decisions.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
 import type { ContainmentObservation } from '../master/containment.js';
 import type { Cycle } from './cycle.js';
@@ -229,7 +229,10 @@ export async function reclaimStep(cycle: Cycle) {
     if (!assessment.settleable) {
       const escalationKey = `escalation:containment:${item.id}:${epoch}`;
       const detail = `${item.key}: containment quarantine from epoch ${epoch} cannot be settled automatically: ${assessment.refusals.join('; ')}`;
-      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
+      // The refusal names the measured round trip, which differs every cycle: a refusal of the same
+      // class is recorded once, and master status shows the live measurement (GY-795).
+      const previous = state.actions[escalationKey];
+      if (!previous || withoutMeasuredRoundTrip(previous.detail) !== withoutMeasuredRoundTrip(boundDetail(detail))) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
       return;
     }
     if (!effects.settleContainment) return;

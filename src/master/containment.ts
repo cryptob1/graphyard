@@ -107,6 +107,14 @@ function namedClockBound(refusal: string, clock: { roundTripMs?: number; source?
 }
 
 /**
+ * A refusal with its live measurement masked: the round trip differs on nearly every read, so the
+ * loop compares this form to record a persistent slow-read refusal once, not once per cycle.
+ */
+export function withoutMeasuredRoundTrip(refusal: string) {
+  return refusal.replace(/ took \d+(ms round trip)?/g, ' took …ms round trip');
+}
+
+/**
  * Verify on this host that a quarantined supervisor is gone, and say why not when it cannot.
  * The assessment is a proposal: the control plane re-evaluates the same refusals itself.
  */
