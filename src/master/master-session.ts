@@ -11,7 +11,7 @@ import { localDirectory } from '../onboarding.js';
 import { type FleetLaunchAccount, type FleetProbe, selectFleetSession } from '../fleet.js';
 import { accountLaunch, heldAwareProbe } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose } from './launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
+import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './herdr.js';
 import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
 import type { Work } from '../model.js';
@@ -112,6 +112,25 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   catch (error) { throw await abandon(error, 'master session launch record could not be written'); }
   return { agentName: name, pane: pane!, runtime: kind, account: selected.account.name, session: selected.account.fleet.session, delivery: delivery! };
 }
+
+/**
+ * The loop's master-session effect (GY-898): `launch` starts the session with the handover folded
+ * into its first request, on the registry's `master` role; `adopt` recovers what a launch record
+ * knows about a session the loop did not launch (its account and registry session), so an adopted
+ * session's spent account is held and its slot is ended with it. A loop wired without it keeps
+ * cycling exactly as before: no master session is launched, adopted, woken or rotated.
+ */
+export interface MasterSessionEffects {
+  launch: (handover: string) => Promise<{ agentName: string; pane: string; runtime: string; account: string | null; session: string | null }>;
+  adopt?: (agentName: string) => Promise<{ account: string | null; session: string | null } | null>;
+}
+export const masterSessionEffects = (root: string, config: () => MasterConfig, run?: ChildRun): MasterSessionEffects => ({
+  launch: async handover => {
+    const { agentName, pane, runtime, account, session } = await launchMasterSession(root, config(), await observeHerdrAgents(run), handover, run);
+    return { agentName, pane, runtime, account, session };
+  },
+  adopt: agentName => readMasterLaunch(root, agentName),
+});
 
 /** The per-host launch record: one live master session at a time, so the newest record is the only one that matters. */
 export const masterLaunchSchema = z.object({ agentName: z.string().max(200), pane: z.string().max(200).nullable(), account: z.string().max(200).nullable(),

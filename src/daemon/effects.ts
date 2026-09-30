@@ -20,7 +20,7 @@ import { defaultAwaitReviewers, launchedSessionHandle, readDispatchCursor } from
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
-import { launchMasterSession, readMasterLaunch } from '../master/master-session.js';
+import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
@@ -342,15 +342,7 @@ export interface DaemonEffects {
    * it causes, a resource at its bound named in place of its symptom — so one cause is tracked as the report shows it, once.
    */
   reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
-  /**
-   * The loop's own master session (GY-898): launches it with the handover folded into its first
-   * request, on the registry's `master` role; `adopt` recovers what a launch record knows about a
-   * session the loop did not launch (its account and registry session), so an adopted session's
-   * spent account is held and its slot is ended with it. A loop wired without it keeps cycling
-   * exactly as before: no master session is launched, adopted, woken or rotated.
-   */
-  masterSession?: { launch: (handover: string) => Promise<{ agentName: string; pane: string; runtime: string; account: string | null; session: string | null }>;
-    adopt?: (agentName: string) => Promise<{ account: string | null; session: string | null } | null> };
+  masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 
 /** Put an action on the cursor, through storeAction, which bounds it and notes it against the fault record (GY-173). */
@@ -801,13 +793,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
-    // The loop's own master session (GY-898): launched on the registry's master role, with the
-    // handover the launching cycle composed from control-plane truth in its first request.
-    masterSession: { launch: async handover => {
-      const launched = await launchMasterSession(root, current(), await observeHerdrAgents(run), handover, run);
-      return { agentName: launched.agentName, pane: launched.pane, runtime: launched.runtime, account: launched.account, session: launched.session };
-    },
-    adopt: agentName => readMasterLaunch(root, agentName) },
+    masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
   };
 }
