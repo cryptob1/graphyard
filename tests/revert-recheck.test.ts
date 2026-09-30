@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -15,6 +13,7 @@ import { CHECK_NAME, GitHub, processJob } from '../src/github.js';
 import { evaluate, Refusal, type Observation, type Principal, type Work } from '../src/model.js';
 import { buildMasterStatus } from '../src/master.js';
 import { ejectionReason } from '../src/merge-queue.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-97. Each test is named for the proof it produces, so acceptance evidence maps to one
 // executed case per required proof: integration:revert-recheck-on-base-advance,
@@ -279,7 +278,7 @@ const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_REVERT_RECHECK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 31);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-revert-recheck-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('revert-recheck'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [CI], 120, 'owner/project'); engine.controlPlaneAppId = APP;
