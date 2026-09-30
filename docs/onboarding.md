@@ -31,7 +31,7 @@ Settings › **Agents** › **Connect an account**: pick a provider; paste a key
 
 ### Agent environments
 
-Each account's `~/.coding_agents` login home is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (0600). Then:
+Each account's `~/.coding_agents` login home is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor, whose login is `CURSOR_CONFIG_DIR=HOME agent login`). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
