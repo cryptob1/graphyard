@@ -539,6 +539,13 @@ export interface ConfinementInput {
 const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
 /** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
 const isDirectoryPath = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
+/** The linked-worktree admin directory a checkout's `.git` pointer file names, resolved against the checkout, or null when its `.git` is unreadable or not a pointer. */
+const gitPointerAdminDirectory = (directory: string): string | null => {
+  let pointer: string;
+  try { pointer = readFileSync(join(directory, '.git'), 'utf8'); } catch { return null; }
+  const match = /^gitdir: (\S+)\s*$/.exec(pointer);
+  return match ? resolve(directory, match[1]) : null;
+};
 /** The bubblewrap executable on this PATH, or null: the synchronous lookup a spawn wrapper needs. */
 export const bwrapOnPath = (env: NodeJS.ProcessEnv = process.env): string | null => {
   for (const directory of (env.PATH ?? '').split(delimiter)) {
@@ -562,14 +569,16 @@ const sandboxWritableScope = (args: readonly string[], sessionDirectory: string)
 };
 /**
  * Whether the runtime's own workspace-write sandbox IS the confinement (GY-888): the sandbox
- * leaves every ungranted path read-only, which confines the checkout only while the checkout lies
- * outside every path the sandbox grants. A session whose working directory or an `--add-dir` would
- * hold the checkout — a terminal reviewer or producer runs from the coordinator root — cannot
- * claim it, and carries the read-only mount instead.
+ * leaves every ungranted path read-only, which confines the checkout only while the checkout and
+ * the Git directory it writes through (`checkoutGitDirectory`, which lies outside the checkout when
+ * the coordinator itself is a linked worktree — GY-957, review finding) lie outside every path the
+ * sandbox grants. A session whose working directory or an `--add-dir` would hold the checkout — a
+ * terminal reviewer or producer runs from the coordinator root — cannot claim it, and carries the
+ * read-only mount instead.
  */
 const runtimeSandboxConfines = (input: ConfinementInput): boolean => {
   if (runtimeSandboxes[input.kind]?.mode([...input.args]) !== 'workspace-write') return false;
-  const root = resolve(input.coordinatorRoot), git = join(root, '.git');
+  const root = resolve(input.coordinatorRoot), git = checkoutGitDirectory(root);
   const own = resolve(input.sessionDirectory);
   const admin = sessionGitAdminDirectory(own, root);
   // What the sandbox may grant inside the checkout: the session's own worktree and its own worktree
@@ -579,23 +588,46 @@ const runtimeSandboxConfines = (input: ConfinementInput): boolean => {
   const inside = (path: string, directory: string) => path === directory || withinCheckout(path, directory);
   const overlaps = (path: string, directory: string) => path === directory || withinCheckout(directory, path) || withinCheckout(path, directory);
   // A grant disqualifies when it touches the checkout or its Git administrative state outside the
-  // exemption — a worker launch grants the common `.git` so the runtime can commit, and that grant
-  // would leave coordinator refs, index and reflogs writable; such a launch carries the mount
-  // wrapper, which re-exposes only the session's own Git paths (GY-888, review finding).
+  // exemption — a worker launch grants the common Git directory so the runtime can commit, and that
+  // grant would leave coordinator refs, index and reflogs writable; such a launch carries the mount
+  // wrapper, which re-exposes only the session's own Git paths (GY-888, GY-957 review findings).
   return !sandboxWritableScope(input.args, input.sessionDirectory).some(path =>
     (overlaps(path, root) || overlaps(path, git)) && !exempt.some(zone => inside(path, zone)));
 };
 
-/** The linked-worktree administrative directory the session's own directory writes through, or null when it is not a linked worktree of the coordinator checkout. A linked worktree points at its admin through its `.git` file, so this reads the pointer rather than asking git. Pinning one session's Git admin, instead of the whole `.git/worktrees`, keeps concurrent assignments' worktree metadata unwritable to each other (GY-888). */
+/**
+ * The common Git directory the checkout at `root` writes through: its `.git` when that is the repository
+ * directory itself, otherwise the common directory the `.git` pointer's worktree admin names through its
+ * `commondir` marker — a directory outside the checkout when the checkout itself is a linked worktree
+ * (GY-957, review finding). Every Git path the confinement protects or re-exposes resolves here, never
+ * under a `.git` that may be a pointer file.
+ */
+export const checkoutGitDirectory = (root: string): string => {
+  const checkout = resolve(root), gitPath = join(checkout, '.git');
+  try { if (statSync(gitPath).isDirectory()) return gitPath; } catch { return gitPath; }
+  const admin = gitPointerAdminDirectory(checkout);
+  if (!admin) return gitPath;
+  try {
+    const common = readFileSync(join(admin, 'commondir'), 'utf8').trim();
+    return common ? resolve(admin, common) : admin;
+  } catch { return admin; }
+};
+
+/** The checkout's own linked-worktree admin directory — where its HEAD, index and FETCH_HEAD live — or null when its `.git` is the repository directory itself, so those paths sit directly under the common Git directory. */
+export const checkoutWorktreeAdminDirectory = (root: string): string | null => {
+  const checkout = resolve(root);
+  if (isDirectoryPath(join(checkout, '.git'))) return null;
+  const admin = gitPointerAdminDirectory(checkout);
+  return admin && isDirectoryPath(admin) ? admin : null;
+};
+
+/** The linked-worktree administrative directory the session's own directory writes through, or null when it is not a linked worktree of the coordinator checkout. A linked worktree points at its admin through its `.git` file, so this reads the pointer rather than asking git, and pins it under the coordinator's common worktrees area (`checkoutGitDirectory`), which is outside the checkout when the coordinator itself is a linked worktree. Pinning one session's Git admin, instead of the whole worktrees area, keeps concurrent assignments' worktree metadata unwritable to each other (GY-888). */
 export const sessionGitAdminDirectory = (sessionDirectory: string, root: string): string | null => {
   const directory = resolve(sessionDirectory), checkout = resolve(root);
   if (!withinCheckout(directory, checkout)) return null;
-  let pointer: string;
-  try { pointer = readFileSync(join(directory, '.git'), 'utf8'); } catch { return null; }
-  const match = /^gitdir: (\S+)\s*$/.exec(pointer);
-  if (!match) return null;
-  const gitDir = resolve(directory, match[1]);
-  const shared = join(checkout, '.git', 'worktrees');
+  const gitDir = gitPointerAdminDirectory(directory);
+  if (!gitDir) return null;
+  const shared = join(checkoutGitDirectory(checkout), 'worktrees');
   return gitDir.startsWith(`${shared}${sep}`) && isDirectoryPath(gitDir) ? gitDir : null;
 };
 
@@ -639,26 +671,33 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * The bubblewrap words that run a session with the coordinator checkout unwritable (GY-888): the
  * whole host exactly as it is, the checkout bind-mounted read-only over it, and only what the
  * session's own work needs re-exposed writable on top — bubblewrap applies each bind in order, so
- * the later ones shadow the read-only one. The namespace also unshares PIDs and mounts a fresh
- * `/proc`, so another process's `/proc/<pid>/root` is not a route back to the writable checkout
- * (the escape `containedInstall` closes for installs), and the host's process-launch channels are
- * hidden so no command can start the write outside the namespace; a session keeps the network and
- * its own process tree. The wrapper ends with `--`, so the runtime command follows it.
+ * the later ones shadow the read-only one. The shared Git paths and the checkout's FETCH_HEAD
+ * resolve through `checkoutGitDirectory`/`checkoutWorktreeAdminDirectory`, so a coordinator that is
+ * itself a linked worktree protects its real common Git directory instead of a `.git` pointer file
+ * (GY-957, review finding); where that directory lies outside the checkout it is bound read-only
+ * beside it, since `--ro-bind root root` alone would leave it writable under `--dev-bind / /`. The
+ * namespace also unshares PIDs and mounts a fresh `/proc`, so another process's `/proc/<pid>/root`
+ * is not a route back to the writable checkout (the escape `containedInstall` closes for installs),
+ * and the host's process-launch channels are hidden so no command can start the write outside the
+ * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
+ * the runtime command follows it.
  */
 export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
-  const gitDir = join(root, '.git');
+  const gitDir = checkoutGitDirectory(root);
   const adminDirectory = sessionGitAdminDirectory(directory, root);
   const sharedDirectories = [
     join(gitDir, 'objects'), ...(adminDirectory ? [adminDirectory] : [join(gitDir, 'worktrees')]), join(gitDir, 'refs', 'remotes'),
     join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'),
   ].filter(isDirectoryPath);
-  const fetchHead = join(gitDir, 'FETCH_HEAD');
+  const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
   const masks = processLaunchMaskWords(hostProcessLaunchTargets(), [root, directory]);
+  const externalGitDir = gitDir !== root && !withinCheckout(gitDir, root) && isDirectoryPath(gitDir) ? [gitDir] : [];
   return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
+    ...externalGitDir.flatMap(path => ['--ro-bind', path, path]),
     ...[...shared, ...own].flatMap(path => ['--bind', path, path]), '--'];
 }
 

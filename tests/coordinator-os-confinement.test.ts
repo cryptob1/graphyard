@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -36,6 +36,26 @@ function coordinatorFixture(base: string) {
   run('worktree', 'add', '-b', 'graphyard/gy-888-1', worktree, 'main');
   prepareConfinedGitPaths(root);
   return { root, worktree };
+}
+
+/** A coordinator checkout that is itself a linked worktree of the repository beside it — the install mode docs/install.md's worktree flow produces — with an assignment worktree under it. */
+function linkedWorktreeCoordinatorFixture(base: string) {
+  const main = join(base, 'main');
+  const seed = (...args: string[]) => execFileSync('git', ['-C', main, ...args], { stdio: 'ignore' });
+  mkdirSync(join(main, 'src'), { recursive: true });
+  writeFileSync(join(main, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  execFileSync('git', ['init', '-b', 'main', main], { stdio: 'ignore' });
+  seed('config', 'user.email', 'graphyard@localhost');
+  seed('config', 'user.name', 'Graphyard');
+  seed('add', '.');
+  seed('commit', '-m', 'main');
+  const root = join(base, 'coordinator');
+  execFileSync('git', ['-C', main, 'worktree', 'add', '-b', 'graphyard/host', root, 'main'], { stdio: 'ignore' });
+  const worktree = join(root, '.graphyard', 'worktrees', 'session');
+  mkdirSync(dirname(worktree), { recursive: true });
+  execFileSync('git', ['-C', root, 'worktree', 'add', '-b', 'graphyard/gy-957-1', worktree, 'main'], { stdio: 'ignore' });
+  prepareConfinedGitPaths(root);
+  return { main, root, worktree };
 }
 
 test('unit:coordinator-write-blocked-for-shell — every runtime kind launches confined, and a confined shell cannot write, commit in or switch the coordinator checkout by any means', async () => {
@@ -151,6 +171,65 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     assert.ok(!run.stdout.includes('PROC-ESCAPE'), 'the /proc route back to the checkout is closed');
     assert.ok(!run.stdout.includes('SYSTEMD-ALLOWED'), 'the systemd-run route outside the namespace is never open');
     assert.match(output, /Read-only file system/, 'operations fail with read-only filesystem error');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:linked-worktree-coordinator-confined — a coordinator that is itself a linked worktree protects its real Git directory, not the `.git` pointer file', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'graphyard-confinement-linked-'));
+  try {
+    const { main, root, worktree } = linkedWorktreeCoordinatorFixture(base);
+    const gitDir = join(main, '.git');
+    // GY-957, review finding: when the coordinator itself is a linked worktree, its `.git` is a
+    // pointer file and the common Git directory and the checkout's own worktree admin lie outside
+    // the checkout — the hard-coded `join(root, '.git')` protected neither, so a confined session
+    // inherited both writable from `--dev-bind / /` and could move the coordinator branch.
+    assert.ok(!isDirectory(join(root, '.git')), 'the coordinator checkout is a linked worktree whose `.git` is a pointer file');
+    assert.equal(checkoutGitDirectory(root), gitDir, 'the common Git directory resolves beside the repository');
+    assert.equal(checkoutWorktreeAdminDirectory(root), join(gitDir, 'worktrees', 'coordinator'), 'the coordinator worktree admin resolves under the common Git directory');
+    assert.equal(sessionGitAdminDirectory(worktree, root), join(gitDir, 'worktrees', 'session'), 'the session still pins its own worktree admin under the common worktrees area');
+    // prepareConfinedGitPaths prepared the real common Git directory, not a path under the pointer file.
+    assert.ok(existsSync(join(gitDir, 'refs', 'heads', 'graphyard')), 'the graphyard branch namespace is prepared under the common Git directory');
+    assert.ok(existsSync(join(gitDir, 'logs', 'refs', 'heads', 'graphyard')), 'the graphyard reflog namespace is prepared under the common Git directory');
+    assert.ok(existsSync(join(gitDir, 'worktrees', 'coordinator', 'FETCH_HEAD')), 'FETCH_HEAD is prepared in the coordinator worktree admin');
+    const build = (kind: string, args: string[], sessionDirectory: string = worktree) =>
+      coordinatorConfinement({ kind, args, coordinatorRoot: root, sessionDirectory, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap' });
+    const confinement = await build('claude', []);
+    assert.ok(confinement, 'the launch carries a confinement');
+    const wrapper = confinement.wrapper;
+    const rootIdx = wrapper.indexOf(root);
+    assert.ok(rootIdx > 0 && wrapper[rootIdx - 1] === '--ro-bind', 'the checkout is bound read-only');
+    const gitIdx = wrapper.indexOf(gitDir);
+    assert.ok(gitIdx > rootIdx && wrapper[gitIdx - 1] === '--ro-bind' && wrapper[gitIdx + 1] === gitDir, 'the common Git directory outside the checkout is bound read-only after it');
+    assert.ok(wrapper.includes(join(gitDir, 'objects')), 'the shared object store is re-exposed writable');
+    assert.ok(wrapper.includes(join(gitDir, 'refs', 'heads', 'graphyard')), 'the shared graphyard branch namespace is re-exposed writable');
+    assert.ok(wrapper.includes(join(gitDir, 'worktrees', 'session')), 'the session pins its own worktree admin directory');
+    assert.ok(!wrapper.includes(join(gitDir, 'worktrees')), 'not every assignment\'s admin directory is unprotected');
+    assert.ok(wrapper.includes(join(gitDir, 'worktrees', 'coordinator', 'FETCH_HEAD')), 'the checkout\'s FETCH_HEAD is re-exposed for fetches from the coordinator root');
+    // The sandbox claim gives up on a grant that would hold the real Git directory.
+    const addDirGit = await build('codex', ['--sandbox', 'workspace-write', '--add-dir', gitDir]);
+    assert.equal(addDirGit?.mechanism, 'read-only-mount', 'a codex --add-dir of the external common Git directory gives up the sandbox claim');
+    const ownSandbox = await build('codex', ['--sandbox', 'workspace-write']);
+    assert.equal(ownSandbox?.mechanism, 'runtime-sandbox', 'a codex worker granting only its own worktree keeps the sandbox claim');
+    // Prove the escape is closed with a real shell: the working tree and the Git administrative
+    // state outside the deliberately shared paths are unwritable, so the coordinator branch cannot
+    // move, while the session's own worktree still takes its writes.
+    if (process.platform !== 'linux' || !await sessionMountNamespaceWorks()) return;
+    const probe = [
+      'if touch "$1/coordinator-write-probe" 2>/dev/null; then echo WRITE-ALLOWED; else echo WRITE-BLOCKED; fi',
+      'if git -C "$1" -c user.email=g@l -c user.name=g commit --allow-empty -m probe 2>/dev/null; then echo COMMIT-ALLOWED; else echo COMMIT-BLOCKED; fi',
+      'if git -C "$1" update-ref refs/heads/main 0000000000000000000000000000000000000000 2>/dev/null; then echo REF-ALLOWED; else echo REF-BLOCKED; fi',
+      'touch "$2/session-write-probe" && git -C "$2" -c user.email=g@l -c user.name=g commit --allow-empty -m probe && echo SESSION-WROTE',
+    ].join('\n');
+    const run = spawnSync(wrapper[0], [...wrapper.slice(1, -1), '/bin/sh', '-c', probe, 'sh', root, worktree],
+      { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
+    assert.equal(run.status, 0, `the confined shell ran successfully: ${run.stderr}`);
+    assert.ok(run.stdout.includes('WRITE-BLOCKED'), 'the linked-worktree checkout is unwritable');
+    assert.ok(run.stdout.includes('COMMIT-BLOCKED'), 'git commit in the linked-worktree checkout is blocked');
+    assert.ok(run.stdout.includes('REF-BLOCKED'), 'a ref outside the shared graphyard namespace is unwritable');
+    assert.ok(run.stdout.includes('SESSION-WROTE'), 'the session worktree still takes its writes');
+    assert.ok(!run.stdout.includes('WRITE-ALLOWED') && !run.stdout.includes('COMMIT-ALLOWED') && !run.stdout.includes('REF-ALLOWED'), 'no probe escapes');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
