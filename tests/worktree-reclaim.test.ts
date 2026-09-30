@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -9,6 +9,7 @@ import { dependencyDirectories, diskExhaustion, diskPressure, diskPressureAttent
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 import { runChild } from '../src/child-runner.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-79: worktrees and their dependency trees filled the host's disk mid-cycle. The master loop
 // now reclaims the dependency directories of finished assignments on its own, a fresh attempt
@@ -23,7 +24,7 @@ const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id:
 
 /** A host repository with one dependency install of its own, the way a real checkout carries one. */
 async function host(remote = true) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-reclaim-'));
+  const root = await temporaryDirectory('reclaim');
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   for (const [key, value] of [['user.email', 'reclaim@example.com'], ['user.name', 'Reclaim Test'], ['commit.gpgsign', 'false']]) execFileSync('git', ['config', key, value], { cwd: root });
   if (remote) execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
@@ -82,7 +83,7 @@ function effects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
 }
 
 test('integration:worktree-reclaim — the loop removes the dependency trees of finished assignments and leaves every checkout, branch and workspace record intact', async () => {
-  const root = await host(false), credentials = await mkdtemp(join(tmpdir(), 'graphyard-reclaim-credentials-'));
+  const root = await host(false), credentials = await temporaryDirectory('reclaim-credentials');
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
     const master = config(token, { reclaimIdleHours: 3 });
@@ -175,7 +176,7 @@ test('integration:worktree-reclaim — the loop removes the dependency trees of 
 });
 
 test('integration:worktree-dependency-reuse — a fresh attempt starts from a clean checkout of its exact head and shares one install instead of paying for a private copy', async () => {
-  const root = await host(), credentials = await mkdtemp(join(tmpdir(), 'graphyard-reuse-credentials-'));
+  const root = await host(), credentials = await temporaryDirectory('reuse-credentials');
   try {
     const credential = join(credentials, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials }, coordinatorStatus as typeof fetch);
@@ -223,7 +224,7 @@ test('integration:worktree-dependency-reuse — a fresh attempt starts from a cl
 
     // A worktree outside the repository resolves nothing on its own, so it is given a mirror of
     // the one install: a real directory of links, which the ignore rule covers and a reclaim removes.
-    const detached = join(await mkdtemp(join(tmpdir(), 'graphyard-detached-')), 'GY-79-2');
+    const detached = join(await temporaryDirectory('detached'), 'GY-79-2');
     execFileSync('git', ['worktree', 'add', '-q', '--detach', detached, 'main'], { cwd: root });
     const mirrored = await shareDependencies(root, detached);
     assert.deepEqual(mirrored.shared, [{ name: 'node_modules', source: join(root, 'node_modules'), how: 'mirrored' }]);
@@ -244,7 +245,7 @@ test('integration:worktree-dependency-reuse — a fresh attempt starts from a cl
 
     // With no install anywhere there is nothing to share and nothing to fail.
     await rm(join(root, 'node_modules'), { recursive: true, force: true });
-    const bare = join(await mkdtemp(join(tmpdir(), 'graphyard-bare-')), 'GY-82-1');
+    const bare = join(await temporaryDirectory('bare'), 'GY-82-1');
     execFileSync('git', ['worktree', 'add', '-q', '--detach', bare, 'main'], { cwd: root });
     const unshared = await shareDependencies(root, bare);
     assert.deepEqual(unshared.shared, []);
@@ -302,7 +303,7 @@ test('unit:disk-pressure-attention — master status asks for a reclaim before t
 
   // And the loop says it too: an action that failed because the host is out of room is recorded
   // as that, with the reclaim command, rather than as an unexplained command error.
-  const credentials = await mkdtemp(join(tmpdir(), 'graphyard-pressure-'));
+  const credentials = await temporaryDirectory('pressure');
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
     const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: token, agentArgs: [], approvals: 'auto', environment: {} };
@@ -389,7 +390,7 @@ test('unit:worktree-reclaim-executes — the reclaim step removes delivered and 
 });
 
 test('unit:worktree-reclaim-bounded — removal is bounded per cycle and drains a backlog on consecutive cycles; status reads the cached inventory without running git per worktree', async () => {
-  const root = await host(false), credentials = await mkdtemp(join(tmpdir(), 'graphyard-reclaim-bounded-')), scratch = await mkdtemp(join(tmpdir(), 'graphyard-reclaim-git-'));
+  const root = await host(false), credentials = await temporaryDirectory('reclaim-bounded'), scratch = await temporaryDirectory('reclaim-git');
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
     const master = config(token, { worktreeRemovalLimit: 3, diskThresholdGb: 0.1 });

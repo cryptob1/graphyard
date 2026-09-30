@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -28,7 +28,7 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const maximumMs = 4 * 3_600_000;
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-attempt-timebox-'));
+  const directory = await temporaryDirectory('attempt-timebox');
   const workers: WorkerProfile[] = [];
   for (const name of ['alpha', 'beta']) {
     const file = join(directory, `${name}.token`);

@@ -1,8 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -11,6 +9,7 @@ import { GitHub, gateMerge } from '../src/github.js';
 import { buildMasterStatus } from '../src/master.js';
 import type { GitHubMergeQueueState, MergeEnqueueRequest } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // All merges stalled after GY-258: on a base branch without a merge queue Graphyard enabled
 // auto-merge, but it only asks once every gate — including the required `Graphyard / merge` check
@@ -153,7 +152,7 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 let pg: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 292;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-merge-clean-pg-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-clean-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_clean_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_clean_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'test/repository');

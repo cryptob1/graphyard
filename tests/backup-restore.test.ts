@@ -1,10 +1,9 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -19,6 +18,7 @@ import { projectFlow } from '../src/flow-analytics.js';
 import { backupDigest, backupSchema, createBackup, ledgerCounts, restoreBackup, verifyBackup } from '../src/backup.js';
 import { ledgerSeeded } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const run = promisify(execFile);
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -38,7 +38,7 @@ const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:$
 
 before(async () => {
   port = Number(process.env.GRAPHYARD_BACKUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 6);
-  scratch = await mkdtemp(join(tmpdir(), 'graphyard-backup-'));
+  scratch = await temporaryDirectory('backup');
   pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start();
   for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded']) await pg.createDatabase(name);

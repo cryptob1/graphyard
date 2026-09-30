@@ -1,12 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { baseTree, derivedIntent } from '../src/cli/master.js';
 import { derivePlannedFiles, describedAsNew, impliedScopeRequests } from '../src/model/work.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-140: plannedFiles is derived from the criteria and resolved against the base branch the item
 // will be worked on, instead of being accepted as hand-written. `master create` and
@@ -18,8 +18,8 @@ const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c
 const baseFiles = ['src/supervisor.ts', 'src/executor.ts', 'src/model/escalation-context.ts', 'src/master.ts', 'docs/master-agent.md', 'tests/existing.test.ts'];
 
 before(async () => {
-  root = await mkdtemp(join(tmpdir(), 'gy140-'));
-  dir = await mkdtemp(join(tmpdir(), 'gy140-intent-'));
+  root = await temporaryDirectory('gy140');
+  dir = await temporaryDirectory('gy140-intent');
   git('init', '--quiet', '--initial-branch=main');
   for (const file of baseFiles) { await mkdir(join(root, dirname(file)), { recursive: true }); await writeFile(join(root, file), `// ${file}\n`); }
   git('add', '.'); git('commit', '--quiet', '-m', 'base');
