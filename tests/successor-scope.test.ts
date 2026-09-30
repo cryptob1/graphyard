@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { automaticScopeGrounds, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -11,6 +11,7 @@ import { parseSuccessions, successorGround, successorsOf, successorWidening } fr
 import { basePaths, baseSuccessions, successionReader } from '../src/review-scope.js';
 import type { ChildRun } from '../src/child-runner.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-394: GY-177 split src/master-daemon.ts into src/daemon/*, and every open item that planned the
 // old file found the code it plans to change outside its scope. A request for the successor files
@@ -27,7 +28,7 @@ const run: ChildRun = async (command, args) => execFileSync(command, args, { enc
 const lines = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, index) => `export function f${from + index}() { return ${from + index} * 2 + 1; }\n`).join('');
 
 before(async () => {
-  scratch = await mkdtemp(join(tmpdir(), 'graphyard-successor-scope-'));
+  scratch = await temporaryDirectory('successor-scope');
   origin = join(scratch, 'origin.git'); root = join(scratch, 'loop'); const work = join(scratch, 'work');
   execFileSync('git', ['init', '--quiet', '--bare', '-b', 'main', origin]);
   execFileSync('git', ['clone', '--quiet', origin, work]);

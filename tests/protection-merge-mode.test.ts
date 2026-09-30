@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyProtection, mergeMode, mergeQueueRulesetName, protectionPlan, repositoryMergeSettings, withMergeSettings } from '../src/protection.js';
 import { applyProtection as installProtection, protectionSatisfied, type GitHubCli } from '../src/install/github.js';
 import { applyProposal, scanProposal } from '../src/repository-setup.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-310: GitHub offers merge queues only on organization-owned repositories and answers the queue
 // ruleset on a user-owned one with HTTP 422. There GitHub merges through auto-merge instead, so
@@ -134,7 +134,7 @@ test('unit:setup-enables-auto-merge — install and onboarding enable auto-merge
   assert.equal(organization.state.allowAutoMerge, true);
 
   // Onboarding: init --scan --apply's setup step switches auto-merge on for a user-owned repository.
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-merge-mode-'));
+  const root = await temporaryDirectory('merge-mode');
   try {
     execFileSync('git', ['init', '-q', root]);
     execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:owner/project.git'], { cwd: root });
