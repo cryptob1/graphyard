@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -17,6 +16,7 @@ import { launchEscalationHandler, masterConfigSchema, runAutonomyCommand, type A
 import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { Store } from '../src/store.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-90: the control plane assembles an escalation's context from the project — the repository's
 // own rules and policy, the goals and priorities the work graph records, the item slice and the
@@ -90,7 +90,7 @@ const fingerprintOf = (body: any) => { const { fingerprint: _fingerprint, ...doc
 let masterRoot: string, credentialDirectory: string, config: MasterConfig;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 27;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-escalation-context-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('escalation-context'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('context_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/context_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
@@ -100,10 +100,10 @@ before(async () => {
   for (const agent of [master, approver])
     await ok(token(operator), 'POST', 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'Onboarding provisions agent identities' });
   // A master installation whose operator-agent credential lives outside every worktree, as onboarding leaves it.
-  masterRoot = await mkdtemp(join(tmpdir(), 'graphyard-context-root-'));
+  masterRoot = await temporaryDirectory('context-root');
   execFileSync('git', ['init', '-q', masterRoot]);
   await writeFile(join(masterRoot, '.gitignore'), '.graphyard/\n');
-  credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-context-credentials-'));
+  credentialDirectory = await temporaryDirectory('context-credentials');
   await writeFile(join(credentialDirectory, 'master.token'), token(coordinator), { mode: 0o600 });
   await writeFile(join(credentialDirectory, 'master-operator.token'), master.token, { mode: 0o600 });
   config = masterConfigSchema.parse({ version: 1, url, credentialFile: join(credentialDirectory, 'master.token'), cliPath: join(root, 'bin/graphyard.mjs'), repository, baseBranch: 'main', githubAppId: 1234, hostId: 'context-host', masterAgentName: 'graphyard-master-escalations',
