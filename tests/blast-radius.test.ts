@@ -92,6 +92,10 @@ test('unit:candidate-blast-radius-summary an unread head or a missing pull reque
   const none = blastRadius(subject({ candidate: null, observation: null }));
   assert.equal(none.touches, 'There is no pull request yet, so nothing is touched.');
   assert.equal(none.sentences.length, 4);
+  // A partial reading of the current head (no file list yet) must not break the item page.
+  const partial = blastRadius({ candidate, observation: { candidate }, gates: [{ name: 'merge', passed: false, reasons: [] }] } as unknown as Work);
+  assert.equal(partial.touches, 'It changes no files.');
+  assert.match(partial.guard, /Still missing: clean merge\.$/);
 });
 
 test('unit:candidate-blast-radius-summary the item view renders the summary for every candidate', () => {

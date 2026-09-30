@@ -49,12 +49,12 @@ const list = (items: string[]) => items.length <= 1 ? items.join('') : `${items.
 
 /** What each gate checks, as a clause after "the merge guard checks that". */
 function guardClauses(work: Pick<Work, 'policy' | 'criteria'>, base: string): { gate: string; text: string }[] {
-  const proofs = work.criteria.reduce((sum, criterion) => sum + criterion.proofs.length, 0);
-  const checks = work.policy.checks ?? [];
+  const proofs = (work.criteria ?? []).reduce((sum, criterion) => sum + criterion.proofs.length, 0);
+  const checks = work.policy?.checks ?? [];
   return [
     { gate: 'build', text: 'the builder has handed the work in' },
     ...(checks.length ? [{ gate: 'test', text: `the automated ${checks.length === 1 ? 'check' : 'checks'} ${list(checks)} ${checks.length === 1 ? 'passes' : 'pass'} on this exact code` }] : []),
-    ...(work.policy.review ? [{ gate: 'review', text: 'someone other than the builder approves this exact code' }] : []),
+    ...(work.policy?.review ? [{ gate: 'review', text: 'someone other than the builder approves this exact code' }] : []),
     ...(proofs ? [{ gate: 'acceptance', text: `${proofs === 1 ? 'the proof its requirements name passes' : `all ${proofs} proofs its requirements name pass`} on it` }] : []),
     { gate: 'merge', text: `it merges cleanly onto ${base} and puts back no file outside its plan` },
   ];
@@ -67,7 +67,7 @@ export function blastRadius(work: Subject): BlastRadius {
   const observation = work.observation;
   const base = observation?.landing?.base ?? 'the base branch';
   const clauses = guardClauses(work, base);
-  const open = clauses.filter(clause => (work.gates as Gate[]).some(gate => gate.name === clause.gate && !gate.passed));
+  const open = clauses.filter(clause => ((work.gates ?? []) as Gate[]).some(gate => gate.name === clause.gate && !gate.passed));
   const guard = `Before it merges, the merge guard checks that ${list(clauses.map(clause => clause.text))}. `
     + (open.length ? `Still missing: ${list(open.map(clause => gateWords[clause.gate]))}.` : 'Every one of these holds now.');
   // Only a reading of the current head describes what this candidate touches.
@@ -79,7 +79,7 @@ export function blastRadius(work: Subject): BlastRadius {
     return { danger: 'unknown', door: null, headline: 'Merge danger: not known yet', touches, doorway, reverts, guard, sentences: [touches, doorway, reverts, guard] };
   }
   const files: Pick<ScopeFile, 'path' | 'status' | 'additions' | 'deletions'>[] = observation!.scopeFiles?.length
-    ? observation!.scopeFiles : observation!.files.map(path => ({ path, status: 'changed', additions: 0, deletions: 0 }));
+    ? observation!.scopeFiles : (observation!.files ?? []).map(path => ({ path, status: 'changed', additions: 0, deletions: 0 }));
   const lines = files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
   const removed = files.filter(file => file.status === 'removed').length;
   const counts = new Map<Area, number>();
