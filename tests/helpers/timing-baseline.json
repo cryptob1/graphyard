@@ -250,6 +250,7 @@
     "tests/bootstrap-policy.test.ts": 3098,
     "tests/candidate-markup.test.ts": 283,
     "tests/capacity-failover.test.ts": 12634,
+    "tests/capacity-spread.test.ts": 650,
     "tests/card-timing.test.ts": 2225,
     "tests/ci-failure-rework.test.ts": 1112,
     "tests/ci-proofs-trust.test.ts": 3574,

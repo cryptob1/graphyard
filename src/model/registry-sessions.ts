@@ -181,14 +181,15 @@ export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; m
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
  * When the role last ran a session on `account`, as spreading reads it (GY-961): the time of its
- * newest session that is still live or ended with a result. A run that ended without a result, or
- * a selection whose launch never ran, is demand the account did not productively serve — GY-446
- * retries such a run on the same account, so it must not read as a reason to move the role away.
+ * newest session, live or ended. Most sessions end with no outcome at all — a worker whose lease
+ * went, a reviewer whose request was answered, anything superseded — and each still spent the
+ * account's quota, so each counts. Only a headless run reported as ending without a result is left
+ * out: GY-446 retries such a run on the same account, so it must not move the role away.
  */
 const lastRoleUse = (registry: Pick<AgentRegistry, 'sessions'>, role: FleetRoleName, account: string): number => {
   let last = Number.NEGATIVE_INFINITY;
   for (const session of registry.sessions) {
-    if (session.role !== role || session.account !== account || (session.endedAt && session.outcome !== 'result')) continue;
+    if (session.role !== role || session.account !== account || session.outcome === 'no-result') continue;
     last = Math.max(last, Date.parse(session.selectedAt));
   }
   return last;

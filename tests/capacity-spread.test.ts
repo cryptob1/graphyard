@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { accountIneligibility, applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, roleIneligibility, type AgentRegistry, type FleetAccount } from '../src/model/registry.js';
+import { accountIneligibility, applyRegistryMutation, chooseSession, emptyRegistry, endRegistrySession, proposedRuntimes, roleIneligibility, type AgentRegistry, type FleetAccount, type FleetRoleName } from '../src/model/registry.js';
 import { masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, type MasterConfig } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-961 — the recurring capacity faults (four in 24 hours: GY-487, GY-727, GY-853 waiting on a
@@ -32,8 +32,18 @@ const WINDOW = 5 * HOUR, INCREMENT = 20, CEILING = 95;
 const STEP = 30 * MINUTE, LAUNCHES = 48;
 const START = Date.parse('2026-09-29T08:56:00.672Z');
 const ACCOUNTS = ['claude-a', 'codex-a', 'opencode-a'];
-/** Every instance listed on GY-961, each a role drained to a standstill by the shared cause. */
-const INSTANCES = ['GY-487', 'GY-727', 'GY-853', 'producer capacity'];
+/** A session's run: it ends well before the next launch, so the role never holds more than one live session. */
+const RUN = 20 * MINUTE;
+/**
+ * Every instance listed on GY-961, each a role drained to a standstill by the shared cause, with
+ * the role it waited in: the three items were worker launches waiting on an account out of quota,
+ * and producer capacity was the producer role. A worker session ends the way `settleSessions` and
+ * the loop's `endRegistrySession` end it — with a reason and no run outcome; a headless producer
+ * run ends with its outcome, `result`.
+ */
+const INSTANCES: { instance: string; role: FleetRoleName }[] = [
+  { instance: 'GY-487', role: 'worker' }, { instance: 'GY-727', role: 'worker' }, { instance: 'GY-853', role: 'worker' }, { instance: 'producer capacity', role: 'producer' },
+];
 
 /** The provider, as the probes read it: per account a rolling `WINDOW` of `INCREMENT`s. */
 function provider(accounts: string[]) {
@@ -59,15 +69,15 @@ const fleetFixture = () => applyRegistryMutation(emptyRegistry(), 'apply', {
   runtimes: ['claude', 'codex', 'opencode'].map(name => proposedRuntimes.find(runtime => runtime.name === name)!),
   models: [{ name: 'claude-default', id: null }, { name: 'codex-default', id: null }, { name: 'opencode-default', id: null }],
   accounts: ACCOUNTS.map((name, index) => ({ name, runtime: ['claude', 'codex', 'opencode'][index], model: `${['claude', 'codex', 'opencode'][index]}-default`, credential: { host: HOST, home: null } })),
-  roles: [{ name: 'producer', accounts: ACCOUNTS, concurrency: 50 }],
+  roles: [{ name: 'worker', accounts: ACCOUNTS, concurrency: 1 }, { name: 'producer', accounts: ACCOUNTS, concurrency: 1 }],
   reason: 'The fleet the four instances drained',
 }, { actor: 'operator', at: new Date(START - HOUR).toISOString() }).registry;
 
 /** The base policy: the first eligible account of the role, in the role's own order, nothing else. */
-const firstFit = (registry: AgentRegistry, role: string, now: number): FleetAccount | null => {
+const firstFit = (registry: AgentRegistry, role: FleetRoleName, now: number): FleetAccount | null => {
   for (const name of registry.roles.find(entry => entry.name === role)!.accounts) {
     const account = registry.accounts.find(entry => entry.name === name)!;
-    if (accountIneligibility(registry, account, now, HOST) ?? roleIneligibility(account, 'producer', now)) continue;
+    if (accountIneligibility(registry, account, now, HOST) ?? roleIneligibility(account, role, now)) continue;
     return account;
   }
   return null;
@@ -76,8 +86,12 @@ const firstFit = (registry: AgentRegistry, role: string, now: number): FleetAcco
 /** `midSession` counts sessions that ran their account past the ceiling while at work — the capacity fault each instance filed. */
 interface Outcome { counts: Record<string, number>; midSession: number; refusals: number; longestPause: number; exhaustedReadings: number; peak: number }
 
-/** One instance run over the registry path: every launch folds fresh quota in, then asks for a session. */
-function simulate(policy: 'base' | 'candidate', instance: string): Outcome {
+/**
+ * One instance run over the registry path: every launch folds fresh quota in, then asks for a
+ * session, and every session has ended — as the role's sessions end in production — before the
+ * next launch asks, so the rotation reads only ended sessions.
+ */
+function simulate(policy: 'base' | 'candidate', { instance, role }: { instance: string; role: FleetRoleName }): Outcome {
   const registry = fleetFixture(), spent = provider(ACCOUNTS);
   const counts = Object.fromEntries(ACCOUNTS.map(name => [name, 0]));
   let midSession = 0, refusals = 0, pause = 0, longestPause = 0, exhaustedReadings = 0, peak = 0;
@@ -86,27 +100,33 @@ function simulate(policy: 'base' | 'candidate', instance: string): Outcome {
     for (const account of registry.accounts) account.quota = { ...spent.quota(account.name, now), observedAt: new Date(now).toISOString(), observedBy: 'master', source: 'probe' };
     exhaustedReadings += registry.accounts.filter(account => account.quota.state === 'exhausted').length;
     peak = Math.max(peak, ...registry.accounts.map(account => spent.percent(account.name, now)));
-    const account = policy === 'candidate' ? chooseSession(registry, { role: 'producer', host: HOST }, now).account : firstFit(registry, 'producer', now);
+    for (const session of registry.sessions) {
+      if (session.endedAt || Date.parse(session.selectedAt) + RUN > now) continue;
+      const at = new Date(Date.parse(session.selectedAt) + RUN).toISOString();
+      if (role === 'worker') endRegistrySession(registry, session, 'the lease is no longer held', undefined, at);
+      else endRegistrySession(registry, session, 'the run exited', 'result', at);
+    }
+    const account = policy === 'candidate' ? chooseSession(registry, { role, host: HOST }, now).account : firstFit(registry, role, now);
     if (!account) { refusals++; pause++; longestPause = Math.max(longestPause, pause); continue; }
     pause = 0;
     spent.use(account.name, now);
     if (spent.percent(account.name, now) >= CEILING) midSession++;
     counts[account.name]++;
     // The choice recorded, as the control plane appends it — the rotation's memory of the role.
-    registry.sessions.push({ id: randomUUID(), role: 'producer', account: account.name, runtime: account.runtime, model: account.model, host: HOST, work: instance, principal: 'proof-runner', selectedAt: new Date(now).toISOString(), selectedBy: 'coordinator', reason: 'simulated', skipped: [], endedAt: null, endReason: null });
+    registry.sessions.push({ id: randomUUID(), role, account: account.name, runtime: account.runtime, model: account.model, host: HOST, work: instance, principal: 'proof-runner', selectedAt: new Date(now).toISOString(), selectedBy: 'coordinator', reason: 'simulated', skipped: [], endedAt: null, endReason: null });
   }
   return { counts, midSession, refusals, longestPause, exhaustedReadings, peak };
 }
 
 test('unit:capacity-fault-class-spread — each GY-961 instance recurs against the base first-fit policy and not against the candidate: the registry spreads a role across its eligible accounts so none drains first (GY-961)', () => {
-  for (const instance of INSTANCES) {
-    const base = simulate('base', instance);
+  for (const entry of INSTANCES) {
+    const { instance } = entry, base = simulate('base', entry);
     assert.ok(base.midSession > 0, `${instance}: against the base sessions run their account out of quota mid-work (${base.midSession} of ${LAUNCHES})`);
     assert.ok(base.exhaustedReadings > 0, `${instance}: against the base accounts read out of quota at launch instants (${base.exhaustedReadings})`);
     const spread = Math.max(...Object.values(base.counts)) - Math.min(...Object.values(base.counts));
     assert.ok(spread > 4, `${instance}: against the base the load is first-fit, not spread (${JSON.stringify(base.counts)})`);
 
-    const candidate = simulate('candidate', instance);
+    const candidate = simulate('candidate', entry);
     assert.deepEqual(candidate.midSession, 0, `${instance}: against the candidate no session runs its account out of quota`);
     assert.deepEqual(candidate.refusals, 0, `${instance}: against the candidate every launch is selected`);
     assert.deepEqual(candidate.longestPause, 0, `${instance}: against the candidate the role never pauses`);
@@ -141,8 +161,8 @@ async function localFixture(directory: string): Promise<MasterConfig> {
 
 /** One instance over the local profile path: a session that spends its account reports the limit (GY-89), and the account is held until it resets. */
 async function simulateLocal(policy: 'base' | 'candidate', instance: string): Promise<Outcome> {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-capacity-spread-'));
-  try {
+  const directory = await temporaryDirectory('capacity-spread');
+  {
     const config = await localFixture(directory), spent = provider(ACCOUNTS);
     const counts = Object.fromEntries(ACCOUNTS.map(name => [name, 0]));
     let midSession = 0, refusals = 0, pause = 0, longestPause = 0, exhaustedReadings = 0, peak = 0;
@@ -173,11 +193,11 @@ async function simulateLocal(policy: 'base' | 'candidate', instance: string): Pr
       pause = 0;
     }
     return { counts, midSession, refusals, longestPause, exhaustedReadings, peak };
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  }
 }
 
 test('unit:capacity-fault-class-spread — the local profile path spreads the same way: each instance recurs against the base first-fit profile order and not against the candidate (GY-961)', async () => {
-  for (const instance of INSTANCES) {
+  for (const { instance } of INSTANCES) {
     const base = await simulateLocal('base', instance);
     assert.ok(base.midSession > 0, `${instance}: against the base sessions run their account out of quota mid-work (${base.midSession} of ${LAUNCHES})`);
     assert.ok(base.exhaustedReadings > 0, `${instance}: against the base accounts are held out of quota at launch instants (${base.exhaustedReadings})`);
