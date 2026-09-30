@@ -144,7 +144,7 @@ test('integration:agent-env-discovery — onboarding discovers or creates one en
     assert.deepEqual(applied.created, ['cursor-b']);
     assert.equal((await stat(join(environments, 'cursor-b'))).mode & 0o777, 0o700);
     assert.equal(applied.counts.loggedIn, 4, 'the new cursor-b has no login yet');
-    assert.match(applied.next, /Log in the rest .*cursor-agent login/);
+    assert.match(applied.next, /Log in the rest .*CURSOR_CONFIG_DIR=\S+ agent login/);
     // The fresh Claude homes get the one setting an unattended bypass-mode launch needs.
     assert.equal(JSON.parse(await readFile(join(claudeA, 'settings.json'), 'utf8')).skipDangerousModePermissionPrompt, true);
     const config = await loadMasterConfig(root);
