@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { BUDGET_EXHAUSTED_REASON, PROBE_FAILED_REASON, candidateConflicts, openCandidates, probeCandidateConflictsWithBudget } from '../src/conflicts.js';
@@ -43,8 +43,8 @@ const gitInit = (root: string) => {
 const block = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
 test('unit:conflict-probe-overlap-only-cached: the probe runs for overlapping pairs only and caches results', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-probe-'));
-  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-probe-git-'));
+  const dataRoot = await temporaryDirectory('conflict-probe');
+  const gitRoot = await temporaryDirectory('conflict-probe-git');
   try {
     gitInit(gitRoot);
 
@@ -183,8 +183,8 @@ test('unit:conflict-probe-budgeted: each unprobed pair carries its reason, and a
 });
 
 test('unit:conflict-probe-budgeted: a slow git holds the budget — each call is killed at the deadline and the rest are named unprobed', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-budget-slow-'));
-  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-budget-slow-git-'));
+  const dataRoot = await temporaryDirectory('conflict-budget-slow');
+  const gitRoot = await temporaryDirectory('conflict-budget-slow-git');
   try {
     gitInit(gitRoot);
     const work: Work[] = [];
@@ -253,8 +253,8 @@ test('unit:conflict-probe-budgeted: master status still returns every other sect
 });
 
 test('unit:conflict-probe-budgeted: the fetch is inside the budget — it is killed at the deadline, the report still answers, and nothing is invented', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-budget-'));
-  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-budget-git-'));
+  const dataRoot = await temporaryDirectory('conflict-fetch-budget');
+  const gitRoot = await temporaryDirectory('conflict-fetch-budget-git');
   try {
     gitInit(gitRoot);
     const work: Work[] = [];
@@ -301,8 +301,8 @@ test('unit:conflict-probe-budgeted: the fetch is inside the budget — it is kil
 });
 
 test('unit:conflict-probe-budgeted: the fetch pays the budget first — the probe phase gets only what the fetch left', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-first-'));
-  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-fetch-first-git-'));
+  const dataRoot = await temporaryDirectory('conflict-fetch-first');
+  const gitRoot = await temporaryDirectory('conflict-fetch-first-git');
   try {
     gitInit(gitRoot);
     const work: Work[] = [];
@@ -353,8 +353,8 @@ test('unit:conflict-probe-budgeted: the fetch pays the budget first — the prob
 });
 
 test('unit:conflict-probe-overlap-only-cached: a pair the disk cache answers is reported however far the budget is spent', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-cache-budget-'));
-  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-cache-budget-git-'));
+  const dataRoot = await temporaryDirectory('conflict-cache-budget');
+  const gitRoot = await temporaryDirectory('conflict-cache-budget-git');
   try {
     gitInit(gitRoot);
     const shaA = '1'.repeat(40), shaB = '2'.repeat(40);
@@ -401,8 +401,8 @@ test('unit:conflict-probe-overlap-only-cached: a pair the disk cache answers is 
 });
 
 test('unit:conflict-probe-null-uncached: an unavailable head is probed again once it becomes available', async () => {
-  const dataRoot = await mkdtemp(join(tmpdir(), 'conflict-null-'));
-  const gitRoot = await mkdtemp(join(tmpdir(), 'conflict-null-git-'));
+  const dataRoot = await temporaryDirectory('conflict-null');
+  const gitRoot = await temporaryDirectory('conflict-null-git');
   try {
     gitInit(gitRoot);
 

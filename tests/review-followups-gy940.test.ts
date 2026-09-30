@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -10,6 +9,7 @@ import { promptTarget } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-940 — the four follow-ups the approved review of GY-852 (PR #425) filed, each a way a
@@ -58,7 +58,7 @@ const dangerousRm = [
 ].join('\n').replaceAll('│', ' ');
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-gy940-'));
+  const directory = await temporaryDirectory('gy940');
   const credentialFile = join(directory, 'coordinator.token'), worker = join(directory, 'worker.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await writeFile(worker, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
