@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -17,6 +17,7 @@ import { decideScopeRequest, pinningTestGround, redecidableScopeRefusal, routabl
 // there each test fails on the behaviour it reproduces, not on a missing import.
 const { documentationTestGround, touchesDocumentation } = scopeRules as Partial<typeof scopeRules> as typeof scopeRules;
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-954: the scope class recurred past its threshold on GY-945 and GY-883. Each test below is
 // named for the instance it reproduces: against the base the ask refuses whole (one ungrounded
@@ -110,7 +111,7 @@ const widenAsMaster = (widened: string[][]) => async (item: Work, asked: ScopeRe
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_FAULT_CLASS_SCOPE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 57);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-fault-class-scope-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('fault-class-scope-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('fault_class_scope_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/fault_class_scope_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
@@ -118,7 +119,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   await ok(token(operator), 'POST', 'operator-agents', { id: master.id, displayName: master.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: master.token, reason: 'Onboarding provisions the master operator agent' });
-  operatorTokenFile = join(await mkdtemp(join(tmpdir(), 'graphyard-fault-class-scope-')), 'operator.token');
+  operatorTokenFile = join(await temporaryDirectory('fault-class-scope'), 'operator.token');
   await writeFile(operatorTokenFile, `${master.token}\n`, { mode: 0o600 });
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
