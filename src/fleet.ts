@@ -17,7 +17,7 @@ import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, pr
  *
  * Every launch asks the control plane which session to run: the executor reads the registry,
  * probes the logins that live on its own host, reports what it saw, and the control plane picks
- * the first eligible account of the role and records the choice. Nothing is cached between
+ * the eligible account of the role used least recently and records the choice. Nothing is cached between
  * actions beyond the probe's own short cache, so a registry change takes effect on the next
  * action with no restart and no file edit. A role the registry does not define yet keeps
  * launching from the local profile, which is how an installation moves onto the registry one

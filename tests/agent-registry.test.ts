@@ -282,7 +282,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const recorded: Registry = await ok('agent-registry/document', coordinator);
   const session = recorded.sessions.at(-1)!;
   assert.deepEqual([session.role, session.account, session.runtime, session.model, session.host, session.work, session.principal, session.selectedBy, session.endedAt], ['worker', 'claude-fresh', 'claude', 'opus', HOST, dispatched.work, 'implementer', 'master', null]);
-  assert.match(session.reason, /claude-fresh is the first eligible account for worker \(preference 5 of 5; 1 of 2 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
+  assert.match(session.reason, /claude-fresh is the eligible account of worker used least recently \(preference 5 of 5; last used never; 1 of 2 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
   assert.deepEqual(session.skipped.map(entry => entry.account), ['claude-off', 'claude-spent', 'claude-out', 'claude-remote']);
   const observed = Object.fromEntries(recorded.accounts.map(account => [account.name, account.quota]));
   assert.deepEqual([observed['claude-spent'].state, observed['claude-spent'].source, observed['claude-spent'].observedBy, observed['claude-out'].loggedIn, observed['claude-fresh'].state], ['exhausted', 'probe', 'master', false, 'available']);
