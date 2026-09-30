@@ -1,7 +1,7 @@
 // Concern: dispatching a worker — dispatchability, the worker launch, its prompt and environment.
 import { writeFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
-import { type ChildRun, defaultChildRun } from '../child-runner.js';
+import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
 import { researchWorkerSection } from '../research.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
@@ -255,7 +255,12 @@ function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
 // large repository is the slowest thing the dispatcher waits on; it is bounded well above the
 // runtime bound, so a slow checkout is never mistaken for a hung one (GY-114).
 export const workerLaunchTimeoutMs = 600_000;
-const workerCommand: WorkerCommand = (command, args, options = {}) => defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
+// A `pipe` stderr is captured so a failed child's is in its error's message, where the dispatch
+// classifier reads the worktree command's git text (GY-860); it is still shown, echoed on failure.
+export const workerCommand: WorkerCommand = async (command, args, options = {}) => {
+  try { return await defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' }); }
+  catch (error) { if (options.stdio?.[2] === 'pipe' && error instanceof ChildProcessError && error.stderr) process.stderr.write(error.stderr); throw error; }
+};
 
 export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
@@ -294,7 +299,7 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   const claimedEpoch = Number.isSafeInteger(claim.epoch) && claim.epoch > 0 ? claim.epoch as number : null;
   try {
     if (claim.lease?.owner !== profile.principal || claimedEpoch === null) throw new Error('Worker launcher acquired an unexpected assignment identity');
-    const workspace = JSON.parse(String(await run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
+    const workspace = JSON.parse(String(await run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })));
     if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
     // The checkout is the attempt's; the dependency tree does not have to be. Sharing is a
     // convenience for the session that follows, so a refusal is reported, never fatal.

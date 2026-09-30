@@ -629,7 +629,10 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     const letGo = async (args: string[]) => { await run('git', ['-C', holderPath, ...args]); };
     if (op === 'rebase') await letGo(['rebase', '--abort']);
     if (op === 'merge') await letGo(['merge', '--abort']);
-    if (op === 'cherry-pick') await letGo(['cherry-pick', '--abort']);
+    // `cherry-pick --abort` returns a stopped sequence to where it began, which would move the
+    // branch back past the picks already committed; quitting and resetting the conflicted index
+    // ends it where the branch stands.
+    if (op === 'cherry-pick') { await letGo(['cherry-pick', '--quit']); await letGo(['reset', '--merge']); }
     await letGo(reused ? ['checkout', '--quiet', branch] : ['checkout', '--detach', '--quiet']);
     return { preserved, reused };
   }

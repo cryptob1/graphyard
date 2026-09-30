@@ -15,7 +15,7 @@ import { releaseHeldBranch } from '../src/master/worktrees.js';
 import { runChild } from '../src/child-runner.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, prepareWorkerLaunch, saveWorkerProfile, setupMaster, type MasterConfig } from '../src/master.js';
-import { workspaceDispatchFailure } from '../src/master/dispatch.js';
+import { workerCommand, workspaceDispatchFailure } from '../src/master/dispatch.js';
 import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 import type { Principal, Work } from '../src/model.js';
@@ -125,6 +125,24 @@ test('unit:stale-worktree-releases-branch — a stopped merge or cherry-pick hol
       execFileSync('git', ['worktree', 'add', '-q', newPath, old.branch], { cwd: root });
       assert.equal(git(newPath, 'rev-parse', 'HEAD'), heldTip);
     }
+    // A cherry-pick sequence stopped on its second pick has already moved the branch by the
+    // first: ending it keeps that commit, where aborting would move the branch back.
+    const old = attemptWorktree(root, 'GY-864', 1);
+    await writeFile(join(old.path, 'source.ts'), 'export const value = 2;\n');
+    execFileSync('git', ['commit', '-qam', 'attempt work'], { cwd: old.path });
+    await writeFile(join(root, 'other.ts'), 'export const other = 1;\n');
+    execFileSync('git', ['add', 'other.ts'], { cwd: root });
+    execFileSync('git', ['commit', '-qm', 'clean pick'], { cwd: root });
+    await writeFile(join(root, 'source.ts'), 'export const value = 7;\n');
+    execFileSync('git', ['commit', '-qam', 'conflicting pick'], { cwd: root });
+    assert.notEqual(spawnSync('git', ['cherry-pick', 'main~1', 'main'], { cwd: old.path, stdio: 'ignore' }).status, 0, 'the sequence must stop on its second pick');
+    const picked = git(root, 'rev-parse', old.branch);
+    assert.equal(git(root, 'log', '-1', '--format=%s', old.branch), 'clean pick', 'the first pick is already on the branch');
+    const sequence = await releaseHeldBranch(root, old.branch, worktreePath(root, 'GY-864', 2), runChild);
+    assert.equal(sequence?.preserved.op, 'cherry-pick');
+    assert.equal(git(root, 'rev-parse', old.branch), picked, 'the branch keeps the pick the sequence already committed');
+    assert.notEqual(symbolicRef(old.path), 0, 'the old worktree is detached');
+    assert.equal(git(old.path, 'status', '--porcelain'), '', 'the stopped pick is ended, its conflict preserved in the record');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -313,6 +331,16 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
     await assert.rejects(prepareWorkerLaunch(root, 'GY-860', 'launch', run(held, 'Lease missing, expired, or superseded; claim the task again')), /already used by worktree/);
     assert.equal(calls.at(-1)![1], 'release');
     assert.equal(calls.filter(entry => entry[1] === 'release').length, 1, 'one release, tolerated as already done');
+    // Through the real child runner: the worktree command runs with the options the launcher
+    // passes, and its git message — written to its stderr, as the CLI reports a failure — is in the
+    // error the dispatch cycle classifies, so the failure is recognized as the workspace's.
+    const real = (command: string, args: string[], options?: Parameters<typeof workerCommand>[2]) => args[1] === 'worktree'
+      ? workerCommand(process.execPath, ['-e', 'process.stderr.write(process.env.WORKTREE_FAILURE); process.exit(1)'], { ...options, env: { ...options?.env, WORKTREE_FAILURE: held } })
+      : run(undefined, 'Lease missing, expired, or superseded; claim the task again')(command, args);
+    const failure = await prepareWorkerLaunch(root, 'GY-860', 'launch', real).then(() => null, (error: unknown) => error);
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /^Command failed: /, 'the real ChildProcessError, not a stub');
+    assert.equal(workspaceDispatchFailure(failure.message), true, 'the git message reaches the classifier');
     // A release that genuinely could not reach the server is wrapped, not swallowed.
     await assert.rejects(prepareWorkerLaunch(root, 'GY-860', 'launch', run('checkout failed', 'connect ECONNREFUSED')), /Graphyard could not release epoch 9/);
     // The classifier itself: workspace-shaped, and not.
