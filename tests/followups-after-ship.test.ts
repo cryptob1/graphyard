@@ -7,7 +7,8 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { fileFollowUpThreads, followUpItem, type AppendFollowUpFindings, type CreateFollowUpItem } from '../src/review-threads.js';
-import { shipHeldFollowUps, type ShipFollowUps } from '../src/reviewer.js';
+import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
+import { repeatedClientErrorLimit } from '../src/retry-stop.js';
 import { followUpEntries, followUpParent, openFollowUpItem, overdueTriage, pendingFollowUpsReport, type TriageJudgement } from '../src/model/machine-backlog.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { clearTriageRuns, triageSettled, triageStep, triageTool } from '../src/triage.js';
@@ -107,6 +108,18 @@ test('unit:followups-wait-on-parent — an approval of an unshipped parent files
   assert.deepEqual(await shipHeldFollowUps(await store.list(), ship), []);
 
   await deliver(parent);
+  // A ship the control plane keeps refusing with one unchanged client error is stopped after
+  // repeatedClientErrorLimit attempts (retry-stop.ts), not asked again every pass for good.
+  const runs: ShipRuns = {};
+  let refusals = 0;
+  const refused: ShipFollowUps = async target => { refusals++; throw new Error(`Graphyard refused to file the held follow-ups of ${target} (403): not permitted`); };
+  const passes: string[][] = [];
+  for (let pass = 0; pass < repeatedClientErrorLimit + 5; pass++) passes.push(await shipHeldFollowUps(await store.list(), refused, runs));
+  assert.equal(refusals, repeatedClientErrorLimit, 'the refused ship is attempted exactly up to the stop');
+  assert.match(passes[repeatedClientErrorLimit - 1]!.join('\n'), /stopped retrying after 10 consecutive attempts/);
+  assert.deepEqual(passes.slice(repeatedClientErrorLimit).flat(), [], 'a stopped ship adds no request and no event line');
+  assert.ok(runs[parent.key]?.stoppedAt);
+  assert.deepEqual(await followUpsOf(parent.key), []);
   const shipped = await shipHeldFollowUps(await store.list(), ship);
   assert.equal(shipped.length, 1, shipped.join('\n'));
   const items = await followUpsOf(parent.key);

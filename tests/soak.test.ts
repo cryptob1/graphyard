@@ -13,7 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { createHash } from 'node:crypto';
-import { Refusal, type Principal, type Work } from '../src/model.js';
+import { Refusal, isClosed, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
@@ -35,6 +35,9 @@ import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
+import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
+import { followUpEntries, followUpParent } from '../src/model/machine-backlog.js';
+import { repeatedClientErrorLimit } from '../src/retry-stop.js';
 import { SimulatedGitHub, SimulatedHerdr, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -157,6 +160,8 @@ const basePlan = {
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
+/** GY-845: the FOLLOW-UP findings one approval of item `n` names: one every approval repeats, one of its own. */
+const followUpFindings = (n: number, review: number) => [{ path: file(n), text: `${file(n)} — the finding every approval of item ${n} repeats` }, { path: file(n), text: `${file(n)} — the finding approval ${review} names` }];
 
 /**
  * The diagnostician's answer, derived the way a read-only session would from the evidence the
@@ -283,7 +288,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -916,6 +921,48 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const releasedScope = new Set<number>();
   // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
+  // GY-845: the loop's follow-up steps, as reconcileReviews runs them every pass over the real
+  // routes: each approval of a parent posts its FOLLOW-UP findings to the parent (one finding every
+  // approval repeats, one of its own), and the ship step files each delivered parent's held
+  // findings as its one follow-up item. One parent's ship is refused with an unchanged 4xx all day,
+  // which must stop after repeatedClientErrorLimit attempts; one extra parent holds findings and is
+  // closed without shipping. A follow-up item open while its parent has not shipped is a violation.
+  const followUpDay = { approvals: new Map<string, number[]>(), ships: new Map<string, number>(), runs: {} as ShipRuns, events: [] as string[], closed: null as Work | null, early: [] as string[] };
+  const followUpPost = async (key: string, body: unknown, idempotency: string) => {
+    const response = await fetch(`${url}/api/work/${encodeURIComponent(key)}/followups`, { method: 'POST', headers: { Authorization: `Bearer ${token(principals.operatorAgent)}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotency }, body: JSON.stringify(body) });
+    const result = await response.json() as any;
+    if (!response.ok) throw new Error(`Graphyard refused the follow-ups of ${key} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    return result;
+  };
+  const followUpShip: ShipFollowUps = async (parent, key) => {
+    followUpDay.ships.set(parent, (followUpDay.ships.get(parent) ?? 0) + 1);
+    if (options.followUps && parent === items[options.followUps.refused - 1].key) throw new Error(`Graphyard refused to file the held follow-ups of ${parent} (403): soak: this parent's filing is refused`);
+    return { key: (await followUpPost(parent, { ship: true, reason: `${parent} shipped; its held review follow-ups become its follow-up item` }, key)).key };
+  };
+  async function followUpsTick() {
+    if (!options.followUps) return;
+    if (!followUpDay.closed) {
+      const closed = await api(principals.operator, 'POST', 'work', { title: 'Soak follow-up parent closed unshipped', plannedFiles: ['src/soak/closed-parent.ts'], criteria: [{ id: 'AC-1', text: 'Never shipped', proofs: [PROOF] }] }) as Work;
+      await followUpPost(closed.key, { findings: followUpFindings(0, 0), reason: 'soak: an approval of a parent that will close unshipped', parent: true }, id());
+      await api(principals.operator, 'POST', `work/${closed.key}/close`, { kind: 'obsolete', reason: 'soak: the parent closes without shipping' });
+      followUpDay.closed = closed;
+    }
+    for (const pr of github.prs.values()) {
+      const n = numberOf(pr);
+      if (!options.followUps.parents.includes(n)) continue;
+      const seen = followUpDay.approvals.get(pr.key) ?? [];
+      for (const review of pr.reviews.filter(entry => entry.state === 'APPROVED' && !seen.includes(entry.id))) {
+        seen.push(review.id); followUpDay.approvals.set(pr.key, seen);
+        await followUpPost(pr.key, { findings: followUpFindings(n, review.id), reason: `soak: approval ${review.id} of ${pr.key}`, parent: true }, `followups:${review.id}`);
+      }
+    }
+    followUpDay.events.push(...await shipHeldFollowUps(await store.list(), followUpShip, followUpDay.runs, new Date(clock.now())));
+    const all = await store.list();
+    for (const item of all) {
+      const parent = followUpParent(item), of = parent && all.find(entry => entry.key === parent);
+      if (of && !isClosed(item) && item.stage !== 'done' && of.stage !== 'done') followUpDay.early.push(`${item.key} is open while its parent ${parent} is in ${of.stage}`);
+    }
+  }
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
   // simulated minute, and a launch the cycle handed over settles before the position advances.
@@ -1116,6 +1163,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      await followUpsTick();
       // GY-898: at most one master session, whatever the cycle did.
       if (options.master) {
         // A settled launch carries the start the loop recorded: the budget is measured from it.
@@ -1162,7 +1210,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, master };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, master, followUpDay };
 }
 
 /**
@@ -1865,4 +1913,45 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+test('unit:soak-invariants-hold — review follow-ups across a day: approvals of unshipped parents (re-approvals during rework included) are held on them, each delivered parent gets exactly one follow-up item, a parent closed unshipped drops its findings, a refused ship stops at the bound, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-845: the follow-up filing and the ship step run every pass, so they belong in this world.
+  // Item 1's first head is spent by its producer and reworked, so it is approved twice; item 2 is
+  // sent back by its reviewer first; item 4's ship is refused all day.
+  const parents = [1, 2, 3, 4], refused = 4;
+  const { items, final, violations, failures, followUpDay } = await simulateDay({
+    hours: 6, followUps: { parents, refused },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([2]), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds, follow-ups-per-parent included, across the approvals, the ships and the close');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(followUpDay.early, [], 'no follow-up item was ever open while its parent had not shipped');
+  const all = await store.list();
+  const followUpsOf = (key: string) => all.filter(item => followUpParent(item) === key);
+  assert.ok((followUpDay.approvals.get(items[0].key) ?? []).length >= 2, `item 1 was re-approved during its rework: ${JSON.stringify([...followUpDay.approvals])}`);
+  for (const n of parents) {
+    const key = items[n - 1].key, approvals = followUpDay.approvals.get(key) ?? [];
+    assert.ok(approvals.length >= 1, `${key} was approved`);
+    if (n === refused) {
+      assert.equal(followUpDay.ships.get(key), repeatedClientErrorLimit, `the refused ship of ${key} is attempted exactly up to the stop`);
+      assert.ok(followUpDay.runs[key]?.stoppedAt, 'and then stopped');
+      assert.equal(followUpDay.events.filter(line => line.includes(`on ${key} stopped retrying`)).length, 1, 'one stop line, never repeated');
+      assert.deepEqual(followUpsOf(key), [], 'its findings stay held on it');
+      assert.equal(final.find(item => item.key === key)!.pendingFollowUps?.findings.length, approvals.length + 1);
+      continue;
+    }
+    assert.equal(followUpDay.ships.get(key), 1, `${key}'s held findings were shipped once`);
+    const filed = followUpsOf(key);
+    assert.equal(filed.length, 1, `${key} has exactly one follow-up item`);
+    assert.deepEqual(filed[0]!.dependencies, [], 'depending on nothing: its parent has landed');
+    assert.deepEqual(followUpEntries(filed[0]!).map(entry => entry.text).sort(), [...new Set(approvals.flatMap(review => followUpFindings(n, review).map(entry => entry.text)))].sort(), 'holding the deduplicated union of every approval\'s findings');
+  }
+  for (const n of [5, 6]) assert.deepEqual(followUpsOf(items[n - 1].key), [], 'an item without follow-up findings gets none');
+  const closed = all.find(item => item.key === followUpDay.closed!.key)!;
+  assert.ok(isClosed(closed) && closed.pendingFollowUps?.dropped?.reason, 'the parent closed unshipped dropped its findings with a recorded reason');
+  assert.deepEqual(followUpsOf(closed.key), [], 'and never got a follow-up item');
+  // The day's follow-up items are closed here, so a later day's backlog is its own.
+  for (const item of all.filter(entry => followUpParent(entry) && !isClosed(entry))) await api(principals.operator, 'POST', `work/${item.key}/close`, { kind: 'obsolete', reason: 'soak: the follow-up day ends' });
 });

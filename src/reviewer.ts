@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
-import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped } from './retry-stop.js';
+import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped, type ClientErrorRun } from './retry-stop.js';
 import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
@@ -1015,7 +1015,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   changed += followUps.changed;
   // A parent delivered since holds findings owed their one follow-up item now (GY-845).
   const ship = dependencies.shipFollowUps ?? (dependencies.observe ? undefined : operatorAgentShip(root, config));
-  if (ship && dependencies.work) followUps.events.push(...await shipHeldFollowUps(dependencies.work, ship));
+  if (ship && dependencies.work) followUps.events.push(...await shipHeldFollowUpsOnce(root, dependencies.work, ship, now));
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
   if (changed) await saveChangedRecords(root, ledger.reviews, before);
@@ -1083,14 +1083,51 @@ function operatorAgentShip(root: string, config: MasterConfig): ShipFollowUps {
     return { key: result.key };
   };
 }
-/** Each delivered parent still holding findings gets its one follow-up item; each outcome is an event line. */
-export async function shipHeldFollowUps(work: readonly Work[], ship: ShipFollowUps) {
+/**
+ * A delivered parent's ship attempts that failed with one unchanged client error, kept across passes
+ * (retry-stop.ts): the filing is stopped after `repeatedClientErrorLimit` of them, as the follow-up
+ * filing is, instead of one refused POST and one event line per cycle for good.
+ */
+export type ShipRuns = Record<string, ClientErrorRun & { stoppedAt?: string }>;
+/**
+ * Each delivered parent still holding findings gets its one follow-up item; each outcome is an event
+ * line. `runs` carries the client-error run of each parent whose ship keeps failing: a stopped one
+ * is not asked again, and a parent no longer owed its item leaves `runs`.
+ */
+export async function shipHeldFollowUps(work: readonly Work[], ship: ShipFollowUps, runs: ShipRuns = {}, now = new Date()) {
   const events: string[] = [];
-  for (const parent of work.filter(shippedFollowUpsOwed)) {
-    try { events.push(`filed the ${heldFollowUps(parent).length} follow-up finding(s) held on ${parent.key} until it shipped as ${(await ship(parent.key, `followups-after-ship:${parent.key}`)).key}`); }
-    catch (error) { events.push(`the follow-ups held on ${parent.key} could not be filed, and are retried next pass: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300)}`); }
+  const owed = work.filter(shippedFollowUpsOwed);
+  for (const key of Object.keys(runs)) if (!owed.some(parent => parent.key === key)) delete runs[key];
+  for (const parent of owed) {
+    const previous = runs[parent.key];
+    if (previous?.stoppedAt) continue;
+    try { events.push(`filed the ${heldFollowUps(parent).length} follow-up finding(s) held on ${parent.key} until it shipped as ${(await ship(parent.key, `followups-after-ship:${parent.key}`)).key}`); delete runs[parent.key]; }
+    catch (error) {
+      const failure = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300), run = nextClientErrorRun(previous, failure);
+      if (!run) { delete runs[parent.key]; events.push(`the follow-ups held on ${parent.key} could not be filed, and are retried next pass: ${failure}`); continue; }
+      runs[parent.key] = { ...run, ...(retryStopped(run) ? { stoppedAt: now.toISOString() } : {}) };
+      events.push(runs[parent.key]!.stoppedAt
+        ? `filing the follow-ups held on ${parent.key} stopped retrying after ${run.count} consecutive attempts failed with the same client error: ${failure}`
+        : `the follow-ups held on ${parent.key} could not be filed (attempt ${run.count} with this client error), and are retried next pass: ${failure}`);
+    }
   }
   return events;
+}
+const followUpShipFile = (root: string) => resolve(followUpCreateDirectory(root), 'ships.json');
+const shipRunsSchema = z.record(z.string(), z.object({ error: z.string().min(1).max(500), count: z.number().int().min(1), stoppedAt: z.string().min(1).max(40).optional() }).strict());
+/** The ship step of one reconciliation pass, under its lock so the dispatcher and `master status` never both ship; a held lock skips the step. */
+async function shipHeldFollowUpsOnce(root: string, work: readonly Work[], ship: ShipFollowUps, now: Date) {
+  if (!work.some(shippedFollowUpsOwed)) return [];
+  const release = await tryFollowUpLock(root, 'followups-after-ship');
+  if (!release) return [];
+  try {
+    let runs: ShipRuns = {};
+    try { runs = shipRunsSchema.parse(JSON.parse(await readFile(followUpShipFile(root), 'utf8'))); }
+    catch (error: any) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError) && !(error instanceof z.ZodError)) throw error; }
+    const before = JSON.stringify(runs), events = await shipHeldFollowUps(work, ship, runs, now);
+    if (JSON.stringify(runs) !== before) { await mkdir(followUpCreateDirectory(root), { recursive: true, mode: 0o700 }); await atomicPrivateWrite(followUpShipFile(root), runs); }
+    return events;
+  } finally { await release(); }
 }
 
 /** Whether a completed approval binds the item's current candidate, or the head whose approval was carried onto it. */
