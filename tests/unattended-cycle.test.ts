@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, reconcilePendingActions, routineDecision, runCycle, runDaemon, silenceBudgetMs, standingVerdict, trackSilence, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -13,6 +12,7 @@ import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { containmentGraceMs } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
 import { decideScopeRequest } from '../src/model/scope.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-84: the loop drives every routine decision unattended.
@@ -60,7 +60,7 @@ type Judgement = 'approve' | 'die' | 'decline' | 'hang' | 'fail';
  * coordinator, operator-agent and approver credentials outside it, each mode 0600.
  */
 async function approverHost(overrides: Parameters<typeof config>[0] = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-unattended-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-unattended-secrets-'));
+  const root = await temporaryDirectory('unattended-root'), secrets = await temporaryDirectory('unattended-secrets');
   execFileSync('git', ['init', '-q', root]);
   const credential = async (name: string) => { const file = join(secrets, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(48, 'x'), { mode: 0o600 }); return file; };
   const master = config({ credentialFile: await credential('coordinator'), operatorAgent: { id: 'graphyard-master-operator', credentialFile: await credential('operator') },
@@ -730,8 +730,8 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   assert.ok(Object.values(noted.actions).some(action => action.kind === 'escalation' && /watchdog window/.test(action.detail)), 'the mismatch is recorded where master status reads it');
 
   // The report `master status` prints puts it first, ahead of every work item, and counts it.
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-loop-'));
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-loop-root-'));
+  const directory = await temporaryDirectory('loop');
+  const root = await temporaryDirectory('loop-root');
   try {
     const credential = join(directory, 'coordinator.token');
     await writeFile(credential, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });

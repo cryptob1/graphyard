@@ -24,7 +24,7 @@ Running rows offer:
 
 ## Settings › Agents: the fleet panel
 
-Every registry account, as `graphyard master registry` reports it: runtime, model, quota state, each usage window with its reset time, eligibility and its reason, role preferences, and live sessions against the account's limit. Each card shows when the quota was last observed; a reading over an hour old (`quotaStaleThresholdMs` in `web/pages/fleet.tsx`) or never observed is marked **old probe**, a failed smoke test **probe failed** — a real wall, told apart from an old probe.
+**Can launch now?**: per role, can it launch, else why and when. **Accounts** is one table with one chip per account, first that applies: Disabled, No role, Spent, Launch failing (failed smoke test, role hold, or a start failure within the hour), Unavailable, Working, Idle; times are local with a countdown (`web/agent-status.ts`). **Account details** holds each card; a quota reading over an hour old (`quotaStaleThresholdMs` in `web/pages/fleet.tsx`) is marked **old probe**, a failed smoke test **probe failed**. Settings pages share `web/components/page-layout.tsx`; operator identity ids wait behind **Identifiers**.
 
 ## The status sentence
 

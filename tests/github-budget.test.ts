@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -12,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, baseRefCycleMs, billableBudgetShare, observationThroughputStatus, processJob, protectionShareMs } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-806: GitHub API use fits the rate limit. Each test is named for the proof it produces:
 // unit:github-immutable-cache, unit:github-shared-cycle-reads, unit:webhook-driven-observation,
@@ -199,7 +198,7 @@ const adminToken = 'o'.repeat(40);
 let port = 0;
 before(async () => {
   port = Number(process.env.GRAPHYARD_GITHUB_BUDGET_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 187);
-  postgres = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-github-budget-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  postgres = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('github-budget'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start(); await postgres.createDatabase('graphyard_test');
 });
 const replicas: Store[] = [];
