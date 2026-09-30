@@ -129,11 +129,14 @@ export class SimulatedGitHub {
    */
   stuckHeads = new Set<string>();
   /**
-   * GY-854. Items whose pull-request branch GitHub protects against Graphyard's writes once listed
-   * here: every tip publication and every branch-restore write to it is answered 403, as GitHub
-   * answers a protected branch update, so a restore the loop owes the item can never publish.
+   * GY-854. Items whose branch restores GitHub refuses once listed here: the restore's branch reset
+   * and its merge are each answered 403, as GitHub answers a protected branch update, so a restore
+   * the loop owes the item can never publish. Tip publications are left alone: the fault is the
+   * restore's, and a tip the queue owes before the ejection is not what it exercises.
    */
   refusedBranches = new Set<string>();
+  /** GY-854. Items GitHub takes this long to compute mergeable once their check passed, so they stay queued, unlanded. */
+  slowMergeable = new Map<string, number>();
   /** Every write a branch restore made or was refused, per item, in order (GY-854). */
   restoreWrites: { key: string; write: 'reset' | 'merge'; refused: boolean; at: number }[] = [];
   /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
@@ -334,7 +337,7 @@ export class SimulatedGitHub {
   mergeState(pr: PullRequest, now: number) {
     const check = pr.graphyardCheck.get(pr.head);
     if (check?.conclusion !== 'success') return 'BLOCKED';
-    return now - check.at >= (this.slowRecompute.has(pr.key) ? 6 * minute : 0) ? pr.settledState : 'BLOCKED';
+    return now - check.at >= (this.slowMergeable.get(pr.key) ?? (this.slowRecompute.has(pr.key) ? 6 * minute : 0)) ? pr.settledState : 'BLOCKED';
   }
   /** A merge somebody made on GitHub by hand, outside Graphyard's queue: nothing asked for it. */
   mergeOutside(pr: PullRequest, now: number) { this.merge(pr, now, 'outside'); return pr.merged!; }
@@ -422,7 +425,6 @@ export class SimulatedGitHub {
       },
       async publishSpeculativeTip(work: Work, placement: QueuePlacement): Promise<QueueSpeculation> {
         const pr = world.pr(work), predicted = placement.predictedBase!;
-        if (world.refusedBranches.has(work.key)) throw new Refusal(`GitHub PATCH /git/refs/heads/${pr.branch} failed (403): Protected branch update failed for refs/heads/${pr.branch}`, 502);
         const base = { ref: queueRef(work.key), base: predicted, baseTree: world.commits.get(predicted)!.tree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date(clock.now()).toISOString(), trigger: 'queue-head' as const };
         // A republication resets the branch to the item's own reviewed head first (GY-568), so a
         // rebuilt tip never carries an entry that left the queue unlanded.
@@ -456,7 +458,7 @@ export class SimulatedGitHub {
           world.restoreWrites.push({ key: work.key, write: kind, refused, at: clock.now() });
           if (refused) throw new Refusal(`GitHub ${kind === 'reset' ? 'PATCH /git/refs/heads/' + pr.branch : 'POST /merges'} failed (403): Protected branch update failed for refs/heads/${pr.branch}`, 502);
         };
-        const provider = Object.assign(Object.create(GitHub.prototype) as GitHub, {
+        const provider: GitHub = Object.assign(Object.create(GitHub.prototype), {
           config: { repository: world.options.repository, base },
           request: async (path: string) => {
             if (path === `/pulls/${pr.number}`) return { number: pr.number, head: { sha: pr.head, ref: pr.branch }, base: { ref: base }, state: pr.open ? 'open' : 'closed', draft: false };
