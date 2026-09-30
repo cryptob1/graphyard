@@ -792,12 +792,16 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   // ---- The loop's own master session (GY-898): launched on the registry's master role, woken on
   // ---- material events, killed mid-day while the registry refuses to end sessions, rotated at its
-  // ---- budget. Every launch, wake, registry end and refused end is recorded against the clock.
+  // ---- budget. Every launch, wake, registry end and refused end is recorded against the day's
+  // ---- schedule (`at`, one minute per cycle). The budget and the heartbeat are measured on the
+  // ---- loop's own clock, which also runs real time forward, so those are recorded on it too
+  // ---- (`startedAt`, `clock`, `before`/`after`, as offsets from the day's start): on a slow host the
+  // ---- schedule falls behind that clock by however long the cycles took.
   const master = {
-    launches: [] as { at: number; pane: string; session: string }[],
-    wakes: [] as { at: number; cycle: number; text: string }[],
+    launches: [] as { at: number; pane: string; session: string; startedAt?: number }[],
+    wakes: [] as { at: number; cycle: number; text: string; clock?: number }[],
     ended: [] as string[], refusedEnds: [] as string[], killed: null as string | null,
-    maxLive: 0, cycleOf: 0, rotations: [] as { at: number; detail: string }[],
+    maxLive: 0, cycleOf: 0, rotations: [] as { at: number; detail: string; before: number; after: number }[],
   };
   if (options.master) {
     const plan = options.master, name = config.masterAgentName!;
@@ -1097,7 +1101,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
-        if (options.master) master.rotations.push(...result.actions.filter(action => action.kind === 'failover' && action.detail.startsWith('Ended master session')).map(action => ({ at: elapsed, detail: action.detail })));
+        if (options.master) {
+          const after = clock.now() - dayStart;
+          master.rotations.push(...result.actions.filter(action => action.kind === 'failover' && action.detail.startsWith('Ended master session')).map(action => ({ at: elapsed, detail: action.detail, before: now - dayStart, after })));
+          // The wake this cycle delivered carries the loop's clock reading the heartbeat is spaced by.
+          for (const wake of master.wakes) if (wake.cycle === master.cycleOf && wake.clock === undefined && state.master.lastWake) wake.clock = Date.parse(state.master.lastWake.at) - dayStart;
+        }
         if (docs) for (const action of result.actions) if (action.kind === 'fault' && /documentation headroom/.test(action.detail)) docsActions.push({ state: action.state, detail: action.detail });
         for (const watch of Object.values(state.approvals)) if (hand.has(watch.decision) && watch.exhaustedAt) spent.add(watch.decision);
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
@@ -1109,6 +1118,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await launcher.idle();
       // GY-898: at most one master session, whatever the cycle did.
       if (options.master) {
+        // A settled launch carries the start the loop recorded: the budget is measured from it.
+        const last = master.launches.at(-1);
+        if (last && last.startedAt === undefined && state.master.session === last.session && state.master.startedAt) last.startedAt = Date.parse(state.master.startedAt) - dayStart;
         const live = herdr.list().filter(agent => agent.name === config.masterAgentName).length;
         master.maxLive = Math.max(master.maxLive, live);
         if (live > 1) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${live} master sessions are live at once`);
@@ -1695,10 +1707,14 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   assert.ok(master.refusedEnds.includes(master.launches[0].session), 'the rotation\'s registry end was refused inside the window');
   assert.ok(master.ended.includes(master.launches[0].session), 'the owed registry session was ended once the registry answered');
   assert.deepEqual(state.master.unreleased, [], 'nothing is owed to the registry at the end of the day');
-  // AC-1: a budget rotation, one budget after the relaunch (deferred at most 30 minutes while a guarded merge on an open item runs).
+  // AC-1: a budget rotation, one budget after the relaunch (deferred at most 30 minutes while a
+  // guarded merge on an open item runs), on the clock the loop measures the budget by: the cycle
+  // that rotated read it between `before` and `after`.
   const budget = master.rotations.find(rotation => /\(budget\)/.test(rotation.detail));
-  assert.ok(budget && budget.at >= master.launches[1].at + plan.sessionMinutes * minute && budget.at <= master.launches[1].at + (plan.sessionMinutes + 32) * minute,
-    `the relaunched session rotated at its ${plan.sessionMinutes}-minute budget: ${JSON.stringify(master.rotations)}`);
+  const relaunched = master.launches[1]?.startedAt;
+  assert.ok(relaunched !== undefined, 'the relaunch recorded its start');
+  assert.ok(budget && budget.after >= relaunched + plan.sessionMinutes * minute && budget.before <= relaunched + (plan.sessionMinutes + 32) * minute,
+    `the relaunched session rotated at its ${plan.sessionMinutes}-minute budget: ${JSON.stringify({ relaunched, rotations: master.rotations })}`);
   assert.equal(master.launches.length, master.rotations.length + 1, 'every rotation relaunched exactly one session');
   // AC-2: at most one wake per cycle, every event wake names its causes, heartbeats are spaced by
   // the configured window, and no cycle repeats the previous cycle's causes (a wake storm).
@@ -1712,7 +1728,7 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   const repeats = events.filter((wake, index) => index > 0 && events[index - 1].cycle === wake.cycle - 1 && causes(events[index - 1].text) === causes(wake.text));
   assert.deepEqual(repeats.map(wake => `+${Math.round(wake.at / minute)} min: ${causes(wake.text)}`), [], 'no wake repeats the previous cycle\'s causes');
   const heartbeats = master.wakes.filter(wake => /heartbeat fallback/.test(wake.text));
-  for (let index = 1; index < heartbeats.length; index++) assert.ok(heartbeats[index].at - heartbeats[index - 1].at >= plan.heartbeatMinutes * minute, 'heartbeats are spaced by the quiet window');
+  for (let index = 1; index < heartbeats.length; index++) assert.ok(heartbeats[index].clock! - heartbeats[index - 1].clock! >= plan.heartbeatMinutes * minute, `heartbeats are spaced by the quiet window: ${JSON.stringify(heartbeats.map(wake => wake.clock))}`);
   assert.ok(master.wakes.length < cycles / 2, `wakes are events, not every cycle: ${master.wakes.length} wakes in ${cycles} cycles`);
 });
 
