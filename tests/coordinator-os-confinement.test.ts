@@ -238,6 +238,63 @@ test('unit:linked-worktree-coordinator-confined — a coordinator that is itself
   }
 });
 
+test('unit:linked-worktree-coordinator-reviewer-confined — a reviewer or producer of a linked-worktree coordinator pins its own checkout\'s Git admin and cannot switch the coordinator', async () => {
+  // GY-957, review finding: a reviewer or producer starts from the coordinator root and is allocated
+  // a managed checkout outside every worktree, holding its linked worktree as the `checkout` child
+  // (install/worktree-root.ts sessionCheckout). Its admin was not found, so the whole common
+  // worktrees area was re-exposed writable — including the coordinator's own admin, its HEAD and
+  // index — and a confined shell could switch the coordinator checkout.
+  const base = await temporaryDirectory('confinement linked reviewer');
+  try {
+    const { main, root } = linkedWorktreeCoordinatorFixture(base);
+    const gitDir = join(main, '.git'), coordinatorAdmin = join(gitDir, 'worktrees', 'coordinator');
+    const allocated = join(base, 'managed', 'review', 'GY-957');
+    const checkout = join(allocated, 'checkout');
+    mkdirSync(allocated, { recursive: true });
+    execFileSync('git', ['-C', root, 'worktree', 'add', '--detach', checkout, 'main'], { stdio: 'ignore' });
+    const ownAdmin = join(gitDir, 'worktrees', 'checkout');
+    assert.equal(sessionGitAdminDirectory(allocated, root), ownAdmin, 'the allocated checkout\'s linked worktree admin is found through its `checkout` child');
+    assert.equal(sessionGitAdminDirectory(root, root), null, 'the coordinator root is never a session of its own');
+    const build = (allocatedDirectory: string) =>
+      coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: root, allocatedDirectory, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap' });
+    const confinement = await build(allocated);
+    assert.ok(confinement, 'the launch carries a confinement');
+    const wrapper = confinement.wrapper;
+    assert.ok(wrapper.includes(ownAdmin), 'the reviewer pins its own checkout\'s worktree admin');
+    assert.ok(!wrapper.includes(join(gitDir, 'worktrees')), 'the common worktrees area is not re-exposed');
+    const fetchIdx = wrapper.indexOf(join(coordinatorAdmin, 'FETCH_HEAD'));
+    assert.ok(fetchIdx > 0 && wrapper[fetchIdx - 1] === '--bind', 'the coordinator FETCH_HEAD stays writable for fetches from the root');
+    // A session whose own admin cannot be found still re-exposes the worktrees area, and then binds
+    // the coordinator's own admin read-only again after it.
+    const bare = join(base, 'managed', 'bare-session');
+    mkdirSync(bare, { recursive: true });
+    const fallback = (await build(bare))!.wrapper;
+    const areaIdx = fallback.indexOf(join(gitDir, 'worktrees'));
+    const adminIdx = fallback.indexOf(coordinatorAdmin);
+    assert.ok(areaIdx > 0 && fallback[areaIdx - 1] === '--bind', 'the fallback re-exposes the worktrees area');
+    assert.ok(adminIdx > areaIdx && fallback[adminIdx - 1] === '--ro-bind', 'the coordinator admin is bound read-only after that re-exposure');
+    const fallbackFetchIdx = fallback.indexOf(join(coordinatorAdmin, 'FETCH_HEAD'));
+    assert.ok(fallbackFetchIdx > adminIdx && fallback[fallbackFetchIdx - 1] === '--bind', 'only its FETCH_HEAD is re-exposed after it');
+    if (process.platform !== 'linux' || !await sessionMountNamespaceWorks()) return;
+    const probe = [
+      'head=$(git -C "$2" rev-parse HEAD)',
+      'if git -C "$1" update-ref --no-deref HEAD "$head" 2>/dev/null; then echo HEAD-ALLOWED; else echo HEAD-BLOCKED; fi',
+      'if git -C "$1" read-tree --empty 2>/dev/null; then echo INDEX-ALLOWED; else echo INDEX-BLOCKED; fi',
+      'git -C "$2" -c user.email=g@l -c user.name=g commit --allow-empty -m probe >/dev/null && echo SESSION-WROTE',
+    ].join('\n');
+    for (const [shape, words] of [['pinned', wrapper], ['fallback', fallback]] as const) {
+      const run = spawnSync(words[0], [...words.slice(1, -1), '/bin/sh', '-c', probe, 'sh', root, checkout],
+        { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
+      assert.equal(run.status, 0, `the ${shape} confined shell ran: ${run.stderr}`);
+      assert.ok(run.stdout.includes('HEAD-BLOCKED') && !run.stdout.includes('HEAD-ALLOWED'), `the ${shape} reviewer cannot switch the coordinator HEAD`);
+      assert.ok(run.stdout.includes('INDEX-BLOCKED') && !run.stdout.includes('INDEX-ALLOWED'), `the ${shape} reviewer cannot rewrite the coordinator index`);
+      if (shape === 'pinned') assert.ok(run.stdout.includes('SESSION-WROTE'), 'the reviewer\'s own checkout still commits');
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer names no Git directory refuses every launch instead of confining the pointer file', async () => {
   const base = await temporaryDirectory('confinement-pointer');
   try {

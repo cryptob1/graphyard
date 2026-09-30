@@ -635,14 +635,28 @@ export const checkoutWorktreeAdminDirectory = (root: string): string | null => {
   return admin && isDirectoryPath(admin) ? admin : null;
 };
 
-/** The linked-worktree administrative directory the session's own directory writes through, or null when it is not a linked worktree of the coordinator checkout. A linked worktree points at its admin through its `.git` file, so this reads the pointer rather than asking git, and pins it under the coordinator's common worktrees area (`checkoutGitDirectory`), which is outside the checkout when the coordinator itself is a linked worktree. Pinning one session's Git admin, instead of the whole worktrees area, keeps concurrent assignments' worktree metadata unwritable to each other (GY-888). */
+/**
+ * The linked-worktree administrative directory the session's own directory writes through, or null when
+ * it is not a linked worktree of the coordinator checkout. A linked worktree points at its admin through
+ * its `.git` file, so this reads the pointer rather than asking git, and pins it under the coordinator's
+ * common worktrees area (`checkoutGitDirectory`), which is outside the checkout when the coordinator
+ * itself is a linked worktree. Pinning one session's Git admin, instead of the whole worktrees area,
+ * keeps concurrent assignments' worktree metadata unwritable to each other (GY-888). A reviewer's or
+ * producer's allocated directory is a managed session checkout outside every worktree that holds its
+ * linked worktree as the `checkout` child (install/worktree-root.ts sessionCheckout), so that child's
+ * pointer is read too. The coordinator's own admin — its HEAD and index when it is a linked worktree —
+ * is never the session's (GY-957, review finding).
+ */
 export const sessionGitAdminDirectory = (sessionDirectory: string, root: string): string | null => {
   const directory = resolve(sessionDirectory), checkout = resolve(root);
-  if (!withinCheckout(directory, checkout)) return null;
-  const gitDir = gitPointerAdminDirectory(directory);
-  if (!gitDir) return null;
+  if (directory === checkout) return null;
+  const coordinatorAdmin = checkoutWorktreeAdminDirectory(checkout);
   const shared = join(checkoutGitDirectory(checkout), 'worktrees');
-  return gitDir.startsWith(`${shared}${sep}`) && isDirectoryPath(gitDir) ? gitDir : null;
+  for (const candidate of [directory, join(directory, 'checkout')]) {
+    const gitDir = gitPointerAdminDirectory(candidate);
+    if (gitDir && gitDir !== coordinatorAdmin && gitDir.startsWith(`${shared}${sep}`) && isDirectoryPath(gitDir)) return gitDir;
+  }
+  return null;
 };
 
 /**
@@ -710,9 +724,16 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const bwrap = input.bwrap ?? 'bwrap';
   const masks = processLaunchMaskWords(hostProcessLaunchTargets(), [root, directory]);
   const externalGitDir = gitDir !== root && !withinCheckout(gitDir, root) && isDirectoryPath(gitDir) ? [gitDir] : [];
+  // A session with no admin of its own re-exposes the whole worktrees area; when the coordinator is
+  // itself a linked worktree its own admin (HEAD, index) lies there, so it is bound read-only again
+  // after that re-exposure — only its FETCH_HEAD, bound after it, stays writable (GY-957, review finding).
+  const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
+  const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
   return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
     ...externalGitDir.flatMap(path => ['--ro-bind', path, path]),
-    ...[...shared, ...own].flatMap(path => ['--bind', path, path]), '--'];
+    ...[...sharedDirectories, ...own].flatMap(path => ['--bind', path, path]),
+    ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
+    ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]), '--'];
 }
 
 /** The one refusal text for a launch whose coordinator confinement cannot be applied (GY-888): the head names the runtime and the checkout, `problem` says what is missing. */
