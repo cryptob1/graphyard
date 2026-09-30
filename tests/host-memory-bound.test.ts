@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
@@ -20,6 +19,7 @@ import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSl
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-612: concurrent agent test runs exhausted host memory. On a 62 GB host fourteen full suites
@@ -33,7 +33,7 @@ const GiB = 2 ** 30;
 // ---- AC-1 --------------------------------------------------------------------------------------
 
 test('unit:host-verification-slots — heavy verification runs started by a session take a host-wide slot: more runs than slots never exceed the bound at once, the rest wait saying on what, and all complete', async () => {
-  const scratch = await mkdtemp(join(tmpdir(), 'gy-slots-'));
+  const scratch = await temporaryDirectory('slots');
   try {
     // The bound: max(2, floor(total GB / 8)), overridable per host.
     assert.equal(defaultVerificationSlots(62 * GiB), 7);
@@ -98,7 +98,7 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
 });
 
 test('unit:host-verification-slots — a sandboxed session is granted the lock directory, and an account PATH keeps the wrappers first', async () => {
-  const scratch = await mkdtemp(join(tmpdir(), 'gy-slots-grant-'));
+  const scratch = await temporaryDirectory('slots-grant');
   try {
     // Codex under workspace-write refuses `mkdir slot-N` outside its grants, and the run would go
     // ahead unbounded: every session role grants the lock directory, created before launch.

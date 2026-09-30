@@ -95,9 +95,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is reported from the host, not from the cursor: the volume filling is what stops it. The
-  // plan is `master reclaim`'s, over the cached inventory (GY-360): a thousand tree walks per call
-  // made status take minutes.
+  // Disk is reported from the host, not the cursor. The plan is `master reclaim`'s, over the cached
+  // inventory (GY-360); host memory rides the loop's cursor (GY-612).
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);

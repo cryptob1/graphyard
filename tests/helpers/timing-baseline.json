@@ -326,6 +326,7 @@
     "tests/hand-approver-relaunch.test.ts": 1996,
     "tests/healthz-bounded.test.ts": 22457,
     "tests/herdr-recovery.test.ts": 14889,
+    "tests/host-memory-bound.test.ts": 3029,
     "tests/hotspots.test.ts": 2046,
     "tests/human-only-surface.test.ts": 4369,
     "tests/init-scan.test.ts": 9414,
