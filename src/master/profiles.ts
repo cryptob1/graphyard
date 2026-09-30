@@ -1,6 +1,6 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
@@ -627,10 +627,22 @@ export const processLaunchMaskWords = (
   const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
   const directories = [...new Set((targets.directories ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path) && hides(path)).map(canonical))];
   const sockets = [...new Set((targets.busSockets ?? []).filter(path => isAbsolute(path) && existsSync(path) && !isDirectoryPath(path) && hides(path)).map(canonical))];
-  const proxy = targets.secretsBus && isAbsolute(targets.secretsBus) && isSocketPath(targets.secretsBus) ? canonical(targets.secretsBus) : '/dev/null';
+  const proxy = targets.secretsBus && isAbsolute(targets.secretsBus) && isProxySocket(targets.secretsBus, targets.busSockets ?? []) ? canonical(targets.secretsBus) : '/dev/null';
   return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
 };
-const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
+/**
+ * Whether `path` is itself a socket that is not one of the session buses. The runtime directory
+ * stays writable inside the namespace, so a confined session could plant a symlink or a hard link
+ * to the real bus where the proxy listens; neither is followed, or the next launch would bind the
+ * unfiltered bus and reopen `systemd-run --user` (GY-1005 review finding).
+ */
+const isProxySocket = (path: string, busSockets: readonly string[]) => {
+  try {
+    const own = lstatSync(path), real = lstatSync(realpathSync(path));
+    if (!own.isSocket() || !real.isSocket() || own.dev !== real.dev || own.ino !== real.ino) return false;
+    return !busSockets.some(bus => { try { const found = statSync(bus); return found.dev === own.dev && found.ino === own.ino; } catch { return false; } });
+  } catch { return false; }
+};
 /** Where `graphyard-secrets-bus.service` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
 export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
   env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
