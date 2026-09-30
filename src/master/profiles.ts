@@ -661,7 +661,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const gitDir = join(root, '.git');
   const adminDirectory = sessionGitAdminDirectory(directory, root);
   const sharedDirectories = [
-    join(gitDir, 'objects'), ...(adminDirectory ? [adminDirectory] : [join(gitDir, 'worktrees')]), join(gitDir, 'refs', 'remotes'),
+    join(gitDir, 'objects'), ...(adminDirectory ? [adminDirectory] : [join(gitDir, 'worktrees')]), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes'),
     join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'),
   ].filter(isDirectoryPath);
   const fetchHead = join(gitDir, 'FETCH_HEAD');

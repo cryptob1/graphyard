@@ -145,7 +145,7 @@ export const launcherRootUndetermined = (argv1: string | undefined = process.arg
 export function prepareConfinedGitPaths(root: string): void {
   const gitDir = join(root, '.git');
   if (!existsSync(gitDir)) return;
-  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard')]) mkdirSync(path, { recursive: true });
+  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')]) mkdirSync(path, { recursive: true });
   const fetchHead = join(gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }

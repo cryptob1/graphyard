@@ -66,6 +66,7 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
         const gitDir = join(root, '.git');
         assert.ok(confinement.wrapper.includes(join(gitDir, 'worktrees', 'session')), `${kind} binds its own worktree admin directory`);
         assert.ok(!confinement.wrapper.includes(join(gitDir, 'worktrees')), `${kind} does not unprotect every assignment's admin directory`);
+        assert.ok(confinement.wrapper.includes(join(gitDir, 'logs', 'refs', 'remotes')), `${kind} keeps remote-tracking reflogs writable, so git fetch can record a new remote branch`);
       }
     }
     // A codex runtime without its workspace-write sandbox carries the mount namespace instead: it is never launched unconfined.
