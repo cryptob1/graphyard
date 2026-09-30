@@ -623,8 +623,11 @@ async function simulateDay(options: { hours: number; regression?: ('approvers-le
   const capacityLaunched: { decision: string; key: string; elapsed: number }[] = [];
   let capacityWaiters: { decision: string; key: string; requestedAt: string }[] | null = null;
   const approver: DaemonEffects['approver'] = async (work, decision) => {
-    if (options.capacityWait && clock.now() - dayStart >= options.capacityWait.from && clock.now() - dayStart < options.capacityWait.to) {
-      capacityRefused.push({ decision, key: work.key, elapsed: clock.now() - dayStart });
+    // The window is read on the day's own schedule too, as the waiters at its close and the launches
+    // after it are: the simulated clock runs real time forward, so on a slow host a window read from
+    // it would close minutes early and let a rework decision it should hold launch at once.
+    if (options.capacityWait && elapsed >= options.capacityWait.from && elapsed < options.capacityWait.to) {
+      capacityRefused.push({ decision, key: work.key, elapsed });
       throw Object.assign(new Error('No healthy agent account for the approver: every approver account is spent until its quota resets'), { capacityExhausted: true });
     }
     const unjudged = hand.get(decision);
