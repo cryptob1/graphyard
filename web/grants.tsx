@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { PageHeader, PageSection } from './components/page-layout';
 import { grantsAuthorize, type ProofAuthority, type ProofGrant, type Work } from '../src/model';
 
 type GrantSet = { authorities: ProofAuthority[]; grants: ProofGrant[] };
@@ -38,27 +39,26 @@ export default function ProofGrantsView({ api, work, canEdit }: { api: (path: st
   const required = [...new Set(work.filter(w => w.stage !== 'done').flatMap(w => w.criteria.flatMap(ac => ac.proofs)))].sort();
   const coverage = required.map(proof => ({ proof, producers: authorities.filter(a => grantsAuthorize(a.patterns, proof)).map(a => a.principalId), items: work.filter(w => w.stage !== 'done' && w.criteria.some(ac => ac.proofs.includes(proof))).map(w => w.key) }));
   const gaps = coverage.filter(entry => !entry.producers.length);
-  return <><header><div className="breadcrumb">Authority <span>/</span> Proof grants</div><a href="/docs/operations-reference#proof-authority-grants">Read the guide ↗</a></header>
-    <div className="page-heading"><div><div className="eyebrow">AUTHORITY LIVES HERE</div><h1>Proof authority</h1><p>Who may produce trusted evidence, for which proof names. Changes take effect immediately, without a redeploy.</p></div></div>
+  return <><PageHeader crumbs={['Settings', 'Proof authority']} guide="/docs/operations-reference#proof-authority-grants" eyebrow="AUTHORITY LIVES HERE" title="Proof authority">Who may produce trusted evidence, for which proof names. Changes take effect immediately, without a redeploy.</PageHeader>
     {loadError && <div role="alert" className="notice danger">{loadError} <button disabled={loading} onClick={() => void load()}>Retry loading proof grants</button></div>}
     <div className="notice">Trust still follows the credential. Worker, reader, and coordinator principals can never hold a grant. The deployment environment allowlist is a bootstrap seed only: once a principal has a grant record, editing the environment changes nothing.</div>
     {loading && <p role="status">Loading proof authority…</p>}
-    <section><div className="section-title"><h2>Unproducible required proof <span className="count">{gaps.length}</span></h2></div>
+    <PageSection title="Unproducible required proof" count={gaps.length}>
       {gaps.length
         ? gaps.map(entry => <div className="criterion" key={entry.proof}><strong className="amber">{entry.proof} · no authorized producer</strong><p>Required by {entry.items.join(', ') || 'no live work'}. Grant this name to a producer principal, or the acceptance gate can never be satisfied.</p></div>)
         : <p>{required.length ? 'Every required proof name has at least one authorized producer.' : 'No live work requires proof yet.'}</p>}
-    </section>
-    <section><div className="section-title"><h2>Producer authority <span className="count">{producers.length}</span></h2></div>
+    </PageSection>
+    <PageSection title="Producer authority" count={producers.length}>
       {producers.map(authority => <div className="criterion" key={authority.principalId}><strong>{authority.principalId} · {authority.patterns.length ? authority.patterns.join(', ') : 'no authority'}</strong>
         <p>Source: {authority.source === 'grant' ? 'Graphyard grant record' : 'environment bootstrap seed, not yet materialized'}{(() => { const record = data?.grants.find(g => g.principalId === authority.principalId); return record ? ` · revision ${record.revision} · last ${record.lastMutation.kind} by ${record.lastMutation.actor} · ${record.lastMutation.reason}` : ''; })()}</p>
         <button className="text-button" onClick={() => void showHistory(authority.principalId)}>Read grant history ↗</button></div>)}
       {!producers.length && !loading && <p>No producer principal is configured. Evidence cannot be trusted until one exists.</p>}
-    </section>
-    {history && <section><div className="section-title"><h2>History · {history.id} <span className="count">{history.rows.length}</span></h2><button className="text-button" onClick={() => setHistory(null)}>Close</button></div>
+    </PageSection>
+    {history && <PageSection title={`History · ${history.id}`} count={history.rows.length} actions={<button className="text-button" onClick={() => setHistory(null)}>Close</button>}>
       {history.rows.map(row => <div className="criterion" key={row.seq}><strong>v{row.revision} · {row.kind} · {row.actor} · {new Date(row.at).toLocaleString()}</strong><p>{row.reason}</p><p>Applied: {row.patterns.join(', ') || 'none'} · Effective: {row.effective.join(', ') || 'none'}</p></div>)}
       {!history.rows.length && <p>No recorded grant history for this principal.</p>}
-    </section>}
-    {canEdit && <section><div className="section-title"><h2>Change authority</h2></div>
+    </PageSection>}
+    {canEdit && <PageSection title="Change authority">
       <p className="muted">Patterns are comma separated. Use an exact proof name, a whole kind such as <code>integration:*</code>, or a bounded prefix such as <code>manual:gy-43/*</code>. Every change appends an audited history entry.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
       <form className="grant-form" onSubmit={e => void mutate(e, 'grant')}>
@@ -74,6 +74,6 @@ export default function ProofGrantsView({ api, work, canEdit }: { api: (path: st
         <button disabled={busy}>{busy ? 'Applying…' : 'Revoke authority'}</button>
       </form>
       <datalist id="grant-principals">{producers.map(authority => <option key={authority.principalId} value={authority.principalId}/>)}</datalist>
-    </section>}
+    </PageSection>}
   </>;
 }
