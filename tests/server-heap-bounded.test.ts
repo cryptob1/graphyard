@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
@@ -12,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { GitHub } from '../src/github.js';
 import { BoundedCache, EtagCache, blobContentBytes, etagCacheBytes, etagCacheEntries } from '../src/github-response-cache.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 
 // GY-975: the production server's heap climbed to its 4 GB limit every ten to fifteen minutes. What
@@ -45,8 +44,8 @@ const rulesText = `# Rules\n\n${'Never weaken a criterion to pass. '.repeat(8_00
 let database: EmbeddedPostgres, store: Store, engine: Engine, github: GitHub, http: ReturnType<typeof server>, url: string, scratch: string;
 const realFetch = globalThis.fetch;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_HEAP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 28);
-  scratch = await mkdtemp(join(tmpdir(), 'graphyard-heap-'));
+  const port = Number(process.env.GRAPHYARD_HEAP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 975);
+  scratch = await temporaryDirectory('heap');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('heap_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/heap_test`); await store.init();
@@ -69,7 +68,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { globalThis.fetch = realFetch; if (http) await new Promise<void>(resolve => http.close(() => resolve())); await store?.close(); await database?.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
+after(async () => { globalThis.fetch = realFetch; if (http) await new Promise<void>(resolve => http.close(() => resolve())); await store?.close(); await database?.stop(); });
 const createEtag = (target: string) => Buffer.from(target).toString('base64url').slice(-40);
 
 async function call(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
