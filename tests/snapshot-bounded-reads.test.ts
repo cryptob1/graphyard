@@ -307,6 +307,22 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
     assert.deepEqual(grown[view], before[view], `a ${view} page reads no more once the ledger doubles`);
   }
 
+  // A scoped operator agent's page is chosen from its own work: the rows, `hasMore` and the cursor
+  // disclose nothing of the items outside its scope.
+  const scopedKeys = [whole.body.work[4].key, whole.body.work[20].key] as string[];
+  const scopedToken = `bounded-scoped-reader-${'s'.repeat(32)}`;
+  const provisioned = await fetch(`${url}/api/operator-agents`, { method: 'POST', headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ id: 'scoped-reader', displayName: 'scoped-reader', capabilities: ['intent:create'], scope: { repositories: ['owner/project'], workItems: scopedKeys }, token: scopedToken, reason: 'A scoped reader pages only its own work' }) });
+  assert.equal(provisioned.status, 200, await provisioned.text());
+  const scopedNumbers = scopedKeys.map(key => Number(/(\d+)$/.exec(key)![1]));
+  const firstScoped = await get('work-snapshot?view=full&pageSize=1', scopedToken);
+  assert.equal(firstScoped.status, 200, JSON.stringify(firstScoped.body));
+  assert.deepEqual(keys(firstScoped.body), [scopedNumbers[0]], 'a scoped page holds the first visible item, not an empty page');
+  assert.equal(firstScoped.body.nextCursor, scopedNumbers[0], 'the cursor names only visible work');
+  const lastScoped = await get(`work-snapshot?view=full&pageSize=1&cursor=${scopedNumbers[0]}`, scopedToken);
+  assert.deepEqual(keys(lastScoped.body), [scopedNumbers[1]]);
+  assert.equal(lastScoped.body.hasMore, false, 'no page is promised beyond the visible work');
+  assert.equal(lastScoped.body.nextCursor, undefined);
+
   // Paging is opt-in and validated; the coordination view stays the loop's unpaged poll.
   assert.equal((await get('work-snapshot?pageSize=0')).status, 400);
   assert.equal((await get('work-snapshot?pageSize=1001')).status, 400);

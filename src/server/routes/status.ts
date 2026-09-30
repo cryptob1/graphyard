@@ -99,6 +99,17 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   {
+    // The installation and the App's requested permissions, read now with the App's own credential
+    // (GY-964): `master browser app-permissions` and `installation-accept` decide and verify from
+    // this, never from whatever the operator's gh token happens to be scoped to see.
+    method: 'GET', path: '/api/github/installation',
+    async handle({ actor, services: { github } }) {
+      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+      demand(github, 'GitHub is not configured on this control plane', 503);
+      return github.installationState();
+    },
+  },
+  {
     // The master loop publishes the production environment it resolves from its own configuration
     // (`graphyard master config productionEnvironment=…`), which lives only on the master's host.
     // Recorded once per change in the installation ledger; every status and flow read uses it.
@@ -194,7 +205,10 @@ export const statusRoutes = defineRoutes('status', [
         demand(cursor === undefined || Number.isSafeInteger(cursor) && cursor >= 0, 'cursor must be a work item number', 400);
         demand(Number.isSafeInteger(pageSize) && pageSize >= 1 && pageSize <= maxPageSize, `pageSize must be an integer from 1 to ${maxPageSize}`, 400);
         demand(view !== 'coordination', 'the coordination view is not paged; it is the bounded read the loop polls', 400);
-        const page = scope(await snapshotPage(services.engine.store.pool, view as 'bounded' | 'full', { cursor, pageSize }));
+        // A scoped operator agent's page is chosen from its own work, so the cursor and `hasMore`
+        // disclose nothing of the items outside its scope.
+        const visible = actor.role === 'operator-agent' && !actor.scope?.workItems.includes('*') ? actor.scope?.workItems ?? [] : undefined;
+        const page = scope(await snapshotPage(services.engine.store.pool, view as 'bounded' | 'full', { cursor, pageSize, visible }));
         return view === 'bounded' ? { ...page, view } : page;
       }
       if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool)), view };
