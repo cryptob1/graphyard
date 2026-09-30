@@ -36,7 +36,8 @@ export type AccountKey = z.infer<typeof accountKeySchema>;
 /**
  * The last one-prompt smoke test of an account, run by an executor on the account's host before
  * the account is first chosen and again after any registry change to it: a failure holds the
- * reason the runtime itself gave, and the account takes no session until it is changed.
+ * reason the runtime itself gave, and the account takes no session until it is changed or it
+ * passes the retest its executor runs once `smokeRetestMs` has passed.
  */
 export interface AccountSmoke { result: 'pass' | 'fail'; reason: string | null; at: string; by: string }
 /** An executor's smoke test of an account it holds the login of: the runtime's own error when it failed. */

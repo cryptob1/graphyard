@@ -1,9 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, wakeJob } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -12,6 +9,7 @@ import { evaluate, type Principal, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { observationConcurrency, observationWorkers } from '../src/server/main.js';
 import { observationThroughputStatus } from '../src/cli/master-status.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-492. Each test is named for the proof it produces: unit:job-claim-priority,
 // unit:parallel-observation-jobs, unit:observation-lag-visible.
@@ -109,7 +107,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let port = 0, databases = 0;
 before(async () => {
   port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 492;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-observation-throughput-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('observation-throughput'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start();
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

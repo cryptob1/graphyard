@@ -13,7 +13,7 @@ export interface RuntimeDescriptor { kind: string; program: string; credentials:
 export const knownRuntimes: RuntimeDescriptor[] = [
   { kind: 'claude', program: 'claude', credentials: ['.claude/.credentials.json', '.claude.json', '.config/claude/.credentials.json'] },
   { kind: 'codex', program: 'codex', credentials: ['.codex/auth.json'] },
-  { kind: 'cursor', program: 'cursor-agent', credentials: ['.cursor/cli-config.json', '.config/cursor-agent/config.json'] },
+  { kind: 'cursor', program: 'agent', credentials: ['.cursor/cli-config.json', '.config/cursor-agent/config.json'] },
   { kind: 'opencode', program: 'opencode', credentials: ['.local/share/opencode/auth.json', '.config/opencode/auth.json'] },
   { kind: 'gemini', program: 'gemini', credentials: ['.gemini/oauth_creds.json'] },
   { kind: 'copilot', program: 'copilot', credentials: ['.config/github-copilot/apps.json', '.config/github-copilot/hosts.json'] },
