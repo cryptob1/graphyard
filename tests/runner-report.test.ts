@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile, readFile, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { verifyRunnerReport } from '../src/runner-report.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 const run = promisify(execFile), id = 'a'.repeat(64);
 const require = createRequire(import.meta.url);
 const playwrightCli = resolve(require.resolve('playwright'), '..', 'cli.js');
@@ -20,7 +20,7 @@ test('report verifier refuses empty, skipped, missing, inconsistent, expected-fa
 });
 test('real Playwright enumeration/execution produces attributable inventory and excludes seeded secrets', async () => {
   // These are locally authored trusted fixtures; no untrusted repository code is executed here.
-  const root = await mkdtemp(resolve('.graphyard-reporter-test-'));
+  const root = await temporaryDirectory('.graphyard-reporter-test', process.cwd());
   try {
     const config = join(root, 'playwright.config.ts'), spec = join(root, 'fixture.spec.ts');
     await writeFile(config, `export default { testDir: '.', retries: 0, workers: 1, reporter: [[${JSON.stringify(resolve('src/playwright-reporter.ts'))}]] };`);

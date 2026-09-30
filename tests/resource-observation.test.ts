@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -21,6 +20,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
 import { dispatchRefusal, loadedRevision, planeVerdict, finishedSessionGraceMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-132: Graphyard observes its own resources.
@@ -50,7 +50,7 @@ const record = (index: number, overrides: Partial<ReviewRecord> = {}): ReviewRec
 /** A terminal record an open request still reads: pinned, so it counts against the bound (GY-131). */
 const pinned = (index: number) => record(index, { requestId: randomUUID() });
 async function scratchRoot() {
-  const directory = await mkdtemp(join(tmpdir(), 'gy-res-'));
+  const directory = await temporaryDirectory('gy-res');
   await mkdir(join(directory, '.graphyard'), { recursive: true, mode: 0o700 });
   return directory;
 }
@@ -103,7 +103,7 @@ const credential = (principal: Principal): Credential => ({ ...principal, token:
 let database: EmbeddedPostgres, store: Store, databaseUrl: string;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_RESOURCE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 83);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-resources-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('resources'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('resources_test');
   databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/resources_test`;
   store = new Store(databaseUrl); await store.init();
@@ -254,20 +254,20 @@ test('integration:resources-reclaimed-within-bound — a finished session and a 
   // released and its pane closed at once. The finished pane is only noted: a pane launched a moment
   // ago holds its name before its record is written, so nothing is closed on a single sighting.
   const t0 = settled + 2 * finishedSessionGraceMs;
-  const first = await reclaimResources(directory, config, { work, agents }, { now: t0, closePane: pane => { closed.push(pane); } });
+  const first = await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: t0, closePane: pane => { closed.push(pane); } });
   assert.deepEqual(first.released.map(entry => entry.name), ['reviewer-b'], 'the session blocked on a prompt past its bound releases its slot');
   assert.match(first.released[0].reason, /blocked on a prompt in Herdr for over 10 minutes/);
   assert.deepEqual(first.closed.map(entry => entry.name), ['reviewer-b']);
   assert.deepEqual(first.reaped, { review: 0, producer: 0 }, 'a terminal record is kept until its retention elapses');
 
   // One grace later the finished session, still unowned, is closed and its name released.
-  const second = await reclaimResources(directory, config, { work, agents: agents.slice(0, 1) }, { now: t0 + finishedSessionGraceMs, closePane: pane => { closed.push(pane); } });
+  const second = await reclaimResources(directory, config, { work, agents: agents.slice(0, 1) }, { tmpRoot: directory, now: t0 + finishedSessionGraceMs, closePane: pane => { closed.push(pane); } });
   assert.deepEqual(second.closed.map(entry => [entry.name, entry.pane]), [['reviewer-a', 'pane-1']]);
   assert.match(second.closed[0].reason, /its review session failed/);
   assert.ok(t0 + finishedSessionGraceMs < settled + ledgerRetentionMs, 'the session is reclaimed well inside the ledger bound');
 
   // At the documented ledger bound the terminal record is reaped; the live one is kept.
-  const bound = await reclaimResources(directory, config, { work, agents: [] }, { now: settled + ledgerRetentionMs, closePane: pane => { closed.push(pane); } });
+  const bound = await reclaimResources(directory, config, { work, agents: [] }, { tmpRoot: directory, now: settled + ledgerRetentionMs, closePane: pane => { closed.push(pane); } });
   assert.deepEqual(bound.reaped, { review: 1, producer: 0 }, 'the terminal record is reaped once its retention elapses');
   const remaining = (await readReviewLedger(directory)).reviews;
   assert.deepEqual(remaining.map(entry => [entry.id, entry.state]), [[answersLive.id, 'failed'], [stuck.id, 'failed']], 'a record answering a live request is kept, and the released one waits out its own retention');
@@ -284,10 +284,10 @@ test('integration:resources-reclaimed-within-bound — a finished session and a 
   const absentRoot = await scratchRoot();
   const absent = record(3, { profile: 'reviewer-b', agentName: 'reviewer-b', state: 'pending', requestId: randomUUID(), requestedAt: iso(settled - 30 * 60_000), closedAt: undefined });
   await saveReviewLedger(absentRoot, { version: 1, reviews: [absent] });
-  const missed = await reclaimResources(absentRoot, config, { work: [], agents: [] }, { now: settled });
+  const missed = await reclaimResources(absentRoot, config, { work: [], agents: [] }, { tmpRoot: absentRoot, now: settled });
   assert.deepEqual(missed.released, [], 'a single missing sighting releases nothing');
   assert.equal((await readReviewLedger(absentRoot)).reviews[0].state, 'pending');
-  const gone = await reclaimResources(absentRoot, config, { work: [], agents: [] }, { now: settled + stuckSessionMs });
+  const gone = await reclaimResources(absentRoot, config, { work: [], agents: [] }, { tmpRoot: absentRoot, now: settled + stuckSessionMs });
   assert.deepEqual(gone.released.map(entry => [entry.name, entry.reason]), [['reviewer-b', 'absent from Herdr on every pass for 10 minutes']]);
   assert.match((await readReviewLedger(absentRoot)).reviews[0].resolution!, /^never started: /, 'the launcher\'s unstarted-retry policy applies');
 
@@ -297,7 +297,7 @@ test('integration:resources-reclaimed-within-bound — a finished session and a 
   const blocked = record(4, { profile: 'reviewer-b', agentName: 'reviewer-b', state: 'pending', requestId: randomUUID(), requestedAt: iso(settled - 30 * 60_000), idleSince: iso(settled - 20 * 60_000), closedAt: undefined });
   await saveReviewLedger(raceRoot, { version: 1, reviews: [blocked] });
   const launchedMeanwhile = record(5, { state: 'pending', requestId: randomUUID(), requestedAt: iso(settled), closedAt: undefined });
-  const raced = await reclaimResources(raceRoot, config, { work: [], agents: [{ name: 'reviewer-b', pane_id: 'pane-7', agent_status: 'blocked' }] }, { now: settled, closePane: async () => {
+  const raced = await reclaimResources(raceRoot, config, { work: [], agents: [{ name: 'reviewer-b', pane_id: 'pane-7', agent_status: 'blocked' }] }, { tmpRoot: raceRoot, now: settled, closePane: async () => {
     const ledger = await readReviewLedger(raceRoot);
     await saveReviewLedger(raceRoot, { ...ledger, reviews: [...ledger.reviews, launchedMeanwhile] });
   } });
