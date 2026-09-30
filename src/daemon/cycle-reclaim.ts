@@ -122,7 +122,7 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
     if (tree) return leased(tree.key, tree.epoch);
     return !!cwd && open.some(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock && cwd.replace(/ \(deleted\)$/, '').endsWith(`/${item.key}-${item.lease.epoch}`));
   };
-  const agentless: { pane: string; name: string | undefined; key: string; item: Work | null; why: string; boundMs: number; agent: boolean }[] = [];
+  const agentless: { pane: string; name: string | undefined; key: string; item: Work | null; why: string; boundMs: number }[] = [];
   for (const agent of agents) {
     // Never a pane whose worktree holds a live lease, nor one an earlier step of this cycle closed.
     if (!agent.pane_id || closedPanes.has(agent.pane_id) || workedHere(agent.cwd)) continue;
@@ -132,19 +132,19 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
       // its item and epoch hold no live lease: an idle finished agent is closed after its grace.
       if (!hit || hit.handle.state === 'running' || (hit.handle.agentName && agent.name && hit.handle.agentName !== agent.name)) continue;
       if (leased(hit.item.key, hit.handle.epoch ?? tree?.epoch)) continue;
-      agentless.push({ pane: agent.pane_id, name: agent.name, key: hit.item.key, item: hit.item, agent: true, boundMs: finishedSessionGraceMs,
-        why: `its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state} and ${hit.item.key}${hit.handle.epoch != null ? ` epoch ${hit.handle.epoch}` : ''} holds no live lease, though its ${agent.agent} agent still stands` });
+      agentless.push({ pane: agent.pane_id, name: agent.name, key: hit.item.key, item: hit.item, boundMs: finishedSessionGraceMs,
+        why: `still holds its ${agent.agent} agent, though its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state} and ${hit.item.key}${hit.handle.epoch != null ? ` epoch ${hit.handle.epoch}` : ''} holds no live lease` });
       continue;
     }
     const ended = !!hit && hit.handle.state !== 'running', worktreeGone = !!agent.cwd && / \(deleted\)\s*$/.test(agent.cwd);
     if (hit && (ended || worktreeGone)) {
-      agentless.push({ pane: agent.pane_id, name: agent.name, key: hit.item.key, item: hit.item, agent: false, boundMs: launchAppearanceMs,
+      agentless.push({ pane: agent.pane_id, name: agent.name, key: hit.item.key, item: hit.item, boundMs: launchAppearanceMs,
         why: ended ? `holds no agent and its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state}` : `holds no agent and its worktree (${agent.cwd}) no longer exists` });
     } else if (tree) {
       // A bare shell in a Graphyard worktree whose item and epoch hold no live lease: the launch
       // that opened it is over, whether its handle stayed 'running' or it was never recorded.
       const item = hit?.item ?? snapshot.work.find(candidate => candidate.key === tree.key) ?? null;
-      agentless.push({ pane: agent.pane_id, name: agent.name, key: tree.key, item, agent: false, boundMs: launchAppearanceMs,
+      agentless.push({ pane: agent.pane_id, name: agent.name, key: tree.key, item, boundMs: launchAppearanceMs,
         why: `holds no agent in the worktree of ${tree.key} epoch ${tree.epoch}, which holds no live lease${hit ? `, though its ${hit.handle.kind} session ${hit.handle.id} is still recorded running` : ' and no Graphyard session recorded it'}` });
     }
     // Any other agentless pane — outside Graphyard's worktrees and never recorded, or recorded
