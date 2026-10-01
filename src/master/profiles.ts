@@ -248,6 +248,9 @@ export const masterRunSchema = z.object({
    */
   awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
   awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
+  // How long a candidate's push-triggered acceptance run has before the loop dispatches the proof
+  // workflow as a fallback, so a busy CI queue does not get a duplicate run per head; unset, 0.
+  proofDispatchGraceMinutes: z.number().int().min(0).max(1440).optional(),
   // How long a launched reviewer or producer session may show no activity before the loop
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
@@ -633,27 +636,38 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
  * `/var/run` → `/run` on Debian-family hosts — resolves against its own staging root, where the
  * target does not exist, so the launch dies with "Can't mkdir". The canonical path also aliases
  * that pair to one mask, and hiding the real directory hides every symlink to it.
+ *
+ * When `secretsBus` names a live socket, each session-bus socket is replaced by it instead of by
+ * `/dev/null`. That socket is an `xdg-dbus-proxy --filter --talk=org.freedesktop.secrets` proxy
+ * (`graphyard-secrets-bus.service`): a session reaches the keyring that holds the operator's
+ * GitHub login, so `git push` through `gh auth git-credential` works, while systemd1 and every
+ * other bus name stay unreachable, so `systemd-run --user` is still refused.
  */
 export const processLaunchMaskWords = (
-  targets: { directories?: readonly string[]; busSockets?: readonly string[] },
+  targets: { directories?: readonly string[]; busSockets?: readonly string[]; secretsBus?: string | null },
   protect: readonly string[],
 ): readonly string[] => {
   const hides = (path: string) => !protect.some(p => p === path || withinCheckout(p, path));
   const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
   const directories = [...new Set((targets.directories ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path) && hides(path)).map(canonical))];
   const sockets = [...new Set((targets.busSockets ?? []).filter(path => isAbsolute(path) && existsSync(path) && !isDirectoryPath(path) && hides(path)).map(canonical))];
-  return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', '/dev/null', path])];
+  const proxy = targets.secretsBus && isAbsolute(targets.secretsBus) && isSocketPath(targets.secretsBus) ? canonical(targets.secretsBus) : '/dev/null';
+  return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
 };
+const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
+/** Where `graphyard-secrets-bus.service` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
+export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
+  env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
 /**
  * The host's own process-launch channels that exist here: the systemd manager directories and
  * session-bus sockets of the user's runtime directory (`/run/user/<uid>`, `$XDG_RUNTIME_DIR`) and
  * the system bus directory. Whether a candidate may be hidden is `processLaunchMaskWords`'s call.
  */
-export const hostProcessLaunchTargets = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): { directories: string[]; busSockets: string[] } => {
+export const hostProcessLaunchTargets = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): { directories: string[]; busSockets: string[]; secretsBus: string | null } => {
   const runtimeDirectories = [...new Set([uid === undefined ? null : `/run/user/${uid}`, env.XDG_RUNTIME_DIR || null]
     .filter((path): path is string => !!path && isAbsolute(path)).map(path => { try { return realpathSync(path); } catch { return path; } }))];
   const directories = [...runtimeDirectories.map(directory => join(directory, 'systemd')), '/run/dbus', '/var/run/dbus'];
-  return { directories, busSockets: runtimeDirectories.map(directory => join(directory, 'bus')) };
+  return { directories, busSockets: runtimeDirectories.map(directory => join(directory, 'bus')), secretsBus: secretsBusPath(uid, env) };
 };
 
 /**
@@ -671,7 +685,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const gitDir = join(root, '.git');
   const adminDirectory = sessionGitAdminDirectory(directory, root);
   const sharedDirectories = [
-    join(gitDir, 'objects'), ...(adminDirectory ? [adminDirectory] : [join(gitDir, 'worktrees')]), join(gitDir, 'refs', 'remotes'),
+    join(gitDir, 'objects'), ...(adminDirectory ? [adminDirectory] : [join(gitDir, 'worktrees')]), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes'),
     join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'),
   ].filter(isDirectoryPath);
   const fetchHead = join(gitDir, 'FETCH_HEAD');
