@@ -21,6 +21,8 @@ Ordinary review findings, rework, idle workers, and proof setup are not stopping
 
 `master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout (GY-857; [sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
 
+The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
+
 ### System-driven items
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
@@ -56,7 +58,7 @@ With `run.research` set, a feature (or `"research": true`) gets one read-only Pi
 
 ## Machine-filed backlog
 
-One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Approvals' follow-up findings are recorded on the approved item's own record, never filed as items; an operator promotes one with `graphyard promote-followup` ([follow-ups](followups.md)). Legacy follow-up items and fault items are machine-filed: with `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
