@@ -30,13 +30,13 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 On the base branch require `Graphyard / merge` and `graphyard/landable` (the [landability verdict](coordination.md)) from this App, beside CI: `strict` **off**, admin-enforced, no force pushes or deletion. `master protection --apply` and `master browser protection` reconcile both, adding `graphyard/landable` to an already-protected branch and to the merge-queue ruleset while keeping every check already required.
 
-The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
+The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head before rework or ejection, on the newest check-run ID from configured CI Apps; an owed or accepted rerun expires after 15 minutes without a new run; Actions: write is required: preflight diagnoses a missing grant, rerun requests hold until accepted.
+A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed or accepted rerun lapses after 15 runless minutes; lacking Actions: write, preflight diagnoses it and rerun requests hold.
 
-Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound.
+Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
 ### Bindings and carry
 
