@@ -21,7 +21,7 @@ import { consentHoldItems } from './cli/consent-holds.js';
 import { untriagedAttention } from './triage.js';
 import { backlogCounts } from './model/machine-backlog.js';
 import { setupHealth } from './cli/master-setup.js';
-import { attributionFor, describeReading, loadedRevision, readDisk, readPlaneResources, readReclaimReports, readResources, resourceAttention, type ResourceReading } from './master-resources.js';
+import { attributionFor, describeReading, loadedRevision, readDisk, readPlaneResources, readReclaimReports, readResources, readTmpInodes, resourceAttention, type ResourceReading } from './master-resources.js';
 
 /**
  * A launch refused by a full session ledger is attributed to that ledger (GY-131).
@@ -128,7 +128,7 @@ export async function resourceStatus(root: string, master: MasterConfig, observe
   const revision = lock && lock.host === master.hostId ? loadedRevision(root, lock.pid, deps.run, now) : null;
   const readings = readResources({ now, reviews: observed.reviews, producers: observed.producers, agents: observed.agents, work: observed.work,
     profiles: { workers: master.workers, reviewers: master.reviewers, producers: master.producers },
-    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, disk: await readDisk(root, master) });
+    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, disk: await readDisk(root, master), tmp: await readTmpInodes(root) });
   const attention = resourceAttention(readings);
   return { readings, attention, report: resourceReport(readings, (await readReclaimReports(root)).at(-1) ?? null) };
 }

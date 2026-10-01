@@ -186,7 +186,7 @@ test('unit:tmp-reclaim: the loop\'s reclaim pass removes an old, unheld director
   assert.equal(existsSync(young), true, 'a directory younger than the age bound stays');
   assert.equal(existsSync(mine), true, 'a directory whose owning process still runs stays, however old');
   assert.ok(report.bytes >= 4096 + 'export {};\n'.length, `the report carries the bytes freed (${report.bytes})`);
-  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 3 stale \/tmp directories$/);
+  assert.match(describeTmpReclaim(report.removed.length, report.bytes) ?? '', /^freed .+ from 3 stale \/tmp entries$/);
 
   // The holder alone kept it: once the process that held it exits, the next pass takes it.
   holder.kill('SIGKILL'); await once(holder, 'exit');
@@ -220,7 +220,7 @@ test('unit:tmp-reclaim: the loop\'s reclaim step records the bytes the /tmp pass
   release(); await settleTmpReclaim();
   const after = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { tmpRoot: root });
   assert.deepEqual(after.tmp, { removed: 2, bytes: 5e8 });
-  assert.match(describeReclaim(after) ?? '', /freed 0\.5 GB from 2 stale \/tmp directories/);
+  assert.match(describeReclaim(after) ?? '', /freed 0\.5 GB from 2 stale \/tmp entries/);
   assert.deepEqual(after.errors, []);
   const recorded = await readReclaimReports(root);
   assert.deepEqual(recorded.at(-1)?.tmp, { removed: 2, bytes: 5e8 }, 'the reclaim record carries the bytes freed');
