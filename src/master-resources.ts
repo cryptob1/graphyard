@@ -251,7 +251,9 @@ export const resourceRegistry: ResourceDefinition[] = [
   },
   {
     id: 'tmp-inodes', title: 'Host /tmp inodes', unit: 'inodes',
-    bound: 'the inode count of the filesystem holding the host temporary directory; on a tmpfs with a per-user quota the quota breaks shells first, so it warns at a quarter free',
+    // statfs reports the filesystem's free inodes, not what remains of this user's quota: a quota is
+    // not readable without quotactl, so the reading warns early rather than claiming to track it.
+    bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
     usage: 'statfs of the host temporary directory (os.tmpdir())', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
     reclaim: `the loop's reclaim pass removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
