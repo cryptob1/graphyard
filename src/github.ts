@@ -389,6 +389,8 @@ export class ObservationPacer {
       if (pace.rate) this.nextAt += (charged - estimate) / pace.rate;
     } };
   }
+  /** Whether the pace still holds something: a job in flight, or a start spaced past `now`. */
+  busy(now: number) { return this.inFlight > 0 || this.nextAt > now; }
   /** The pace in force, per minute, for the status an operator reads. */
   report() {
     const perMinute = this.last.rate === null ? null : Math.round(this.last.rate * 60_000 * 100) / 100;
@@ -418,16 +420,52 @@ export interface TokenBudgetReport {
  * or not. What the paced observation jobs did not spend of it is what `observationPace` holds back
  * for the others until the reset. `githubFromEnv` shares one ledger across the process, so the
  * engine's submission observer and the server's workers read the same account.
+ *
+ * An installation's budget is shared by the access tokens it rotates through hourly (GY-726), so
+ * `rotate` hands the old token's entry to its successor: the header series, the charges and the
+ * pacer's in-flight estimate carry over, and the old token's in-flight requests charge the same
+ * entry. The series is filtered by reset, so a rotation that crosses a reset starts afresh.
  */
 export class TokenBudgets {
   private entries = new Map<string, { reading: TokenReading | null; readings: TokenReading[]; charges: { at: number; paced: boolean }[]; pacer: ObservationPacer }>();
+  /** A rotated-out token's digest to the digest of the token that now holds its entry. */
+  private successors = new Map<string, string>();
+  private prunedAt = -Infinity;
+  private resolve(token: string) { return this.successors.get(token) ?? token; }
   private entry(token: string) {
+    token = this.resolve(token);
     let entry = this.entries.get(token);
     if (!entry) this.entries.set(token, entry = { reading: null, readings: [], charges: [], pacer: new ObservationPacer() });
     return entry;
   }
+  /** The installation rotated `from` out for `to`: the budget, its series and its pace continue under `to`. */
+  rotate(from: string, to: string) {
+    from = this.resolve(from);
+    if (from === to) return;
+    const entry = this.entries.get(from);
+    if (!entry) return;
+    this.entries.delete(from);
+    if (!this.entries.get(to)?.reading) this.entries.set(to, entry);
+    this.successors.delete(to);
+    for (const [old, successor] of this.successors) if (successor === from) this.successors.set(old, to);
+    this.successors.set(from, to);
+  }
+  /**
+   * Drop every entry with no reading in force, nothing in flight or spaced out, and no charge in
+   * the window, and every rotation that points at none. Run from `read` and `charge` at most once
+   * a minute, so a process nobody polls for status still holds one entry per live token rather
+   * than one per hourly rotation.
+   */
+  private prune(now: number, keep?: string) {
+    for (const [token, entry] of this.entries)
+      if (token !== keep && !this.reading(token, now) && !entry.pacer.busy(now) && !entry.charges.some(charge => now - charge.at <= budgetWindowMs)) this.entries.delete(token);
+    for (const [old, successor] of this.successors) if (!this.entries.has(successor)) this.successors.delete(old);
+    this.prunedAt = now;
+  }
+  private pruneEvery(now: number, keep: string) { if (now - this.prunedAt >= 60_000 || now < this.prunedAt) this.prune(now, this.resolve(keep)); }
   /** Record one response's reading. Responses to concurrent requests arrive out of order; within one reset the budget only falls. */
   read(token: string, reading: TokenReading) {
+    this.pruneEvery(reading.at, token);
     const entry = this.entry(token), previous = entry.reading;
     const same = previous && previous.resetAt === reading.resetAt;
     entry.reading = same && previous.remaining < reading.remaining ? { ...reading, remaining: previous.remaining } : reading;
@@ -435,13 +473,14 @@ export class TokenBudgets {
   }
   /** Charge one request that cost budget to the token that made it; `paced` when a paced observation job made it. */
   charge(token: string, at: number, paced: boolean) {
+    this.pruneEvery(at, token);
     const entry = this.entry(token);
     entry.charges.push({ at, paced });
     if (entry.charges.length > 8192 || entry.charges.length % 256 === 0) entry.charges = entry.charges.filter(charge => at - charge.at <= budgetWindowMs);
   }
   /** The token's reading while it is in force: past its reset the budget is unknown until a response reads it again. */
   reading(token: string, now: number) {
-    const reading = this.entries.get(token)?.reading ?? null;
+    const reading = this.entries.get(this.resolve(token))?.reading ?? null;
     return reading && (reading.resetAt === null || reading.resetAt > now) ? reading : null;
   }
   pacer(token: string) { return this.entry(token).pacer; }
@@ -451,7 +490,7 @@ export class TokenBudgets {
    * counts every caller; from this process's own charges until then.
    */
   rates(token: string, now: number): { total: number; other: number } {
-    const entry = this.entries.get(token);
+    const entry = this.entries.get(this.resolve(token));
     if (!entry) return { total: 0, other: 0 };
     const charges = entry.charges.filter(charge => now - charge.at <= budgetWindowMs);
     const latest = entry.reading;
@@ -474,8 +513,7 @@ export class TokenBudgets {
   }
   /** Every token with a reading in force: remaining, reset, spend rate and what is projected to be left at the reset. */
   report(now: number, reserve: number, current?: string): TokenBudgetReport[] {
-    for (const [token, entry] of this.entries)
-      if (!this.reading(token, now) && entry.pacer.inFlight === 0 && !entry.charges.some(charge => now - charge.at <= budgetWindowMs)) this.entries.delete(token);
+    this.prune(now);
     return [...this.entries].flatMap(([token, entry]) => {
       const reading = this.reading(token, now);
       if (!reading) return [];
@@ -905,6 +943,8 @@ export class GitHub {
       this.authenticationRefusal = null;
       const result: any = await response.json();
       demand(typeof result.token === 'string' && result.token.length > 0 && Number.isFinite(Date.parse(result.expires_at)) && Date.parse(result.expires_at) > Date.now(), 'Invalid GitHub installation token response', 502);
+      // The installation's budget outlives its token (GY-726): the new token inherits the old one's ledger entry.
+      if (this.token) this.budgets.rotate(tokenIdentity(this.token), tokenIdentity(result.token));
       this.token = result.token; this.expires = Date.parse(result.expires_at);
       this.permissions = result.permissions && typeof result.permissions === 'object' ? result.permissions : {};
   }
