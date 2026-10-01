@@ -248,6 +248,9 @@ export const masterRunSchema = z.object({
    */
   awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
   awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
+  // How long a candidate's push-triggered acceptance run has before the loop dispatches the proof
+  // workflow as a fallback, so a busy CI queue does not get a duplicate run per head; unset, 0.
+  proofDispatchGraceMinutes: z.number().int().min(0).max(1440).optional(),
   // How long a launched reviewer or producer session may show no activity before the loop
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
