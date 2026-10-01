@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
@@ -11,6 +10,7 @@ import { assertMergeCandidate } from '../src/master/merge.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
 import { dispatchFailureAttention, dispatchSummary, emptyDispatchCursor, launchWaitAttention, launchWaitLimit, launchWaits, reviewLaunchWaitAttentionMs, tickWaits, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, observationWakeRetryMs, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-710. On 2026-09-26 review requests waited hours for a reviewer: every launch was refused with
@@ -61,9 +61,8 @@ function dispatchEffects(items: () => Work[], launched: string[]): DispatchEffec
   };
 }
 async function withToken<T>(run: (token: string) => Promise<T>) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-launch-freshness-'));
-  try { const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 }); return await run(token); }
-  finally { await rm(directory, { recursive: true, force: true }); }
+  const directory = await temporaryDirectory('launch-freshness');
+  const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 }); return await run(token);
 }
 
 test('unit:launch-binds-head-not-age — a 20-minute-old observation of the requested head launches the review; a moved head does not; merges keep the two-minute bound', async () => {
