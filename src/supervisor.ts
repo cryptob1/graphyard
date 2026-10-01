@@ -278,7 +278,9 @@ export function renewalGraceMs(error: unknown): number | null {
 }
 
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+/** The one line a supervisor prints before its first control-plane call, naming the item and epoch (GY-1033). */
+export const setupLine = (subject: string | undefined, epoch: number) => `graphyard: establishing containment for ${subject ?? 'this item'} epoch ${epoch}`;
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; /** The item the session works, named in the line printed before the first control-plane call (GY-1033). */ subject?: string; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0, granted = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -432,7 +434,13 @@ export async function supervise(command: string, args: string[], epoch: number, 
     process.on('SIGTERM', interrupted); process.on('SIGINT', interrupted);
     void (async () => {
       try {
-        if (containment) await options.quarantine!.establish();
+        if (containment) {
+          // The pane says what it is doing before the first control-plane call, which may take most
+          // of a minute under coordination-lock contention: the launcher reads this line as a
+          // supervisor still setting up, not a launch that never started (GY-1033).
+          console.error(setupLine(options.subject, epoch));
+          await options.quarantine!.establish();
+        }
         if (containment && options.quarantine!.revalidate) {
           try { await options.quarantine!.revalidate(); }
           catch (error) {

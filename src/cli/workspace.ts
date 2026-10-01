@@ -277,7 +277,7 @@ export const workspaceCommands = defineCommands([
         }
       };
       process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
-          detached: !foreground,
+          detached: !foreground, subject: work.key,
           ...(scoped ? { containment: scoped } : {}),
           quarantine: foreground ? {
             // The quarantine records the exact scope unit and supervisor pid the session is
