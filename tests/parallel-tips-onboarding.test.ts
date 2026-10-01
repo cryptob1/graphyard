@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { defaultParallelTips } from '../src/merge-queue.js';
@@ -10,9 +9,10 @@ import { onboardingMergeQueue } from '../src/repository-setup.js';
 import { parallelTipsAdvisories, protectionPlan, readWorkflows, type WorkflowFile } from '../src/protection.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-parallel-tips-'));
+  const root = await temporaryDirectory('parallel-tips');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
@@ -25,19 +25,14 @@ const workflowWithConcurrency: WorkflowFile = {
 
 test('unit:parallel-tips-onboarded — onboarding writes parallelTips default to master config', async () => {
   const root = await repository();
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-'));
+  const credentialDirectory = await temporaryDirectory('master-credentials');
   const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
   const cliPath = process.execPath;
-  try {
-    const coordinatorStatus = (async () =>
-      new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
-    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath, credentialDirectory }, coordinatorStatus);
-    const config = await loadMasterConfig(root);
-    assert.equal(config.mergeQueue?.parallelTips, defaultParallelTips, 'parallelTips should be set to the default value');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-    await rm(credentialDirectory, { recursive: true, force: true });
-  }
+  const coordinatorStatus = (async () =>
+    new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
+  await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath, credentialDirectory }, coordinatorStatus);
+  const config = await loadMasterConfig(root);
+  assert.equal(config.mergeQueue?.parallelTips, defaultParallelTips, 'parallelTips should be set to the default value');
 });
 
 test('unit:parallel-tips-onboarded — onboardingMergeQueue writes the product default from profiles.ts', () => {
@@ -84,7 +79,7 @@ test('unit:parallel-tips-onboarded — master protection plans the advisory for 
 test('unit:parallel-tips-onboarded — the advisory reads the checkout from the repository root, not the working directory', async () => {
   // `graphyard master protection` runs from wherever the operator stands: the workflows must come
   // from the discovered repository root, or a subdirectory invocation silently loses the advisory.
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-parallel-tips-root-'));
+  const root = await temporaryDirectory('parallel-tips-root');
   const home = process.cwd();
   await mkdir(join(root, 'nested'), { recursive: true });
   process.chdir(join(root, 'nested'));
@@ -99,7 +94,6 @@ test('unit:parallel-tips-onboarded — the advisory reads the checkout from the 
     assert.match(advisories[0], /concurrent runner slots/);
   } finally {
     process.chdir(home);
-    await rm(root, { recursive: true, force: true });
   }
 });
 
