@@ -1,10 +1,12 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fleetRoleHealth, reconcileFleetSessions, selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
+import { fleetRequestTimeoutMs, fleetRoleHealth, reconcileFleetSessions, selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { approverSessionName, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
@@ -213,4 +215,13 @@ test('unit:capacity-refusal-retried — an approver launch refused for the role\
   assert.equal(watch.agentName, approverSessionName({ key: 'GY-42' }, decisionId));
   assert.ok(fleet.all().find(session => session.id === busy.id)!.endedAt, 'the session that exited was ended');
   assert.deepEqual(fleet.live().map(session => session.work), ['GY-42']);
+});
+
+test('unit:registry-request-outlasts-lock-queue — a registry request waits 30 s, so a selection queued behind the coordination lock is not abandoned while the server completes it', () => {
+  // 2026-10-01: 45 of 46 selects were abandoned at a 10 s bound; each still completed server-side and left a phantom live session.
+  assert.ok(fleetRequestTimeoutMs >= 30_000, 'the registry request bound covers the coordination lock queue');
+  // Every registry client takes that bound: heldAwareProbe built its own with a literal 10 s, which kept
+  // every dispatch failing while any account was held spent.
+  const sources = execFileSync('grep', ['-rln', 'httpFleetClient(', fileURLToPath(new URL('../src', import.meta.url))], { encoding: 'utf8' }).trim().split('\n');
+  for (const file of sources) assert.doesNotMatch(readFileSync(file, 'utf8'), /httpFleetClient\([^;]*\?\?\s*\d[\d_]*\s*\)/, `${file} passes a literal timeout to httpFleetClient`);
 });
