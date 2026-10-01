@@ -8,7 +8,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
+import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequestTimeoutMs } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
@@ -356,7 +356,7 @@ export interface LaunchSelection { account: LaunchAccount | null; health: Enviro
 export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, probe: FleetProbe = {}): Promise<FleetProbe> {
   const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
   if (!Object.keys(held).length) return probe;
-  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000) : null);
+  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs) : null);
   if (!client) return probe;
   return { ...probe, registry: { document: () => client.document(), end: (session, reason, outcome) => client.end(session, reason, outcome),
     select: request => client.select({ ...request, observations: request.observations.map(entry => !held[entry.account] ? entry
