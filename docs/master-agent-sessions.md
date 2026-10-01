@@ -15,7 +15,7 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands, or is refused: Codex by `--sandbox workspace-write` (no grant on the checkout or its `.git`), others by bubblewrap (PIDs unshared, fresh `/proc`, bus and systemd hidden; only the session's directory and shared Git areas writable). The loop and executors never start, self-upgrade or restart on a dirty checkout; the escalation names paths and leases.
+Every launch but the master session's gets the checkout unwritable to shell commands, or is refused: Codex by `--sandbox workspace-write` (no grant on the checkout or its `.git`), others by bubblewrap (PIDs unshared, fresh `/proc`, systemd hidden, session bus a keyring-only proxy; only the session's directory and shared Git areas writable). The loop and executors never start, self-upgrade or restart on a dirty checkout; the escalation names paths and leases.
 
 ## Accounts and failover
 
