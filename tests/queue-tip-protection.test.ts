@@ -109,7 +109,7 @@ class Repo {
       if (method === 'PATCH' && path.startsWith('/git/refs/')) { this.refs.set(decodeURIComponent(path.slice('/git/refs/'.length)), (body as { sha: string }).sha); return { object: { sha: (body as { sha: string }).sha } }; }
       if (method === 'POST' && path === '/git/refs') { this.refs.set((body as { ref: string }).ref.replace(/^refs\//, ''), (body as { sha: string }).sha); return {}; }
       if (method !== 'GET') return { id: 12 };
-      if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: this.refs.get('heads/main') } };
+      if (path.startsWith('/git/ref/heads/')) { const name = decodeURIComponent(path.slice('/git/ref/'.length)); return { ref: `refs/${name}`, object: { type: 'commit', sha: this.refs.get(name) } }; }
       if (/^\/commits\/[a-f0-9]{40}$/.test(path)) {
         const commit = this.commits.get(path.slice(9)); if (!commit) throw new Refusal(`GitHub GET ${path} failed (404)`, 502);
         return { sha: commit.sha, parents: commit.parents.map(sha => ({ sha })), commit: { tree: { sha: commit.tree }, message: commit.message, author: { email: 'noreply@github.com' } }, author: commit.author };
