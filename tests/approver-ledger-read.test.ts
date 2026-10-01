@@ -61,29 +61,33 @@ test('unit:approver-reads-ledger — an approver principal reads the whole event
   assert.equal(unscoped.status, 403, JSON.stringify(unscoped.body));
   assert.match(unscoped.body.error, /require a scoped work item/);
 
-  // No write was added: every mutation below was refused before the grant and still is.
+  // No write was added: every mutation below was refused before the grant and still is. Each body
+  // is schema-valid, so the 403 and its message prove the approver was refused for authorization,
+  // not for a malformed request.
   const baseline = await call(credentials[0].token, 'GET', `work/${work.key}`);
   const revision = baseline.body.revision as number;
-  const mutations: [string, unknown][] = [
-    ['work', { title: 'Approver-created', plannedFiles: ['src/x.ts'], criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], reason: 'An approver never creates work' }],
-    [`work/${work.key}/ready`, { expectedRevision: revision, reason: 'An approver never releases' }],
-    [`work/${work.key}/block`, { expectedRevision: revision, reason: 'An approver never blocks' }],
-    [`work/${work.key}/requirements`, { expectedRevision: revision, criteria: [{ id: 'AC-2', text: 'y', proofs: ['unit:y'] }], reason: 'An approver never adds requirements' }],
-    [`work/${work.key}/decide`, { action: 'release', input: { expectedRevision: revision }, reason: 'An approver never requests' }],
-    [`work/${work.key}/close`, { reason: 'An approver never closes' }],
-    [`work/${work.key}/park`, { kind: 'goals-and-priorities', needed: 'x', reason: 'An approver never parks' }],
-    ['assignments/claim', { work: work.id }],
-    ['actions/claim', {}],
-    ['operator-agents', { id: 'minted', displayName: 'minted', capabilities: ['decision:approve'], scope: { repositories: [repository], workItems: ['*'] }, token: `minted-${'z'.repeat(32)}`, reason: 'An approver never mints identities' }],
-    [`operator-agents/${approver.id}/configure`, { expectedRevision: 1, capabilities: ['decision:approve', 'intent:create'], scope: { repositories: [repository], workItems: ['*'] }, reason: 'An approver never widens itself' }],
-    ['intake', { title: 'x' }],
-    ['merge-queue', {}],
-    ['validation/result', {}],
-    ['direct-merges/on', { reason: 'x' }],
+  const agentRoute = /Route is not available to operator agents/, adminOnly = /Administrator permission required/;
+  const mutations: [string, unknown, RegExp][] = [
+    ['work', { title: 'Approver-created', plannedFiles: ['src/x.ts'], criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], reason: 'An approver never creates work' }, /Capability intent:create is required/],
+    [`work/${work.key}/ready`, { expectedRevision: revision, reason: 'An approver never releases' }, /Capability intent:ready is required/],
+    [`work/${work.key}/unblock`, { expectedRevision: revision, reason: 'An approver never unblocks' }, /Capability intent:unblock is required/],
+    [`work/${work.key}/requirements`, { expectedPolicyRevision: baseline.body.policyRevision, criteria: [{ id: 'AC-2', text: 'y', proofs: ['unit:y'] }], dependencies: [], plannedFiles: ['src/measured.ts'], exclusiveResources: [], reason: 'An approver never adds requirements' }, /Capability policy:requirements is required/],
+    [`work/${work.key}/decide`, { action: 'release', input: { expectedRevision: revision }, reason: 'An approver never requests' }, /Capability intent:ready is required/],
+    [`work/${work.key}/close`, { kind: 'obsolete', reason: 'An approver never closes' }, /Capability intent:create is required/],
+    [`work/${work.key}/park`, { epoch: 1, kind: 'goals-and-priorities', needed: 'x', reason: 'An approver never parks' }, /Worker permission required/],
+    ['assignments/claim', { work: work.id }, agentRoute],
+    ['actions/claim', {}, agentRoute],
+    ['operator-agents', { id: 'minted', displayName: 'minted', capabilities: ['decision:approve'], scope: { repositories: [repository], workItems: ['*'] }, token: `minted-${'z'.repeat(32)}`, reason: 'An approver never mints identities' }, adminOnly],
+    [`operator-agents/${approver.id}/configure`, { expectedRevision: 1, capabilities: ['decision:approve', 'intent:create'], scope: { repositories: [repository], workItems: ['*'] }, reason: 'An approver never widens itself' }, adminOnly],
+    ['intake', { origin: 'goal', title: 'x' }, /goal intake is human-only/],
+    ['merge-queue', {}, agentRoute],
+    ['validation/result', {}, agentRoute],
+    ['direct-merges/on', { reason: 'x' }, /only with an admin credential/],
   ];
-  for (const [path, body] of mutations) {
+  for (const [path, body, refusal] of mutations) {
     const refused = await call(approver.token, 'POST', path, body);
-    assert.ok(refused.status >= 400 && refused.status < 500, `${path} answered ${refused.status}: ${JSON.stringify(refused.body)}`);
+    assert.equal(refused.status, 403, `${path} answered ${refused.status}: ${JSON.stringify(refused.body)}`);
+    assert.match(refused.body.error, refusal, path);
   }
   const after = await call(credentials[0].token, 'GET', 'events');
   assert.equal(after.status, 200);
