@@ -211,7 +211,7 @@ export const workspaceCommands = defineCommands([
       if (work.submission) {
         const remoteBranch = `refs/remotes/origin/${branch}`;
         // GY-860 AC-2: an unfetchable or moved PR branch is a workspace failure, so no attempt is spent.
-        const refused = submittedBranchRefusal(root, branch, remoteBranch, work.candidate?.sha);
+        const refused = await submittedBranchRefusal(root, branch, remoteBranch, work.candidate?.sha, runChild);
         if (refused) { await releaseUnderFailure(mutate, epoch, refused); throw new Error(`${refused}. The claim was released as a workspace failure, so the attempt costs nothing.`); }
         startPoint = remoteBranch;
       }

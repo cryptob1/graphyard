@@ -1,5 +1,4 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir } from 'node:fs/promises';
@@ -656,10 +655,10 @@ export async function releaseUnderFailure(mutate: (name: string, data: unknown) 
 }
 
 /** GY-860 AC-2: why a rework workspace may not start from the submitted PR branch, or null when it may. */
-export function submittedBranchRefusal(root: string, branch: string, remoteBranch: string, candidateSha: string | undefined): string | null {
+export async function submittedBranchRefusal(root: string, branch: string, remoteBranch: string, candidateSha: string | undefined, run: ChildRun): Promise<string | null> {
   try {
-    execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
-    const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
+    const remoteSha = String(await run('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim();
     return !candidateSha || remoteSha !== candidateSha ? 'Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace' : null;
   } catch (error) { return `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`; }
 }
