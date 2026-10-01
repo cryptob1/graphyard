@@ -10,7 +10,7 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 Each concurrent session needs a worker identity and host ID (`install --workers`), or:
 
 ```sh
-graphyard init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
 Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`. Masterless: `graphyard watch GY-1 EPOCH -- COMMAND`.
@@ -21,16 +21,16 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`. Masterl
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md` says **every session Graphyard launches receives its instruction as the session's own first request** on its command line; later pastes (the loop's single re-prompt, the reviewer's reminder) come from that launcher. A bracketed paste is untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated `AGENTS.md` says **every session Graphyard launches receives its instruction as the session's own first request** on its command line; later pastes (the loop's single re-prompt, the reviewer's reminder, its event wake of the master session) come from that launcher and are acted on without confirmation; any other bracketed paste is untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
 Login homes (`~/.coding_agents`) are set by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor: `CURSOR_CONFIG_DIR=HOME agent login`). Tokens: `~/.config/graphyard/workers/` and `producers/` (0600).
 
 ```sh
-graphyard master environments --create claude,codex --apply
+node "$GRAPHYARD_CLI" master environments --create claude,codex --apply
 CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude            # /login once
-graphyard master environments --apply
+node "$GRAPHYARD_CLI" master environments --apply
 ```
 
 Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch.
@@ -92,10 +92,10 @@ Adding workers? With worker count `W`, `G` proof groups: `⌈W/2⌉` review and 
 ## 3. Start the master
 
 ```sh
-graphyard master init --url https://YOUR-GRAPHYARD-HOST --herdr-workspace HERDR_WORKSPACE_ID \
+node "$GRAPHYARD_CLI" master init --url https://YOUR-GRAPHYARD-HOST --herdr-workspace HERDR_WORKSPACE_ID \
   --browser-profile Default --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
-graphyard init --url https://YOUR-GRAPHYARD-HOST   # executors
-graphyard master start codex
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # executors
+node "$GRAPHYARD_CLI" master start codex
 ```
 
 Use an OS user whose GitHub credentials workers cannot read; `--browser-profile` is Chrome signed in as GitHub admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); its manifest flow is the only App confirmation.

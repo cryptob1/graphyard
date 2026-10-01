@@ -28,11 +28,11 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Require the check
 
-Require `Graphyard / merge` from the control-plane App on the base branch: `strict` **off**, admin-enforced, no force pushes or deletion (`master browser protection` reconciles). It needs green `GITHUB_CI_APP_IDS` checks, current-head approval, trusted evidence, a mergeable non-draft PR, and queue head or [optimistic lane](#optimistic-merges). Restrict other merge identities; lease-less workers still push.
+Require `Graphyard / merge` from the control-plane App on the base branch: `strict` **off**, admin-enforced, no force pushes or deletion (`master browser protection` reconciles). It needs green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted evidence, a mergeable non-draft PR, and queue head or [optimistic lane](#optimistic-merges). Restrict other merge identities; lease-less workers still push.
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (Actions: write; expires unstarted after 15 minutes). The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects the entry; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound.
+A failed required check reruns once on the unchanged head (Actions: write; expires unstarted after 15 minutes). The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects the entry; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
 ### Bindings and carry
 
@@ -42,7 +42,7 @@ The reviewer App re-posts a carried approval onto the tip (`review.carry-refresh
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass; `1` restores batching. A failing tip ejects its entry once those ahead pass, rebuilding later tips. Failing only `unit:docs-word-budget` ejects the entry crossing a page cap ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass; `1` restores batching. A failing tip ejects its entry once those ahead pass, rebuilding later tips. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget; those ahead still merge ([development](development.md#documentation)).
 
 ### Optimistic merges
 

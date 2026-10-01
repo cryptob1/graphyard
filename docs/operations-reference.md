@@ -43,7 +43,7 @@ A failing required check reruns once per sha (Actions:write), keeping position, 
 
 | Band | Cadence |
 | --- | --- |
-| `merge` | at the queue head, passing: 20 s |
+| `merge` | within two of the queue head (or a parallel tip), passing: 20 s |
 | `active` | awaiting check, review or rework: 1 min |
 | `steady` | unchanged: 5 min or longer |
 | `idle` | awaiting dispatch or escalation: 5 min |
