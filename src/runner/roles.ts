@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { spawn, type SpawnOptions } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
@@ -10,6 +11,22 @@ import { z } from 'zod';
 import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
 import { runRecord, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
+
+/**
+ * A child-process spawner that puts the coordinator confinement (GY-888) before a spawned command:
+ * the bubblewrap words go before the command and its arguments, which keep their own working
+ * directory, environment and streams. A spawn that cannot be confined throws instead of starting
+ * unconfined. Headless runs are not spawned through it: their runner confines Pi alone, inside the
+ * run's shell (`runConfinement`).
+ */
+export function confiningSpawn(base: typeof spawn = spawn, options: { coordinatorRoot?: string | null; bwrap?: string | null } = {}): typeof spawn {
+  const confine = runConfinement(options);
+  if (!confine) return base;
+  return ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
+    const wrapper = confine(typeof spawnOptions?.cwd === 'string' ? spawnOptions.cwd : undefined);
+    return base(wrapper[0], [...wrapper.slice(1), command, ...args], spawnOptions);
+  }) as typeof spawn;
+}
 
 /**
  * The coordinator confinement of every headless run (GY-888), as the runner's `confine` option:
