@@ -160,10 +160,12 @@ export function terminalScopeRefusal(item: { plannedFiles?: readonly string[]; c
  * approver's reason and that the attempt stays inside plannedFiles, withdrawing the ask, which
  * lifts the refusal holding the item, rather than waiting on a master that will not come.
  */
-export function scopeOutcomeMessage(key: string, epoch: number, outcome: { state: 'approved' | 'refused'; paths: readonly string[]; approver: string | null; reason: string | null }, cli = 'graphyard') {
+export function scopeOutcomeMessage(key: string, epoch: number, outcome: { state: 'approved' | 'refused'; paths: readonly string[]; approver: string | null; reason: string | null; companions?: readonly string[] }, cli = 'graphyard') {
   const paths = outcome.paths.join(', ');
+  // A path granted as the timing baseline's companion (GY-1023) is not planned: say what it does allow.
+  const companions = outcome.companions?.length ? outcome.companions : [], planned = outcome.paths.filter(path => !companions.includes(path));
   return outcome.state === 'approved'
-    ? `Graphyard: your scope request on ${key} (epoch ${epoch}) was approved${outcome.approver ? ` by ${outcome.approver}` : ''}${outcome.reason ? `: ${outcome.reason}` : ''}. plannedFiles now include ${paths} and you keep your lease: continue the work.`
+    ? `Graphyard: your scope request on ${key} (epoch ${epoch}) was approved${outcome.approver ? ` by ${outcome.approver}` : ''}${outcome.reason ? `: ${outcome.reason}` : ''}.${planned.length ? ` plannedFiles now include ${planned.join(', ')}` : ''}${companions.length ? `${planned.length ? ';' : ''} ${companions.join(', ')} is granted as an implied companion and stays outside plannedFiles, so only the lines of the test files this change adds or changes may change there,` : ''} and you keep your lease: continue the work.`
     : `Graphyard: your scope request on ${key} (epoch ${epoch}) for ${paths} was refused by the independent approver${outcome.approver ? ` ${outcome.approver}` : ''}: ${outcome.reason ?? 'no reason recorded'}. Stay inside plannedFiles: withdraw the request with ${cli} scope-request ${key} ${epoch} - and finish the work without those files, or record a blocker if the criteria cannot be met without them.`;
 }
 
@@ -185,7 +187,9 @@ export function scopeRequestOutcome(item: { key: string; plannedFiles?: readonly
   // Liveness comes first: an outcome, even one decided before the deadline, is not this attempt's
   // to act on once its lease has lapsed or been reconciled away.
   if (item.lease?.epoch !== ask.epoch || Date.parse(item.lease.expiresAt) <= now) return { state: 'ended', text: `Graphyard: your lease on ${item.key} (epoch ${ask.epoch}) is no longer live, so no scope outcome applies to this attempt; stop the work` };
-  if (!own && covered) return { state: 'approved', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'approved', paths: ask.paths, approver: decided?.state === 'approved' && decided.decidedBy !== 'graphyard' ? decided.decidedBy : null, reason: decided?.state === 'approved' ? decided.reason : null }, cli) };
+  // A path the decision granted for this ask without planning it — the timing baseline's implied companion (GY-1023) — is approved too.
+  const granted = !own && decided?.state === 'approved' && outside.every(path => decided.paths.includes(path));
+  if (!own && (covered || granted)) return { state: 'approved', text: scopeOutcomeMessage(item.key, ask.epoch, { state: 'approved', paths: ask.paths, approver: decided?.state === 'approved' && decided.decidedBy !== 'graphyard' ? decided.decidedBy : null, reason: decided?.state === 'approved' ? decided.reason : null, companions: outside }, cli) };
   const refusal = own?.decision ?? decided;
   // A refusal names only the paths still outside plannedFiles: one widened meanwhile, by any path,
   // is planned, and the worker is not told to finish without it.

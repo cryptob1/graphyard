@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { awaitScopeOutcome } from '../src/cli/session-commands.js';
 import { applyScopeDecision } from '../src/engine.js';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, Refusal, type Work, type Observation } from '../src/model.js';
-import { decideScopeRequest, redecidableScopeRefusal } from '../src/model/scope.js';
+import { decideScopeRequest, redecidableScopeRefusal, scopeRequestOutcome } from '../src/model/scope.js';
 import { timingBaselineCompanion, timingBaselinePath } from '../src/model/timing-companion.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { localScopeFindings } from '../src/sync.js';
@@ -111,7 +112,7 @@ test('unit:timing-baseline-implied-companion — removing or altering lines of t
   assert.equal(timingBaselineCompanion(baseline(shipped), baseline({ ...shipped, 'tests/new-thing.test.ts': 450 }), []).allowed, false);
 });
 
-test('unit:timing-baseline-scope-request-granted — scope-request for the baseline is granted without an operator when the change adds a test file', () => {
+test('unit:timing-baseline-scope-request-granted — scope-request for the baseline is granted without an operator when the change adds a test file', async () => {
   const criteria = [{ id: 'AC-1', text: 'The thing works; a test covers it.' }];
   const request = { paths: [timingBaselinePath] };
   const planned = decideScopeRequest({ plannedFiles: ['src/thing.ts', 'tests/new-thing.test.ts'], criteria }, request);
@@ -131,6 +132,19 @@ test('unit:timing-baseline-scope-request-granted — scope-request for the basel
   const refusal = { epoch: 1, paths: [timingBaselinePath], reason: 'record the new test file timing line', requestedBy: 'worker', at: '2026-09-30T00:00:00Z',
     decision: { state: 'refused' as const, reason: untested.reason, at: '2026-09-30T00:00:01Z', decidedBy: 'graphyard', waitedMs: 1000, paths: [timingBaselinePath], requestedBy: 'worker', requestedAt: '2026-09-30T00:00:00Z' } };
   assert.equal(redecidableScopeRefusal({ plannedFiles: ['src/thing.ts', 'tests/new-thing.test.ts'], criteria, blocker: `Scope request refused: ${untested.reason}`, scopeRequest: refusal }), true);
+  // The worker reads the grant from its own `scope-request --wait`: approved, though plannedFiles are unchanged.
+  const ask = { epoch: 1, paths: [timingBaselinePath], reason: 'record the new test file timing line', requestedBy: 'worker', at: new Date().toISOString() };
+  const work = { id: 'w', key: 'GY-1023', plannedFiles: ['src/thing.ts', 'tests/new-thing.test.ts'], criteria, blocker: null, lease: { epoch: 1, owner: 'worker', expiresAt: new Date(Date.now() + 600_000).toISOString() }, scopeRequest: ask } as unknown as Work;
+  assert.equal(applyScopeDecision(work, ask, new Date()).state, 'approved');
+  assert.deepEqual(work.plannedFiles, ['src/thing.ts', 'tests/new-thing.test.ts']);
+  const outcome = scopeRequestOutcome(work, { epoch: 1, at: ask.at, paths: ask.paths }, Date.now());
+  assert.equal(outcome.state, 'approved', outcome.text);
+  assert.match(outcome.text, /tests\/helpers\/timing-baseline\.json is granted as an implied companion and stays outside plannedFiles/);
+  const heard = await awaitScopeOutcome({ api: async () => ({ work: [work], now: new Date().toISOString() }) }, work, 1, { waitMs: 0 });
+  assert.equal(heard.state, 'approved', heard.text);
+  assert.match(heard.text, /you keep your lease: continue the work/);
+  // A grant for another ask of the attempt is not this one's.
+  assert.notEqual(scopeRequestOutcome(work, { epoch: 1, at: new Date(Date.parse(ask.at) - 1000).toISOString(), paths: ask.paths }, Date.now()).state, 'approved');
 });
 
 test('unit:timing-baseline-implied-companion — a scope request granted for the baseline keeps it outside plannedFiles, so foreign lines are still refused', async () => {
