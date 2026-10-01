@@ -41,6 +41,7 @@ const flagValue = (args: string[], ...flags: string[]) => {
   });
   return value as string | null;
 };
+const flagValues = (args: string[], ...flags: string[]) => args.flatMap((arg, index) => flags.includes(arg) && index + 1 < args.length ? [args[index + 1]] : flags.flatMap(flag => arg.startsWith(`${flag}=`) ? [arg.slice(flag.length + 1)] : []));
 const probeProfile = 'graphyard-launch-probe';
 
 export const runtimeSandboxes: Record<string, RuntimeSandbox> = {
@@ -57,7 +58,10 @@ export const runtimeSandboxes: Record<string, RuntimeSandbox> = {
     probe: (args, cwd, script) => {
       const writable = runtimeSandboxes.codex.mode(args) === 'workspace-write' ? [':workspace_roots', ...addedDirectories(args, cwd)] : [];
       const filesystem = [['/', 'read'], ...writable.map(path => [path, 'write'])].map(([path, access]) => `${JSON.stringify(path)}=${JSON.stringify(access)}`).join(', ');
-      return { command: 'codex', args: ['sandbox', '-P', probeProfile, '-C', cwd, '-c', `permissions.${probeProfile}.filesystem={${filesystem}}`, '--', ...script] };
+      // The launch's network grant is the profile's too: a probe that reaches GitHub (GY-1008's
+      // credential probe) would otherwise fail on name resolution while the worker's own push works.
+      const network = flagValues(args, '-c', '--config').includes('sandbox_workspace_write.network_access=true') ? ['-c', `permissions.${probeProfile}.network.enabled=true`] : [];
+      return { command: 'codex', args: ['sandbox', '-P', probeProfile, '-C', cwd, '-c', `permissions.${probeProfile}.filesystem={${filesystem}}`, ...network, '--', ...script] };
     },
   },
 };

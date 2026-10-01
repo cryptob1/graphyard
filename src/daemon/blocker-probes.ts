@@ -6,7 +6,11 @@ import type { MasterConfig } from '../master.js';
 import type { ChildRun } from '../child-runner.js';
 import type { BlockerClass, BlockerClassification } from '../model/blocker-class.js';
 export type { BlockerClassification };
-import { runtimeSandboxes } from '../worker-sandbox.js';
+import { grantWorkerPaths, runtimeSandboxes, workerPaths, writablePaths } from '../worker-sandbox.js';
+import type { WorkerProfile } from '../master/profiles.js';
+import { accountLaunch, readEnvironmentLog, selectionKey, sharedGitDirectory, type LaunchAccount } from '../master/environments.js';
+import { readFleet, type FleetLaunchAccount, type FleetProbe } from '../fleet.js';
+import { rolePolicy } from '../model/registry.js';
 
 /** What the loop writes on the item for one probe (POST work/ID/blocker-probe). */
 export interface BlockerProbeRecord { blocker: string; class: BlockerClass; probe: string; result: 'pass' | 'fail'; detail: string; nextAt: string | null }
@@ -26,8 +30,12 @@ export function confinedCommand(launch: WorkerLaunch | null, cwd: string, script
   return sandbox && sandbox.mode(launch!.args) !== null ? sandbox.probe(launch!.args, cwd, script) : { command: script[0], args: script.slice(1) };
 }
 
-/** The credential probe: what the next attempt's first `gh` and `git push` meet. */
-export const credentialScript = ['/bin/sh', '-c', 'gh auth status >/dev/null 2>&1 || { gh auth status 2>&1 | tail -n 3; exit 1; }; GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code origin HEAD >/dev/null'];
+/**
+ * The credential probe: what the next attempt's first `gh` and `git push` meet. The push is a dry
+ * run of a branch name no attempt uses, so it asks the remote for write access (a read-only token
+ * is refused there) and changes nothing.
+ */
+export const credentialScript = ['/bin/sh', '-c', 'gh auth status >/dev/null 2>&1 || { gh auth status 2>&1 | tail -n 3; exit 1; }; GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code origin HEAD >/dev/null && GIT_TERMINAL_PROMPT=0 git push --dry-run --no-verify --quiet origin HEAD:refs/heads/graphyard/blocker-probe'];
 /** The write probe: the path, or the nearest directory above it that exists, can be written. */
 export const writableScript = (path: string) => ['/bin/sh', '-c', 'p="$1"; while [ ! -e "$p" ]; do p=$(dirname "$p"); done; if [ -d "$p" ]; then f="$p/.graphyard-blocker-probe-$$"; : > "$f" && rm -f "$f"; else : >> "$p"; fi', 'sh', path];
 
@@ -62,7 +70,7 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
   switch (classification.class) {
     case 'github-credential': return confined('gh auth status and git ls-remote origin', credentialScript);
     case 'sandbox-path': {
-      const path = classification.path ? (isAbsolute(classification.path) ? classification.path : resolve(deps.cwd, classification.path)) : deps.cwd;
+      const path = await refusedPathIn(classification.path, deps);
       return confined(`write ${path}`, writableScript(path));
     }
     case 'control-plane-error': {
@@ -84,19 +92,84 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
 }
 
 /**
- * The probe as the loop wires it: the worker profile the next attempt would get (the blocked
- * attempt's own, else the first launch profile), run in the attempt's worktree when it is on this
- * host and in this checkout otherwise, with the base tip read from `origin`.
+ * Where a refused path is: an absolute path as named, and a `.git/...` path the way Git itself
+ * resolves it in the worktree (`git rev-parse --git-path`). In a linked worktree `.git` is a file
+ * and refs, their logs and objects live in the shared Git directory, so `<worktree>/.git/logs/...`
+ * would probe the pointer file and pass while the shared directory stays read-only. Any other
+ * relative path is the worktree's own.
  */
-export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildRun, planeHealth: () => Promise<string | null>) {
-  return (work: Work, classification: BlockerClassification) => {
+async function refusedPathIn(path: string | null, deps: Pick<BlockerProbeDeps, 'run' | 'cwd'>) {
+  if (!path) return deps.cwd;
+  if (isAbsolute(path)) return path;
+  const inGit = /^\.git(?:\/(.*))?$/.exec(path.replace(/^\.\//, ''));
+  if (!inGit) return resolve(deps.cwd, path);
+  try {
+    const resolved = String(await deps.run('git', ['rev-parse', '--path-format=absolute', ...(inGit[1] ? ['--git-path', inGit[1]] : ['--git-dir'])], { cwd: deps.cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })).trim();
+    return resolved ? resolve(deps.cwd, resolved) : resolve(deps.cwd, path);
+  } catch { return resolve(deps.cwd, path); }
+}
+
+/**
+ * The account the blocked attempt ran on, so its probe meets the same runtime, arguments and
+ * environment. The registry's session for the item on this host when the registry decides the
+ * worker role (else the role's first enabled account here); otherwise the account the environment
+ * log recorded choosing for this item, else the profile's first configured account. Nothing is
+ * selected or reserved: a probe never takes a session or a slot.
+ */
+export async function blockedAttemptAccount(config: MasterConfig, work: Work, profile: WorkerProfile, probe: FleetProbe = {}): Promise<LaunchAccount | null> {
+  const fleet = await readFleet(config, 'worker', probe);
+  if (fleet.managed) {
+    const { registry } = fleet, role = registry.roles.find(entry => entry.name === 'worker');
+    const session = registry.sessions.filter(entry => entry.role === 'worker' && entry.work === work.key && entry.host === config.hostId).sort((a, b) => Date.parse(b.selectedAt) - Date.parse(a.selectedAt))[0];
+    const account = registry.accounts.find(entry => session ? entry.name === session.account : !!role?.accounts.includes(entry.name) && entry.enabled && entry.credential.host === config.hostId);
+    const runtime = registry.runtimes.find(entry => entry.name === (session?.runtime ?? account?.runtime));
+    const model = registry.models.find(entry => entry.name === (session?.model ?? rolePolicy(role).model ?? account?.model));
+    if (!account || !runtime) throw new Error(`the agent registry names no worker account on host ${config.hostId} to probe ${work.key}'s blocker under`);
+    return { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
+      fleet: { runtime: runtime.name, contract: runtime.launch, model: model?.name ?? account.model, modelId: model?.id ?? null, session: session?.id ?? 'blocker-probe', reason: `blocker probe for ${work.key}`, role: 'worker', policy: rolePolicy(role), revision: registry.revision } } satisfies FleetLaunchAccount;
+  }
+  const chosen = (await readEnvironmentLog(config)).selected[selectionKey('worker', profile.name)];
+  const environments = config.environments ?? [];
+  const name = chosen?.work === work.key && chosen.environment ? chosen.environment : profile.accounts?.find(account => environments.some(entry => entry.name === account));
+  return environments.find(entry => entry.name === name) ?? null;
+}
+
+/**
+ * The launch a worker on `profile` gets for `work`, built as dispatch builds it: its account's
+ * `accountLaunch`, then every path the worker writes in `cwd` — the worktree, its own Git admin
+ * directory and the shared one — granted to the runtime's sandbox (`grantWorkerPaths`).
+ */
+export async function blockedAttemptLaunch(config: MasterConfig, root: string, work: Work, profile: WorkerProfile, cwd: string, probe: FleetProbe = {}): Promise<WorkerLaunch> {
+  const launch = accountLaunch(profile, await blockedAttemptAccount(config, work, profile, probe));
+  const paths = workerPaths(cwd);
+  const writable = writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) });
+  return { kind: launch.kind, args: grantWorkerPaths(launch.kind, launch.args, writable, cwd), environment: launch.environment };
+}
+
+/** The classes whose probe runs inside the worker's confinement, and so needs its launch. */
+const confinedClasses: readonly BlockerClass[] = ['github-credential', 'sandbox-path'];
+
+/**
+ * The probe as the loop wires it: the worker profile the next attempt would get (the blocked
+ * attempt's own, else the first launch profile) and the launch dispatch would give it
+ * (`blockedAttemptLaunch`), run in the attempt's worktree when it is on this host and in this
+ * checkout otherwise, with the base tip read from `origin`. A launch that cannot be built is a
+ * failing probe naming why, never a pass.
+ */
+export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildRun, planeHealth: () => Promise<string | null>, probe: FleetProbe = {}) {
+  return async (work: Work, classification: BlockerClassification): Promise<BlockerProbeResult | null> => {
     const holder = work.lease?.owner ?? work.lastAssignment?.owner;
     const launched = config.workers.filter(worker => worker.mode === 'launch');
     const profile = launched.find(worker => worker.principal === holder) ?? launched[0];
     const workspace = work.workspaces.find(entry => entry.epoch === work.epoch && entry.host === config.hostId);
+    const cwd = workspace && existsSync(workspace.path) ? workspace.path : root;
+    let launch: WorkerLaunch | null = null;
+    if (profile && confinedClasses.includes(classification.class)) {
+      try { launch = await blockedAttemptLaunch(config, root, work, profile, cwd, probe); }
+      catch (error) { return { probe: `the worker launch for ${work.key}`, passed: false, detail: bound(`the launch the next attempt would get cannot be built: ${firstLine(error)}`) }; }
+    }
     return probeBlocker(work, classification, { run: (command, args, options) => run(command, args, { ...options, timeoutMs: 30_000 }), planeHealth,
       baseTip: async () => String(await run('git', ['-C', root, 'ls-remote', 'origin', `refs/heads/${config.baseBranch}`])).split(/\s/)[0] ?? '',
-      launch: profile ? { kind: profile.kind, args: profile.agentArgs ?? [], environment: profile.environment } : null,
-      cwd: workspace && existsSync(workspace.path) ? workspace.path : root, clock: Date.now() });
+      launch, cwd, clock: Date.now() });
   };
 }

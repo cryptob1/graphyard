@@ -19,9 +19,9 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 
 | Class | Probe, every cycle | Cleared when |
 | --- | --- | --- |
-| `github-credential` | `gh auth status`, `git ls-remote origin HEAD` in the worker's sandbox and worktree | both pass |
+| `github-credential` | `gh auth status`, `git ls-remote`, `git push --dry-run` under the attempt's own launch | all pass |
 | `control-plane-error` | server health | healthy |
-| `sandbox-path` | write the path (or nearest parent) in the sandbox | it succeeds |
+| `sandbox-path` | write the path (`.git/` via `git rev-parse --git-path`) in that sandbox | it succeeds |
 | `worktree-mismatch` | the attempt's lease | ended |
 | `outside-scope-test-failure` | base branch tip | moved |
 | `planned-file-scope` | additive `requirements` widening for the approver | files covered |

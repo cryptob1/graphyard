@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -17,8 +17,10 @@ import { blockedAttemptMarker } from '../src/model/capacity.js';
 import { humanRequestBlocker } from '../src/model/human-request.js';
 import { buildBoard, masterBoard } from '../src/model/board.js';
 import { workAttentionOwner } from '../src/master/attention.js';
-import { confinedCommand, probeBlocker } from '../src/daemon/blocker-probes.js';
+import { confinedCommand, loopBlockerProbe, probeBlocker } from '../src/daemon/blocker-probes.js';
+import { emptyRegistry, type AgentRegistry } from '../src/model/registry.js';
 import { keepBlockedWork } from '../src/cli/lease.js';
+import { assignmentSurrender } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -201,6 +203,20 @@ test('unit:blocked-attempt-frees-slot — recording a blocker ends the attempt i
   // The worker's clear (`blocked GY-N EPOCH -`) needs a live lease: the ended attempt clears nothing.
   assert.equal((await call(token(implementer), 'POST', `work/${held.id}/blocked`, { epoch: held.epoch, reason: null })).status, 409);
   assert.equal(await readFile(join(worktree, 'queue.ts'), 'utf8'), 'export const carry = 2; // unfinished\n');
+
+  // A watch supervisor whose session is gone surrenders against this real engine in one release
+  // carrying the cause: the attempt ends, the cause is on the ledger, and no blocker stands.
+  const orphaned = await claimed('Supervisor surrender leaves no blocker');
+  const surrender = assignmentSurrender(orphaned.epoch, [process.execPath, 'bin/graphyard.mjs', 'watch', orphaned.key, String(orphaned.epoch), '--', 'claude'], { GRAPHYARD_URL: url, GRAPHYARD_TOKEN: token(implementer) })!;
+  await surrender('Herdr no longer reports this agent session');
+  const surrendered = await reload(orphaned.id);
+  assert.equal(surrendered.lease, null, 'the lease is released');
+  assert.equal(surrendered.blocker, null, 'no standing blocker for a condition that is already over');
+  assert.equal(blockerView(surrendered), null, 'nothing needs anyone');
+  const release = (await events(surrendered)).filter(row => row.kind === 'release');
+  assert.equal(release.length, 1);
+  assert.equal(release[0].payload.details.cause, `Watch supervisor ended attempt ${orphaned.epoch}: Herdr no longer reports this agent session`, 'the cause is kept on the release event');
+  assert.equal((await engine.execute(implementer, 'claim', orphaned.id, {}, randomUUID())).epoch, orphaned.epoch + 1, 'the item is claimable at once');
 });
 
 test('unit:environment-blocker-auto-cleared — each cycle the loop probes an environmental blocker inside the worker confinement, clears it with an audit record once the probe passes, and never while it fails', async () => {
@@ -261,6 +277,56 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   assert.equal(sandbox?.passed, true);
   assert.match(sandbox!.probe, /write \/srv\/wt\/\.git\/logs\/refs\/remotes\/origin\/graphyard\/gy-941-1 inside the codex sandbox/);
   assert.deepEqual(confinedCommand({ kind: 'claude', args: [] }, '/srv/wt', ['/bin/sh', '-c', 'true']), { command: '/bin/sh', args: ['-c', 'true'] }, 'a runtime without a sandbox runs the probe as its shell would');
+
+  // A managed worktree is a linked one: `.git` is a file and the ref logs live in the shared Git
+  // directory. The blocker's `.git/logs/...` path is probed where Git writes it, so while the
+  // shared directory stays read-only the probe keeps failing, and it passes once it is writable.
+  const repo = await temporaryDirectory('blocker-unblock-repo');
+  git(repo, 'init', '-q', '-b', 'main'); git(repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'base');
+  git(repo, 'update-ref', 'refs/remotes/origin/graphyard/gy-940-1', 'HEAD');
+  const linked = join(await temporaryDirectory('blocker-unblock-linked'), 'GY-941-1');
+  git(repo, 'worktree', 'add', '-q', '-b', 'graphyard/gy-941-1', linked);
+  const shared = git(repo, 'rev-parse', '--path-format=absolute', '--git-path', 'logs/refs/remotes/origin/graphyard');
+  const host = (command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const linkedProbe = () => probeBlocker(work, classifyBlocker(incidents[2][0]), { run: host, launch: { kind: 'claude', args: [] }, cwd: linked, clock: Date.now() });
+  await chmod(shared, 0o555);
+  try {
+    const readOnly = await linkedProbe();
+    assert.equal(readOnly?.probe, `write ${shared}/gy-941-1 inside the worker shell`, 'the shared directory\'s log is probed, not the worktree\'s `.git` pointer file');
+    if (process.getuid?.() !== 0) assert.equal(readOnly?.passed, false, 'a read-only shared Git directory keeps the probe failing');
+  } finally { await chmod(shared, 0o755); }
+  assert.equal((await linkedProbe())?.passed, true, 'it passes once the shared directory is writable');
+
+  // The loop builds the launch as dispatch does: the account the attempt ran on, with the
+  // worktree, its own Git admin directory and the shared one granted to the sandbox.
+  const scratch = await temporaryDirectory('blocker-unblock-loop');
+  const linkedWork = { ...work, lease: null, lastAssignment: { epoch: work.epoch, owner: implementer.id, claimedAt: new Date().toISOString() }, workspaces: [{ epoch: work.epoch, host: 'loop-host', path: linked, branch: 'graphyard/gy-941-1' }] } as unknown as Work;
+  const accountConfig = (kind: string) => masterConfigSchema.parse({ ...loopConfig(), credentialFile: join(scratch, `${kind}-coordinator.token`), environments: [{ name: 'codex-a', kind: 'codex', home: '/homes/codex-a' }],
+    workers: [{ ...profile, kind, accounts: kind === 'codex' ? ['codex-a'] : undefined }] }) as MasterConfig;
+  const ran: { command: string; args: string[]; env: NodeJS.ProcessEnv }[] = [];
+  const record = (async (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => { ran.push({ command, args, env: options.env ?? {} }); return ''; }) as any;
+  const local = { document: async () => emptyRegistry(), select: async () => { throw new Error('a probe never selects a session'); }, end: async () => {} } as any;
+  const credentialProbe = await loopBlockerProbe(accountConfig('codex'), repo, record, async () => null, { registry: local })(linkedWork, classifyBlocker(incidents[0][0]));
+  assert.equal(credentialProbe?.passed, true);
+  const sandboxed = ran.at(-1)!;
+  assert.equal(sandboxed.command, 'codex', 'the profile\'s codex account runs the probe in the codex sandbox');
+  assert.equal(sandboxed.env.CODEX_HOME, '/homes/codex-a', 'under the account\'s own home');
+  const filesystem = sandboxed.args.find(arg => arg.includes('.filesystem='))!;
+  for (const path of [git(linked, 'rev-parse', '--absolute-git-dir'), git(linked, 'rev-parse', '--path-format=absolute', '--git-common-dir')]) assert.ok(filesystem.includes(`${JSON.stringify(path)}="write"`), `the probe sandbox grants ${path}, as the worker's launch does`);
+  assert.ok(sandboxed.args.includes('permissions.graphyard-launch-probe.network.enabled=true'), 'with the launch\'s network access, so the remote is reachable');
+  assert.match(sandboxed.args.join(' '), /git push --dry-run/, 'a read-only token fails the push dry run');
+
+  // A registry-selected worker is probed on the account its session ran on, not the profile's.
+  const registry: AgentRegistry = { ...emptyRegistry(), revision: 4,
+    runtimes: [{ name: 'claude-rt', launch: { kind: 'claude', args: [], environment: {}, homeVariable: null, modelFlag: null, login: null, loginFile: null } }],
+    models: [{ name: 'model-a', id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong', contextTokens: null } }],
+    accounts: [{ name: 'reg-claude', runtime: 'claude-rt', model: 'model-a', credential: { host: 'loop-host', home: '/homes/reg-claude' }, enabled: true, maxSessions: null, quota: {} as any }],
+    roles: [{ name: 'worker', accounts: ['reg-claude'], concurrency: 2 }],
+    sessions: [{ id: 'session-7', role: 'worker', account: 'reg-claude', runtime: 'claude-rt', model: 'model-a', host: 'loop-host', work: linkedWork.key, principal: implementer.id, selectedAt: new Date().toISOString(), selectedBy: coordinator.id, reason: 'first eligible', skipped: [], endedAt: null, endReason: null }] };
+  await loopBlockerProbe(accountConfig('codex'), repo, record, async () => null, { registry: { ...local, document: async () => registry } })(linkedWork, classifyBlocker(incidents[0][0]));
+  assert.equal(ran.at(-1)!.command, '/bin/sh', 'the session\'s claude runtime has no sandbox to wrap the probe in');
+  assert.equal(ran.at(-1)!.env.CLAUDE_CONFIG_DIR, '/homes/reg-claude');
+  assert.equal(ran.at(-1)!.env.CODEX_HOME, process.env.CODEX_HOME, 'the profile\'s own account is not used');
 });
 
 test('unit:scope-blocker-becomes-decision — a planned-file-scope blocker becomes an additive widening decision for the independent approver, and a needs-decision blocker gets its approver launched, without a master', async () => {
