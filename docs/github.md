@@ -38,7 +38,7 @@ A failed required check reruns once on the unchanged head (Actions: write; expir
 
 Reviews and proofs bind a head, base and policy revision; on a moved base all carry if the patch-id held; else the approval carries if no reviewed file changed, as do proofs with disjoint `scopeFiles`. A republished tip of the same head and patch keeps it; a person's approval never carries.
 
-The reviewer App re-posts a carried approval onto the tip (`review.carry-refreshed`); with none usable, the entry yields for a fresh review (`mergeRefusal.action: rereview`). Past 10 minutes the loop raises an attention and may request rework (`mergeRefusal.action: rework`, approver-judged in the high [risk lane](how-graphyard-works.md#risk-lanes)), once per recovery phase.
+Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review at once, and the entry yields the head to the next until a fresh approval re-enters. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) and which is applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
 
 ### Parallel tips
 
