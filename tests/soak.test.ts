@@ -228,26 +228,40 @@ function soakSessionDirectory(): string {
   return directory;
 }
 
-let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
-before(async () => {
-  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 404;
-  pgServer = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pgServer.initialise(); await pgServer.start(); await pgServer.createDatabase('soak_test');
-  const connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/soak_test`;
+let pgServer: EmbeddedPostgres, pgPort: number, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+const planes: { store: Store; http: ReturnType<typeof server> }[] = [];
+/**
+ * A control plane on its own database of the shared Postgres server, which every later day then
+ * runs against. Days share one by default; a day that needs none of the earlier days' items starts
+ * a fresh one, since the loop's reconciliation and job passes read every item the database holds,
+ * so each earlier day's items make every cycle of a later day slower (GY-971).
+ */
+async function controlPlane(database: string) {
+  await pgServer.createDatabase(database);
+  const connection = `postgres://graphyard:testing-only@127.0.0.1:${pgPort}/${database}`;
   // The database reads the simulated clock: its time functions are shadowed before the schema exists.
   const setup = new pg.Client({ connectionString: connection });
   await setup.connect();
   for (const statement of clockSql) await setup.query(statement);
-  await setup.query('ALTER DATABASE soak_test SET search_path = public, pg_catalog');
+  // A later plane starts at the simulated time the earlier days reached.
+  if (planes.length) await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
+  await setup.query(`ALTER DATABASE ${database} SET search_path = public, pg_catalog`);
   await setup.end();
-  clock.install(start);
   store = new Store(connection); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   engine.principals = everyone; engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  planes.push({ store, http });
+}
+before(async () => {
+  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
+  pgPort = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 404;
+  pgServer = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak'), user: 'graphyard', password: 'testing-only', port: pgPort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await pgServer.initialise(); await pgServer.start();
+  clock.install(start);
+  await controlPlane('soak_test');
   // The fixture coordinator checkout the simulated launches confine against (GY-888).
   coordinatorBase = await temporaryDirectory('soak-coordinator');
   coordinatorRoot = join(coordinatorBase, 'coordinator');
@@ -260,7 +274,11 @@ before(async () => {
   git('add', '.');
   git('commit', '-m', 'coordinator');
 });
-after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
+after(async () => {
+  clock.uninstall();
+  for (const plane of planes) { await new Promise<void>(resolve => plane.http.close(() => resolve())); await plane.store.close(); }
+  if (pgServer) await pgServer.stop();
+});
 
 const id = () => randomUUID();
 async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
@@ -1954,6 +1972,9 @@ test('unit:soak-invariants-hold — review findings classified mechanical under 
   // that item is reworked and delivered like any change request. The plan, the hold, the rework
   // decision and the fresh-read judgement repeat per cycle, head and item, which is why they live here.
   const mechanical = { applied: 2, rejected: 4 };
+  // The day needs none of the earlier days' items, so it runs on a control plane of its own and its
+  // cycles stay as fast as the first day's, wherever it falls in the file.
+  await controlPlane('soak_mechanical');
   const { items, final, violations, failures, lost, github, actionKeys, mechanical: world } = await simulateDay({
     hours: 6, mechanical,
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
