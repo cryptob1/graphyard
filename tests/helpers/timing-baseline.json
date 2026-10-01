@@ -502,6 +502,7 @@
     "tests/verify-before-review.test.ts": 7493,
     "tests/vite-config-loader.test.ts": 265,
     "tests/work-snapshot-latency.test.ts": 94943,
+    "tests/worker-push-credential.test.ts": 2600,
     "tests/worker-push-rights.test.ts": 10664,
     "tests/worker-sandbox.test.ts": 4037,
     "tests/workers-tab.test.ts": 961,
