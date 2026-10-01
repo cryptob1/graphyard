@@ -287,6 +287,7 @@
     "tests/direct-merge-mode.test.ts": 2429,
     "tests/dismissed-review.test.ts": 2433,
     "tests/dispatch-collision.test.ts": 1696,
+    "tests/dispatch-failure-reclaim.test.ts": 2780,
     "tests/dispatch-overlap.test.ts": 967,
     "tests/dispatch-race-guard.test.ts": 32698,
     "tests/dispatch-reservation-followups.test.ts": 590,

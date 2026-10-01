@@ -139,7 +139,7 @@ test('unit:worktree-failure-names-git-error — a failing git worktree add repor
     await runCycle(config, state, effects.effects, () => effects.clock());
     const recorded = state.actions['dispatch:item-7:0'];
     assert.equal(recorded.state, 'failed');
-    assert.match(recorded.detail, /^Dispatch of GY-7 to one failed \(1 of 3 with this cause\): Worker launch failed: .*fatal: '.*GY-7-3' already exists/);
+    assert.match(recorded.detail, /^Dispatch of GY-7 to one failed: Worker launch failed: .*fatal: '.*GY-7-3' already exists.* \(failure 1 of 3 with this cause\)$/);
   } finally { await plane.close(); await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });
 

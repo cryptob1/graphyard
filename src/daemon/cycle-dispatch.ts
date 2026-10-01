@@ -270,7 +270,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         }
         recordProfileFailure(state, current.profile, message(error), now());
         const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed (${run.count} of ${dispatchFailureBlockAfter} with this cause): ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)} (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         if (run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }
