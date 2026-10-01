@@ -23,7 +23,7 @@ Every launch runs with the checkout unwritable to shell commands (GY-888). A cod
 
 ### Workers push with their own credential
 
-A worker's session bus is masked, so the host keyring behind `gh auth git-credential` is unreachable (GY-999). Before a worker starts, the launcher mints its [push credential](protocol/leases.md#push-credential) into `worker-sessions/GY-N-EPOCH` beside the profile's credential file (0700, files 0600) and sets `GH_CONFIG_DIR` there, empties `GH_TOKEN`/`GITHUB_TOKEN`, resets every git credential helper to one reading that token, and pushes ssh origins over https. A launch that cannot mint one is refused and its claim released. An attempt blocked by a GitHub credential failure is ended in the next cycle, keeping its work on its branch, and relaunched with a fresh credential.
+A worker's session bus is masked, so the host keyring behind `gh auth git-credential` is unreachable (GY-999). Before a worker starts, the launcher mints its [push credential](protocol/leases.md#push-credential) into `worker-sessions/GY-N-EPOCH` beside the profile's credential file (0700, files 0600) and sets `GH_CONFIG_DIR` there, empties `GH_TOKEN`/`GITHUB_TOKEN`, resets every git credential helper to one reading that token, and pushes ssh origins over https. A launch that cannot mint one is refused and its claim released. An attempt blocked by a GitHub credential failure (git's or `gh`'s own refusal, or a 401 naming GitHub) is ended in the next cycle, keeping its work on its branch, and relaunched with a fresh credential. Each such ending counts as a failed attempt, as one that outruns its time box does: relaunches wait 5, then 15 minutes, and a third in a row holds the item for an approver's decision.
 
 ## Accounts and failover
 

@@ -13,8 +13,9 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { dispatchWork, loadMasterConfig, masterConfigSchema, setupMaster, type CredentialMinter, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { hostProcessLaunchTargets, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { roleSessionMaximumMs } from '../src/model/sessions.js';
-import { credentialFailure, refreshWorkerCredential, superviseSessionCredential, workerCredentialDirectory, workerCredentialEnvironment, workerPushPermissions, writeWorkerCredential, type MintedPushCredential } from '../src/worker-credential.js';
+import { credentialBlockedReason, credentialFailure, refreshWorkerCredential, superviseSessionCredential, sweepExpiredWorkerCredentials, workerCredentialDirectory, workerCredentialRoot, workerCredentialEnvironment, workerPushPermissions, writeWorkerCredential, type MintedPushCredential } from '../src/worker-credential.js';
 import { environmentBlocker } from '../src/worker-sandbox.js';
+import { attemptRetryHold, maxFailedAttempts, retryBackoffMs } from '../src/daemon/reblocked-attempts.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -151,6 +152,17 @@ test('unit:worker-session-scoped-push-credential — a worker launched under its
     const tabFails = (command: string, args: string[]) => { if (args[0] === 'tab') throw new Error('herdr is down'); return failing.run(command, args); };
     await assert.rejects(dispatchWork(root, item(), { ...profile, agentName: 'eng-oc-2' }, [], tabFails, [item()], async () => ({ epoch: 5, path: join(root, 'assigned-5'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { credential }), /herdr is down/);
     assert.equal(existsSync(workerCredentialDirectory(profile.credentialFile!, 'GY-999', 5)), false, 'a failed launch withdraws the credential it minted');
+
+    // A supervisor killed outright never withdraws its own: the next launch's sweep revokes the
+    // expired credential's token before it removes the directory, and leaves a current one alone.
+    const stale = workerCredentialDirectory(profile.credentialFile!, 'GY-999', 6), current = workerCredentialDirectory(profile.credentialFile!, 'GY-999', 7);
+    await writeWorkerCredential(stale, { ...issued, epoch: 6, token: token('killed'), expiresAt: new Date(Date.now() - 60_000).toISOString() });
+    await writeWorkerCredential(current, { ...issued, epoch: 7, token: token('current'), expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+    const swept: string[] = [];
+    assert.deepEqual(await sweepExpiredWorkerCredentials(workerCredentialRoot(profile.credentialFile!), new Date(), async value => { swept.push(value); }), [stale]);
+    assert.deepEqual(swept, [token('killed')], 'the expired token is revoked, not merely deleted');
+    assert.equal(existsSync(stale), false);
+    assert.equal(existsSync(current), true, 'a credential still current is kept');
   } finally {
     globalThis.fetch = realFetch;
     await cleanup();
@@ -239,8 +251,21 @@ test('unit:credential-block-releases-slot — an attempt blocked only by a GitHu
   // write refusals and item decisions are not credential failures.
   for (const blocker of ["git push failed: fatal: could not read Username for 'https://github.com': No such device or address", 'gh pr create: The token in default is invalid.', "remote: Invalid username or token. fatal: Authentication failed for 'https://github.com/owner/project.git/'"])
     assert.ok(credentialFailure(blocker), blocker);
-  for (const blocker of ['needs a product decision on the retry bound', environmentBlocker('sync GY-963', 'claude', { path: '/srv/x/.git/FETCH_HEAD', detail: 'Permission denied' })])
+  for (const blocker of ['gh pr edit 530: HTTP 401: Bad credentials (https://api.github.com/graphql)', 'To get started with GitHub CLI, please run:  gh auth login'])
+    assert.ok(credentialFailure(blocker), blocker);
+  // A generic authentication refusal that names neither GitHub, git nor gh is the item's own.
+  for (const blocker of ['needs a product decision on the retry bound', environmentBlocker('sync GY-963', 'claude', { path: '/srv/x/.git/FETCH_HEAD', detail: 'Permission denied' }),
+    'the integration test gets HTTP 401 from the billing API: Requires authentication', 'staging answers Bad credentials for the seeded user'])
     assert.equal(credentialFailure(blocker), false, blocker);
+
+  // The ending counts on the retry ladder (GY-885), so a failure no fresh mint cures is bounded:
+  // each relaunch waits its backoff, and the third ending in a row holds the item for an approver.
+  const ended = (epoch: number, at: number) => ({ role: 'worker', cause: 'interrupted', epoch, profile: 'alpha', account: null, runtime: 'claude', at: iso(at), resetsAt: null,
+    reason: credentialBlockedReason({ key: 'GY-963' }, epoch, "fatal: could not read Username for 'https://github.com'") });
+  const ladder = (count: number) => ({ submission: null, capacity: { exhaustions: Array.from({ length: count }, (_, index) => ended(index + 1, index * 60_000)) } }) as unknown as Work;
+  assert.deepEqual(attemptRetryHold(ladder(1), clock + 60_000)?.kind, 'backoff');
+  assert.equal(attemptRetryHold(ladder(1), clock + 60_000)?.resumeAt, clock + retryBackoffMs[0]);
+  assert.equal(attemptRetryHold(ladder(maxFailedAttempts), clock + 24 * 3_600_000)?.kind, 'held', 'held at the cap however long it waits');
 
   const directory = await temporaryDirectory('credential-block');
   try {
