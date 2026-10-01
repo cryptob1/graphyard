@@ -14,5 +14,5 @@ All endpoints but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glos
 - `submit`: `{"epoch":1,"pr":123}`; `409` when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
 - `deployment`: `{"sha":…,"mergeSha":…,"source":"endpoint","observedAt":…}`; coordinator or admin, delivered work, once.
 - `followups` `{findings,reason}` (master), batch reads and `promote` `{index}`: [follow-ups](../followups.md); appending to a closed legacy follow-up item is a `409`. `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
-
+- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) under the caller; `POST /api/retro/ID/approve|refuse` `{reason}`: an AI admin or operator agent holding `decision:approve`, never a human session, the drafter or an identity that recorded the instances (`403`; `409` once judged). `submit` is also refused while the candidate fails an applied retro check.
 No endpoint sets lifecycle state.
