@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { applyScopeDecision } from '../src/engine.js';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, Refusal, type Work, type Observation } from '../src/model.js';
 import { decideScopeRequest, redecidableScopeRefusal } from '../src/model/scope.js';
@@ -19,7 +20,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const baseline = (files: Record<string, number>) => `${JSON.stringify({ schema: 1, commit: 'a'.repeat(40), runs: [{ run: 1, durationMs: 100 }], files }, null, 2)}\n`;
 const shipped = { 'tests/a.test.ts': 1200, 'tests/b.test.ts': 800 };
 
-async function fixture() {
+async function fixture(plannedFiles = ['src/thing.ts']) {
   const directory = await temporaryDirectory('timing-companion');
   const git = (...args: string[]) => execFileSync('git', args, { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init', '-b', 'main'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
@@ -52,17 +53,17 @@ async function fixture() {
     if (route.startsWith('/contents/')) { const sha = blob(params.get('ref')!, decodeURIComponent(route.slice(10))); if (!sha) throw new Refusal(`GitHub GET ${path} failed (404)`, 502); return { type: 'file', sha }; }
     throw new Error(`Unexpected request ${path}`);
   };
-  const work = () => ({ id: 'w', key: 'GY-1023', title: 'timing companion', type: 'bug', description: '', priority: 0, dependencies: [], criteria: [], policy: { checks: [], review: false }, plannedFiles: ['src/thing.ts'], stage: 'build', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
+  const work = () => ({ id: 'w', key: 'GY-1023', title: 'timing companion', type: 'bug', description: '', priority: 0, dependencies: [], criteria: [], policy: { checks: [], review: false }, plannedFiles: [...plannedFiles], stage: 'build', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'test', path: directory, branch: 'candidate', epoch: 1, owner: 'worker' }], submission: { pr: 1, epoch: 1 }, candidate: { pr: 1, sha: head, baseSha: root, branch: 'candidate', author: 'worker' }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString() }) as unknown as Work;
   // `graphyard sync`'s own judgement: the local diff against the base tip, blobs read through git.
-  const sync = async () => localScopeFindings(['src/thing.ts'], git('diff', '--raw', '-M', '-z', '--no-abbrev', base, 'HEAD'), git('diff', '--numstat', '-M', '-z', base, 'HEAD'), [],
+  const sync = async (planned = plannedFiles) => localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', base, 'HEAD'), git('diff', '--numstat', '-M', '-z', base, 'HEAD'), [],
     async sha => { try { return git('cat-file', 'blob', sha) + '\n'; } catch { return null; } });
   return {
     git, root,
     candidate: (files: Record<string, string>) => { head = commit(files); },
     advanceMain: (files: Record<string, string>) => { git('checkout', '-q', 'main'); base = commit(files); git('checkout', '-q', 'candidate'); },
-    observe: async () => { const item = work(); const seen = await github.observe(item); return { item, seen }; },
+    observe: async (edit: (item: Work) => void = () => {}) => { const item = work(); edit(item); const seen = await github.observe(item); return { item, seen }; },
     sync,
   };
 }
@@ -130,4 +131,28 @@ test('unit:timing-baseline-scope-request-granted — scope-request for the basel
   const refusal = { epoch: 1, paths: [timingBaselinePath], reason: 'record the new test file timing line', requestedBy: 'worker', at: '2026-09-30T00:00:00Z',
     decision: { state: 'refused' as const, reason: untested.reason, at: '2026-09-30T00:00:01Z', decidedBy: 'graphyard', waitedMs: 1000, paths: [timingBaselinePath], requestedBy: 'worker', requestedAt: '2026-09-30T00:00:00Z' } };
   assert.equal(redecidableScopeRefusal({ plannedFiles: ['src/thing.ts', 'tests/new-thing.test.ts'], criteria, blocker: `Scope request refused: ${untested.reason}`, scopeRequest: refusal }), true);
+});
+
+test('unit:timing-baseline-implied-companion — a scope request granted for the baseline keeps it outside plannedFiles, so foreign lines are still refused', async () => {
+  const planned = ['src/thing.ts', 'tests/new-thing.test.ts'];
+  const f = await fixture(planned);
+  f.candidate({ 'tests/new-thing.test.ts': 'new\n', [timingBaselinePath]: baseline({ 'tests/b.test.ts': 9999, 'tests/new-thing.test.ts': 450 }) });
+  let granted: Work | undefined;
+  const { item, seen } = await f.observe(work => {
+    work.scopeRequest = { epoch: 1, paths: [timingBaselinePath], reason: 'record the new test file timing line', requestedBy: 'worker', at: new Date().toISOString() };
+    const decision = applyScopeDecision(work, work.scopeRequest, new Date());
+    assert.equal(decision.state, 'approved', decision.reason);
+    assert.match(decision.reason, /stays outside plannedFiles/);
+    granted = work;
+  });
+  assert.deepEqual(granted!.plannedFiles, planned, 'the implied grant widens nothing');
+  assert.equal(granted!.scopeRequest, null);
+  assert.match(regressionRefusals(item, seen, []).join('\n'), /timing-baseline\.json: differs from the base branch tip.*"tests\/a\.test\.ts" \(removed\).*"tests\/b\.test\.ts" \(altered\)/);
+  assert.equal(build(item, seen).passed, false);
+  const local = (await f.sync(granted!.plannedFiles)).find(finding => finding.path === timingBaselinePath)!;
+  assert.equal(local.refused, true, local.detail);
+  // The same grant still lets the change write its own line.
+  assert.deepEqual(decideScopeRequest({ plannedFiles: planned, criteria: [] }, { paths: [timingBaselinePath] }).companions, [timingBaselinePath]);
+  // A baseline the criteria name is ordinary scope and is planned in full.
+  assert.deepEqual(decideScopeRequest({ plannedFiles: planned, criteria: [{ id: 'AC-1', text: `Rebalance ${timingBaselinePath}` }] }, { paths: [timingBaselinePath] }).companions, []);
 });

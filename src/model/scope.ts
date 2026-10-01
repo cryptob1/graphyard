@@ -151,7 +151,8 @@ export const scopeBlockedBudgetMs = 900_000;
 export const scopeDecisionSample = 10;
 /** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
 export const plannedFilesMax = 100;
-export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[] }
+/** `companions`: approved paths implied only as the timing baseline's companion (GY-1023), never added to plannedFiles so its line judgement stays in force. */
+export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; companions?: string[] }
 /**
  * The decision itself, computed from the item's own record: never from what the requester claims.
  * A purely additive request whose every path is implied is approved with the implication as its
@@ -185,7 +186,8 @@ export function decideScopeRequest(
   const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
   if (folded.length > plannedFilesMax)
     return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); decide it with graphyard master requirements GY-N FILE REASON, whose plannedFiles can fold or split the ask under the cap — a plain union of exact paths is refused by the same bound`);
-  return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
+  const companions = matched.filter(entry => entry.by!.kind === 'timing-companion').map(entry => entry.path);
+  return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}${companions.length ? `; ${companions.join(', ')} stays outside plannedFiles, so only the lines of this item's own test files may change there` : ''}`, paths, companions };
 }
 
 // ---------------------------------------------------------------------------
