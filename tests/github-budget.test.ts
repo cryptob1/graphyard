@@ -52,6 +52,7 @@ class Api {
       return { status: match[1] === match[2] ? 'identical' : ahead ? 'ahead' : 'diverged', ahead_by: 1, total_commits: 1, commits: [{ sha: match[2] }], files: [{ filename: 'src/feature.ts', status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b' }] };
     }
     if (route.endsWith('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: APP }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+    if (route === '/rules/branches/main') return [];
     if (route === '/check-runs' || /^\/check-runs\/\d+$/.test(route)) return { id: 12 };
     throw new Error(`Unexpected request ${method} ${path}`);
   }
@@ -179,12 +180,13 @@ test('unit:github-shared-cycle-reads — twenty items observed in one cycle make
   github.clock = () => now;
   // No webhook has been delivered: the sharing does not wait for one.
   const items = Array.from({ length: 20 }, (_, index) => item(index, api));
-  const refs = () => api.count(/^\/git\/ref\/heads\/main$/), protections = () => api.count(/^\/branches\/main\/protection$/);
+  const refs = () => api.count(/^\/git\/ref\/heads\/main$/), protections = () => api.count(/^\/branches\/main\/protection$/), rules = () => api.count(/^\/rules\/branches\/main$/);
   // Half the fleet at once, as the observation workers run, and the rest one after another.
   await Promise.all(items.slice(0, 10).map(work => github.observe(work, items)));
   for (const work of items.slice(10)) { now += 500; await github.observe(work, items); }
   assert.equal(refs(), 1, 'one ref read for the whole cycle');
   assert.ok(protections() <= 1, `at most one protection read (${protections()})`);
+  assert.ok(rules() <= 1, `at most one branch-rules read (${rules()})`);
   assert.ok(api.count(/^\/pulls\/\d+$/) >= 20, 'every item still reads its own pull request');
 
   // The next cycle reads the ref again; protection is kept for five minutes.
@@ -199,7 +201,7 @@ test('unit:github-shared-cycle-reads — twenty items observed in one cycle make
   // A protection event ends the protection share; so does its five minutes.
   github.noteWebhook('branch_protection_rule', { action: 'edited' });
   await github.observe(items[2], items);
-  assert.equal(protections(), 2);
+  assert.equal(protections(), 2); assert.equal(rules(), 2);
   now += protectionShareMs;
   await github.observe(items[3], items);
   assert.equal(protections(), 3);
