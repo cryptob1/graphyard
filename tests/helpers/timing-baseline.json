@@ -381,6 +381,7 @@
     "tests/merge-delegation-clean.test.ts": 2427,
     "tests/merge-executor-owner.test.ts": 2825,
     "tests/merge-queue.test.ts": 969,
+    "tests/merge-refusal-lift.test.ts": 600,
     "tests/merge-stall-attention.test.ts": 743,
     "tests/merge-version-skew.test.ts": 446,
     "tests/mergeability-unknown.test.ts": 642,
