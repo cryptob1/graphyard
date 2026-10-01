@@ -159,7 +159,7 @@ export async function verifyContainmentDeath(
   return { ...assessment, settleable: !refusals.length, refusals, verification };
 }
 /** Verify every lapsed quarantine this host is responsible for, keyed by work id; a live worker's is not probed. */
-export async function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source']; probe?: SupervisorProbe }) {
+export async function assessContainment(work: Work[], options: { hostId: string; observedAt: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source']; localNow?: Date; probe?: SupervisorProbe }) {
   const assessments: Record<string, ContainmentAssessment> = {};
   for (const item of containmentQuarantines(work, options.hostId)) {
     if (containmentPhase(item, Date.parse(options.observedAt))?.state === 'live') continue;

@@ -212,7 +212,10 @@ export async function reclaimStep(cycle: Cycle) {
   //     supervisor is gone, so it does: the probe is the same one `master settle-containment`
   //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
-  const measured = effects.controlPlaneClock ? await effects.controlPlaneClock().catch(() => null) : null;
+  //     The timed read runs only in a cycle with a quarantine to assess — one whose owner's lease is
+  //     not live — at most once, and a read that fails or stalls past its timeout leaves the snapshot's bounds.
+  const assessing = effects.containment && snapshot.work.some(item => item.containmentQuarantine && containmentPhase(item, clock)?.state !== 'live');
+  const measured = assessing && effects.controlPlaneClock ? await effects.controlPlaneClock().catch(() => null) : null;
   const clockBounds = await containmentClock(clockOffset, measured ? () => Promise.resolve(measured) : undefined);
   // Every containment assessment this cycle is judged with the timed read's bounds, the fresh probe
   // after a pane close included (GY-795): the snapshot's bound is as wide as its slow read.

@@ -457,3 +457,17 @@ test('unit:settle-clock-bound-fast-read the fresh probe after a pane close is ju
   assert.equal(settled.length, 1, 'the settlement the close unlocked is not refused on the snapshot read\'s width');
   assert.deepEqual(settled[0].refusals, []);
 });
+
+test('unit:settle-clock-bound-fast-read the timed read runs only in a cycle with a quarantine to assess, never for a live worker\'s or an unquarantined item', async () => {
+  let reads = 0;
+  const controlPlaneClock = async () => { reads += 1; return { clockOffset: { min: -999, max: 200 }, roundTripMs: 200, source: 'timed read' as const }; };
+  const containment: DaemonEffects['containment'] = (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset, localNow: new Date(observed.now), probe: () => clean } as any);
+  const quiet = item();
+  await loop(quiet, { snapshot: async () => ({ work: [quiet], now: observedAt }), controlPlaneClock, containment });
+  assert.equal(reads, 0, 'no quarantine, no timed read');
+  const live = launched(at(90_000));
+  await loop(live, { snapshot: async () => ({ work: [live], now: observedAt }), controlPlaneClock, containment });
+  assert.equal(reads, 0, 'a live worker\'s quarantine is never assessed, so it is not read for');
+  await loop(lapsedQuarantine, { snapshot: async () => ({ work: [lapsedQuarantine], now: observedAt }), controlPlaneClock, containment });
+  assert.equal(reads, 1, 'a lapsed quarantine is read for once in the cycle');
+});

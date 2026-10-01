@@ -14,7 +14,8 @@ import { server } from '../src/server.js';
 import { processJob } from '../src/github.js';
 import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
-import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { approverSessionName, assessContainment, containmentPhase, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { readControlPlaneClock } from '../src/master/containment.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -280,10 +281,11 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * produced: `stuck` is the item whose published tip GitHub answers with a head other than the
  * record's, so every guarded merge attempt refuses with one unchanged message, and `lostCarry` is
  * the item whose carried review GitHub stops holding once the tip's carry decision bound it, so the
- * re-post cannot use it.
+ * re-post cannot use it. `containment` fences each planned death's first attempt with a containment
+ * quarantine on a plane whose snapshot read is too slow to bound the clock (GY-795).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; containment?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -456,6 +458,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     await confine('worker', key);
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+    // GY-795: a planned death's first attempt is a supervised launch, fenced by a containment
+    // quarantine that outlives the session, so the loop has to verify and settle it to go on.
+    if (options.containment && plan.deaths.has(n) && attempt === 1) {
+      const settlementHash = createHash('sha256').update(`soak-settlement-${key}-${epoch}`).digest('hex');
+      await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash }, id());
+      await engine.execute(principal, 'launch', work.id, { epoch, settlementHash }, id());
+    }
     // GY-852: the reassigned item's first session takes the lease and then sits at its prompt for
     // ever, as an idle worker does, so the loop's idle re-prompt and reclaim run against it.
     const idling = options.reassigned === n && attempt === 1;
@@ -706,13 +715,46 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   // The control plane's status read the faults are classified from; `heldJobs` is the flap below.
   let heldJobs = false;
+  // ---- Containment on a slow plane (GY-795): this plane takes 12 s to build its work snapshot, so
+  // ---- a clock bound from that read is 12 s wide, past the 5 s tolerance. The loop's light timed
+  // ---- read is the production readControlPlaneClock over a simulated HEAD. Against the first dead
+  // ---- worker's lapsed quarantine its first read fails (as a 10 s timeout aborts it) and the loop
+  // ---- falls back; against the second's its reads take 6 s for a stretch of cycles, a persistent
+  // ---- slow-read refusal, and then answer fast. Every read records the cycle it ran in.
+  const [fallsBack, slowRead] = [...plan.deaths];
+  const containmentDay = { reads: [] as { cycle: number; mode: 'fast' | 'slow' | 'failed'; lapsed: number[] }[], settled: [] as string[], slowReads: 8 };
+  const timedRead = async (roundTripMs: number) => {
+    const sent = clock.now(), local = [sent, sent + roundTripMs];
+    const fetcher = (async () => new Response(null, { headers: { date: new Date(sent + roundTripMs / 2).toUTCString() } })) as unknown as typeof fetch;
+    return readControlPlaneClock(config.url, { fetcher, clock: () => local.length > 1 ? local.shift()! : local[0] });
+  };
+  const controlPlaneClock: DaemonEffects['controlPlaneClock'] = async () => {
+    const at = clock.now(), lapsed = (await store.list()).filter(item => item.containmentQuarantine && containmentPhase(item, at)?.state === 'lapsed').map(numberOf);
+    const reads = (mode: string, n: number) => containmentDay.reads.filter(read => read.mode === mode && read.lapsed.includes(n)).length;
+    const mode = lapsed.includes(fallsBack) && !reads('failed', fallsBack) ? 'failed' : lapsed.includes(slowRead) && reads('slow', slowRead) < containmentDay.slowReads ? 'slow' : 'fast';
+    containmentDay.reads.push({ cycle: cycles, mode, lapsed });
+    if (mode === 'failed') throw new Error('The operation was aborted due to timeout');
+    return timedRead(mode === 'slow' ? 6_000 : 200);
+  };
+  const containment: DaemonEffects['containment'] = (work, observed) => {
+    const timed = observed.clockSource === 'timed read';
+    return assessContainment(work, { hostId: config.hostId, observedAt: observed.now, clockOffset: timed ? observed.clockOffset : { min: -6_000, max: 6_000 },
+      clockRoundTripMs: timed ? observed.clockRoundTripMs : 12_000, clockSource: observed.clockSource, localNow: new Date(clock.now()),
+      // The dead worker's supervisor and every process it held are gone from this host.
+      probe: target => ({ method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath: target.workspacePath, processes: [], scopes: [], held: [], recordedScope: null, inaccessible: 0, unverifiable: [] }) });
+  };
+  const settleContainment: DaemonEffects['settleContainment'] = async (work, assessment) => {
+    await api(principals.coordinator, 'POST', `work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
+      reason: `The soak loop verified on ${assessment.host} that the supervisor of epoch ${assessment.epoch} is gone`, verification: assessment.verification });
+    containmentDay.settled.push(`${work.key}:${assessment.epoch}`);
+  };
   const effects: DaemonEffects = {
     agents: () => herdr.list(),
     herdr: () => ({ agents: herdr.list(), available: true }),
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge, refuseMerge,
+    snapshot, dispatch, requestProof, approver, merge, refuseMerge, controlPlaneClock, containment, settleContainment,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
     decide: (work, action, reason, input = {}) => {
       const bound = decisionInput(action, work, input);
@@ -1162,7 +1204,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, master };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, master, containmentDay };
 }
 
 /**
@@ -1730,6 +1772,32 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   const heartbeats = master.wakes.filter(wake => /heartbeat fallback/.test(wake.text));
   for (let index = 1; index < heartbeats.length; index++) assert.ok(heartbeats[index].clock! - heartbeats[index - 1].clock! >= plan.heartbeatMinutes * minute, `heartbeats are spaced by the quiet window: ${JSON.stringify(heartbeats.map(wake => wake.clock))}`);
   assert.ok(master.wakes.length < cycles / 2, `wakes are events, not every cycle: ${master.wakes.length} wakes in ${cycles} cycles`);
+});
+
+test('unit:soak-invariants-hold — automatic quarantine settlement on a plane whose snapshot read is too slow to bound the clock: at most one light timed read per cycle and only while a quarantine waits, a failed read falls back to the snapshot, a persistent slow read is escalated once for the day, both dead workers\' quarantines settle, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-795: each planned death's first attempt is a supervised launch whose quarantine outlives
+  // it. The loop verifies the dead supervisor and settles the fence through its timed clock read,
+  // so the items are offered again and delivered.
+  const day = await simulateDay({ hours: 6, containment: true });
+  const { items, final, sessions, violations, failures, cycles, escalations, containmentDay } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.equal(sessions.filter(session => session.state === 'dead').length, basePlan.deaths.size, 'two workers died');
+  const undelivered = final.filter(item => [...basePlan.deaths].some(n => items[n - 1].key === item.key) && (item.stage !== 'done' || !item.delivery));
+  assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}`), [], 'both quarantined items were offered again and delivered');
+  const readsPerCycle = new Map<number, number>();
+  for (const read of containmentDay.reads) readsPerCycle.set(read.cycle, (readsPerCycle.get(read.cycle) ?? 0) + 1);
+  assert.ok(Math.max(...readsPerCycle.values()) === 1, `at most one timed read per cycle: ${JSON.stringify([...readsPerCycle])}`);
+  assert.ok(containmentDay.reads.length <= 40 && containmentDay.reads.length < cycles / 10, `the timed read runs only while a quarantine waits to be assessed: ${containmentDay.reads.length} reads in ${cycles} cycles`);
+  const [fallsBack, slowRead] = [...basePlan.deaths].map(n => sessions.find(session => session.key === items[n - 1].key && session.attempt === 1)!);
+  assert.deepEqual(containmentDay.settled.sort(), [`${fallsBack.key}:${fallsBack.epoch}`, `${slowRead.key}:${slowRead.epoch}`].sort(), 'both dead workers\' quarantines were settled by the loop');
+  assert.equal(containmentDay.reads.filter(read => read.mode === 'failed').length, 1, 'one timed read failed');
+  assert.equal(containmentDay.reads.filter(read => read.mode === 'slow').length, containmentDay.slowReads, 'the slow reads stood for their stretch of cycles');
+  const containmentEscalations = (key: string) => escalations.filter(detail => detail.startsWith(`${key}: containment quarantine`));
+  assert.deepEqual(containmentEscalations(fallsBack.key).map(detail => /the snapshot read of the control-plane clock took 12000ms round trip, so settlement waits on a faster control-plane read, not on a clock disagreement/.test(detail)), [true],
+    `the failed read fell back to the snapshot's bound, refused once naming that read: ${containmentEscalations(fallsBack.key).join(' | ')}`);
+  assert.deepEqual(containmentEscalations(slowRead.key).map(detail => /the timed read of the control-plane clock took 6000ms round trip, so settlement waits on a faster control-plane read/.test(detail)), [true],
+    `the persistent slow read was escalated once for the whole day: ${containmentEscalations(slowRead.key).join(' | ')}`);
 });
 
 // GY-475's citation day runs before the regression day: the days share one control plane, and
