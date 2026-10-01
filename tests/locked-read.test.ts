@@ -80,14 +80,24 @@ before(async () => {
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
-/** How long each coordination transaction held the lock, by the operation that took it. */
-const holds: { label: string; ms: number }[] = [];
+/**
+ * How long each coordination transaction held the lock, by the operation that took it, and how many
+ * settled deliveries' whole documents (a summary drops the pipeline) its queries returned.
+ */
+const holds: { label: string; ms: number; settledDocuments: number }[] = [];
 let label = 'other';
+const settledDocument = (value: unknown) => !!value && typeof value === 'object' && (value as Work).stage === 'done' && !!(value as Work).pipeline;
 function timeTransactions() {
   const original = store.transaction.bind(store);
   store.transaction = (async (fn: any, options: any) => original(async (db, now) => {
     const started = performance.now();
-    try { return await fn(db, now); } finally { holds.push({ label, ms: performance.now() - started }); }
+    let settledDocuments = 0;
+    const counted = new Proxy(db, { get: (target, property) => property !== 'query' ? Reflect.get(target, property, target) : async (...args: unknown[]) => {
+      const result = await (target.query as any)(...args);
+      for (const row of result?.rows ?? []) if (settledDocument(row.document)) settledDocuments++;
+      return result;
+    } });
+    try { return await fn(counted, now); } finally { holds.push({ label, ms: performance.now() - started, settledDocuments }); }
   }, options)) as typeof store.transaction;
 }
 async function held<T>(name: string, run: () => Promise<T>): Promise<{ result: T; ms: number }> {
@@ -202,7 +212,11 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   const batches = holds.slice(from).filter(entry => entry.label === 'reconcile');
   label = 'other';
   const total = batches.reduce((sum, entry) => sum + entry.ms, 0), longest = Math.max(...batches.map(entry => entry.ms));
-  console.log(`reconcile pass: ${batches.length} batches, ${total.toFixed(0)} ms of lock hold, longest ${longest.toFixed(0)} ms`);
+  const reread = batches.reduce((sum, entry) => sum + entry.settledDocuments, 0);
+  console.log(`reconcile pass: ${batches.length} batches, ${total.toFixed(0)} ms of lock hold, longest ${longest.toFixed(0)} ms, ${reread} delivered documents read whole`);
+  // Each batch reads its own open rows whole and every delivered item as its compact summary: not
+  // one of the 600 delivered documents is read under the lock, in any batch.
+  assert.equal(reread, 0, `${reread} delivered documents were read whole over ${batches.length} batches (${batches.map(entry => entry.settledDocuments).join(', ')})`);
   assert.ok(total < 5_000, `a full pass held the lock ${total.toFixed(0)} ms over ${batches.length} batches`);
   // The budget counts from before the read: a batch overruns it by at most the one item it always completes.
   assert.ok(longest < engine.reconcileBatchMs + 250, `the longest batch held the lock ${longest.toFixed(0)} ms against a ${engine.reconcileBatchMs} ms budget`);
@@ -210,4 +224,5 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   const again = holds.length; label = 'reconcile';
   await engine.reconcile(); label = 'other';
   assert.ok(holds.slice(again).reduce((sum, entry) => sum + entry.ms, 0) < 5_000);
+  assert.equal(holds.slice(again).reduce((sum, entry) => sum + entry.settledDocuments, 0), 0, 'a second pass reads no delivered document whole');
 });

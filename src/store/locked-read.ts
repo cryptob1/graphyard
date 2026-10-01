@@ -57,18 +57,24 @@ export async function lockedRows(db: Queryable, focus: readonly (string | null |
     FROM work_index WHERE settled AND summary IS NOT NULL`)).rows.filter(row => !wholeNumbers.has(String(row.number)));
   const key = (row: { cluster: string; version: string }) => `${row.cluster}/${row.version}`;
   const missing = settled.filter(row => !cache.has(key(row))).map(row => row.version.split(':')[0]);
+  // What this call fetched is kept for this call: the bounded cache may evict it before it is used.
+  const fetched = new Map<string, string>();
   if (missing.length) {
     for (const row of (await db.query(`SELECT id::text || ':' || xmin::text AS version, current_database() || ':' || pg_postmaster_start_time()::text AS cluster, summary::text AS summary
-      FROM work_index WHERE settled AND id::text = ANY($1::text[])`, [missing])).rows) remember(key(row), row.summary);
+      FROM work_index WHERE settled AND id::text = ANY($1::text[])`, [missing])).rows) { fetched.set(key(row), row.summary); remember(key(row), row.summary); }
   }
   const rows: { number: number; document: Work }[] = whole.map(row => ({ number: Number(row.number), document: row.document as Work }));
+  const changed: number[] = [];
   for (const row of settled) {
-    const text = cache.get(key(row));
-    // Changed between the two reads (or evicted under pressure): read that one document whole.
-    const document = text ? JSON.parse(text) as Work : (await db.query('SELECT document FROM work_items WHERE number=$1', [row.number])).rows[0]?.document as Work | undefined;
-    if (!document) continue;
-    if (text) summaries.add(document);
+    const text = fetched.get(key(row)) ?? cache.get(key(row));
+    // Changed between the two reads: read those documents whole, in one query.
+    if (!text) { changed.push(Number(row.number)); continue; }
+    const document = JSON.parse(text) as Work;
+    summaries.add(document);
     rows.push({ number: Number(row.number), document });
+  }
+  if (changed.length) {
+    for (const row of (await db.query('SELECT number, document FROM work_items WHERE number = ANY($1::bigint[])', [changed])).rows) rows.push({ number: Number(row.number), document: row.document as Work });
   }
   return rows.sort((a, b) => a.number - b.number);
 }
