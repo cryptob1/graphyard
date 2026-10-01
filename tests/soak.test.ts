@@ -754,7 +754,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge, refuseMerge, controlPlaneClock, containment, settleContainment,
+    snapshot, dispatch, requestProof, approver, merge, refuseMerge,
+    // Only the containment day wires the containment effects, so every other day runs the loop as before.
+    ...options.containment ? { controlPlaneClock, containment, settleContainment } : {},
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
     decide: (work, action, reason, input = {}) => {
       const bound = decisionInput(action, work, input);
