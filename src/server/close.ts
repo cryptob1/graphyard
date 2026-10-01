@@ -2,7 +2,7 @@ import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
 import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
-import { dropHeldFollowUps } from '../model/machine-backlog.js';
+import { dropHeldFollowUps } from '../model/followups-held.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
 import { endAttempt } from '../pipeline-speed.js';
 import { save, wakeJob } from '../store.js';

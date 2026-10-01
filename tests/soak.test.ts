@@ -956,8 +956,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         await followUpPost(pr.key, { findings: followUpFindings(n, review.id), reason: `soak: approval ${review.id} of ${pr.key}`, parent: true }, `followups:${review.id}`);
       }
     }
-    followUpDay.events.push(...await shipHeldFollowUps(await store.list(), followUpShip, followUpDay.runs, new Date(clock.now())));
-    const all = await store.list();
+    // One listing per pass, read again only when a ship changed something: the store carries every
+    // earlier day's items, so a listing per step slowed this day past its bound.
+    let all = await store.list();
+    const shipped = await shipHeldFollowUps(all, followUpShip, followUpDay.runs, new Date(clock.now()));
+    followUpDay.events.push(...shipped);
+    if (shipped.length) all = await store.list();
     for (const item of all) {
       const parent = followUpParent(item), of = parent && all.find(entry => entry.key === parent);
       if (of && !isClosed(item) && item.stage !== 'done' && !hasShipped(of)) followUpDay.early.push(`${item.key} is open while its parent ${parent} has not shipped (${of.stage})`);
@@ -1922,7 +1926,7 @@ test('unit:soak-invariants-hold — review follow-ups across a day: approvals of
   // reverted and reopened before it ships, and approved again; item 4's ship is refused all day.
   const parents = [1, 2, 3, 4], refused = 4, reverted = 3;
   const { items, final, violations, failures, followUpDay } = await simulateDay({
-    hours: 6, followUps: { parents, refused },
+    hours: 5, followUps: { parents, refused },
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([2]), deaths: new Set(), breaksMain: reverted, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');

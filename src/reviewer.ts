@@ -14,7 +14,8 @@ import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } fro
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { researchReviewSection } from './research.js';
-import { heldFollowUps, openFollowUpItem, shippedFollowUpsOwed } from './model/machine-backlog.js';
+import { openFollowUpItem } from './model/machine-backlog.js';
+import { heldFollowUps, shippedFollowUpsOwed } from './model/followups-held.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
