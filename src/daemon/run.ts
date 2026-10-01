@@ -122,19 +122,20 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
-  const effects = boundedPersist(namedEffects(raw)), host = options.process ?? process;
   // GY-866: research and triage sessions have no checkout of their own, so they read the code they
   // judge from a scratch checkout of their own under the managed worktree root — a detached
   // worktree of the release this loop runs, when one can be made, so the session still reads real
   // code — never from the coordinator checkout: a session that works where it starts rewrites the
   // control plane's own code. A root that cannot hold the scratch leaves the loop without research
   // and triage rather than with sessions working in the coordinator checkout.
+  // The diagnostician reads the repository from the same scratch checkout: it too is a session the
+  // loop launches, and without the scratch it does not run at all.
   const scratchRoot = coordinatorCheckoutRoot(config.cliPath);
-  let scratch: Awaited<ReturnType<typeof allocateManagedCheckout>> | null = null;
-  if (raw.research) {
+  let scratch: Awaited<ReturnType<typeof allocateManagedCheckout>> | null = null, scratchDirectory: string | null = null;
+  if (raw.research || 'diagnostician' in raw) {
     try {
       scratch = await allocateManagedCheckout(scratchRoot, config, 'approval', 'loop-scratch', raw.loadedRelease?.commit ?? '0'.repeat(40), randomUUID());
-      let scratchDirectory = scratch.directory;
+      scratchDirectory = scratch.directory;
       const release = raw.loadedRelease?.commit;
       if (release) {
         try {
@@ -142,12 +143,16 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           scratchDirectory = scratch.worktree;
         } catch (error) { log(`[graphyard-master] the research scratch checkout holds no worktree of ${release.slice(0, 12)}: ${message(error)}`); }
       }
-      effects.research = { ...raw.research, cwd: scratchDirectory };
     } catch (error) {
-      delete effects.research;
-      log(`[graphyard-master] research and triage are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
+      log(`[graphyard-master] research, triage and the diagnostician are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
     }
   }
+  const scoped = new Proxy(raw, { get(target, property, receiver) {
+    if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
+    if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
+    return Reflect.get(target, property, receiver);
+  } });
+  const effects = boundedPersist(namedEffects(scoped)), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
   // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
   // checkout must not report the release the process before it loaded.

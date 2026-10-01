@@ -517,6 +517,18 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  * candidate changes: the criterion is judged beside the item's own, with the repository's paths.
  */
 /** `research` is the item's recorded research brief (GY-259): the change is checked against its recommended approach and answered questions. */
+/**
+ * GY-866: a reviewer or producer session starts in its own session directory under the managed
+ * worktree root, never in the coordinator checkout, and its request runs `git fetch` and
+ * `git worktree add` from where it starts. The directory is made a worktree of the repository with
+ * nothing checked out, so those commands reach the repository's Git directory from there without
+ * the session starting among the coordinator's files. It runs right after allocation, while the
+ * directory is still empty. A repository that cannot register one leaves the directory as allocated.
+ */
+export async function anchorSessionCheckout(root: string, directory: string, run: ChildRun = defaultChildRun): Promise<void> {
+  try { await run('git', ['-C', root, 'worktree', 'add', '--detach', '--no-checkout', '--quiet', directory, 'HEAD']); } catch { /* the session still starts outside the coordinator checkout */ }
+}
+
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null) {
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
@@ -647,6 +659,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       // Before a token exists: the one place this session may check the head out, under the managed
       // worktree root — durable storage with room left, outside every worktree.
       const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
+      await anchorSessionCheckout(root, checkout.directory);
       const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
       let minted: { token: string; expiresAt: string };
       try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }

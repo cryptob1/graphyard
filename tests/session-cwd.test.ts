@@ -10,16 +10,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { coordinatorCheckoutRefusal, readCoordinatorCheckout } from '../src/master/profiles.js';
 import { worktreeRoot } from '../src/install/worktree-root.js';
-import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, masterConfigSchema, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { launchProducer, readProducerLedger } from '../src/producer.js';
+import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { faultClassItem, type FaultInstance } from '../src/model/fault-classes.js';
+import { diagnosticianSettings } from '../src/runner/payloads.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
@@ -112,6 +116,16 @@ const outsideCoordinator = (path: string, coordinatorRoot: string) => {
   return directory !== base && (!directory.startsWith(`${base}${sep}`) || directory.startsWith(`${base}${sep}.graphyard${sep}`));
 };
 
+/**
+ * What the session's request does first, from where it starts: reach the repository and add the
+ * detached worktree of the head it judges at the path it was allocated. The fixture's origin is
+ * not reachable, so the head is the commit the repository already holds.
+ */
+const obtainsCode = (start: string, worktree: string, commit: string) => {
+  execFileSync('git', ['worktree', 'add', '--detach', '--quiet', worktree, commit], { cwd: start, stdio: 'ignore' });
+  return existsSync(join(worktree, 'src', 'loop.ts'));
+};
+
 /** Effects both the loop's guard and the steps read: a snapshot over `work`, and stubs for everything else. */
 function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects & ControlPlaneEffects {
   const base = {
@@ -133,7 +147,7 @@ const loopOptions = (fixture: { root: string }, extra: Partial<Parameters<typeof
 test('unit:session-cwd-own-checkout — a reviewer session opens its pane and starts its runtime in its own managed checkout, never in the coordinator checkout', async () => {
   const fixture = await installed();
   try {
-    const { root, cleanup } = fixture;
+    const { root, head, cleanup } = fixture;
     const home = await temporaryDirectory('session-cwd-claude-home');
     try {
       const stub = herdr();
@@ -147,6 +161,7 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
       assert.ok(sessionCheckout, 'the launch files are written in a checkout of their own');
       assert.ok(outsideCoordinator(sessionCheckout!, root), 'the launch files live outside the coordinator checkout');
       assert.equal(resolve(pane!), resolve(sessionCheckout!), 'the pane opens exactly where the session checkout is');
+      assert.ok(obtainsCode(pane!, join(pane!, 'checkout'), head), 'the git fetch and git worktree add its request runs from where it starts reach the repository');
       // The process-level folder the runtime starts in is the session checkout too: the launch's
       // cwd is what the folder-trust step records, and it records the checkout and only it.
       const projects = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')).projects as Record<string, { hasTrustDialogAccepted?: boolean }>;
@@ -186,7 +201,90 @@ test('unit:session-cwd-own-checkout — an escalation handler opens its pane and
     assert.ok(pane, 'the escalation handler pane is created with an explicit --cwd');
     assert.ok(outsideCoordinator(pane!, root), `the escalation handler pane opens outside the coordinator checkout, not ${pane}`);
     assert.equal(existsSync(pane!), true, 'the escalation handler pane opens in a checkout that exists');
+    // The one checkout the launch allocated under the managed worktree root is where it opens.
+    const managedRoot = worktreeRoot(root, config);
+    const allocated = (await readdir(managedRoot)).filter(name => /^graphyard-approval-/.test(name)).map(name => join(managedRoot, name));
+    assert.equal(allocated.length, 1, 'the launch allocates one managed checkout for the handler');
+    assert.equal(resolve(pane!), resolve(allocated[0]), 'the pane opens exactly in the checkout the handler was allocated');
+    assert.equal(dirname(resolve(pane!)), resolve(managedRoot));
+    assert.match(basename(pane!), /^graphyard-approval-gy-866-/i, 'the checkout is the handler\'s own, named for its item');
     assert.deepEqual(stub.pasted, [], 'the handler takes its request on its command line, never a paste');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:session-cwd-own-checkout — a producer session opens its pane and starts its runtime in its own managed checkout, never in the coordinator checkout', async () => {
+  const fixture = await installed();
+  try {
+    const { root, head, config, cleanup } = fixture;
+    const home = await temporaryDirectory('session-cwd-producer-home');
+    try {
+      const stub = herdr();
+      const proof = 'integration:session-cwd-producer';
+      await saveProducerProfile(root, { name: 'producer-claude', principal: 'proof-runner', agentName: 'produce-claude', kind: 'claude', credentialFile: await fixture.token('producer'), environment: { CLAUDE_CONFIG_DIR: home } },
+        async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
+      const request = { id: 'produce-request', kind: 'producer', sha: H, baseSha: B, policyRevision: 1, pr: 866, group: 'integration', proofs: [proof], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
+      const item = work({ criteria: [{ id: 'AC-1', text: 'Own checkout', proofs: [proof] }], implementers: ['implementer'], autoDispatch: { review: null, producers: [request], history: [] } } as Partial<Work>);
+      const profile = (await loadMasterConfig(root)).producers.find(entry => entry.name === 'producer-claude')!;
+      const launched = await launchProducer(root, item, request, profile, [], new Date().toISOString(), { run: stub.run });
+      assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the producer');
+      const pane = paneCwd(stub.tabs[0]);
+      assert.ok(pane, 'the producer pane is created with an explicit --cwd');
+      assert.ok(outsideCoordinator(pane!, root), `the producer pane opens outside the coordinator checkout, not ${pane}`);
+      assert.equal(dirname(resolve(launched.checkout)), resolve(worktreeRoot(root, config)), 'the producer checkout sits under the managed worktree root');
+      assert.equal((await readProducerLedger(root)).producers[0].checkout, launched.checkout, 'the session record owns that checkout');
+      assert.equal(resolve(pane!), resolve(launched.checkout), 'the pane opens exactly in the producer\'s managed checkout');
+      assert.equal(resolve(checkoutOfStem(stub.typed[0].stem)!), resolve(launched.checkout), 'the launch files are written in that checkout');
+      // The runtime's own working folder is the checkout too: the folder-trust step records it and only it.
+      const projects = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')).projects as Record<string, { hasTrustDialogAccepted?: boolean }>;
+      assert.equal(projects[realpathSync(resolve(launched.checkout))]?.hasTrustDialogAccepted, true, 'the runtime starts in the producer checkout');
+      assert.equal(projects[realpathSync(resolve(root))], undefined, 'the coordinator checkout is never recorded as the folder the runtime starts in');
+      assert.ok(obtainsCode(pane!, join(launched.checkout, 'checkout'), head), 'the git fetch and git worktree add its request runs from where it starts reach the repository');
+    } finally { await rm(home, { recursive: true, force: true }); }
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:session-cwd-own-checkout — the loop starts its diagnostician in the managed scratch checkout of the release it runs, never in the coordinator checkout', async () => {
+  const fixture = await installed();
+  try {
+    const { root, head, config, cleanup } = fixture;
+    const managedRoot = worktreeRoot(root, config);
+    const started: { cwd: string; holdsRelease: boolean }[] = [];
+    const runner: Runner = {
+      name: 'stub',
+      start: (_prompt, options) => {
+        started.push({ cwd: options.cwd, holdsRelease: existsSync(join(options.cwd, 'src', 'loop.ts')) });
+        return { id: 'run-1', events: [], onEvent: () => () => {}, cancel: () => {},
+          result: async () => ({ ok: false as const, failure: { reason: 'cancelled' as const, detail: 'the test stub settles at once' }, payloads: [] }) };
+      },
+    };
+    const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
+    // The production wiring hands the loop's own checkout as the diagnostician's cwd; the loop must
+    // replace it with the scratch checkout before the run starts.
+    const diagnostician: DiagnosticianEffects = {
+      settings, cwd: root,
+      runner: async () => ({ runner, runtime: 'pi', model: settings.model }),
+      context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
+      file: async () => { throw new Error('the stub files nothing'); },
+      decide: async () => { throw new Error('the stub decides nothing'); },
+    };
+    const state = emptyDaemonState(config);
+    const instances: FaultInstance[] = ['GY-1', 'GY-2', 'GY-3'].map((subject, index) => ({ id: `blocker|${subject}|${iso(-index * 60_000)}`, kind: 'blocker', faultClass: 'stalled-gate',
+      subject, text: `${subject} waits on the merge of PR #77`, at: iso(-index * 60_000), lastSeenAt: iso(0), linkedTo: 'GY-101' }));
+    state.faults.instances.push(...instances);
+    const input = faultClassItem({ faultClass: 'stalled-gate', recent: instances }, { threshold: 3, windowHours: 24 }, Date.parse(iso(0)));
+    const recurring = { ...ready(), id: 'work-101', key: 'GY-101', stage: 'backlog', ready: false, title: input.title, description: input.description, origin: input.origin, type: 'bug' } as unknown as Work;
+    try {
+      await runDaemon(config, state, loopEffects([recurring], { loadedRelease: { commit: head, dirty: false }, diagnostician }), loopOptions(fixture));
+      await diagnosesSettled();
+    } finally { clearDiagnoses(); }
+    assert.equal(started.length, 1, 'one diagnostician run starts');
+    const [run] = started;
+    assert.ok(outsideCoordinator(run.cwd, root) && !run.cwd.startsWith(resolve(root)), `the diagnostician does not start in the coordinator checkout (${run.cwd})`);
+    assert.ok(run.cwd.startsWith(resolve(managedRoot)), `the diagnostician starts under the managed worktree root (${run.cwd})`);
+    assert.match(run.cwd.split(sep).at(-2)!, /^graphyard-approval-loop-scratch-/, 'the diagnostician starts in the loop scratch checkout');
+    assert.ok(run.holdsRelease, 'the scratch checkout holds the release the loop runs, so the diagnostician reads real code');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });
