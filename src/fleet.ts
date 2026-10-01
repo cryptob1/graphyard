@@ -249,13 +249,15 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
 /**
  * Whether a role can launch from the registry right now, without choosing anything: what the
  * durable loop and `master status` read before they dispatch. Null when the registry does not
- * decide the role. A Pi account whose only fault is a smoke failure that has aged past
+ * decide the role. `running` counts the settled document the control plane serves (GY-974): a
+ * session whose lease or request has gone is already ended there, so it never holds a slot.
+ * A Pi account whose only fault is a smoke failure that has aged past
  * `smokeRetestMs` reads healthy here (GY-515): the launch this admits is what runs the retest,
  * and the choice it asks for still refuses until the fresh result is folded.
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
-  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [] }; }
+  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
@@ -266,7 +268,7 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   const running = liveSessions(fleet.registry).filter(session => session.role === role && !runtimeSessionGone(session, probe.runtime, host, now)).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
-  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts };
+  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
 }
 
 /**
