@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { botReviewerStates, dispatchEffects, dispatchSummary, emptyDispatchCursor, runDispatchTick, type BotActivity, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-349: an automatic bot reviewer that has announced its quota is spent posts no review, so a
 // reviewer launch that waits for it loses the whole wait on every round. Each test is named for
@@ -61,7 +61,7 @@ function effects(item: Work, log: string[], activity: () => BotActivity[]): Disp
 }
 
 async function withToken<T>(body: (config: MasterConfig) => Promise<T>) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-exhausted-bot-'));
+  const directory = await temporaryDirectory('exhausted-bot');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     return await body(masterConfig(token));

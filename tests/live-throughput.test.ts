@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -16,6 +15,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free measurement script.
 import { claimContainment, main as measureMain, parseArguments } from '../scripts/measure-throughput.mjs';
 
@@ -48,7 +48,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 900;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_LIVE_THROUGHPUT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 97);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-live-throughput-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('live-throughput'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
@@ -321,7 +321,7 @@ test('integration:live-throughput-population — the population rule reads the r
     response.statusCode = 404; response.end('{}');
   });
   await new Promise<void>(resolve => served.listen(0, '127.0.0.1', resolve));
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-throughput-measure-'));
+  const directory = await temporaryDirectory('throughput-measure');
   const logged: string[] = []; const log = console.log; const exitCode = process.exitCode;
   try {
     console.log = (line: string) => { logged.push(String(line)); };
@@ -372,7 +372,7 @@ test('integration:live-throughput-population — the population rule reads the r
 });
 
 test('unit:throughput-claim-visible — master status carries GY-87\'s throughput claim as verified or unverified against the release now serving, with what missed, so a delivered-but-unproven claim is visible rather than assumed', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-throughput-root-'));
+  const root = await temporaryDirectory('throughput-root');
   try {
     execFileSync('git', ['init', '-q', root]);
     const measured: ThroughputReport = { measuredAt: '2026-09-21T12:00:00.000Z', claim: throughputClaim,

@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promis
 import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { REDACTED, type PlannedPrincipal, type Role } from './types.js';
+import { REDACTED, type DeclaredSessionKind, type PlannedPrincipal, type Role } from './types.js';
 
 /** 32 random bytes rendered base64url: 43 characters, far above the 32-character floor. */
 export const generateToken = () => randomBytes(32).toString('base64url');
@@ -28,7 +28,7 @@ export class Vault {
   get size() { return this.secrets.size; }
 }
 
-const principalRecordSchema = z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'reader', 'producer']), proofs: z.array(z.string().min(1)).optional(), fingerprint: z.string().length(12) }).strict();
+const principalRecordSchema = z.object({ id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'reader', 'producer']), proofs: z.array(z.string().min(1)).optional(), sessionKind: z.enum(['human', 'ai']).optional(), fingerprint: z.string().length(12) }).strict();
 export const installRecordSchema = z.object({
   version: z.literal(1),
   installId: z.string().min(1),
@@ -119,20 +119,24 @@ export async function writeInstallRecord(directory: string, record: InstallRecor
 
 /** The exact value of GRAPHYARD_PRINCIPALS, matching the server's principal schema. */
 export function principalsVariable(principals: PlannedPrincipal[], tokens: Map<string, string>) {
-  return JSON.stringify(principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), token: tokens.get(principal.id) ?? '' })));
+  return JSON.stringify(principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), token: tokens.get(principal.id) ?? '' })));
 }
 
 export function plannedPrincipals(installId: string, options: { workers?: number; producerProofs?: string[] } = {}): PlannedPrincipal[] {
   const workers = Math.min(Math.max(options.workers ?? 1, 1), 20);
   const proofs = [...new Set(options.producerProofs ?? [])].sort();
+  // The declared kind travels with the principal into GRAPHYARD_PRINCIPALS: the operator is a
+  // human session — an undeclared admin is refused every human-only answer (delegation.ts
+  // `sessionKind`), which would strand the needs-you requests the loop parks for the operator —
+  // and every agent principal is ai.
   return [
-    { id: `${installId}-operator`, role: 'admin' as Role },
-    { id: `${installId}-master`, role: 'coordinator' as Role },
-    ...Array.from({ length: workers }, (_, index) => ({ id: `${installId}-worker-${index + 1}`, role: 'worker' as Role })),
-    { id: `${installId}-dashboard`, role: 'reader' as Role },
+    { id: `${installId}-operator`, role: 'admin' as Role, sessionKind: 'human' as DeclaredSessionKind },
+    { id: `${installId}-master`, role: 'coordinator' as Role, sessionKind: 'ai' as DeclaredSessionKind },
+    ...Array.from({ length: workers }, (_, index) => ({ id: `${installId}-worker-${index + 1}`, role: 'worker' as Role, sessionKind: 'ai' as DeclaredSessionKind })),
+    { id: `${installId}-dashboard`, role: 'reader' as Role, sessionKind: 'ai' as DeclaredSessionKind },
     // A producer is created only with an explicit proof allowlist; an empty grant would
     // be a standing credential with no lane, and widening it later is never automatic.
-    ...(proofs.length ? [{ id: `${installId}-ci`, role: 'producer' as Role, proofs }] : []),
+    ...(proofs.length ? [{ id: `${installId}-ci`, role: 'producer' as Role, proofs, sessionKind: 'ai' as DeclaredSessionKind }] : []),
   ];
 }
 

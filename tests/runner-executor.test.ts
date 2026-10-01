@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rename, symlink, realpath, rm, chmod, stat } from 'node:fs/promises';
+import { mkdir, writeFile, rename, symlink, realpath, rm, chmod, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { oracleBundleDigest } from '../src/runner-setup.js';
 import { accountFileDigest, acknowledgeAttempt, acknowledgementRetry, approvedAccountDigest, assertAncestryFixed, assertIsolation, assertRunnerCredentialScope, attemptBoundaryPath, authorityWatch, boundaryIdentity, containerEnvironment, containerNames, executeAttempt, executionCommand, executionPlanSchema, observeContainers, preflightAttempt, type ExecutionPlan, type Runner, type Settler } from '../src/runner-executor.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const image = `sha256:${'1'.repeat(64)}`;
 const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
@@ -16,7 +17,7 @@ const runAsUser = `${process.getuid!()}:${process.getgid!()}`;
 // `nobody` stands in for any other identity, whose ownership must be refused.
 const foreignUid = 65534;
 async function boundary(run: (paths: { oracle: string; collection: string; output: string; plan: ExecutionPlan }) => Promise<void>, files: Record<string, string> = { 'playwright.config.ts': 'export default {};', 'suite.spec.ts': 'approved assertion' }) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-executor-'));
+  const root = await temporaryDirectory('executor');
   const oracle = join(root, 'oracle'), collection = join(root, 'output');
   await mkdir(oracle, { mode: 0o755 }); await mkdir(collection, { mode: 0o755 });
   for (const [path, content] of Object.entries(files)) await writeFile(join(oracle, path), content);
@@ -155,7 +156,7 @@ test('a sticky ancestor is exempt from the mode rule only, never from ownership'
   // `/tmp` is tolerated. They leave the directory's own owner able to rename any child,
   // so a runner-owned mode-1777 parent could still swap the oracle tree or the boundary
   // aside during execution and restore it before the closing inode and digest checks.
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-sticky-'));
+  const root = await temporaryDirectory('sticky');
   const sticky = join(root, 'sticky'), child = join(sticky, 'boundary');
   await mkdir(sticky); await chmod(sticky, 0o1777);
   await mkdir(child, { mode: 0o700 });

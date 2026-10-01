@@ -1,8 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -10,6 +7,7 @@ import { Engine, scopeRequestEndedReason } from '../src/engine.js';
 import { livenessOf } from '../src/model/liveness.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
 import type { Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-597: a scope request belongs to the attempt (epoch) that filed it. On 2026-09-26 GY-402's
@@ -33,7 +31,7 @@ const ready = (work: Work) => work.gates.find(gate => gate.name === 'ready')!;
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
   const port = Number(process.env.GRAPHYARD_STALE_SCOPE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 36);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-stale-scope-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('stale-scope'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;

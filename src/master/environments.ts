@@ -1,6 +1,6 @@
 // Concern: agent environments and accounts — discovery, health, quota, selection and the launch plan.
 import { existsSync } from 'node:fs';
-import { readdir, stat, mkdir, readFile } from 'node:fs/promises';
+import { readdir, stat, mkdir, readFile, access } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { z } from 'zod';
@@ -8,12 +8,73 @@ import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
+import { type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequestTimeoutMs } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, readCredentialFile } from './config.js';
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
+import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
+export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './connect-accounts.js';
+
+// ---------------------------------------------------------------------------
+// What a stopped session's output must say before the loop reads it as its provider saying the
+// account is spent (GY-421). Only the runtimes' own provider-authored limit notices count —
+// Claude's "You've hit your … limit · resets …", Codex's usage-limit banner, the provider APIs'
+// 429 usage error — and never free text the agent itself wrote: GY-402's epoch 2 was failed over
+// on its own narration "tmp disk quota is exhausted (a known local issue)…", an account with 86%
+// of its window left, because a generic quota-exhausted pattern matched the prose about a disk.
+// Each runtime is matched against its own catalog, and a runtime with no catalog of its own
+// against the usage errors the provider APIs return, which every runtime's output can carry. The
+// line scan is detectExhaustion's (the tail only, the notice leading its line behind at most
+// `exhaustionNoticeLabelWords` words of label); the catalogs replace its generic list wherever a
+// session is being judged mid-work.
+// ---------------------------------------------------------------------------
+
+/** The usage-limit messages the provider APIs themselves return, in a runtime's error output. */
+const providerUsageErrors: readonly RegExp[] = [
+  /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
+  /\b(?:usage|rate) limit reached\b/i,
+  /\breached your [\w .-]{0,40}usage limits?\b/i,
+  /\busage limits? (?:has|have) been reached\b/i,
+  /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
+  /\blimit reached\b.*\breset/i,
+];
+/** Each runtime's own provider-authored limit notices, keyed by the kind its profiles name. */
+export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
+  claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
+  codex: [...providerUsageErrors],
+  opencode: [...providerUsageErrors],
+  cursor: [...providerUsageErrors],
+};
+/** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
+export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
+
+/** The label a runtime draws in front of a provider error — `Error:`, `API Error:`, `Error code: 429 -` — which is not the agent's voice. */
+const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s*(?:\d{3}\s*)?[-–—:]*\s*/i;
+
+/**
+ * Whether the tail of a stopped session's output is `runtime`'s provider saying the account is
+ * spent. The same tail, lead-of-line and reset-time rules as `detectExhaustion`, matched against
+ * the runtime's own provider-authored notices instead of generic quota wording, so a worker's own
+ * prose about a quota — a disk's, not the account's — is never a failover. A leading severity
+ * label is stripped before the label words are counted: it is the runtime's rendering of the
+ * provider's answer, not words the session wrote.
+ */
+export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
+  const notices = runtimeLimitNotices(runtime);
+  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim()).filter(Boolean).slice(-exhaustionTailLines);
+  for (let index = lines.length - 1; index >= 0; index--) {
+    // The banner itself, with whatever the terminal drew in front of it removed.
+    const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');
+    if (line.length > exhaustionNoticeMaxLength) continue;
+    const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
+    if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
+    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ');
+    return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
+  }
+  return null;
+}
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
@@ -64,7 +125,7 @@ export async function prepareAgentEnvironment(environment: AgentEnvironment) {
 export function loginCommand(environment: AgentEnvironment) {
   const home = shellQuote(environment.home);
   return { claude: `CLAUDE_CONFIG_DIR=${home} claude, then /login`, codex: `CODEX_HOME=${home} codex login`,
-    opencode: `XDG_DATA_HOME=${home} opencode auth login`, cursor: `CURSOR_CONFIG_DIR=${home} cursor-agent login` }[environment.kind];
+    opencode: `XDG_DATA_HOME=${home} opencode auth login`, cursor: `CURSOR_CONFIG_DIR=${home} agent login` }[environment.kind];
 }
 
 export interface AccountUsage { window: string; percent: number; resetsAt: string | null }
@@ -89,10 +150,16 @@ const windowName = (minutes: number) => minutes >= 1440 && minutes % 1440 === 0 
 
 // Claude Code keeps its subscription login in the environment's .credentials.json. The usage the
 // provider meters against it is read from the same endpoint Claude Code's /usage reads; the token
-// is sent only to its own provider and never leaves this function.
+// is sent only to its own provider and never leaves this function. An account connected with a
+// pasted API key (GY-409) holds it in the environment's settings.json instead, which is a login
+// the health probe recognises even though no usage endpoint stands behind it.
 async function claudeAccount(environment: AgentEnvironment, probe: EnvironmentProbe, now: number) {
   const oauth = (await readJsonFile(resolve(environment.home, '.credentials.json')))?.claudeAiOauth;
-  if (!oauth || typeof oauth !== 'object' || !(oauth.accessToken || oauth.refreshToken)) return { loggedIn: false, usage: [], note: null };
+  if (!oauth || typeof oauth !== 'object' || !(oauth.accessToken || oauth.refreshToken)) {
+    const settings = await readJsonFile(resolve(environment.home, 'settings.json'));
+    if (typeof settings?.env?.ANTHROPIC_API_KEY === 'string' && settings.env.ANTHROPIC_API_KEY) return { loggedIn: true, usage: [], note: 'an API-key account: the provider exposes no usage Graphyard can read' };
+    return { loggedIn: false, usage: [], note: null };
+  }
   if (probe.quota === false) return { loggedIn: true, usage: [], note: 'quota not read' };
   if (typeof oauth.accessToken !== 'string' || typeof oauth.expiresAt === 'number' && oauth.expiresAt <= now) return { loggedIn: true, usage: [], note: 'the stored access token has expired; Claude Code refreshes it at launch, so quota is read on the next check' };
   try {
@@ -289,7 +356,7 @@ export interface LaunchSelection { account: LaunchAccount | null; health: Enviro
 export async function heldAwareProbe(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, probe: FleetProbe = {}): Promise<FleetProbe> {
   const held = await observedExhaustions(config, probe.now?.() ?? Date.now());
   if (!Object.keys(held).length) return probe;
-  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000) : null);
+  const client = probe.registry ?? (config.url && config.hostId ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs) : null);
   if (!client) return probe;
   return { ...probe, registry: { document: () => client.document(), end: (session, reason, outcome) => client.end(session, reason, outcome),
     select: request => client.select({ ...request, observations: request.observations.map(entry => !held[entry.account] ? entry
@@ -623,3 +690,4 @@ export async function setupAgentEnvironments(root: string, input: { directory?: 
       : loggedOut.length ? `Profiles use the ${loggedIn.length} logged-in environment(s). Log in the rest (${loggedOut.map(entry => entry.login).join(' ; ')}) and rerun master environments --apply to add them`
       : 'Every environment is logged in and every profile uses it; master run checks login and quota before each launch and fails over between them' };
 }
+

@@ -1,10 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -44,7 +43,7 @@ async function followUp(parent: Work, reviewId: number, findings: string[], with
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 402;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-backlog-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('backlog-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('backlog_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/backlog_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
@@ -69,9 +68,12 @@ test('unit:one-followup-per-parent — the followups route appends only the find
   assert.equal(followUpEntries(current).length, 2);
   assert.equal(current.description.match(/the cache never expires/g)?.length, 1);
   assert.deepEqual((await events(current)).filter(event => event.kind === 'followups.appended').map(event => event.payload.details?.added ?? event.payload.added), [1]);
-  // A worker may not append; an operator item is not a follow-up item.
+  // A worker may not append. An operator item is not a follow-up item: an approval's findings posted
+  // for it are recorded on its own record (GY-896). A closed follow-up item refuses the append.
   assert.equal((await call(worker, `work/${item.key}/followups`, body)).status, 403);
-  const refused = await call(coordinator, `work/${parent.key}/followups`, body);
+  assert.deepEqual(await ok(coordinator, `work/${parent.key}/followups`, body), { key: parent.key, added: 2, findings: 2 });
+  await ok(coordinator, `work/${item.key}/close`, { kind: 'obsolete', reason: 'Superseded in this test' });
+  const refused = await call(coordinator, `work/${item.key}/followups`, { ...body, reason: 'approval 14' });
   assert.equal(refused.status, 409);
   assert.match(refused.body.error, /not an open follow-up item/);
 });

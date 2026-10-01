@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +13,7 @@ import { managedInstructions } from '../src/repository-setup.js';
 import { managedMasterInstructions } from '../src/master.js';
 import type { ScopeFile, Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const exec = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -50,7 +50,7 @@ test('integration:generated-index-no-conflict — this repository declares docs/
   assert.ok(coordination.includes(`GRAPHYARD_GENERATED_FILES=${manifest.files.join(',')}`), 'docs/coordination.md states the deployment value that matches the manifest');
   // A copy of the docs alone: links to examples and workflows dangle there, so only the
   // generated-index verdicts are read from the checker's output.
-  const copy = await mkdtemp(join(tmpdir(), 'graphyard-docs-copy-'));
+  const copy = await temporaryDirectory('docs-copy');
   try {
     await exec('cp', ['-r', join(repositoryRoot, 'docs'), join(repositoryRoot, 'README.md'), copy]);
     await mkdir(join(copy, 'scripts')); await copyFile(checkDocs, join(copy, 'scripts/check-docs.mjs'));
@@ -69,7 +69,7 @@ test('integration:generated-index-no-conflict — this repository declares docs/
 // A small documented repository: the docs generator, one page per index section, the managed
 // AGENTS.md blocks, and an origin the branch under test syncs against.
 async function fixtureRepository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-sync-'));
+  const root = await temporaryDirectory('sync');
   const origin = join(root, 'origin.git'), main = join(root, 'main'), branch = join(root, 'branch');
   execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
   execFileSync('git', ['clone', '-q', origin, main], { stdio: 'ignore' });

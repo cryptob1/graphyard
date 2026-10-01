@@ -17,8 +17,8 @@
 // Under supervision (GY-105) the host declares how many executors it runs and of which kinds in
 // .graphyard/executors.json, and the shipped systemd template examples/master/graphyard-executor@.service
 // starts one instance per slot with `--slot N`: the slot takes its kinds and poll interval from the
-// declaration, claims under a stable name, and answers systemd's watchdog on every poll and every
-// claim renewal. `--install` writes that declaration and enables the units (src/repository-setup.ts
+// declaration, claims under a stable name, and answers systemd's watchdog on every poll — whether
+// or not it claims — every settlement and every claim renewal (GY-646). `--install` writes that declaration and enables the units (src/repository-setup.ts
 // installExecutorSupervision); `graphyard init` does the same on a coordinator host. Exactly one
 // component merges (GY-245): where the master loop is installed or running, `--install` declares
 // every kind but `merge`, and a slot that still serves merge refuses merge rows while the loop lives.
@@ -26,7 +26,8 @@
 // The modules are loaded once, here, and the checkout they came from keeps moving (GY-126). The
 // process records the release it loaded beside the coordinator credential, re-reads the checkout's
 // commit before every claim, and stands down — finishing what it runs, claiming nothing more,
-// saying why and how to restart it — the moment the two differ. `--unit` names the systemd user
+// saying why and how to restart it — the moment the two differ; under a supervisor that restarts it
+// the stand-down is a clean exit (status 0), so the unit brings it back on the new code. `--unit` names the systemd user
 // unit it runs under when that cannot be read from the process itself (only a graphyard-executor
 // service is accepted); `graphyard master executors restart` restarts every registered executor
 // through that unit, and no claim starts while its fence stands.
@@ -176,19 +177,17 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     if (!k.executorRunnableKinds.includes(kind)) throw new Error(`No executor runs ${kind}; it runs ${k.executorRunnableKinds.join(', ')}`);
   }
 
-  // Under systemd every poll and every claim renewal is a keep-alive: a process whose event loop
-  // wedged stops sending them and is restarted, while a slow handler that still renews is left alone.
   const notify = supervisorNotifier(env, run);
   const alive = () => notify?.('alive');
   const effects = {
-    claim: body => { alive(); return mutate('actions/claim', body); },
+    claim: body => mutate('actions/claim', body),
     // The settlement names the executor the claim was recorded under, never this credential's own
     // principal: several executors may run behind one coordinator credential.
     settle: (action, result, reason) => mutate(`actions/${action.id}/settle`, { result, reason, ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
     // A handler is not bounded by the claim lease — a dispatch waits on a runtime, a guarded merge
     // chains provider calls — so while one runs this says the claim is still held. Without it a
     // slow handler loses its row mid-flight and another executor runs the action beside it.
-    renew: action => { alive(); return mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }); },
+    renew: action => mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
     handlers: options.kinds ? Object.fromEntries(options.kinds.filter(kind => handlers[kind]).map(kind => [kind, handlers[kind]])) : handlers,
   };
   // A supervised slot claims under a stable name, so a restart is the same executor coming back
@@ -201,6 +200,14 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     intervalSeconds: options.intervalSeconds, root, release, supervisor: f.detectSupervisorUnit({ named: options.unit }) });
   await registrar.started();
   let fenceSeen = null;
+  const stopping = new AbortController();
+  const stop = () => stopping.abort();
+  // Under a supervisor that restarts it (systemd's NOTIFY_SOCKET, or a graphyard-executor unit),
+  // a stand-down is an exit (GY-646): the process has nothing more to claim on this release, and
+  // the unit's Restart=always brings it back on the checkout's current code within RestartSec.
+  // Idling instead left the watchdog to abort it with SIGABRT and a core dump. An executor run by
+  // hand keeps standing down, since nothing would start it again.
+  const supervised = !!notify || !!registrar.registration.supervisor;
   // Exactly one component merges (GY-245): while a live master loop on this installation runs the
   // guarded merge, this executor leaves merge rows to it rather than claiming one, since the claim
   // itself writes the item and defeats the loop's revision check.
@@ -216,17 +223,21 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       fenceSeen = fence?.id ?? null;
       return fence;
     },
-    standDown: detail => { console.error(`[graphyard-executor] ${identity.id} stands down: ${detail.reason}; restart it with ${registrar.registration.supervisor?.restart ?? f.executorRestartCommand}`); return registrar.standDown(detail); },
+    standDown: async detail => {
+      console.error(`[graphyard-executor] ${identity.id} stands down: ${detail.reason}; ${supervised ? `it exits so ${registrar.registration.supervisor?.unit ?? 'its supervisor'} restarts it on the current code` : `restart it with ${registrar.registration.supervisor?.restart ?? f.executorRestartCommand}`}`);
+      try { return await registrar.standDown(detail); } finally { if (supervised) stop(); }
+    },
     resumed: () => { console.error(`[graphyard-executor] ${identity.id} claims again: its checkout is back on ${release.commit.slice(0, 12)}`); return registrar.resumed(); },
   });
   console.error(`[graphyard-executor] ${identity.id} runs ${release.commit ? release.commit.slice(0, 12) : 'an unknown commit'}${release.dirty ? ' (dirty)' : ''} from ${root}${registrar.registration.supervisor ? ` under ${registrar.registration.supervisor.unit}` : ' with no supervisor unit'}; registered at ${registrar.file}`);
-  const stopping = new AbortController();
-  const stop = () => stopping.abort();
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, stop);
   notify?.('ready');
   console.error(`[graphyard-executor] ${identity.id} (pid ${process.pid}) serving ${a.executorKinds(effects.handlers).join(', ')} every ${options.intervalSeconds}s${options.slot !== null ? ` as slot ${options.slot}` : ''}${notify ? ' under systemd supervision' : ''}`);
   try {
-    const result = await a.runExecutor(identity, guarded, { intervalMs: options.intervalSeconds * 1000, once: options.once, signal: stopping.signal, log: line => console.error(line) });
+    // Under systemd every step is a keep-alive — every claim (made, fenced, refused or standing
+    // down), settlement and claim renewal (x.watchdogEffects): a process whose event loop wedged
+    // stops sending them and is restarted, while a slow handler that still renews is left alone.
+    const result = await a.runExecutor(identity, x.watchdogEffects(guarded, alive), { intervalMs: options.intervalSeconds * 1000, once: options.once, signal: stopping.signal, log: line => console.error(line) });
     const report = { executor: identity.id, host: identity.host, pid: process.pid, slot: options.slot, repository: config.repository, kinds: a.executorKinds(effects.handlers), intervalSeconds: options.intervalSeconds,
       release, supervisor: registrar.registration.supervisor, standingDown: guarded.standingDown(), registration: registrar.file,
       steps: result.steps.length, ran: result.steps.filter(step => step.action).length, failed: result.steps.filter(step => step.result === 'failed').length, last: result.steps.at(-1) ?? null };
