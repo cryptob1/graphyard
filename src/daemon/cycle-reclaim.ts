@@ -1,7 +1,6 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim, paneReclaimStatus, agentlessPaneAttentionBound } from '../master-resources.js';
-import { diskThresholdBytes, containmentPhase, containmentQuarantines } from '../master.js';
-import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
+import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -11,6 +10,8 @@ import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { SessionHandle } from '../model/sessions.js';
 import type { ContainmentAssessment } from '../master.js';
+import { containmentQuarantines } from '../master.js';
+import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
 import { closablePane, endedScopeStates } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import type { DaemonAction, DaemonState } from './state.js';
