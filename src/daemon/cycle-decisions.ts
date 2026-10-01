@@ -432,12 +432,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (Number.isFinite(verdictAt)) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
       await effects.persist(state);
       // A rework on a low- or medium-lane item is applied by the control plane as it is requested
-      // (GY-883): no approver decision is asked for, so no session is launched; a failed
-      // application is supervised next cycle like any other and requested again.
+      // (GY-883): no approver decision is asked for, so no session is launched. A failed
+      // application is recorded failed, so the watch is supervised like any decision the server
+      // settled without applying: requested again on the widening retry interval, within the
+      // request bound, and escalated once that bound is spent.
       const settledState = (requested as { state?: string }).state;
       if (settledState === 'applied' || settledState === 'failed') {
         if (settledState === 'applied') watch.settledAt = stamp;
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Requested decision ${requested.id} (${decision.action}) for ${item.key}; its risk lane needs no approver, and the control plane ${settledState === 'applied' ? 'applied it' : 'could not apply it'} at once: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: settledState === 'applied' ? 'done' : 'failed', detail: `Requested decision ${requested.id} (${decision.action}) for ${item.key}; its risk lane needs no approver, and the control plane ${settledState === 'applied' ? 'applied it' : 'could not apply it'} at once: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
       // The request alone changes nothing; the approver session is what applies it. A launch that
