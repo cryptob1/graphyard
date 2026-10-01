@@ -1,15 +1,15 @@
-<!-- page: Understand or contribute | 1 | code layout and testing. -->
-# Development and dogfooding
+<!-- page: Understand or contribute | 1 | layout, testing. -->
+# Development
 
 ## Where a new feature goes
 
-- A CLI command: a `src/cli/` module (`defineCommands`); help is generated.
-- An HTTP route: a `src/server/routes/` module (`defineRoutes`).
-- A schema or gate rule: its module under `src/model/`; commands via `src/engine.ts`, GitHub I/O `src/github.ts`.
-- A table: a `defineTable` under `src/store/tables/` (migrations and backups derive).
-- A dashboard view: a `web/pages/` page listed in `web/pages/index.tsx`.
-- A protocol topic: a `docs/protocol/` page starting `<!-- page: Agent protocol | N | summary -->`.
-- Managed `AGENTS.md` text: the template in `src/repository-setup.ts` or `src/master.ts`; re-render `AGENTS.md`.
+- CLI command: a `src/cli/` module (`defineCommands`); help is generated.
+- HTTP route: a `src/server/routes/` module (`defineRoutes`).
+- Schema or gate rule: its `src/model/` module; commands via `src/engine.ts`, GitHub I/O `src/github.ts`.
+- Table: a `defineTable` in `src/store/tables/` (migrations, backups derive).
+- Dashboard view: a `web/pages/` page listed in `web/pages/index.tsx`.
+- Protocol topic: a `docs/protocol/` page, [page line](#documentation) section `Agent protocol`.
+- Managed `AGENTS.md` text: its template in `src/repository-setup.ts` or `src/master.ts`, then re-render.
 
 `tests/hotspots.test.ts` holds each assembler to a size budget.
 
@@ -19,16 +19,8 @@
 npm ci && npm run build && npm test
 ```
 
-`npm test` hides `GRAPHYARD_*`/`HERDR_*` variables and reserves free Postgres ports. Worktree installs need [bubblewrap](install.md#preconditions).
-
-## CI
-
-`test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips all (`scripts/ci-tests.mjs`).
+`npm test` hides `GRAPHYARD_*`/`HERDR_*` variables and reserves free Postgres ports; worktree installs need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips all (`scripts/ci-tests.mjs`). Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry, then require the proof.
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; `GRAPHYARD_GENERATED_FILES` ([value](coordination.md#generated-files-never-conflict)) exempts them from the regression guard. README.md and `docs/` stay within the `wordBudget` in `graphyard.json` (12,000 words, no page over 1,200), each topic on one page (`tests/docs-budget.test.ts`): link, never restate. A total over the budget never fails CI: the test warns, and `master status` reports the total and the largest pages; a page over its per-page cap still fails. At 97% of the budget, `master status` raises `docs`; the loop files one 5%-headroom trim item.
-
-## Trusted contracts
-
-Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry first, then require later work's proof.
+`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; `GRAPHYARD_GENERATED_FILES` ([value](coordination.md#generated-files-never-conflict)) exempts them from the regression guard. README.md and `docs/` share `graphyard.json`'s `wordBudget` (12,000 words, ≤1,200 per page; `tests/docs-budget.test.ts`); one page per topic, link, never restate. A page over its cap fails; an over-budget total only warns, in `master status` with the largest pages; at 97% it raises `docs` and the loop files one 5%-headroom trim item.

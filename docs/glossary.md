@@ -1,53 +1,53 @@
-<!-- page: Start here | 2 | terms, roles, who decides. -->
+<!-- page: Start here | 2 | terms, roles. -->
 # Glossary
 
 ## The eight distinctions
 
 ### 1. Human operator (human authority)
 
-The `admin` credential holder declaring `sessionKind: "human"`, who alone decides goals and priorities, spending money or opening accounts, and credentials for people.
+The `admin` credential holder declaring `sessionKind: "human"`; alone decides goals and priorities, spending or opening accounts, and credentials for people.
 
-**Canonical usage:** *human operator*; bare *operator* means this person.
+**Canonical usage:** *human operator*, or bare *operator*.
 
 ### 2. AI agent
 
 A model acting through a runtime with only its credential's authority.
 
-**Canonical usage:** name the role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
+**Canonical usage:** its role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running agent instance in a runtime.
+One running agent instance.
 
-**Canonical usage:** *session*; *runtime* for the hosting software.
+**Canonical usage:** *session*; *runtime* for its host software.
 
 ### 4. Principal, role, and credential
 
-A *principal* is an authenticated identity, its *role* the authority class, its *credential* (*token*) the secret.
+*Principal*: an authenticated identity; *role*: its authority class; *credential* (*token*): its secret.
 
 **Canonical usage:** one principal per concurrent session.
 
 ### 5. Worker lease and worktree
 
-A *lease* is one worker's time-limited ownership of one item at one *epoch*; the *assigned worktree* is the registered `(host, path)` checkout with a reserved branch.
+*Lease*: one worker's time-limited ownership of one item at one *epoch*; *assigned worktree*: its registered `(host, path)` checkout with a reserved branch.
 
-**Canonical usage:** *lease*, *epoch*, *assigned worktree*.
+**Canonical usage:** the italic terms.
 
 ### 6. Independent reviewer and proof producer
 
-A *reviewer* is a non-author GitHub identity approving the exact head; a *proof producer*, a `producer` principal granted exact proof names; neither implements it.
+*Reviewer*: a non-author GitHub identity approving the exact head; *proof producer*: a `producer` principal granted exact proof names. Neither implements.
 
-**Canonical usage:** *reviewer*, *proof producer*.
+**Canonical usage:** the italic terms.
 
 ### 7. Graphyard control plane
 
-The server, database, dashboard and CLI.
+Server, database, dashboard and CLI.
 
-**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; it never *runs* a session.
+**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; never *runs* a session.
 
 ### 8. Herdr runtime
 
-The supervisor that launches sessions and reports their liveness.
+The supervisor launching sessions and reporting liveness.
 
 **Canonical usage:** *Herdr*; other runtimes by product name.
 
@@ -55,27 +55,18 @@ The supervisor that launches sessions and reports their liveness.
 
 | Role | Held by | May | Never |
 | --- | --- | --- | --- |
-| `admin` | Human operator | Any decision | Share with an AI session |
-| `operator-agent` | Master and approver | Add intent; request or approve decisions | Approve its own request; merge |
+| `admin` | Human operator | Any decision | Share it with AI |
+| `operator-agent` | Master, approver | Add intent; request or approve decisions | Approve own request; merge |
 | `coordinator` | Master loop | Dispatch, guarded merge | Implement, produce evidence |
 | `slice-lead` | Slice lead | Rule on its slice, escalate | Implement, merge |
 | `worker` | Worker | Claim, heartbeat, register, submit | Satisfy an acceptance gate |
-| `producer` | CI, runner, observer | Evidence for granted proofs | Prove its own work |
+| `producer` | CI, runner, observer | Evidence for granted proofs | Prove own work |
 | `reader` | Dashboards | Read | Mutate |
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until the human answers.
+The master applies non-weakening intent (create, release, unblock, add requirements) itself. Requirement rewrites, escalation resolution, rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures and merges with automatic merging off need `graphyard master decide GY-N ACTION REASON` approved by another agent's `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested it, was assigned the item, produced its evidence or would get the grant. Reviewers, producers and the merge gate decide the rest; a human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until answered.
 
 ## Diagram legend
 
-| Shape and colour | Term |
-| --- | --- |
-| Amber rounded box | Human operator |
-| Green rounded box | Agent session with one role and credential |
-| Blue square box | Graphyard control plane |
-| Violet box or container | Herdr runtime |
-| Grey square box | GitHub and other external facts |
-| Dashed chip | Credential, lease epoch, or worktree |
-| Solid arrow | Authenticated command |
-| Dashed arrow | Observation, never authority |
+Boxes: amber rounded, human operator; green rounded, single-role session; blue square, control plane; violet (or container), Herdr; grey square, GitHub and external facts. Dashed chips: credential, lease epoch, worktree. Arrows: solid, authenticated command; dashed, observation, never authority.

@@ -1,47 +1,32 @@
-<!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item, retrieved, promoted on demand. -->
+<!-- page: Operate Graphyard | 4 | reviewer findings. -->
 # Review follow-ups
 
-The independent reviewer's approval may name findings beyond an item's acceptance criteria and
-judge each FOLLOW-UP. Graphyard records them against the approved item itself — never as a work
-item, neither one per review nor one per item — and an operator promotes a finding to a work item
-only on demand.
+An independent reviewer's approval may name findings beyond the acceptance criteria, each judged
+FOLLOW-UP. Graphyard records them on the approved item, never as backlog or ready work items; an
+operator promotes one only on demand.
 
 ## Recorded on the item and the pull request
 
-When the loop holds an approval of an item's candidate, it records the approval's follow-ups on
-that item's own record (`POST /api/work/GY-N/followups`, a `followups.recorded` event naming the
-pull request and head):
+The loop records an approved candidate's follow-ups on its item (`POST /api/work/GY-N/followups`;
+a `followups.recorded` event names the pull request and head):
 
-- Every approval of the same item adds only the findings the item's batch does not hold yet,
-  deduplicated by file path and finding text. A retried filing records nothing twice.
-- On the pull request, each follow-up thread gets a reply naming the item and is resolved; a
-  finding with no thread is already on the approval's own `Follow-up finding:` line.
-- Nothing is filed: the backlog gains no item, and no ready-stage item carries no implementation.
+- Each approval adds only findings the batch lacks (by file path and text), so retries record
+  nothing twice.
+- Each follow-up thread gets a reply naming the item and is resolved; a threadless finding is
+  already on the approval's `Follow-up finding:` line.
 
-Follow-up items filed before this (`Follow-ups from the approved review of GY-N (PR #M)`) still
-take a later approval's findings while open, and are triaged as before
-([machine-filed backlog](master-agent.md#machine-filed-backlog)).
+Open legacy items (`Follow-ups from the approved review of GY-N (PR #M)`) still take later
+findings and are [triaged](master-agent.md#machine-filed-backlog).
 
-## Retrieving a batch
+## Retrieving and promoting
 
-    graphyard followups GY-N
-    graphyard followups --pr N
+    graphyard followups GY-N                 # GET /api/work/GY-N/followups
+    graphyard followups --pr N               # GET /api/followups?pr=N, every batch for PR N
+    graphyard promote-followup GY-N INDEX    # POST /api/work/GY-N/promote
 
-The first answers item `GY-N`'s batch (`GET /api/work/GY-N/followups`); the second every batch
-recorded for pull request `N` (`GET /api/followups?pr=N`). Each finding is numbered from 1 and
-names its file, text, the thread it was raised on, the pull request and head its approval
-reviewed, and the item it was promoted to, if any.
-
-## Promoting a finding
-
-    graphyard promote-followup GY-N INDEX
-
-An operator (an admin, or an operator agent holding `intent:create`) promotes finding `INDEX` of
-`GY-N`'s batch (`POST /api/work/GY-N/promote`) to an ordinary work item of its own, in the
-backlog. It carries the finding as its criterion, plans the finding's file, depends on the
-approved item, and requires `manual:review-followup-addressed` — the finding is addressed in
-code, or declined with a recorded reason — which a producer session may hold once granted.
-
-A finding is promoted once: promotions of one finding are serialized, the batch marks it with
-the item it became, and repeating the command answers that item (`"duplicate": true`). The batch
-keeps every finding; the rest wait until an operator promotes them.
+Findings, numbered from 1, name file, text, thread, reviewed pull request and head, and any
+promoted item. An admin, or an operator agent holding `intent:create`, promotes finding `INDEX`
+to a backlog item: the finding as criterion, its file planned, depending on the approved item,
+requiring `manual:review-followup-addressed` (addressed in code, or declined with a recorded
+reason), which a granted producer may hold. Promotion is serialized, once per finding; a repeat
+answers the item it became (`"duplicate": true`). The batch keeps every finding.

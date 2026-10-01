@@ -1,48 +1,42 @@
-<!-- page: Operate Graphyard | 10 | criteria, overlap and scope. -->
+<!-- page: Operate Graphyard | 10 | criteria, overlap, scope. -->
 # Coordination
 
 ## Write observable criteria
 
-A criterion states an outcome and its proofs:
-
-```json
-{"id":"AC-1","text":"Retrying a confirmed booking produces exactly one SMS request","proofs":["integration:sms-idempotency"]}
-```
-
-`unit:`/`integration:` proofs are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless `producerProofs` lists it; judged, not title-counted, its trusted pass proves it whatever it executed (`unit:`/`integration:`/`e2e:` need `executed > 0`). `e2e:` proofs use the [validation runner](validation.md).
+Criteria name outcomes and proofs (`"proofs":["integration:sms-idempotency"]`): `unit:`/`integration:` are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)), `e2e:` use the [validation runner](validation.md). A `manual:` proof needs two-party attestation unless `producerProofs` lists it; judged, not title-counted, its trusted pass proves it whatever it executed (`unit:`/`integration:`/`e2e:` need `executed > 0`).
 
 ## Revise requirements explicitly
 
-`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first (a plannedFiles-only widening excepted), as prior evidence, review and authorization lapse.
+`graphyard master requirements GY-N revision.json "REASON"` adds; rewrite, removal or narrowing needs two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the document against `expectedPolicyRevision`, lapsing evidence, review and authorization; stop the worker first unless only widening plannedFiles.
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, or directory prefixes ending `/`) is the change-scope contract, not a lock: the [merge queue](github.md#merge-queue) and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and candidates `git merge-tree` cannot merge. A root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
+`plannedFiles` (paths or `/`-ending directory prefixes) is a scope contract, not a lock: the [merge queue](github.md#merge-queue) and `sync` integrate overlaps, and only `exclusiveResources`, reserved at claim, hold dispatch. `master status` records `overlap.concurrent` and candidates `git merge-tree` cannot merge. Root-level directories are `highConflict`, refused without `--allow-broad-scope`.
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is exact-head reviewer approval plus required CI. Approvals mark each listed thread resolved, follow-up (backlog) or overridden, or are withdrawn; the loop resolves threads. A filing refused for a reused idempotency key links that key's item (same parent, approval), else uses an approval-and-body-hash key; 10 consecutive identical 4xx failures stop retries with one attention item (step, error, item). Bot threads turn advisory after two rework rounds. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items; carried files (another item's unlanded commits) are no ejection (GY-871). A worker cannot widen `plannedFiles`; a scope request or audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
+At `complete`, each new head and landing, a file neither new nor in `plannedFiles` must match the bound base byte-for-byte or is refused (deletion, revert, rewrite), naming files and shipping items; carried files (another item's unlanded commits) don't eject. Only a scope request or audited revision, never the worker, widens `plannedFiles`; asks over 20 files in one directory or past the 100-entry cap collapse to their deepest common directory (`tests/`) listing covered files, and pending asks merge into one decision.
 
-One landability verdict, `evaluateLandability` (`src/model/landability.ts`), is the single authority on whether a candidate can land: the build and acceptance gates are its refusals, and the merge queue ejects an entry only for a reason it gives. It is computed from live facts keyed by candidate SHA and policy revision, never stored; each refusal records its version and inputs on the gate and the ejection. A landability ejection is not sticky: once the verdict is landable, the same head re-enters the queue.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gates (build, acceptance) and queue ejections carry its refusals with its version and inputs. It is recomputed from live facts (candidate SHA, policy revision), never stored, so refusals aren't sticky: a landable head re-enters.
 
 ### Keep current with `graphyard sync`
 
-The landing check compares the candidate's changes since its merge base with the commit it would land on (live or predicted base). Each out-of-scope file is judged by the head's three-way merge onto it, not its blob: a change the commit has since extended, or one only the base made, merges to the commit's version, while a head restoring the merge-base version over it is still refused. Out-of-scope deletions and rewrites remain refused. Every observation recomputes this check, so stale refusals clear without a push. The simulated-day soak (`tests/soak.test.ts`) runs this check across landing-base moves, and stages a window where GitHub answers compares without a usable merge base; its false refusals hold only there.
+Each out-of-scope file is judged by the head's three-way merge onto the landing commit (live or predicted base): a change that commit extended, or only the base made, passes; restoring the merge-base version, deleting or rewriting is refused. Observations recompute it, clearing stale refusals without a push; false refusals arise only where a compare lacks a merge base.
 
-Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
+Before pushing, `graphyard sync GY-N` merges `origin/BASE` (never rebases), regenerates, commits and prints the classification; restore a file with `git checkout BASE_TIP -- PATH`.
 
 ### Generated files never conflict
 
-`docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)) and `init` renders the managed `AGENTS.md` blocks; `sync` regenerates them after merging. The regression guard classifies `GRAPHYARD_GENERATED_FILES` paths (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
+`GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` lists files [generated in full](development.md), classed `generated`: only deletion is refused. `sync` regenerates them; `init` renders managed `AGENTS.md` blocks.
 
 ## Ship in under thirty minutes
 
-The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never weaker gates.
+The [routine target](master-agent-reference.md#pipeline-speed) needs `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never weaker gates.
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
+`graphyard diagnose GY-N` names the refusing gate and other holds; conflicting `base-behind`/`base-conflict` get rework. Three straight unobserved observation jobs raise `observation-starved` (master attention, `/api/status` `starvedJobs`).
