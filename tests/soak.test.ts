@@ -116,10 +116,10 @@ const basePlan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted —
   // more than one pass's bound (GY-980 raised it to ten), so the drain takes several passes.
-  leftovers: 14,
+  leftovers: 12,
   // GY-980: of each class a previous day left in Graphyard worktrees — an unrecorded shell, a shell
   // whose handle stayed 'running', an ended session's idle agent — this many.
-  worktreeLeftovers: 4,
+  worktreeLeftovers: 2,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
@@ -1567,7 +1567,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const passes = [...new Set(reclaimed.map(pane => herdr.closedAt.get(pane)))];
   assert.ok(passes.length >= 2, `the backlog drained over successive passes, not in one burst (${passes.length})`);
   // The bound paces every pass: however the backlog interleaves with the day's other panes, no
-  // pass carries more than the bound of the leftovers, and the fourteen take several passes.
+  // pass carries more than the bound of the leftovers, and the twelve take several passes.
   const perPass = [...new Set(reclaimed.map(pane => herdr.closedAt.get(pane)))].map(at => reclaimed.filter(pane => herdr.closedAt.get(pane) === at).length);
   assert.ok(perPass.every(count => count <= paneSweepLimit), `a pass closes at most the bound of ${paneSweepLimit} (${perPass.join(', ')})`);
   const sweepStatus = state.actions['sweep:panes:status'];
