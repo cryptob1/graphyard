@@ -298,9 +298,6 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-// GY-471: the queued day's predecessor whose change explains the failing tip's `test` failure; a test
-// sets it around its own day.
-let blamedPredecessor: number | undefined;
 async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
@@ -1664,6 +1661,9 @@ test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses 
   assert.ok(escalation?.includes(restore!.failure!), `master status named the escalation: ${JSON.stringify(day.restoreLines)}`);
 });
 
+// GY-471: the queued day's predecessor whose change explains the failing tip's `test` failure; a test
+// sets it around its own day.
+let blamedPredecessor: number | undefined;
 test('unit:soak-invariants-hold — a speculative tip failure a predecessor\'s change explains is attributed to it: the predecessor leaves the queue and is asked for one rework of its head, the entry re-enters and lands with no rework of its own, each failed run\'s annotations are read once, and every invariant holds', { timeout: 300_000 }, async () => {
   // GY-471: a queue-only day in which item three's first tip, chained behind item two's, fails
   // `test` and keeps failing after its rerun, and the failing test's annotation names
