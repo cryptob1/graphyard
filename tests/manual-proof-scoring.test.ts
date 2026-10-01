@@ -36,7 +36,8 @@ function observation(overrides: Partial<Observation> = {}): Observation {
     candidate: { sha: head, baseSha: base, pr: 895, branch: 'graphyard/gy-895-1', author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }],
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null,
-    files: ['src/followups.ts'], scopeFiles: [], at, prState: 'open', draft: false, baseTip: base, baseTipContained: true,
+    // GY-883: a public API path keeps the item in the high lane, which still demands the manual proof this test scores.
+    files: ['src/server/routes/followups.ts'], scopeFiles: [{ path: 'src/server/routes/followups.ts', status: 'modified' as const, sha: 'f'.repeat(40), additions: 1, deletions: 1, binary: false }], at, prState: 'open', draft: false, baseTip: base, baseTipContained: true,
     conversations: { required: true, unresolved: [] }, ...overrides,
   };
 }

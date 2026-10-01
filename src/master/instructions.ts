@@ -21,7 +21,9 @@ Create, release, unblock, and add requirements with your own operator-agent iden
 decision (requirement rewrites, escalation resolution, \`manual:\` attestation,
 rework, containment recovery, proof grants, and merge approval when automatic
 merging is off) with \`graphyard master decide GY-N ACTION REASON\`, then launch the
-independent approver with \`graphyard master approver GY-N DECISION\`. The loop
+independent approver with \`graphyard master approver GY-N DECISION\`, except for a
+low- or medium-lane rework, which the server applies as it is requested
+(\`approvedBy: graphyard-risk-lane\`), so no approver is launched for it. The loop
 watches that session as it watches its own approvers and closes it, recording why,
 once its decision settles or its item is delivered; it closes any other approver
 session left open the same way. The server
