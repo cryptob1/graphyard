@@ -17,13 +17,24 @@ import { DELIVERY_EVENT_PREDICATE } from './tables/production.js';
  * A full snapshot is written for the first save, every `snapshotEvery` rows, when the delta
  * would exceed `deltaSizeFraction` of the document, when the stage or delivery changed (so
  * lifecycle rows stay whole), and for an item's first accepted-delivery observation (the row
- * the shipping pulse indexes). Nothing is updated or deleted: the ledger stays append-only.
+ * the shipping pulse indexes). Nothing is updated; only the audited compaction of routine rows
+ * past their retention window deletes (store/compaction.ts).
+ *
+ * A routine save (`routineSaveKinds`: the continuous writes nobody reads as a lifecycle step) is
+ * never a full snapshot once the item has one (GY-979): it is a delta on that snapshot however
+ * many rows follow it and however large the delta, unless it moves the stage or the delivery —
+ * then it is a lifecycle row and stays whole whatever its kind. Full snapshots written by routine
+ * kinds were 8 GB of a 9 GB ledger in production. The `snapshotEvery` and size rules now apply to
+ * the other kinds alone, so a routine delta can sit any number of rows after its base.
  *
  * Rows written before this generalisation carry a clock-only delta (`observation`, `lease`,
  * no `ops`); both readers still resolve them.
  */
 export const snapshotEvery = 50;
 export const deltaSizeFraction = 0.25;
+/** The save kinds that store only what changed, never a whole document (GY-979). */
+export const routineSaveKinds = ['github.observed', 'heartbeat', 'reconciled', 'action.claimed', 'action.failed', 'github.queue', 'session'] as const;
+const routineSave: ReadonlySet<string> = new Set(routineSaveKinds);
 
 export type DeltaPath = (string | number)[];
 /** `[path, value]` sets a value (appending when the index is an array's length); `[path]` removes an object key. */
@@ -112,7 +123,8 @@ export function applyWorkDelta(base: Work, delta: WorkDelta | SnapshotDelta): Wo
  * The SQL twin of `applyWorkDelta`, installed with the events table: an event's full document
  * from its own `payload`, whether it carries the document whole or a delta on a full snapshot.
  * `graphyard_work_at_revision` finds the document an item held at a revision: the exact full
- * snapshot by index, else the delta row within `snapshotEvery` rows of its base.
+ * snapshot by index, else the delta row within `snapshotEvery` rows of its base, else — a routine
+ * delta any distance from its base (GY-979) — the item's delta row carrying that revision.
  */
 export const eventWorkFunctions = `CREATE OR REPLACE FUNCTION graphyard_event_work(p_work uuid, p_payload jsonb) RETURNS jsonb
   LANGUAGE plpgsql STABLE PARALLEL SAFE AS $fn$
@@ -149,10 +161,12 @@ BEGIN
   IF found IS NOT NULL OR p_revision IS NULL OR p_revision !~ '^[0-9]{1,15}$' THEN RETURN found; END IF;
   SELECT max(e.seq) INTO base_seq FROM events e WHERE e.work_id=p_work AND e.payload ? 'work'
     AND e.payload->'work'->>'revision' = ANY(ARRAY(SELECT (p_revision::bigint - g)::text FROM generate_series(1, ${snapshotEvery}) g));
-  IF base_seq IS NULL THEN RETURN NULL; END IF;
-  SELECT graphyard_event_work(x.work_id, x.payload) INTO found
+  IF base_seq IS NOT NULL THEN SELECT graphyard_event_work(x.work_id, x.payload) INTO found
     FROM (SELECT e.work_id, e.payload FROM events e WHERE e.work_id=p_work AND e.seq>base_seq ORDER BY e.seq LIMIT ${snapshotEvery}) x
-    WHERE x.payload ? 'delta' AND x.payload->'delta'->>'revision'=p_revision LIMIT 1;
+    WHERE x.payload ? 'delta' AND x.payload->'delta'->>'revision'=p_revision LIMIT 1; END IF;
+  IF found IS NOT NULL THEN RETURN found; END IF;
+  SELECT graphyard_event_work(e.work_id, e.payload) INTO found FROM events e
+    WHERE e.work_id=p_work AND e.payload ? 'delta' AND e.payload->'delta'->>'revision'=p_revision ORDER BY e.seq DESC LIMIT 1;
   RETURN found;
 END $fn$;`;
 
@@ -167,17 +181,18 @@ export const snapshotBaseSql = `SELECT b.seq, b.payload->'work' AS work, (SELECT
     FROM events b WHERE b.work_id=$1 AND b.payload ? 'work' ORDER BY b.seq DESC LIMIT 1`;
 /**
  * Append one save to the ledger: a delta on the item's last full snapshot when it is small
- * and recent, the whole document otherwise.
+ * and recent, or whenever the save is routine; the whole document otherwise.
  */
 export async function appendSave(db: pg.PoolClient, work: Work, actor: string, kind: string, details?: unknown) {
   const document: Work = JSON.parse(JSON.stringify(work));
   const full = JSON.stringify({ work: document, details });
   const base = (await db.query(snapshotBaseSql, [work.id])).rows[0] as { seq: string; work: Work; since: number } | undefined;
+  const routine = routineSave.has(kind);
   let row = full;
-  if (base?.work && base.since < snapshotEvery && base.work.stage === document.stage && equal(base.work.delivery ?? null, document.delivery ?? null)
+  if (base?.work && (routine || base.since < snapshotEvery) && base.work.stage === document.stage && equal(base.work.delivery ?? null, document.delivery ?? null)
     && !(kind === 'github.observed' && document.delivery?.mergedAt && !(await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND ${DELIVERY_EVENT_PREDICATE} LIMIT 1`, [work.id])).rows.length)) {
     const delta = JSON.stringify({ delta: workDelta(Number(base.seq), base.work, document), details });
-    if (delta.length <= full.length * deltaSizeFraction) row = delta;
+    if (routine || delta.length <= full.length * deltaSizeFraction) row = delta;
   }
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, row]);
 }
