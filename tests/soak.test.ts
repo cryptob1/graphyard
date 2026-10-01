@@ -995,12 +995,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // observation of the request is stale: its rework waits, and the loop wakes the observation job.
   let loopDownUntil = 0;
   const restarts = new Map<string, number>();
+  const restartLog: { key: string; kind: 'rework' | 'merge'; at: number }[] = [];
   const restartOnVerdict = async (now: number) => {
     const rework = new Set([...plan.rework].map(n => items[n - 1].id));
     const requested = (await store.list()).find(item => rework.has(item.id) && item.candidate && !restarts.has(item.candidate.sha)
       && !!item.observation?.reviews.some(review => review.sha === item.candidate!.sha && review.state === 'CHANGES_REQUESTED'));
     if (!requested) return false;
-    restarts.set(requested.candidate!.sha, now); loopDownUntil = now + 3 * minute;
+    restarts.set(requested.candidate!.sha, now); restartLog.push({ key: requested.key, kind: 'rework', at: now }); loopDownUntil = now + 3 * minute;
     return true;
   };
   // A stale merge (GY-710): the same restart just as an item reaches the merge stage, for the
@@ -1011,7 +1012,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     if (staleMerges.length >= (options.staleMerge ?? 0)) return false;
     const merging = (await store.list()).find(item => item.stage === 'merge' && item.candidate && !restarts.has(item.candidate.sha) && item.gates.every(gate => gate.passed));
     if (!merging) return false;
-    restarts.set(merging.candidate!.sha, now); staleMerges.push(merging.key); loopDownUntil = now + 3 * minute;
+    restarts.set(merging.candidate!.sha, now); staleMerges.push(merging.key); restartLog.push({ key: merging.key, kind: 'merge', at: now }); loopDownUntil = now + 3 * minute;
     return true;
   };
   const busyFleet = async (now: number) => {
@@ -1298,7 +1299,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mergeStallSightings, restoreLines, master, lanesSeen, laneApplications, approverWorks,
-    wakes, staleMerges };
+    wakes, staleMerges, restartLog };
 }
 
 /**
@@ -1764,36 +1765,30 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
 });
 
-// Keep restart-induced stale observations in their own day: pausing the whole loop changes
-// which heads need speculative tips, so the baseline day's CI-flake schedule stays intact.
-test('unit:soak-invariants-hold — stale rework wakes observation jobs without storms or cursor growth', { timeout: 300_000 }, async () => {
-  const day = await simulateDay({ hours: 8, staleRework: true });
-  const { items, final, wakes, state, violations, failures, lost, observed } = day;
-  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => item.key), [], 'all fifteen items are delivered after the restarts');
+// Keep restart-induced stale observations in their own day, trimmed to six items so it adds
+// little to the soak file's runtime: pausing the whole loop changes which heads need speculative
+// tips, so the baseline day's CI-flake schedule stays intact.
+test('unit:soak-invariants-hold — stale rework and stale merges each wake the observation job once and proceed once it lands, without storms or cursor growth', { timeout: 300_000 }, async () => {
+  const rework = new Set([2, 4]);
+  const day = await simulateDay({ hours: 6, staleRework: true, staleMerge: 2,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework, deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } } });
+  const { items, final, wakes, restartLog, staleMerges, state, violations, failures, lost } = day;
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered after the restarts');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease');
-  assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), basePlan.rework.size + 2, 'all review, revert and spent-producer rework rounds complete');
-  // Each rework the restart left on a stale observation woke its item's observation job once, and
-  // the rework rounds above still came to pass: no wake storm, and no growth of state.actions.
-  assert.deepEqual(wakes.map(wake => wake.key), [...basePlan.rework].map(n => items[n - 1].key), `one observation wake per stale rework: ${JSON.stringify(wakes)}`);
-  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('wake:observation:')).length <= basePlan.rework.size, 'one wake entry per item woken');
-});
-
-test('unit:soak-invariants-hold — a guarded merge refused for a stale observation wakes the observation job once and merges after it lands, without storms or cursor growth', { timeout: 300_000 }, async () => {
-  const day = await simulateDay({ hours: 8, staleMerge: 3 });
-  const { final, wakes, staleMerges, state, violations, failures, lost, observed } = day;
-  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => item.key), [], 'all fifteen items are delivered after the restarts');
-  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-  assert.deepEqual(failures, [], 'no cycle failed');
-  assert.deepEqual(lost, [], 'no worker lost its lease');
-  assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed');
-  assert.equal(staleMerges.length, 3, 'three merges were left on a stale observation');
-  // Each merge the restart left on a stale observation woke its item's observation job once, and
-  // was still delivered: no wake storm, and no growth of state.actions.
-  for (const key of staleMerges) assert.equal(wakes.filter(wake => wake.key === key).length, 1, `${key}: one observation wake for its stale merge: ${JSON.stringify(wakes)}`);
-  assert.ok(wakes.length <= 2 * staleMerges.length, `wakes stay bounded: ${JSON.stringify(wakes)}`);
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), rework.size, 'every rework round completes');
+  // Each rework the restart left on a stale observation woke its item's observation job.
+  const reworkKeys = [...rework].map(n => items[n - 1].key);
+  assert.deepEqual(restartLog.filter(entry => entry.kind === 'rework').map(entry => entry.key), reworkKeys, `one stale rework per rework item: ${JSON.stringify(restartLog)}`);
+  assert.equal(staleMerges.length, 2, 'two merges were left on a stale observation');
+  // Every stale observation the restarts left — rework or merge — woke its item's job exactly once
+  // after that restart, and the item was still delivered: no wake storm, no growth of state.actions.
+  for (const [index, entry] of restartLog.entries()) {
+    const until = restartLog.slice(index + 1).find(next => next.key === entry.key)?.at ?? Infinity;
+    assert.equal(wakes.filter(wake => wake.key === entry.key && wake.at >= entry.at && wake.at < until).length, 1, `${entry.key} (${entry.kind}): one observation wake: ${JSON.stringify(wakes)}`);
+  }
+  assert.equal(wakes.length, restartLog.length, `no wake beyond the stale observations: ${JSON.stringify(wakes)}`);
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('wake:observation:')).length <= wakes.length, 'one wake entry per item woken');
 });
 
