@@ -111,8 +111,13 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
 // started unconfined. The master session opts out (`confinement: false`): it runs the loop's own
 // configuration and administration commands from the coordinator root, under its own harness rules.
 
-/** Whether `argv1` is one of the launcher's own entries: `bin/graphyard.mjs` or the `src/cli.ts` child it spawns — in both the checkout is two levels up. */
-const cliEntry = (argv1: string) => ['graphyard.mjs', 'cli.ts'].includes(basename(argv1));
+/**
+ * Whether `argv1` is one of the launcher's own entries: `bin/graphyard.mjs`, the `src/cli.ts` child
+ * it spawns, or `scripts/graphyard-executor.mjs`, whose slots launch workers in-process — in each
+ * the checkout is two levels up. Missing the executor entry started every executor-dispatched
+ * worker unconfined (2026-09-30).
+ */
+const cliEntry = (argv1: string) => ['graphyard.mjs', 'cli.ts', 'graphyard-executor.mjs'].includes(basename(argv1));
 /**
  * The coordinator checkout the launching process itself runs from, or null when this is not the
  * Graphyard CLI or the test runner is driving: nothing is confined there. Both entries count —
@@ -140,7 +145,7 @@ export const launcherRootUndetermined = (argv1: string | undefined = process.arg
 export function prepareConfinedGitPaths(root: string): void {
   const gitDir = join(root, '.git');
   if (!existsSync(gitDir)) return;
-  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard')]) mkdirSync(path, { recursive: true });
+  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')]) mkdirSync(path, { recursive: true });
   const fetchHead = join(gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
