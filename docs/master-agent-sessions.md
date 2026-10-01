@@ -19,13 +19,13 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (session bus, systemd, `/run/dbus`), only the session's directory (the assigned worktree, or the checkout a reviewer or producer gets beside the root it starts from) and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (bubblewrap missing, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. The loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names paths and leases.
+Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; the session bus is a keyring-only proxy), only the session's directory (the assigned worktree, or the checkout a reviewer or producer gets beside the root it starts from) and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (bubblewrap missing, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. The loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names the paths and their leases.
 
 ## Accounts and failover
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-A runtime failing to start fails over too; the dispatch result and `master status` name both (`opencode-a failed to start: …; launched on claude-b`). Three consecutive start failures raise one attention item, loop included, naming account and runtime; a start resets it.
+A runtime failing to start fails over too; the dispatch result and `master status` name both (`opencode-a failed to start: …; launched on claude-b`). Three consecutive start failures raise one attention item naming account and runtime; a start resets it.
 
 On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset.
 
@@ -53,7 +53,7 @@ The typed line is bounded at **512 bytes** whatever the request is.
 
 The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). It is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. A runtime that printed below its command and handed the pane back to its shell fails at once, quoting its last lines: `the cursor runtime exited back to the shell … it last printed: "Error: No Cursor IDE installation found. …"`; retried as `Automatic producer launch for GY-N refused 1 time(s)`. A failed launch stops its supervisor, closes its pane, releases its claim.
 
-OpenCode 1.18 is ready on its `Ask anything…` prompt or `tab agents` hint ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)), not its name in an echoed command.
+OpenCode 1.18 is ready on its `Ask anything…` prompt or `tab agents` hint ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)), not its echoed name.
 
 #### First-run consent prompts
 
@@ -71,7 +71,7 @@ Every paste goes to the **pane on the attempt's own session handle**, never the 
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; ending that session (finished, failed, ended, a lead it cannot keep) closes the pane in the same step, recorded. Research and triage run headless. A per-cycle sweep closes panes this host's launchers recorded whose session ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the pane count and oldest agentless pane (`daemon.actions`), raising attention above **20** agentless panes (`daemon.escalations`) and recording the drain.
+Every launch records its pane on the item's session handle; when the loop ends that session it closes the pane in the same step. Research and triage run headless. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host** whose session has ended or whose worktree is gone, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
 
 ### The dispatcher's own state
 
