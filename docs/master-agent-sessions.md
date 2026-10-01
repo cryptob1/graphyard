@@ -3,11 +3,7 @@
 
 ## Launch profiles
 
-Add a worker with `master worker add FILE` ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)).
-
-Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)).
-
-`master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports launch-stopping setup.
+`master worker add FILE` adds workers ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); `master reviewer setup` and `master reviewer add FILE`, reviewers ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)). `master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
 
 ### Session handles
 
@@ -15,23 +11,19 @@ Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Clau
 
 ### Approval modes
 
-Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor, started and logged in as `agent`: `cursor` is the IDE launcher and `cursor-agent` refuses interactive runs); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
+`"approvals": "auto"` means: Claude Code `--permission-mode bypassPermissions`, `.claude.json` trust; Codex `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir`; Cursor `--force --trust` via `agent` (not `cursor-agent`); opencode allow-all `OPENCODE_PERMISSION`; Gemini, Qwen `--yolo`; Copilot `--allow-all-tools --allow-all-paths`; Muse `--approval-mode never --trust-workspace`; Pi none. `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (session bus, systemd, `/run/dbus`), only the session's directory (the assigned worktree, or the checkout a reviewer or producer gets beside the root it starts from) and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (bubblewrap missing, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. The loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names the paths and their leases.
+Every launch but the master session's runs with the checkout unwritable to shell commands, or is refused: Codex by `--sandbox workspace-write` (while no grant on the checkout or its `.git` leaves the session's worktree), others under bubblewrap (checkout read-only, PIDs unshared, fresh `/proc`, bus and systemd hidden; only the session's directory and shared Git areas writable). The loop and executors never start, self-upgrade or restart on a dirty checkout; the escalation names paths and leases.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
-
-On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), relaunches on the next account or awaits reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`); with none left, the role waits (one uncounted `capacity` line), relaunching oldest-first. On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` and relaunches on the next account or after reset.
 
 ## The loop's own master session
 
-The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until the loop ends it; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover naming standing judgement work. It relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred at most 30 minutes for an open item's merge. A failed registry end is retried each cycle. Each cycle wakes it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
-
-## How a session starts
+A fleet role (`master registry role set master ACCOUNTS …`) pinned to one session; the loop and `master start` adopt a live one named `masterAgentName`. It starts on the master prompt plus a handover and relaunches on exit, a limit notice, or past `run.masterSessionMinutes` (default 240; deferred up to 30 minutes for a merge). Cycles wake it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`daemon.master`).
 
 ### The request is the session's first message
 
@@ -39,41 +31,34 @@ Never pasted ([authorization](onboarding.md#what-the-generated-instructions-auth
 
 #### How the request reaches the runtime
 
-The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`), mode 0600, removed with the checkout, and types:
+The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`), mode 0600, removed with the checkout, and types a line bounded at **512 bytes** whatever the request is:
 
 ```
 GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
-The typed line is bounded at **512 bytes** whatever the request is.
-
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). It is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. A runtime that printed below its command and handed the pane back to its shell fails at once, quoting its last lines: `the cursor runtime exited back to the shell … it last printed: "Error: No Cursor IDE installation found. …"`; retried as `Automatic producer launch for GY-N refused 1 time(s)`. A failed launch stops its supervisor, closes its pane, releases its claim.
+A runtime ready (active with no prompt, or banner shown: `the claude runtime is on screen while Herdr reports it unknown`) within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`); else it is refused with the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. One back at its shell fails at once, quoting its last lines (`Automatic producer launch for GY-N refused N time(s)`). A failed launch stops its supervisor, closes its pane, releases its claim.
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline` — the least-privilege options, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (a **credential** or **payment** prompt above all) escalates. A worker is held in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it, leaving the item dispatchable.
 
-### Acknowledgement, the one re-prompt, and never started
+### Acknowledgement, resume and idle sessions
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched cost-free a minute later until three exhaust the request (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless, it is **`never started`**, relaunched free a minute later, up to three (`retry.neverStarted`).
 
-### Resume, idle-with-lease and exited sessions
-
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again on that epoch ends the attempt and its blocker; a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
-
-Every paste goes to the **pane on the attempt's own session handle**, never the profile's reusable agent name another session may hold (GY-852); a gone pane hands the attempt on.
+A resolved blocker or scope request re-prompts the attempt's inactive session once (`complete GY-N EPOCH PR`); blocking again on that epoch hands it to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then handed on after 30 more. Pastes go to the attempt's own handle's pane, never a shared agent name; a gone pane hands it on.
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; when the loop ends that session — finished, failed, ended by the loop, a lead it cannot keep — it closes the pane in the same step and records the close. Research and triage run headless, opening no pane. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host**, whose session has ended or whose worktree is gone, matched only against what this host's launchers recorded, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the host's pane count and oldest agentless pane (`master status` `daemon.actions`), raising attention once agentless panes exceed **20** (`daemon.escalations`) and recording the drain at zero.
+Ending a session closes its pane. A per-cycle sweep closes panes Graphyard launched **on this host** whose session or worktree is gone, agentless past **120 s**, **6** a pass at most, never one with an agent or live lease. `daemon.actions` records the count and oldest agentless pane; over **20** raise attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
 - **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
   path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
-
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+- **A tick failure is attributed and surfaced** in `dispatch.lastFailure`. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
+- **A session that exits at launch is classified from its pane.** For a runtime that exits **at launch** `herdr agent get` answers only `agent_not_found`, so `herdr pane read` decides: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.

@@ -68,6 +68,8 @@ test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and 
   const judgement = budgetJudgement(counts);
   assert.equal(judgement.failed, null, `a page over its budget fails here: ${judgement.failed}`);
   if (judgement.warning) console.warn(`unit:docs-word-budget: ${judgement.warning}`);
+  const largest = counts.reduce((top, entry) => entry.words > top.words ? entry : top);
+  console.log(`unit:docs-word-budget: ${counts.length} pages, ${counts.reduce((sum, entry) => sum + entry.words, 0)} words in total; largest ${largest.page} (${largest.words})`);
 });
 
 test('unit:docs-budget-reports-not-blocks — an over-budget total passes with the warning recorded; a page over its per-page cap still fails', () => {
