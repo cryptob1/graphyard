@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountStartFailureAttention, accountStartFailurePath, clearAccountStartFailures, readAccountStartFailures, readProfileLaunchRecords, workerLaunchRows } from '../src/master/dispatch.js';
@@ -10,6 +9,7 @@ import { atomicPrivateWrite, awaitRuntimeStart, dispatchWork, loadMasterConfig, 
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient, FleetProbe } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 
 // GY-417: a runtime's start is judged from the runtime's own screen, and a launch whose preferred
@@ -121,11 +121,11 @@ const item = { id: 'work-499', key: 'GY-499', title: 'OpenCode sessions never co
 
 /** A master with one OpenCode account and one Claude account, both logged in, and one launch profile naming them in that order. */
 async function installed() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-runtime-screens-')), credentials = await mkdtemp(join(tmpdir(), 'graphyard-runtime-screens-credentials-'));
+  const root = await temporaryDirectory('runtime-screens'), credentials = await temporaryDirectory('runtime-screens-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
-  const homes = await mkdtemp(join(tmpdir(), 'graphyard-runtime-screens-homes-'));
+  const homes = await temporaryDirectory('runtime-screens-homes');
   const opencodeHome = join(homes, 'opencode-a');
   await mkdir(join(opencodeHome, 'opencode'), { recursive: true });
   await writeFile(join(opencodeHome, 'opencode/auth.json'), JSON.stringify({ 'zai-coding-plan': { type: 'api', key: 'k' } }), { mode: 0o600 });
