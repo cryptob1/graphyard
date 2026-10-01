@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +11,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewI
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import type { Observation, Work } from '../src/model.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof: integration:review-ledger-reconcile and
@@ -28,7 +28,7 @@ const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Da
 const verdict = (state = 'APPROVED') => ({ state, reviewer: 'graphyard-reviewer[bot]', reviewId: 77, submittedAt: new Date().toISOString() });
 
 async function boundMaster() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-review-ledger-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-review-ledger-credentials-'));
+  const root = await temporaryDirectory('review-ledger'), credentialDirectory = await temporaryDirectory('review-ledger-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);

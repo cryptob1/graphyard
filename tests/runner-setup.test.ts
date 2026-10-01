@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { inspectRunnerRepository, snapshotRunnerSources } from '../src/runner-setup.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 async function fixture(run: (root: string) => Promise<void>) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-runner-setup-'));
+  const root = await temporaryDirectory('runner-setup');
   try { await run(root); } finally { await rm(root, { recursive: true, force: true }); }
 }
 test('runner discovery does not execute candidate configuration or confuse filenames with inventory', async () => fixture(async root => {

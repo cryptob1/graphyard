@@ -1,7 +1,6 @@
 import { after, afterEach, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -334,7 +333,7 @@ const call = async (credential: string, path: string, body?: unknown) => {
 const ok = async (credential: string, path: string, body?: unknown) => { const result = await call(credential, path, body); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 439;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-diagnostician-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('diagnostician'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('diagnostician_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/diagnostician_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;

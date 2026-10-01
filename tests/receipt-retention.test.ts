@@ -1,14 +1,14 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { pruneReceipts, receiptReplayWindowMs } from '../src/store/receipts.js';
+import { readFile } from 'node:fs/promises';
+import { pruneReceipts, receiptPruneIntervalMs, receiptReplayWindowMs } from '../src/store/receipts.js';
 import type { Principal } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * Receipts grew without bound: no timestamp, no pruning, and every lease renewal stored a whole
@@ -22,7 +22,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 171;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-receipt-retention-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('receipt-retention'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('receipt_retention_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/receipt_retention_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;
@@ -91,4 +91,24 @@ test('unit:receipt-pruning-window — pruning removes only receipts past the win
   // A pruned key is a new command: past the window a retry executes instead of replaying.
   const again = await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, keys[0]);
   assert.equal(again.lease!.epoch, 1);
+});
+
+test('unit:receipts-pruned-after-one-day — receipts are kept one day: the server\'s periodic prune removes a receipt a day old, and a retry inside the day still replays', async () => {
+  assert.equal(receiptReplayWindowMs, 24 * 60 * 60 * 1000, 'the replay window is one day');
+  assert.ok(receiptPruneIntervalMs <= 60 * 60 * 1000, 'the prune runs well inside the window');
+  // The server's reconciliation tick runs this prune, with the default window, on its interval.
+  const main = await readFile(join(import.meta.dirname, '../src/server/main.ts'), 'utf8');
+  assert.match(main, /receiptPruneIntervalMs\) \{[^\n]*pruneReceipts\(store\.pool\)/);
+  const w = await claimed();
+  const inside = randomUUID(), past = randomUUID();
+  const input = { epoch: 1, host: 'test', path: `/tmp/receipts-${serial}`, branch: `graphyard/receipts-${serial}` };
+  const first = await engine.execute(worker, 'workspace', w.id, input, inside);
+  await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, past);
+  await age(worker.id, inside, receiptReplayWindowMs - 5 * 60_000);
+  await age(worker.id, past, receiptReplayWindowMs + 60_000);
+  assert.equal(await pruneReceipts(store.pool), 1, 'only the receipt past one day goes');
+  assert.equal(await receipt(worker.id, past), undefined);
+  assert.ok(await receipt(worker.id, inside), 'a receipt inside the day stays');
+  const replayed = await engine.execute(worker, 'workspace', w.id, input, inside);
+  assert.deepEqual(replayed, JSON.parse(JSON.stringify(first)), 'a retry inside the day replays the accepted result');
 });

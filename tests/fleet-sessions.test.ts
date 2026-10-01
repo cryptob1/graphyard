@@ -1,8 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fleetRoleHealth, reconcileFleetSessions, selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
@@ -10,6 +9,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { approverSessionName, masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, liveSessions, proposedRuntimes, supersededByRequest, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-190: on 2026-09-24 a rework approver could not launch because the approver role was "at its
@@ -30,7 +30,7 @@ const directories: string[] = [];
 after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
 
 async function config(): Promise<MasterConfig> {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-fleet-sessions-')); directories.push(directory);
+  const directory = await temporaryDirectory('fleet-sessions'); directories.push(directory);
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(directory, 'coordinator.token'), cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: HOST, masterAgentName: 'graphyard-master-project',
     autoMerge: true, mergeMethod: 'merge', workers: [] });

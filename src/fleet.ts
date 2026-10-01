@@ -10,7 +10,7 @@ import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -185,10 +185,13 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
 
 /**
  * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) with no result since it last changed. An interactive
- * runtime's session is its own check — a session that cannot start fails its launch.
+ * runtime (Pi, the narrow roles' runner) with no result since it last changed, or whose last test
+ * failed `smokeRetestMs` ago or more (GY-515). An interactive runtime's session is its own check — a
+ * session that cannot start fails its launch — and the registry's launch contract names no
+ * one-prompt headless mode for it, so it has no smoke test to run.
  */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime) => runtime.launch.kind === 'pi' && account.enabled && !account.smoke;
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => runtime.launch.kind === 'pi' && account.enabled
+  && (!account.smoke || smokeFailureDue(account, now));
 
 /**
  * The session a launch runs on, chosen by the control plane — or null when the registry does not
@@ -213,7 +216,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime), model = registry.models.find(entry => entry.name === account.model);
     const observation = observations.find(entry => entry.account === account.name);
-    if (!runtime || !model || !needsSmoke(account, runtime) || observation?.quota.loggedIn === false) return;
+    if (!runtime || !model || !needsSmoke(account, runtime, probe.now?.() ?? Date.now()) || observation?.quota.loggedIn === false) return;
     const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
       fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
     let result: SmokeResult;
@@ -246,7 +249,9 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
 /**
  * Whether a role can launch from the registry right now, without choosing anything: what the
  * durable loop and `master status` read before they dispatch. Null when the registry does not
- * decide the role.
+ * decide the role. A Pi account whose only fault is a smoke failure that has aged past
+ * `smokeRetestMs` reads healthy here (GY-515): the launch this admits is what runs the retest,
+ * and the choice it asks for still refuses until the fresh result is folded.
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
@@ -255,7 +260,7 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
-    const reason = account ? accountIneligibility(fleet.registry, account, now, host) : `${name} is not a registered account`;
+    const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) : `${name} is not a registered account`;
     return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role && !runtimeSessionGone(session, probe.runtime, host, now)).length;
@@ -384,7 +389,10 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
   const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
-  const roles: FleetRole[] = !accounts.length ? [] : fleetRoles.flatMap(name => {
+  // The master role is never proposed (GY-898): it is one account the operator names for it with
+  // `master registry role set master`, and the durable loop launches nothing until it is named.
+  const proposed = fleetRoles.filter(name => name !== 'master');
+  const roles: FleetRole[] = !accounts.length ? [] : proposed.flatMap(name => {
     const added = accounts.filter(account => serves(account, name)).map(account => account.name);
     const existing = current.roles.find(role => role.name === name);
     if (existing) return [{ ...existing, accounts: [...existing.accounts, ...added.filter(account => !existing.accounts.includes(account))] }];
@@ -492,8 +500,8 @@ export const connectProviders: readonly ConnectProvider[] = [
   {
     id: 'cursor', label: 'Cursor (subscription)', kind: 'subscription', runtime: 'cursor', model: 'cursor-default', tier: 'strong',
     // Without NO_OPEN_BROWSER the login opens a browser on the host; the card's URL is the only path.
-    login: { command: 'cursor-agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
-    smoke: { command: 'cursor-agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
+    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
+    smoke: { command: 'agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
     help: 'Your Cursor plan. Finish the sign-in in your own browser.',
   },
 ];
