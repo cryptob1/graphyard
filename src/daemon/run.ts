@@ -279,10 +279,10 @@ const escalationKey = 'escalation:dirty-checkout';
  */
 export function coordinatorCheckoutGuard(deps: {
   state: () => DaemonState; read: () => Promise<CoordinatorCheckout>; agents: DaemonEffects['agents']; snapshot: DaemonEffects['snapshot'];
-  persist: DaemonEffects['persist']; now: () => number; log: (line: string) => void; applies?: (root: string) => boolean;
+  persist: DaemonEffects['persist']; now: () => number; log: (line: string) => void; applies?: (root: string) => boolean; enrichMs?: number;
 }) {
-  const applies = deps.applies ?? checkoutGuardApplies;
-  let expectedHead: string | null = null;
+  const applies = deps.applies ?? checkoutGuardApplies, enrichMs = deps.enrichMs ?? 10 * 60_000;
+  let expectedHead: string | null = null, enriched: { refusal: string; detail: string; at: number } | null = null;
   const headDrift = (checkout: CoordinatorCheckout) => checkout.commit && expectedHead && checkout.commit !== expectedHead
     ? `the master loop refuses to restart or self-upgrade from the coordinator checkout at ${checkout.root}: its HEAD moved from ${expectedHead.slice(0, 12)} to ${checkout.commit.slice(0, 12)} while the loop was running, so HEAD is not the commit it runs. It keeps running the code it loaded; restore the checkout with git -C ${checkout.root} checkout --detach ${expectedHead.slice(0, 12)}, then restart the loop`
     : null;
@@ -307,6 +307,7 @@ export function coordinatorCheckoutGuard(deps: {
     if (!applies(checkout.root)) return null;
     const refusal = coordinatorCheckoutRefusal(checkout, 'the master loop') ?? headDrift(checkout);
     if (!refusal) {
+      enriched = null;
       // A checkout clean again and back at the commit the loop runs settles the attention it raised.
       const state = deps.state(), raised = state.actions[escalationKey];
       if (raised?.state === 'failed') {
@@ -315,14 +316,22 @@ export function coordinatorCheckoutGuard(deps: {
       }
       return null;
     }
-    let detail = refusal;
-    try {
-      const snapshot = await deps.snapshot();
-      detail = dirtyCheckoutEscalation(refusal, dirtyCheckoutLeases(snapshot.work, dirtyCheckoutPaths(checkout), Date.parse(snapshot.now) || undefined));
-    } catch { /* the refusal stands alone when the plane cannot be read */ }
-    const pointing = await pointingSessions(checkout.root);
-    if (!pointing) detail += ' The sessions whose panes point at it are unknown: the Herdr inventory could not be read.';
-    else if (pointing.length) detail += ` ${pointing.length === 1 ? 'One session\'s pane still points at it' : `${pointing.length} sessions' panes still point at it`}: ${pointing.slice(0, 8).join('; ')}${pointing.length > 8 ? `; and ${pointing.length - 8} more` : ''}.`;
+    // A standing refusal keeps the leases and sessions it named: the plane and the Herdr inventory
+    // are read again when what the checkout holds changes, and at most every enrichMs while it does
+    // not, never once per cycle.
+    let detail: string;
+    if (enriched && enriched.refusal === refusal && deps.now() - enriched.at < enrichMs) detail = enriched.detail;
+    else {
+      detail = refusal;
+      try {
+        const snapshot = await deps.snapshot();
+        detail = dirtyCheckoutEscalation(refusal, dirtyCheckoutLeases(snapshot.work, dirtyCheckoutPaths(checkout), Date.parse(snapshot.now) || undefined));
+      } catch { /* the refusal stands alone when the plane cannot be read */ }
+      const pointing = await pointingSessions(checkout.root);
+      if (!pointing) detail += ' The sessions whose panes point at it are unknown: the Herdr inventory could not be read.';
+      else if (pointing.length) detail += ` ${pointing.length === 1 ? 'One session\'s pane still points at it' : `${pointing.length} sessions' panes still point at it`}: ${pointing.slice(0, 8).join('; ')}${pointing.length > 8 ? `; and ${pointing.length - 8} more` : ''}.`;
+      enriched = { refusal, detail, at: deps.now() };
+    }
     const state = deps.state(), existing = state.actions[escalationKey];
     if (detailChanged(existing, detail)) {
       storeAction(state, escalationKey, { kind: 'escalation', work: null, principal: null, state: 'failed', detail, attempts: (existing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: new Date(deps.now()).toISOString() }, 'action:config');

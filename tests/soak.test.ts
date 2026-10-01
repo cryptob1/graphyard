@@ -1154,11 +1154,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       if (!moved && movedFrom !== null) { checkout.head = movedFrom; movedFrom = null; }
       const readsBefore = guardReads.agents;
       const { refusal, upgraded } = await guard.betweenCycles(selfUpgrade);
+      const lastSeen = lastRefusal;
       if (refusal && refusal !== lastRefusal) guardReads.transitions++;
       lastRefusal = refusal;
       if (refusal) {
         guardReads.refused++; guardReads.details.add(refusal);
-        assert.equal(guardReads.agents, readsBefore + 1, 'a refused cycle reads the Herdr inventory once');
+        assert.ok(guardReads.agents <= readsBefore + 1, 'a refused cycle reads the Herdr inventory at most once');
+        if (refusal !== lastSeen) assert.equal(guardReads.agents, readsBefore + 1, 'a refusal that changed reads the Herdr inventory afresh');
         refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:') || key.startsWith('escalation:dirty-checkout')).length, attempts: state.actions['escalation:dirty-checkout']?.attempts ?? 0, head: moved });
       } else assert.equal(guardReads.agents, readsBefore, 'a clean checkout costs no Herdr inventory read');
       if (upgraded) upgrades.outcomes.push(upgraded.outcome);
@@ -1421,7 +1423,9 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok([...guardReads.details].some(detail => detail.includes(`moved from `) && detail.includes(`to ${guardReads.foreignHead.slice(0, 12)}`)), 'the HEAD refusal names the commit the loop runs and the HEAD it found');
   assert.ok(!upgrades.checkouts.some(entry => entry.from === guardReads.foreignHead || entry.to === guardReads.foreignHead), 'nothing aligned from or to the moved HEAD');
   assert.equal(guardReads.refused, refusalSamples.length, 'every refused cycle is sampled');
-  assert.equal(guardReads.agents, guardReads.refused, 'the guard read the Herdr inventory once per refused cycle and never on a clean one');
+  // A standing refusal reuses what it named: the plane and the Herdr inventory are read on each
+  // change and at most every ten minutes while it stands, never once per refused cycle.
+  assert.ok(guardReads.agents >= guardReads.transitions && guardReads.agents < guardReads.refused / 3, `the guard read the Herdr inventory on each change and seldom while a refusal stood (${guardReads.agents} read(s), ${guardReads.transitions} change(s), ${guardReads.refused} refused cycle(s))`);
   const guardEscalation = state.actions['escalation:dirty-checkout'];
   assert.ok(guardEscalation && guardEscalation.attempts >= 2 && guardEscalation.attempts <= guardReads.transitions, `the escalation's attempts grow only when what it names changes (${guardEscalation?.attempts} over ${guardReads.transitions} change(s), ${guardReads.refused} refused cycle(s))`);
   assert.equal(guardEscalation.state, 'done', 'the clean checkout back at the commit the loop runs settles the attention');
