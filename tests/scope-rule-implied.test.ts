@@ -269,6 +269,9 @@ test('unit:scope-rule-criteria-implied — (b) a test is granted for a label or 
   assert.equal(criterionTestGround('browser-tests/y.spec.ts', "test('Settings › Agents lists every runtime', async () => {});", symbols), 'browser-tests/y.spec.ts pins the label or output "Settings › Agents" that AC-1 changes');
   assert.equal(criterionTestGround('tests/z.test.ts', "run(['master', 'status']); // master status", symbols), null, 'running a command is not pinning its output');
   assert.equal(criterionTestGround('src/w.ts', "'Connect an account'", symbols), null, 'only a test file is granted on what it pins');
+  assert.equal(criterionTestGround('browser-tests/todo.spec.ts', '// TODO: Settings › Agents needs coverage', symbols), null, 'a coverage-needed remark records the absence of a test, never an assertion of one');
+  assert.equal(criterionTestGround('browser-tests/fixme.spec.ts', '// FIXME: Settings › Agents', symbols), null, 'a TODO marker names no assertion either');
+  assert.equal(criterionTestGround('browser-tests/described.spec.ts', '// GY-170 AC-3: Settings › Agents lists the runtime selector', symbols), 'browser-tests/described.spec.ts pins the label or output "Settings › Agents" that AC-1 changes', 'a comment that describes what the test asserts still pins');
 });
 
 test('unit:scope-rule-criteria-implied — (c) a planned re-export barrel names the files it was split into', () => {
