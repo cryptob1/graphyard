@@ -22,19 +22,22 @@ const proof = (overrides: Partial<Evidence> = {}): Evidence => ({
   producer: 'independent-producer', trusted: true, result: 'pass', executed: 3, skipped: 0, at, ...overrides,
 }) as Evidence;
 
-/** A submitted candidate with an in-scope change and its one criterion proven: landable unless `extra` says otherwise. */
+/**
+ * A submitted candidate with an in-scope change and its one criterion proven: landable unless `extra` says otherwise.
+ * The change is under a high-risk path, so its risk lane (GY-883) requires every proof its criteria name.
+ */
 function item(extra: Partial<Work> = {}, candidateSha = head): Work {
   const candidate = { sha: candidateSha, baseSha: base, pr: 10, branch: 'graphyard/gy-1-1', author: 'worker' };
-  const file = { path: 'src/own.ts', status: 'modified', sha: sha('d'), baseSha: sha('e'), additions: 3, deletions: 1, binary: false };
+  const file = { path: 'src/store/own.ts', status: 'modified', sha: sha('d'), baseSha: sha('e'), additions: 3, deletions: 1, binary: false };
   const observation = {
     candidate, checks: [{ name: 'test', result: 'success', appId: 1 }], reviews: [{ reviewer: 'reviewer', sha: candidateSha, state: 'APPROVED', submittedAt: at }],
-    merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/own.ts'], scopeFiles: [file], landing: { base: main, files: [file] },
+    merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/store/own.ts'], scopeFiles: [file], landing: { base: main, files: [file] },
     at, prState: 'open', draft: false, baseTip: main, baseTree: sha('e'), baseTipContained: true,
   } as unknown as Observation;
   return {
     id: 'gy-1', key: 'GY-1', title: 'GY-1', description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'proven', proofs: ['unit:own-proof'] }],
-    policy: { checks: [], review: false }, plannedFiles: ['src/own.ts'], stage: 'merge', revision: 4, policyRevision: 1,
+    policy: { checks: [], review: false }, plannedFiles: ['src/store/own.ts'], stage: 'merge', revision: 4, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, candidate,
     workspaces: [{ host: 'machine-a', path: '/tmp/GY-1', epoch: 1, owner: 'worker', branch: candidate.branch }],
     submission: { epoch: 1, pr: 10 }, reworkRequested: false, scenarioRequirements: [],
@@ -76,7 +79,7 @@ test('unit:landable-check-published — graphyard/landable concludes success on 
   assert.match(success.output.summary, new RegExp(`Candidate ${head}; base ${base}; policy 1`));
 
   // Refused fixture: no trusted evidence for the criterion's proof, and the change leaves the planned files.
-  const refused = item({ evidence: [], plannedFiles: ['src/other.ts'] });
+  const refused = item({ evidence: [], plannedFiles: ['src/store/other.ts'] });
   const verdict = evaluateLandability(refused, [refused], now);
   assert.equal(verdict.verdict, 'refused');
   const reasons = verdict.verdict === 'refused' ? verdict.reasons : [];
