@@ -124,10 +124,9 @@ const basePlan = {
   // own new changes read as reverts — the reading this item fixes. The window covers the NOTICE
   // commit on main, which moves the base under candidates still unqueued: their false landing
   // refusals hold only the build gate and clear on the same heads when the window closes, before
-  // a worker could even react. GY-612's memory dip holds the morning's launches back, so the
-  // window sits where the deferred candidates' landing heads are the ones open under it.
-  blind: { from: 150 * minute, to: 152 * minute },
-  notice: 150 * minute,
+  // a worker could even react to them.
+  blind: { from: 96 * minute, to: 98 * minute },
+  notice: 96 * minute,
   // GY-852: the item whose worker idles with its live lease, loses its pane, and whose profile's
   // agent name another session then holds — the loop must reclaim the attempt without pasting
   // into or closing that pane, and still deliver the item. The reassigned day carries it alone:
@@ -139,10 +138,8 @@ const basePlan = {
   // one: a pull request merged by hand a minute after it is opened lands before producer runs
   // could fail, and the spent request would never be.
   spentProducer: 1, lostRuns: 2,
-  // GY-612: the host starts the day below its memory floor — the way the day this item records
-  // began — and recovers a quarter hour in, so the only launch it holds back is the first item's
-  // and the day's later cadence is the undipped one every other fault's choreography is tuned to.
-  memoryDip: { from: 0, until: 15 * minute },
+  // GY-612: the host's memory dip; only the main day carries one (memoryDay below).
+  memoryDip: null as { from: number; until: number } | null,
   // GY-756: a pull request somebody merges on GitHub by hand, a minute after it is opened, inside
   // a direct-merge window the operator opened for exactly that minute. The item is the last
   // released one, whose pull request stands unheard while it waits its turn: the minute it lands,
@@ -762,11 +759,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
   };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
-  // The queue-only day and the capacity-wait day run without the dip, the way the queue-only day
-  // runs without the blind window: their faults are the bound candidates' recovery and the
-  // approvers' ordered relaunch, which the main day exercises, and a launch pause would only churn
-  // which of their decisions sit inside the window's choreography.
-  const dip = options.queued || options.capacityWait ? null : plan.memoryDip;
+  const dip = plan.memoryDip;
   const GiB = 2 ** 30;
   let memoryReads = 0;
   const memoryReading = (): HostMemoryReading => {
@@ -1313,10 +1306,16 @@ function assertLaunchesConfined(day: { confined: { role: string; key: string; di
     `the same launches are refused where the confinement cannot be built: ${day.unconfinedRefusals[0] ?? 'none'}`);
 }
 
+// GY-612: the main day starts below the host's memory floor — the way the day that item records
+// began — and recovers a quarter hour in, so the only launch it holds back is the first item's.
+// The deferred morning moves the candidates' landing heads, so the blind window moves with it to
+// where they are open under it; every other day keeps the undipped choreography.
+const memoryDay = { memoryDip: { from: 0, until: 15 * minute }, blind: { from: 150 * minute, to: 152 * minute }, notice: 150 * minute };
+
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, plan: { blockedMerge: blockedMergeItem } });
+  const day = await simulateDay({ hours, plan: { blockedMerge: blockedMergeItem, ...memoryDay } });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { reconciled, outside, items, final, github, sessions, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
@@ -1458,7 +1457,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.ancestorCompares > 0, `candidates bound behind the tip were compared from their merge base (${github.ancestorCompares} ancestor compares)`);
   assert.ok(github.blindCompares > 0, `the fault window answered compares without a usable merge base (${github.blindCompares} blind compares)`);
   assert.ok(landingRefusals.length >= 2, `the fault window caught every candidate bound behind it (${JSON.stringify(landingRefusals)})`);
-  assert.ok(landingRefusals.every(entry => entry.elapsed >= basePlan.blind.from - minute && entry.elapsed <= basePlan.blind.to + minute),
+  assert.ok(landingRefusals.every(entry => entry.elapsed >= memoryDay.blind.from - minute && entry.elapsed <= memoryDay.blind.to + minute),
     `a false landing refusal stood only inside the fault window: ${JSON.stringify(landingRefusals)}`);
   for (const entry of landingRefusals) {
     const landed = github.merges.find(merge => merge.key === entry.key);
@@ -1472,9 +1471,9 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(memory, 'the memory crossing was recorded');
   assert.equal(memory.attempts, 2, 'one record on the way down, one on the way back up');
   assert.match(memory.detail, /^Launches resumed: /, 'the last crossing recorded is the resumption');
-  const during = (at: number) => { const elapsed = at - dayStart; return elapsed >= basePlan.memoryDip.from && elapsed < basePlan.memoryDip.until; };
+  const during = (at: number) => { const elapsed = at - dayStart; return elapsed >= memoryDay.memoryDip.from && elapsed < memoryDay.memoryDip.until; };
   assert.deepEqual(launches.filter(during).map(at => new Date(at).toISOString()), [], 'no worker launched while the host was below its floor');
-  assert.ok(launches.some(at => at - dayStart >= basePlan.memoryDip.until), 'launching resumed once memory recovered');
+  assert.ok(launches.some(at => at - dayStart >= memoryDay.memoryDip.until), 'launching resumed once memory recovered');
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'memory-pressure').length, 1, 'one memory-pressure fault stands for the whole dip');
   // The diagnostician (GY-439) rode the same day. The three held-job windows recur past the
   // threshold, so the loop files the class's one recurring item and diagnoses it within the cycle

@@ -161,10 +161,7 @@ export interface DaemonEffects {
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
   reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
-  /**
-   * The resource reclaim pass (GY-132): reaps terminal ledger records, closes finished sessions
-   * holding profile names, and releases the slots of stuck sessions. Runs every cycle.
-   */
+  /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
