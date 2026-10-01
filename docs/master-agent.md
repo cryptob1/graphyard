@@ -38,6 +38,8 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Machine-filed backlog
 
+With `run.research`, a feature (or `"research": true`) gets one read-only Pi brief per revision, which build follows; a differing answer reworks, failure never blocks, product questions go to a human.
+
 Approvals' [follow-ups](followups.md) stay on the item until `graphyard promote-followup`. With `run.research`, Pi triages machine-filed items (legacy follow-ups, faults), `triageConcurrency` (default 2) at once: release, approved close, or merge (`machineUntriaged`, `operatorBacklog`).
 
 ## Automatic dispatch at submit
