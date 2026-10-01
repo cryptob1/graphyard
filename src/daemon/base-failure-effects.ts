@@ -33,7 +33,9 @@ export function baseFailureEffects(run: ChildRun, current: () => MasterConfig, a
     const kept = logs.get(jobId);
     if (kept) return kept;
     if (logs.size >= 200) logs.delete(logs.keys().next().value!);
-    const entry = Promise.resolve(run('gh', ['api', `repos/${current().repository}/actions/jobs/${jobId}/logs`], { maxBuffer: 128 * 1024 * 1024 })).then(log => parseFailedTests(String(log)));
+    // CI logs carry terminal colour codes, and gh refuses to print a response holding them unless
+    // told to; `parseFailedTests` strips them itself.
+    const entry = Promise.resolve(run('gh', ['api', '--allow-escape-sequences', `repos/${current().repository}/actions/jobs/${jobId}/logs`], { maxBuffer: 128 * 1024 * 1024 })).then(log => parseFailedTests(String(log)));
     logs.set(jobId, entry);
     entry.catch(() => { if (logs.get(jobId) === entry) logs.delete(jobId); });
     return entry;

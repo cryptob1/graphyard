@@ -10,6 +10,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { requestedBaseRefresh, type BaseRefresh } from '../src/merge-queue.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { baseFailureAttention } from '../src/daemon/cycle-base-failures.js';
+import { baseFailureEffects } from '../src/daemon/base-failure-effects.js';
 import { type BaseCheck, judgeFailedCheck, parseFailedTests } from '../src/model/base-failure.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -117,6 +118,31 @@ test('unit:base-failure-no-rework — a failing test the base head fails too req
   await runCycle(config(), waiting, effects(pending), () => pending.now);
   assert.deepEqual([pending.decided, pending.approvers], [[], []]);
   assert.match(waiting.actions['wait:base-failure:work-1'].detail, /rework waits for the base head .*'s own test run to complete with a readable log/);
+});
+
+test('unit:base-failure-no-rework — the master\'s gh reads a coloured CI log, which gh refuses to print without --allow-escape-sequences, so a shared failure is judged a base failure in production', async () => {
+  // gh 2.101 exits 1 on a response holding terminal escape sequences unless told to allow them, and
+  // Actions logs are coloured: without the flag every read failed and every base failure was reworked.
+  const coloured = (name: string) => ['\x1b[36m▶ suite\x1b[39m', `2030-01-01T11:59:00.1234567Z \x1b[31m✖ ${name}\x1b[39m \x1b[90m(12.5ms)\x1b[39m`, '\x1b[34mℹ fail 1\x1b[39m'].join('\n');
+  const calls: string[][] = [];
+  const run = (command: string, args: string[]) => {
+    calls.push([command, ...args]);
+    const path = args.find(arg => arg.startsWith('repos/'))!;
+    const logs = /actions\/jobs\/(\d+)\/logs$/.exec(path);
+    if (logs) {
+      if (!args.includes('--allow-escape-sequences')) throw new Error('the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway');
+      return coloured(timeBomb);
+    }
+    if (path.includes('/check-runs?')) return JSON.stringify([{ id: 555, head_sha: broken, status: 'completed', conclusion: 'failure', html_url: 'https://github.com/owner/project/actions/runs/77/job/555' }]);
+    throw new Error(`unexpected gh call ${args.join(' ')}`);
+  };
+  const effects = baseFailureEffects(run, config, async () => { throw new Error('no operator agent'); });
+  const own = await effects.failedTests!(101);
+  const base = await effects.baseCheck!('test');
+  assert.deepEqual(own, [timeBomb]);
+  assert.deepEqual(base, { check: 'test', baseSha: broken, state: 'failed', jobId: 555, url: 'https://github.com/owner/project/actions/runs/77/job/555', tests: [timeBomb] });
+  assert.deepEqual(judgeFailedCheck(own, base), { kind: 'base', tests: [timeBomb] });
+  assert.equal(calls.filter(call => call.some(arg => arg.endsWith('/logs'))).length, 2, 'each job log is read once');
 });
 
 /** Run the loop with the base failing the time bomb, then with the base repaired and the candidates observed on it. */
