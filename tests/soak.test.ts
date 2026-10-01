@@ -752,8 +752,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
   // GY-852: the reassigned day runs on a control plane the earlier days share, so its loop reads
   // only its own items: an earlier day's half-finished item (a rework decision nobody adopted)
-  // would otherwise be dispatched, pushed and refused here for its linked pull request.
-  const ownItems = options.reassigned || options.credentialBlocked ? new Set(items.map(item => item.id)) : null;
+  // would otherwise be dispatched, pushed and refused here for its linked pull request. The
+  // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
+  // for every earlier day's delivered work.
+  const ownItems = options.reassigned || options.credentialBlocked || options.containment ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -2097,15 +2099,54 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
-test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-999: a worker whose push is refused for want of a valid GitHub login records that blocker.
+  // The loop ends the attempt in the cycle that sees it — work kept, pane closed, lease released —
+  // and the item is launched again with a fresh credential. The ending counts on the GY-885 retry
+  // ladder: each relaunch waits its backoff, and an item whose every attempt fails that way is held
+  // at the cap for an independent approver's decision instead of being ended and relaunched for ever. The ending and the relaunch run per item and per cycle, so they live here.
+  const recovers = 2, never = 3;
+  const { items, final, violations, failures, lost, herdrClosed, sessions, state } = await simulateDay({
+    hours: 6, credentialBlocked: { recovers, never },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds across the credential endings and the relaunches');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost: each blocked attempt was ended by the loop');
+  const recovering = items[recovers - 1], held = items[never - 1];
+  assert.deepEqual(final.filter(item => item.stage !== 'done' && item.id !== held.id).map(item => `${item.key} ${item.stage}`), [], 'every other item, the recovering one included, is delivered');
+
+  const attemptsOf = (work: Work) => sessions.filter(session => session.key === work.key);
+  const endings = (work: Work) => Object.entries(state.actions).filter(([key]) => key.startsWith(`resume:credential:${work.id}:`));
+  // The recovering item: two blocked attempts, each ended once, then the third delivers.
+  const mine = attemptsOf(recovering);
+  assert.equal(mine.length, 3, `two blocked attempts and the one that delivered: ${mine.map(session => `${session.epoch}:${session.state}`).join(', ')}`);
+  assert.deepEqual(mine.slice(0, 2).map(session => session.state), ['reclaimed', 'reclaimed']);
+  assert.deepEqual(endings(recovering).map(([, action]) => [action.state, action.attempts]), [['done', 1], ['done', 1]], 'each blocked attempt was ended once');
+  assert.ok(mine.slice(0, 2).every(session => herdrClosed.includes(session.pane)), 'the loop closed each blocked pane');
+  // The relaunches wait the ladder's backoff: 5 minutes after the first ending, 15 after the second.
+  assert.ok(mine[1].dispatchAt - mine[0].dispatchAt >= 5 * minute + 5 * minute, `the second attempt waited its backoff: ${(mine[1].dispatchAt - mine[0].dispatchAt) / minute} min`);
+  assert.ok(mine[2].dispatchAt - mine[1].dispatchAt >= 5 * minute + 15 * minute, `the third attempt waited its backoff: ${(mine[2].dispatchAt - mine[1].dispatchAt) / minute} min`);
+
+  // The never-curing item: bounded at the cap, never relaunched past it while the approver's refusal stands.
+  const theirs = attemptsOf(held);
+  assert.equal(theirs.length, 3, `the ladder bounds the relaunches at the cap: ${theirs.map(session => `${session.epoch}:${session.state}`).join(', ')}`);
+  assert.deepEqual(endings(held).map(([, action]) => [action.state, action.attempts]), [['done', 1], ['done', 1], ['done', 1]]);
+  assert.match(state.actions[`retry:held:${held.id}`]?.detail ?? '', /held: 3 attempts in a row ended without submitting.*credential-blocked attempt on epoch 1.*credential-blocked attempt on epoch 3/, 'the hold names every credential failure');
+  assert.ok(state.actions[`retry:cap-request:${held.id}`], 'the loop asked for the decision that alone resumes the item, rather than relaunching it');
+  assert.ok(theirs.every(session => session.state === 'reclaimed'), 'no blocked session was left holding its lease');
+});
+
+test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {
   // GY-811: every supervised launch raises a containment quarantine; two workers die, so their
   // fences outlive them and only the loop can lower them. The work snapshot takes 6 s to read, so
   // its bound is too wide to settle with — the shared cause of GY-466, GY-521 and GY-543. The
   // loop's light timed read of the plane's clock fails for the first stretch of the day, answers in
   // 6 s for the next, and only then answers fast: the fences stand, escalated once per cause, and
   // settle within a cycle or two of the fast reads. The day is short and its items released close
-  // together: it runs late in the file, where each one-minute cycle costs the most, and a six-hour
-  // day overran its bound and the CI shard's on a loaded runner.
+  // together: it runs last in the file, where each one-minute cycle costs the most (about 200 s on
+  // a CI runner, so its bound is about twice that, like the regression day's), and last so that no
+  // other day pays for the state it leaves.
   const failUntil = 35 * minute, slowUntil = hour, deaths = [2, 4];
   const { items, final, violations, failures, lost, escalations, fenced, cycles } = await simulateDay({
     hours: 3, containment: { failUntil, slowUntil },
@@ -2149,42 +2190,4 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     assert.equal(new Set(escalated.map(unmeasured)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
     assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key}: delivered by the attempt after the settled one`);
   }
-});
-
-test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 300_000 }, async () => {
-  // GY-999: a worker whose push is refused for want of a valid GitHub login records that blocker.
-  // The loop ends the attempt in the cycle that sees it — work kept, pane closed, lease released —
-  // and the item is launched again with a fresh credential. The ending counts on the GY-885 retry
-  // ladder: each relaunch waits its backoff, and an item whose every attempt fails that way is held
-  // at the cap for an independent approver's decision instead of being ended and relaunched for ever. The ending and the relaunch run per item and per cycle, so they live here.
-  const recovers = 2, never = 3;
-  const { items, final, violations, failures, lost, herdrClosed, sessions, state } = await simulateDay({
-    hours: 6, credentialBlocked: { recovers, never },
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
-  });
-  assert.deepEqual(violations, [], 'every system invariant holds across the credential endings and the relaunches');
-  assert.deepEqual(failures, [], 'no cycle failed');
-  assert.deepEqual(lost, [], 'no lease was lost: each blocked attempt was ended by the loop');
-  const recovering = items[recovers - 1], held = items[never - 1];
-  assert.deepEqual(final.filter(item => item.stage !== 'done' && item.id !== held.id).map(item => `${item.key} ${item.stage}`), [], 'every other item, the recovering one included, is delivered');
-
-  const attemptsOf = (work: Work) => sessions.filter(session => session.key === work.key);
-  const endings = (work: Work) => Object.entries(state.actions).filter(([key]) => key.startsWith(`resume:credential:${work.id}:`));
-  // The recovering item: two blocked attempts, each ended once, then the third delivers.
-  const mine = attemptsOf(recovering);
-  assert.equal(mine.length, 3, `two blocked attempts and the one that delivered: ${mine.map(session => `${session.epoch}:${session.state}`).join(', ')}`);
-  assert.deepEqual(mine.slice(0, 2).map(session => session.state), ['reclaimed', 'reclaimed']);
-  assert.deepEqual(endings(recovering).map(([, action]) => [action.state, action.attempts]), [['done', 1], ['done', 1]], 'each blocked attempt was ended once');
-  assert.ok(mine.slice(0, 2).every(session => herdrClosed.includes(session.pane)), 'the loop closed each blocked pane');
-  // The relaunches wait the ladder's backoff: 5 minutes after the first ending, 15 after the second.
-  assert.ok(mine[1].dispatchAt - mine[0].dispatchAt >= 5 * minute + 5 * minute, `the second attempt waited its backoff: ${(mine[1].dispatchAt - mine[0].dispatchAt) / minute} min`);
-  assert.ok(mine[2].dispatchAt - mine[1].dispatchAt >= 5 * minute + 15 * minute, `the third attempt waited its backoff: ${(mine[2].dispatchAt - mine[1].dispatchAt) / minute} min`);
-
-  // The never-curing item: bounded at the cap, never relaunched past it while the approver's refusal stands.
-  const theirs = attemptsOf(held);
-  assert.equal(theirs.length, 3, `the ladder bounds the relaunches at the cap: ${theirs.map(session => `${session.epoch}:${session.state}`).join(', ')}`);
-  assert.deepEqual(endings(held).map(([, action]) => [action.state, action.attempts]), [['done', 1], ['done', 1], ['done', 1]]);
-  assert.match(state.actions[`retry:held:${held.id}`]?.detail ?? '', /held: 3 attempts in a row ended without submitting.*credential-blocked attempt on epoch 1.*credential-blocked attempt on epoch 3/, 'the hold names every credential failure');
-  assert.ok(state.actions[`retry:cap-request:${held.id}`], 'the loop asked for the decision that alone resumes the item, rather than relaunching it');
-  assert.ok(theirs.every(session => session.state === 'reclaimed'), 'no blocked session was left holding its lease');
 });

@@ -101,8 +101,9 @@ jobs:
     # The confinement soak (GY-888) runs the launcher's real mount namespace on every simulated
     # launch, so its file alone takes about twenty minutes on a runner — far past what its
     # baseline entry records — and the shard that holds it needs this bound to fit the file as it
-    # runs, not as it was last balanced.
-    timeout-minutes: 35
+    # runs, not as it was last balanced. A loaded runner runs the soak days about 40% slower than
+    # an idle one, which took that shard past 35 minutes (GY-811), so the bound leaves that margin.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
