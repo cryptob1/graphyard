@@ -58,7 +58,7 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
   await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Settings', exact: true })).toBeVisible();
   const entries = await page.getByRole('navigation', { name: 'Primary' }).getByRole('button').allTextContents();
   if (phone) await page.getByRole('button', { name: 'Menu' }).click();
-  expect(entries).toEqual(['Work', 'Workers', 'Shipped', 'Insights', 'Settings']);
+  expect(entries).toEqual(['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
   for (const entry of entries) {
     await nav(page, entry, phone);
     const tabs = page.getByRole('navigation', { name: 'Pages in this section' });

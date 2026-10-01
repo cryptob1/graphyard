@@ -25,10 +25,18 @@ const runtimeWarning = /\b(?:dangerous|destructive|irreversible|cannot be undone
 /**
  * A command the prompt shows, classified by its verb at a command position (the start of a line,
  * after `(`, `;`, `&&`, `|`, a backtick, `$(`, `sudo` or `xargs`): a deletion, move or overwrite,
- * or a git command that discards work (GY-223). A word such as "remove" or "force" in the prompt's
- * prose does not make it destructive; the command it would run does.
+ * or a git command that discards work (GY-223) — including `find … -delete`, `git rm` and
+ * `rsync --delete` (GY-472). A word such as "remove" or "force" in the prompt's prose does not
+ * make it destructive; the command it would run does.
  */
-const destructiveCommand = /(?:^|[;&|(`]|\$\(|\bsudo\s+|\bxargs\s+(?:-\S+\s+)*)\s*(?:(?:rm|rmdir|unlink|shred|mv|truncate|dd)\s|git\s+(?:clean\b|reset\s+--hard\b|push\b.*(?:--force\b|\s-f\b)|branch\s+-D\b|checkout\s+--\s))/i;
+const destructiveCommand = /(?:^|[;&|(`]|\$\(|\bsudo\s+|\bxargs\s+(?:-\S+\s+)*)\s*(?:(?:rm|rmdir|unlink|shred|mv|truncate|dd)\s|find\s[^;&|]*\s-delete\b|rsync\s[^;&|]*--(?:delete|remove-source-files)\b|git\s+(?:rm\s|clean\b|reset\s+--hard\b|push\b.*(?:--force\b|\s-f\b)|branch\s+-D\b|checkout\s+--\s))/i;
+/**
+ * A shell redirect that truncates a file: a lone `>` (or `>|`, `2>`, `&>`) after a word and a
+ * space, onto a target that names a file — a path with a `/` or a name with an extension. An
+ * append (`>>`), a descriptor duplication (`2>&1`), `/dev/null`, an arrow (`->`) and a comparison
+ * such as `x > 5.0` are not overwrites.
+ */
+const overwriteRedirect = /\S\s+[0-9&]?>\|?(?![>&])\s*["']?(?!\/dev\/null\b)[\w~.$\/-]*(?:\/|\.[A-Za-z]\w*)/;
 /** A command's own confirmation, such as `rm: remove regular file 'x'?` or `mv: overwrite 'y'?`. */
 const commandConfirmation = /^(?:rm|rmdir|unlink|shred|mv|cp):\s/i;
 /** Box borders, bullets and a shell's `$` before a command on a runtime's screen. */
@@ -36,7 +44,7 @@ const screenFrame = /^[\s│┃║╎┆>$●⎿•]+/;
 /** Whether a prompt's "yes" is destructive: the runtime says so, or a command it shows is one. */
 export function destructivePrompt(lines: string[]) {
   if (runtimeWarning.test(lines.join(' '))) return true;
-  return lines.some(entry => { const line = entry.replace(screenFrame, ''); return destructiveCommand.test(line) || commandConfirmation.test(line); });
+  return lines.some(entry => { const line = entry.replace(screenFrame, ''); return destructiveCommand.test(line) || commandConfirmation.test(line) || overwriteRedirect.test(line); });
 }
 const collapse = (lines: string[]) => {
   const text = lines.map(entry => entry.replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ');

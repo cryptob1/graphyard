@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +12,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { annotatePaneShell, closablePane, containmentSettlementRefusals, herdrServerPid, isHerdrServer, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-413: dispatching GY-393 failed with 'the claude runtime never started within 30 s … (command
 // still echoing)'. The pane it created stayed open, its bash shell idled in the worktree, and
@@ -68,7 +68,7 @@ function fakeClaims(root: string, timeline: string[]) {
 const virtualStart = (clock: { now: number }, lines: string[] = []) => ({ pollMs: 1_000, clock: () => clock.now, wait: (ms: number) => { clock.now += ms; }, log: (line: string) => { lines.push(line); } });
 
 async function installation(run: Record<string, unknown> = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-failed-launch-')); const credentials = await mkdtemp(join(tmpdir(), 'graphyard-failed-launch-credentials-'));
+  const root = await temporaryDirectory('failed-launch'); const credentials = await temporaryDirectory('failed-launch-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const credential = join(credentials, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
@@ -183,7 +183,7 @@ function host(extra: Record<number, Row> = {}) {
 const refusals = (item: Work, verification: ContainmentVerification) => containmentSettlementRefusals(item, verification, { now: Date.parse(observedAt) });
 
 async function loop(item: Work, containment: DaemonEffects['containment']) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-failed-launch-shell-'));
+  const directory = await temporaryDirectory('failed-launch-shell');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, coordinatorToken, { mode: 0o600 });
   const profile = { name: 'claude-1', principal: 'worker-a', agentName: 'graphyard-claude-1', mode: 'launch', kind: 'claude', credentialFile: join(directory, 'worker.token'), agentArgs: [], environment: {} } as unknown as WorkerProfile;
@@ -308,7 +308,7 @@ test('unit:launch-start-timeout-configurable — run.launchStartSeconds (default
 
   // A slow start inside the bound is a start, logged with how long it took.
   const clock = { now: 0 }, lines: string[] = [];
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-slow-start-'));
+  const directory = await temporaryDirectory('slow-start');
   try {
     const slow = fakeHerdr([], clock, { startsAt: 45_000 });
     const started = await startAgentSession('graphyard-claude-9', 'codex', 'pane-1', [], 'Implement GY-9', slow.run, { directory, ...virtualStart(clock, lines), timeoutMs: 60_000 });

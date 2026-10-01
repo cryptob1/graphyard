@@ -1,13 +1,13 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { closePool, trackedPool } from '../src/store/pools.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-483: pg-pool's end() resolved once it had asked its idle clients to end, not once they had
 // closed, so a test that stopped Postgres straight after Store.close() could terminate a live
@@ -20,7 +20,7 @@ after(async () => {
 });
 
 test('unit:store-close-waits-for-clients — a store with idle clients closes fully before Postgres stops, 50 times over', async () => {
-  directory = await mkdtemp(join(tmpdir(), 'graphyard-store-close-'));
+  directory = await temporaryDirectory('store-close');
   database = new EmbeddedPostgres({ databaseDir: directory, user: 'graphyard', password: 'testing-only', port, persistent: true, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('store_close');
   const url = `postgres://graphyard:testing-only@127.0.0.1:${port}/store_close`;

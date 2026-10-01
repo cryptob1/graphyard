@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +15,7 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../s
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-93: a launched session receives its instruction as its own first request, never as pasted
 // content; the loop tells a session that never started from one that did the work and failed;
@@ -53,14 +53,14 @@ const requested = (overrides: Partial<Work> = {}) => { const item = work(overrid
 const ready = () => work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null, gates: [{ name: 'ready', passed: true, reasons: [] }] });
 
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-launch-request-'));
+  const root = await temporaryDirectory('launch-request');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
 }
 /** A master installed in a throwaway repository, its credentials outside it, with a reviewer, a producer and an approver identity. */
 async function installed() {
-  const root = await repository(), credentials = await mkdtemp(join(tmpdir(), 'graphyard-launch-request-credentials-'));
+  const root = await repository(), credentials = await temporaryDirectory('launch-request-credentials');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
   await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };

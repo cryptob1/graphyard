@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +16,7 @@ import { dispatchEffects, emptyDispatchCursor, runDispatchTick } from '../src/au
 import { controlPlaneHandlers } from '../src/executor.js';
 import { relaunchSession } from '../src/master-daemon.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-172 AC-2: every path that starts a session registers the same session record before its
@@ -34,7 +34,7 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_EVERY_LAUNCH_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 193);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-every-launch-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('every-launch'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [1234], 120, 'owner/project');
@@ -47,7 +47,7 @@ const mutate = async (path: string, body: unknown) => { const [, id, command] = 
 
 /** A checkout the real approver launcher accepts: master.json and the three credentials, each 0600, outside it. */
 async function host() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-launch-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-launch-secrets-'));
+  const root = await temporaryDirectory('launch-root'), secrets = await temporaryDirectory('launch-secrets');
   execFileSync('git', ['init', '-q', root]);
   const credential = async (name: string) => { const file = join(secrets, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(48, 'x'), { mode: 0o600 }); return file; };
   const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: await credential('coordinator'), cliPath: launcher,

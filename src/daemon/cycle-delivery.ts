@@ -1,14 +1,15 @@
 // Concern: cycle steps 5–7 — shepherd reviews and proofs, the guarded merge, deployment verification.
-import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
+import { carriedApproval, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
 import { type Work } from '../model.js';
 import { queueSequencingReason } from '../merge-queue.js';
 import type { DaemonAction } from './state.js';
 import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message } from './state.js';
 import { candidateKey, decisionKey } from './reconcile.js';
+import { automatableProof } from '../model/mechanical-proofs.js';
 import { missingProofs } from './metrics.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged, maxApproverLaunches, standingVerdict } from './decisions.js';
+import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, maxApproverLaunches, standingVerdict } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { deploymentDetail } from './deployment.js';
@@ -42,12 +43,55 @@ export function mergeRetryDue(previous: DaemonAction | undefined, work: Work, cy
   return now - Date.parse(previous.at) >= Math.min(mergeRetryBaseMs * 2 ** Math.max(0, previous.attempts - 1), mergeRetryCapMs);
 }
 
+/** How long the guarded merge may refuse one candidate for one unchanged reason before the loop acts on it (GY-831). */
+export const repeatedMergeRefusalMs = 10 * 60_000;
+/**
+ * GY-831. A guarded merge refused for the same reason on consecutive attempts past
+ * `repeatedMergeRefusalMs` is not retried for good: on 2026-09-26 GY-470 headed a twenty-item queue
+ * for an hour while every attempt was refused for a carried approval the re-post could not use,
+ * and nothing moved until a master requested rework by hand. The loop raises attention naming the
+ * reason and the next step, and takes that step itself through the control plane: a carried
+ * approval is cleared so the review gate requests a fresh review of the tip, and otherwise the
+ * candidate is marked for a rework decision the approver judges. Either way the item leaves the
+ * queue head and the next entry heads it. Acted on once per candidate, reason and recovery phase:
+ * the phase is the carried binding the action would clear, so a re-review that is answered — the
+ * carry gone, the refusal standing — re-arms the handling and moves the candidate on to the rework
+ * action instead of being deduplicated away by the first phase's marker (GY-831 review). A carry
+ * re-bound to another review is a phase of its own.
+ */
+export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string) {
+  const { state, effects, now, performed } = cycle;
+  const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
+  if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
+  const carry = carriedApproval(item), carried = !!carry;
+  const key = `${mergeKey}:repeated:${carry ? `carry:${carry.reviewId ?? 'unnumbered'}:${carry.originalSha}` : 'rework'}`, previous = state.actions[key];
+  if (previous?.state === 'done' && previous.since === since) return;
+  // Like the refusal itself, the attention is the gate working, not a daemon fault: no fault kind.
+  const next = carried
+    ? `Graphyard clears the carried approval so the review gate requests a fresh review of tip ${item.candidate!.sha.slice(0, 12)}, and the next queue entry heads the queue meanwhile`
+    : `Graphyard marks candidate ${item.candidate!.sha.slice(0, 12)} for a rework decision the approver judges, and the next queue entry heads the queue meanwhile`;
+  const attention = `${item.key}: the guarded merge has refused candidate ${item.candidate!.sha.slice(0, 12)} on every attempt for ${minutes} minutes with the same reason: ${reason}. Next step: ${next}.`;
+  if (!effects.refuseMerge) {
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'failed', detail: `${attention} This loop cannot report the refusal to the control plane, so a master reports it with graphyard master decide ${item.key} rework REASON`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist, null));
+    return;
+  }
+  try {
+    await effects.refuseMerge(item, reason, since);
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: attention, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist, null));
+  } catch (error) {
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'failed', detail: `${attention} Reporting it failed and is retried on the next refusal: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist, null));
+  }
+}
+
 /** Step 5: shepherd reviews and proofs for submitted candidates. */
 export async function shepherdStep(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open } = cycle;
   // 5. Shepherd reviews and proofs for submitted candidates. Graphyard dispatches provider reviews
   //    and trusted producers publish evidence; the daemon records exactly one request per candidate
   //    and escalates what only a human or a producer may resolve.
+  //    A producer request whose attempts are used up is raised here the cycle it is first seen
+  //    (GY-496); the decision step requests the rework on a later cycle (cycle-decisions.ts).
+  const exhausted = await cycle.exhaustedProofs();
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested && !standingVerdict(candidate))) await isolate('proof', item, item.key, async () => {
     const reviewGate = item.gates.find(gate => gate.name === 'review');
     if (reviewGate && !reviewGate.passed) {
@@ -65,9 +109,16 @@ export async function shepherdStep(cycle: Cycle) {
         if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
     }
+    for (const entry of exhausted.filter(entry => entry.work === item.key && entry.sha === item.candidate!.sha)) {
+      const key = exhaustedProofKey(entry);
+      if (!state.actions[key]) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: exhaustedProofEscalation(entry), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    }
     const outstanding = missingProofs(item, new Date(clock));
     if (!outstanding.length) return;
-    const manual = outstanding.filter(proof => proof.startsWith('manual:'));
+    // GY-868: only a manual proof no producer session may run waits for an operator witness. One a
+    // producer may run is answered through its producer group — requested, reworked on a judged
+    // failure, or attested when nothing was executed — never parked here for a human.
+    const manual = outstanding.filter(proof => proof.startsWith('manual:') && !automatableProof(item, proof));
     const automatable = outstanding.filter(proof => !proof.startsWith('manual:'));
     if (manual.length) {
       const key = `escalation:proof:${item.id}:${item.candidate!.sha}:${item.policyRevision}`;
@@ -76,7 +127,22 @@ export async function shepherdStep(cycle: Cycle) {
     if (!automatable.length) return;
     const key = candidateKey('proof', item);
     const previous = state.actions[key];
+    if (previous?.state === 'failed' && previous.attempts >= maxProofAttempts) {
+      // Spent requests are named, never left silent (GY-496): the last failure says what to fix.
+      const escalationKey = `escalation:proof-workflow:${item.id}:${item.candidate!.sha}:${item.policyRevision}`;
+      if (!state.actions[escalationKey]) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key}: the trusted producer workflow was requested ${previous.attempts} times for ${automatable.join(', ')} on ${item.candidate!.sha.slice(0, 12)} and the loop stops asking; the master fixes what the last attempt names: ${previous.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     if (previous && (previous.state === 'done' || previous.attempts >= maxProofAttempts || !readyToRetry(previous, state.cycle))) return;
+    // A push to the candidate already runs every automatable proof through pull_request_target, so a
+    // dispatch is only the fallback for a run that never produced the evidence: it waits a grace
+    // period from when the loop first saw the head waiting, rather than queueing a duplicate run.
+    const graceMs = (config.run.proofDispatchGraceMinutes ?? 0) * 60_000;
+    if (graceMs > 0) {
+      const seenKey = `${key}:awaiting-push-run`;
+      if (!state.actions[seenKey]) await record(state, seenKey, { kind: 'proof', work: item.key, principal: null, state: 'done', detail: `${item.key}: waiting for the push-triggered acceptance run on ${item.candidate!.sha.slice(0, 12)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+      if (clock - Date.parse(state.actions[seenKey].at) < graceMs) return;
+    }
     if (!config.run.proofWorkflow) {
       if (previous?.state !== 'failed') performed.push(await record(state, key, { kind: 'proof', work: item.key, principal: null, state: 'failed', detail: `${item.key} needs trusted evidence for ${automatable.join(', ')}; configure master run --proof-workflow so the loop can request it from the trusted producer workflow`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return;
@@ -161,10 +227,13 @@ export async function mergeStep(cycle: Cycle) {
           if (reread) { target = reread; continue; }
         }
         // A refusal is the gate working, not a daemon fault: record it (no fault kind, so it is no
-        // recurrence instance and files no structural item) and keep cycling.
-        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed',
-          detail: `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`,
-          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist, null));
+        // recurrence instance and files no structural item) and keep cycling. The refusal keeps the
+        // time it was first given while its detail stays the same (GY-831).
+        const detail = `Guarded merge refused for ${item.key}${race ? ` after ${retries + 1} attempt(s) this cycle, each lost to a concurrent write; not counted toward the backoff` : ''}: ${message(error)}`;
+        const since = !race && previous?.state === 'failed' && previous.detail === detail ? previous.since ?? previous.at : new Date(now()).toISOString();
+        performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail,
+          attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle, ...(race ? {} : { since }) }, now(), effects.persist, null));
+        if (!race) await actOnRepeatedRefusal(cycle, target, key, message(error), since);
         return;
       }
     }

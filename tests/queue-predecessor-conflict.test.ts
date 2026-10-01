@@ -67,10 +67,18 @@ test('unit:predecessor-conflict-waits — a speculative conflict behind a queued
   const other = queueEjectionRecord(alone, [alone], conflict(alone.candidate!.sha, alone.key), now).ejection;
   assert.equal(other.conflict, null);
   assert.equal(other.predecessors, undefined);
+  // GY-583: the history entry carries the same typed flag, so the audit trail needs no reason text.
+  assert.deepEqual(onBase.queueHistory!.at(-1)!.conflict, { base }, 'the ejected history entry records the conflict');
+  assert.equal(queueEjectionRecord(alone, [alone], conflict(alone.candidate!.sha, alone.key), now).history.at(-1)!.conflict, null);
   const decision = decide(onBase);
   assert.equal(decision?.action, 'rework');
   assert.equal(decision?.binding, `${sha('3')}:queue-conflict:3:${base}`, 'the rework is keyed on the base tip the head conflicts with');
   assert.match(decision!.reason, /graphyard sync GY-3/);
+  // GY-583: the rework names the base the merge conflicted with, as recorded, not whatever tip is observed now.
+  const recorded = { ...onBase, queueEjection: { ...onBase.queueEjection!, conflict: { base: movedBase } } } as Work;
+  const named = syncConflict(recorded);
+  assert.equal(named?.binding, `${sha('3')}:queue-conflict:3:${movedBase}`);
+  assert.match(named!.reason, new RegExp(`base branch tip ${movedBase.slice(0, 12)}; the base branch tip is now ${base.slice(0, 12)}`));
   // A record from before the rule names no predecessors and still reads as a base conflict.
   const legacy = { ...onBase, queueEjection: { ...onBase.queueEjection!, predecessors: undefined, conflict: undefined } } as Work;
   assert.equal(decide(legacy)?.binding, `${sha('3')}:queue-conflict:3:${base}`);

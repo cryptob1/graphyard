@@ -1,13 +1,14 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
-import { describeReclaim } from '../master-resources.js';
+import { describeReclaim, paneReclaimStatus, agentlessPaneAttentionBound } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged } from './decisions.js';
-import { preserveInterruptedAttempt, record } from './effects.js';
+import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
+import type { SessionHandle } from '../model/sessions.js';
 import type { ContainmentAssessment } from '../master.js';
 import { closablePane, endedScopeStates } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
@@ -63,6 +64,83 @@ export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonE
   // A shell still exiting after its pane closed, or a probe that failed, is left to the next
   // cycle's probe, which settles or escalates it; the pre-close assessment is never used.
   for (const item of closed) if (fresh[item.id]?.settleable) assessments[item.id] = fresh[item.id];
+}
+
+/**
+ * How many agentless launched panes one pass closes, so a backlog drains over cycles rather than
+ * in one burst of closes (GY-842).
+ */
+export const paneSweepLimit = 6;
+
+/**
+ * 3c. Leftover agentless panes are reclaimed (GY-842). Every launch records its pane on the item
+ * (GY-172); a runtime that exits leaves its pane behind as a bare shell holding a pty, and Herdr
+ * held 584 of them on 26 September 2026 while the host throttled. Each cycle this sweep closes a
+ * bounded number: panes a Graphyard session recorded, holding no agent, whose session has ended on
+ * the record or whose worktree no longer exists, once they have stood agentless past
+ * `launchAppearanceMs` — so a launch whose runtime has not yet started is never taken for one that
+ * exited. It never touches a pane Graphyard did not launch (only recorded pane ids are matched), a
+ * pane with an agent in it, or a pane whose worktree holds a live lease. What the host holds is
+ * reported with it — the pane count, the agentless Graphyard panes and the oldest — and attention
+ * is raised once agentless panes pass the bound.
+ */
+export async function reclaimLaunchedPanes(cycle: Cycle) {
+  const { config, state, effects, now, clock, snapshot, performed, isolate, agents, open } = cycle;
+  // The inventory and the close are local to this host, so only the handles this host's launchers
+  // recorded are matched or counted: a finished handle another host recorded that happens to name
+  // this host's pane coordinate would otherwise make a local pane another launch's target, and its
+  // counts would not be this host's (GY-842). The implementation-session close (1g) filters the
+  // same way.
+  const recorded = new Map<string, { item: Work; handle: SessionHandle }>();
+  for (const item of snapshot.work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === config.hostId) recorded.set(handle.pane, { item, handle });
+  // Whether a live lease is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
+  const workedHere = (cwd: string | undefined) => !!cwd && open.some(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
+    && cwd.replace(/ \(deleted\)$/, '').endsWith(`/${item.key}-${item.lease.epoch}`));
+  const agentless: { pane: string; name: string | undefined; cwd: string | undefined; item: Work; handle: SessionHandle }[] = [];
+  for (const agent of agents) {
+    if (!agent.pane_id || agent.agent) continue; // a pane with an agent in it is a live session, whatever its state
+    const hit = recorded.get(agent.pane_id);
+    if (!hit || workedHere(agent.cwd)) continue; // never a pane Graphyard did not launch, nor one whose worktree holds a live lease
+    const ended = hit.handle.state !== 'running', worktreeGone = !!agent.cwd && / \(deleted\)\s*$/.test(agent.cwd);
+    if (!ended && !worktreeGone) continue;
+    agentless.push({ pane: agent.pane_id, name: agent.name, cwd: agent.cwd, ...hit });
+  }
+  let closed = 0;
+  for (const { pane, name, cwd, item, handle } of agentless) {
+    if (closed >= paneSweepLimit) break;
+    const key = `sweep:pane:${pane}`, previous = state.actions[key];
+    if (previous?.state === 'done') continue;
+    const ended = handle.state !== 'running', why = ended ? `its ${handle.kind} session ${handle.id} is ${handle.state}` : `its worktree (${cwd}) no longer exists`;
+    if (!previous) {
+      // A runtime that has not started yet looks the same, so nothing closes on the first sighting.
+      await record(state, key, { kind: 'close', work: item.key, principal: null, state: 'started', detail: `Pane ${pane} of ${item.key}${name ? ` (${name})` : ''} holds no agent and ${why}; it is closed if that stands in ${Math.round(launchAppearanceMs / 1000)}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+      continue;
+    }
+    if (now() - Date.parse(previous.at) < launchAppearanceMs) continue;
+    await isolate('close', item, pane, async () => {
+      let gone = false;
+      try { await effects.closeSession(pane); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
+      closed += 1;
+      performed.push(await record(state, key, { kind: 'close', work: item.key, principal: null, state: 'done',
+        detail: `${gone ? 'Pane was already gone; reclaimed' : 'Closed agentless pane'} ${pane} of ${item.key}${name ? ` (${name})` : ''}: ${why}, and it stood agentless past the launch bound`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    });
+  }
+  // What the host holds, on the record for `master status` to show, with attention past the bound.
+  // A host holding nothing agentless records nothing until it once held some: a quiet installation
+  // stays quiet, and a drained backlog is recorded as drained instead of standing reported.
+  const inventory = await effects.panes?.().catch(() => null) ?? null;
+  const status = paneReclaimStatus(inventory?.available ? inventory.panes : null, snapshot.work, agents, now(), config.hostId);
+  const counts = `Herdr reports ${status.panes ?? 'an unknown number of'} pane(s) on this host, ${status.launched} opened by Graphyard launch(es), ${status.agentless} standing agentless${status.oldest ? `; the oldest is pane ${status.oldest.pane} of ${status.oldest.work} (${status.oldest.kind}), launched ${status.oldest.launchedAt}` : ''}`;
+  const statusKey = 'sweep:panes:status';
+  const previous = state.actions[statusKey], previousAgentless = Number(/(\d+) standing agentless/.exec(previous?.detail ?? '')?.[1] ?? 0);
+  const drained = status.agentless === 0 && previousAgentless > 0;
+  if ((status.agentless > 0 && (closed || detailChanged(previous, counts))) || drained) performed.push(await record(state, statusKey, { kind: 'close', work: null, principal: null, state: 'done', detail: `Pane sweep: ${counts}${drained ? '; the backlog has drained, and no pane stands agentless' : ''}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  const attentionKey = 'sweep:panes:attention';
+  if (status.attention) {
+    if (detailChanged(state.actions[attentionKey], status.attention.text)) performed.push(await record(state, attentionKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: status.attention.text, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  } else if (state.actions[attentionKey] && !state.actions[attentionKey].detail.includes('back under the')) {
+    performed.push(await record(state, attentionKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: `${counts}; back under the ${agentlessPaneAttentionBound}-pane attention bound`, attempts: (state.actions[attentionKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  }
 }
 
 /** Step 3: reclaim disk, the loop's own bounded resources, and the items whose sessions died. */
@@ -134,6 +212,8 @@ export async function reclaimStep(cycle: Cycle) {
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
   const assessments = await effects.containment?.(snapshot.work, { now: snapshot.now, clockOffset }) ?? {};
   await closeEndedWorkerPanes(state, effects, open, assessments, { now: snapshot.now, clockOffset }, now, performed);
+  // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
+  await reclaimLaunchedPanes(cycle);
   for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) await isolate('settle', item, item.key, async () => {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];

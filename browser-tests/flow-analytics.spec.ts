@@ -322,7 +322,7 @@ test('unit:flow-medians-independent-of-replay — a step-move read that has not 
   await expect(page.locator('.flow-wait')).toHaveText('Reading the recorded step changes…');
 });
 
-for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: '375 px', width: 375, height: 812 }]) {
+for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 'compact desktop', width: 1100, height: 900 }, { name: '375 px', width: 375, height: 812 }]) {
   test(`unit:flow-now-compact — 40 items at one step keep the Now panel within 320 px behind a '+N more' control that shows them all, at ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     const work = boardWork();
@@ -337,9 +337,12 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 
     // The step header carries the column's full count at either width.
     const count = stepHead(page, step!).locator('> span').getByText(`${total} now`);
     await expect(count).toBeVisible();
-    // Several dots share a row: the twelve shown stand on six rows.
+    // Density follows measured column width while reserving room for touch targets.
     const rows = await lane.locator(`.now-dot[data-step="${step}"]`).evaluateAll(dots => new Set(dots.map(dot => (dot as HTMLElement).dataset.row)).size);
-    expect(rows).toBe(6);
+    const laneWidth = await lane.evaluate(node => node.clientWidth);
+    const capacity = Math.max(1, Math.min(12, Math.floor(laneWidth / 7 / (viewport.width <= 1250 ? 28 : 88))));
+    expect(rows).toBe(Math.ceil(12 / capacity));
+    if (viewport.name === 'compact desktop') expect(capacity).toBeGreaterThan(2);
     const more = lane.locator(`.now-more[data-step="${step}"]`);
     await expect(more).toHaveAttribute('data-hidden', String(total - 12));
     await expect(more).toContainText(`+${total - 12}`);
@@ -351,8 +354,14 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 
       expect(overflow.content).toBeLessThanOrEqual(overflow.width);
     };
     await bounded();
-    // No two shown dots overlap.
+    // Let the initial responsive layout transition settle before measuring geometry.
+    await page.waitForTimeout(900);
+    // No two shown dots overlap, and every target remains at least 24 by 24 CSS pixels.
     const boxes = await lane.locator('.now-dot').evaluateAll(dots => dots.map(dot => dot.getBoundingClientRect()).map(r => ({ left: r.left, right: r.right, top: r.top, bottom: r.bottom })));
+    for (const box of boxes) {
+      expect(box.right - box.left).toBeGreaterThanOrEqual(24);
+      expect(box.bottom - box.top).toBeGreaterThanOrEqual(24);
+    }
     for (const [i, a] of boxes.entries()) for (const b of boxes.slice(i + 1))
       expect(a.right <= b.left + 0.5 || b.right <= a.left + 0.5 || a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5, 'Now dots overlap').toBe(true);
     await more.click();

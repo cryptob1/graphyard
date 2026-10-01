@@ -48,7 +48,8 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     const flow = positionals[0] as BrowserFlow | undefined;
     if (!flow || !browserFlows.includes(flow)) throw new Error(`Use master browser ${browserFlows.join('|')} [--dry-run]`);
     const snapshot = await masterApi('work-snapshot');
-    const result = await runBrowserFlow(root, master, flow, { work: snapshot.work, coordinator: coordinator.actor.id, dryRun: !!values['dry-run'] });
+    // Installation state comes from the control plane's App credential, not the operator's gh token (GY-964).
+    const result = await runBrowserFlow(root, master, flow, { work: snapshot.work, coordinator: coordinator.actor.id, dryRun: !!values['dry-run'], installation: () => masterApi('github/installation') });
     if (result.outcome === 'refused') process.exitCode = 1;
     return print(result);
   }
