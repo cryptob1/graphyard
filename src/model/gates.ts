@@ -1,8 +1,9 @@
-import { ciPendingReason, conversationProtectionRefusal, requiredCheck, checkRerunStatus, tipValidation } from '../merge-queue.js';
+import { ciPendingReason, conversationProtectionRefusal, failedCheckResults, requiredCheck, requiredCheckPassed, requiredCheckRun, requiredChecksOf, checkRerunStatus, tipValidation } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
 import { ciCheckRefusal } from './ci-refusal.js';
+import { requiredCheckFailure } from './required-check-refusal.js';
 import { leadHoldRefusal } from './delegation.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
@@ -90,8 +91,15 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
     ...(!reviewPassed ? [reviewRefusal] : []),
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
   ] : []);
-  const checkReasons = work.policy.checks.filter(name => requiredCheck(work, name, ciAppIds)?.result !== 'success')
-    .map(name => ciCheckRefusal(name, current ? checkRerunStatus(work, name) : ''));
+  // The policy's checks and every other check the base branch's protection requires (GY-430):
+  // GitHub refuses the merge while any of them has not passed, so none is left for it to find.
+  const checkReasons = requiredChecksOf(work).flatMap(check => {
+    const run = check.policy ? requiredCheck(work, check.name, ciAppIds) : current ? requiredCheckRun(check, obs!.checks, ciAppIds) : undefined;
+    if (requiredCheckPassed(check, run)) return [];
+    return [!check.policy && run && failedCheckResults.includes(run.result)
+      ? requiredCheckFailure(check.name)
+      : ciCheckRefusal(check.name, current ? checkRerunStatus(work, check.name) : '')];
+  });
   gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
   family('acceptance');
   // The merge queue owns the last hop. A candidate that has proven itself enters the queue,
