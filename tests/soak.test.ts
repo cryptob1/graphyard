@@ -545,6 +545,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
   const dispatch: DaemonEffects['dispatch'] = failover ? async (work, profile, free, snapshot) => {
+    // An earlier day's item still open in the shared store goes the simulated way: the day's own
+    // five are what the real launch path and its ledger are judged on.
+    if (!items.some(item => item.id === work.id)) return simulatedDispatch(work, profile, free, snapshot);
     // The real dispatch path (GY-417): the launcher claims through the engine, launches through
     // the world's Herdr, and falls forward to the profile's next account when the preferred
     // account's runtime never comes up. The day's fourth dispatch finds the account healthy, so
@@ -571,7 +574,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     sessions.push({ work: work.id, key: work.key, branch, profile, epoch, attempt, pane: result.pane!, pushAt: clock.now() + plan.workMs, diesAt: null, exitsAt: null, dispatchAt: clock.now(), state: 'working', syncs: 0,
       scopeAt: null, misreadAt: null, misread: false });
     return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
-  } : async (work, profile) => {
+  } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
+  async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
@@ -599,7 +603,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await engine.execute(principal, 'scope', work.id, { epoch, paths: ask.slice(at, at + 50), reason: `Item ${n}: the ${ask.length === 1 ? 'file' : 'files'} this change touches` }, id());
     // The pane is the session's own coordinate: the loop records it on the implementation handle.
     return { key, epoch, pane, agentName: profile.agentName };
-  };
+  }
   const workersTick = async (now: number) => {
     for (const session of sessions.filter(entry => entry.state === 'working' || entry.state === 'idling')) {
       if (session.diesAt !== null && now >= session.diesAt) { herdr.kill(session.pane); session.state = 'dead'; continue; }
