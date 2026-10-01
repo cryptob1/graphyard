@@ -1,4 +1,4 @@
-// Concern: cycle steps 1e–1f — what a live attempt waits on, the re-prompt when its wait clears, the one idle-lease reminder and the reclaim that hands a stalled attempt to a new one (GY-524), with the pane-binding check every paste through these paths must pass (GY-852, GY-940) and the stable-absence bound a cleared wait's reclaim stands on (GY-953).
+// Concern: cycle steps 1e–1f — what a live attempt waits on, the re-prompt when its wait clears, the one idle-lease reminder and the reclaim that hands a stalled attempt to a new one (GY-524), each resolution prompting once on a dedup row the resolved-action prune never retires (GY-923), with the pane-binding check every paste through these paths must pass (GY-852, GY-940) and the stable-absence bound a cleared wait's reclaim stands on (GY-953).
 import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master.js';
 import { message, type DaemonAction } from './state.js';
@@ -103,17 +103,19 @@ export function checkPaneStillBelongs(item: Work, handleId: string, pane: string
  * 1e–1f. A worker told nothing waits for ever (GY-524). While a live attempt has a blocker or a
  * scope request open, the loop marks what it waits on; once none is open, the session is re-prompted
  * once with what changed and the exact next command — unless it is already active — and the
- * re-prompt goes on its handle, so the item's history shows it. A worker holding a live lease with
- * nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its handle says so,
- * naming the pane, and it is re-prompted once; still inactive `idleLeaseMs` later, its attempt is
- * handed to a new one that keeps its branch. A cleared wait its session cannot verifiably receive
+ * re-prompt goes on its handle, so the item's history shows it. The once is kept on the cursor as a
+ * waiting action outside the prunable action ledger (GY-923), keyed by the decision's own instant,
+ * so a busy installation cannot re-prompt a decision whose ledger row was retired. A worker holding
+ * a live lease with nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its
+ * handle says so, naming the pane, and it is re-prompted once; still inactive `idleLeaseMs` later,
+ * its attempt is handed to a new one that keeps its branch. A cleared wait its session cannot verifiably receive
  * — its recorded pane gone from the runtime, or its handle recording no pane — ends the attempt
  * only once that has stood past `launchAppearanceMs` on a later cycle, and a reappearance cancels
  * it: one listing miss ends nothing, and an unverifiable handle is reclaimed on a bound instead of
  * refusing every resolution for ever (GY-953).
  */
 export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingLive: boolean) {
-  const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
+  const { config, state, effects, now, clock, performed, isolate, agents, heldBy, open } = cycle;
   const live = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
     const item = heldBy(profile);
@@ -209,6 +211,10 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     //     the attempt's epoch (GY-544), so a recent one nobody was told of since counts as waited on.
     //     A blocker cleared between two cycles leaves no such record on the item, so it is left
     //     to the idle-with-lease re-prompt below.
+    //     The once-per-decision promise is kept on the cursor outside the prunable ledger (GY-923):
+    //     the row that remembers a sent prompt is a waiting action, which `pruneDaemonState` never
+    //     retires, keyed by the decision's own instant — so a busy installation that resolves more
+    //     actions than the ledger retains cannot make the same decision prompt a second time.
     const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
     const decision = item.scopeDecision, decidedAt = decision?.epoch === epoch ? Date.parse(decision.at) : NaN;
     const unmarked = !state.actions[keys.scope] && Number.isFinite(decidedAt) && now() - decidedAt <= idleLeaseMs
@@ -264,13 +270,17 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         }
         return;
       }
-      if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
+      // Both outcomes are recorded as the durable dedup row (GY-923): a waiting action survives the
+      // resolved-action prune, so an already-consumed resolution cannot prompt a second time once a
+      // busy stretch retires the ledger rows around it. The sweep at the end of this step retires
+      // the row once nothing recent can match it again.
+      if (status === 'working') { await entry(promptKey, 'waiting', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
       if (!effects.promptSession || !readyToRetry(previous, state.cycle)) return;
       const attempts = (previous?.attempts ?? 0) + 1;
       await entry(promptKey, 'started', `${item.key} epoch ${epoch}: ${changed}; re-prompting ${profile.agentName} in pane ${pane} to resume`, attempts);
       try {
         await effects.promptSession(agent, resumePromptText(config.cliPath, item, epoch, changed));
-        performed.push(await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} in pane ${pane} was re-prompted once to resume, naming ${completeCommand('CLI', item, epoch).replace('node CLI ', '')}`, attempts));
+        performed.push(await entry(promptKey, 'waiting', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} in pane ${pane} was re-prompted once to resume, naming ${completeCommand('CLI', item, epoch).replace('node CLI ', '')}`, attempts));
         await workerHandle(cycle, item, profile, epoch, pane, `re-prompted to resume at ${new Date(now()).toISOString()}: ${changed}`, false);
         await drop(keys.blocker, keys.scope, keys.idle);
       } catch (error) {
@@ -334,8 +344,15 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     const paneReason = checkPaneStillBelongs(item, handleId, pane);
     await reclaimIdle(`idle with a live lease: no activity in pane ${pane} since ${idle.at}, nor in the ${Math.round((now() - Date.parse(reprompted.at)) / 60_000)} minutes after its re-prompt at ${reprompted.at}${paneReason ? `; its pane no longer verifies (${paneReason})` : ''}`, paneReason ? null : pane);
   });
-  // A wait whose attempt no longer holds a live lease has nobody left to tell.
-  const stale = Object.entries(state.actions).filter(([key, action]) => action.state === 'waiting' && waitPrefixes.some(prefix => key.startsWith(prefix)) && !live.has(key));
+  // A wait whose attempt no longer holds a live lease has nobody left to tell. A resume-prompt dedup
+  // row (GY-923) is swept once it can dedupe nothing again: its item is gone, or the row is older
+  // than the recency window any decision it could match must fall in — a decision matches only when
+  // the row was written at or after it and both sit within `idleLeaseMs` of now, so a row past that
+  // window is inert by construction.
+  const stale = Object.entries(state.actions).filter(([key, action]) => action.state === 'waiting'
+    && (waitPrefixes.some(prefix => key.startsWith(prefix)) && !live.has(key)
+      || key.startsWith('resume:prompt:')
+        && (!open.some(item => key.startsWith(`resume:prompt:${item.id}:`)) || now() - Date.parse(action.at) > idleLeaseMs)));
   for (const [key] of stale) delete state.actions[key];
   if (stale.length) await effects.persist(state);
 }

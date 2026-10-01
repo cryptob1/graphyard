@@ -464,17 +464,35 @@ export async function closeStep(cycle: Cycle) {
  * listing (GY-544), so an exited runtime is acted on as step 1 acts on one: only when Herdr read
  * the handle's workspace at all, and only once the same sight stands on a later cycle and
  * launchAppearanceMs after it was first seen.
+ *
+ * A closed pane is retained on the cursor for the retry (GY-923): a close that got as far as
+ * closing the pane can still fail to update the registry, and the pane it closed — a sole pane
+ * empties its workspace's listing — can then never be witnessed again, which would leave the handle
+ * running for ever. Once the pane is closed, or found already gone, the witnessed exit is kept as a
+ * waiting action (which the resolved-action prune never retires) — a write of it that fails does
+ * not hold the registry update back — and a retry holding it only updates the registry: it never closes the pane again, so no stale evidence can end a pane that
+ * still stands or has been reused. A close that fails before the pane is gone keeps no evidence and
+ * is retried only on a fresh, confirmed sight.
  */
+
+/** The cursor row that records a pane this step closed, so the retry only updates the registry (GY-923). */
+const closeEvidenceKey = (item: Pick<Work, 'id'>, handle: { id: string; startedAt: string }) => `close-evidence:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
+
 async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrAgent[]; available: boolean } | null) {
   const { config, state, effects, snapshot, clock, now, performed, isolate } = cycle;
   if (!effects.recordSession) return;
-  const sighted = new Set<string>();
+  const sighted = new Set<string>(), evidenced = new Set<string>();
   for (const item of snapshot.work) for (const handle of item.sessions ?? []) {
     if (handle.kind !== 'implementation' || handle.state !== 'running' || handle.host !== config.hostId) continue;
+    const evidenceKey = closeEvidenceKey(item, handle);
+    evidenced.add(evidenceKey);
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
     const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
+    // A pane this step already closed is not read again: the retry is only the registry update (GY-923).
+    const evidence = state.actions[evidenceKey];
     let reason: string | null = null;
-    if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
+    if (evidence) reason = evidence.detail;
+    else if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
       // A pane absent from a listing that holds nothing of its workspace says nothing about the pane.
@@ -498,23 +516,35 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
       const entry = (outcome: 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: handle.principal, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         // The pane goes first, so the record never says finished beside a pane still standing. A
-        // close that fails leaves the handle running: the step is retried whole on a later cycle.
-        let closed = '';
-        if (handle.pane) {
-          try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
-          catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
+        // close that fails before the pane is gone leaves the handle running and keeps no evidence:
+        // it is retried only on a fresh sight. Once the pane is gone that is recorded, so a failed
+        // registry update is retried alone, never by closing the pane again (GY-923).
+        let closed = '', unsaved = '';
+        if (evidence) closed = `; pane ${handle.pane} closed on an earlier attempt, so only the registry update is retried`;
+        else {
+          if (handle.pane) {
+            try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
+            catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
+          }
+          // The evidence write is no failure boundary: the pane is gone whatever it does, so the
+          // registry update is attempted anyway, and a row the write could not persist stays on the
+          // in-memory cursor for the next persist to carry.
+          try { await record(state, evidenceKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: found, attempts: 1, cycle: state.cycle }, now(), effects.persist); }
+          catch (error) { unsaved = `; its closed-pane evidence is not yet persisted (${message(error)})`; }
         }
         await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}${closed}`.slice(0, 500) });
-        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}`));
-        // Its sighting goes with it, in this cycle's sweep.
-        sighted.delete(seenKey);
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}${unsaved}`));
+        // Its sighting and its closed-pane evidence go with it, in this cycle's sweep.
+        sighted.delete(seenKey); evidenced.delete(evidenceKey);
       } catch (error) {
-        performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}`));
+        performed.push(await entry('failed', `Could not close implementation session ${handle.id} of ${item.key}: ${message(error)}${state.actions[evidenceKey] ? '; its pane is closed and only the registry update is retried' : ''}`));
       }
     });
   }
-  // A sighting that did not stand this cycle — the agent reappeared, or its handle was closed — starts over.
-  const lapsed = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:') && state.actions[key].state === 'waiting' && !sighted.has(key));
+  // A sighting that did not stand this cycle — the agent reappeared, or its handle was closed — starts over,
+  // and evidence whose handle is no longer a running implementation session here is swept with it (GY-923).
+  const lapsed = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:') && state.actions[key].state === 'waiting' && !sighted.has(key)
+    || key.startsWith('close-evidence:implementation:') && !evidenced.has(key));
   for (const key of lapsed) delete state.actions[key];
   if (lapsed.length) await effects.persist(state);
 }
