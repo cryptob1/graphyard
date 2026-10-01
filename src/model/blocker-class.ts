@@ -1,5 +1,6 @@
 import { humanRequestBlocker } from './human-request.js';
 import { namedPaths, pathScopeContains, scopeRefusalBlocker } from './scope.js';
+import { widenedPlannedFiles } from './scope-collapse.js';
 // Types only from work.ts: work.ts reaches this module through its own field types.
 import type { Work } from './work.js';
 
@@ -91,8 +92,10 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   if (sandbox.test(blocker)) return { class: 'sandbox-path', ...none, path: refusedPath(blocker) };
   if (suiteFailure.test(blocker) && outsideScope.test(blocker)) return { class: 'outside-scope-test-failure', ...none };
   if (blocker.startsWith(scopeRefusalBlocker) || scopeWords.test(blocker)) {
-    const paths = namedPaths(blocker).filter(path => !/^https?:/.test(path));
-    const commit = blocker.match(commitToken)?.find(token => !paths.some(path => path.includes(token))) ?? null;
+    // A URL is a reference, not a file: its host and path never become planned paths or a commit.
+    const unlinked = blocker.replace(/\b(?:https?:\/\/|www\.)\S+/gi, ' ');
+    const paths = namedPaths(unlinked);
+    const commit = unlinked.match(commitToken)?.find(token => !paths.some(path => path.includes(token))) ?? null;
     return paths.length && commit ? { class: 'planned-file-scope', ...none, paths, commit } : { class: 'genuine', ...none };
   }
   if (decisionWords.test(blocker) && decisionWait.test(blocker)) return { class: 'needs-decision', ...none, decision: uuidToken.exec(blocker)?.[0].toLowerCase() ?? null };
@@ -106,8 +109,14 @@ export function itemBlockerClass(work: Pick<Work, 'blocker' | 'humanRequest'>): 
 }
 
 /** The planned-file-scope blocker's files that plannedFiles do not yet cover. */
-export const uncoveredBlockerPaths = (work: Pick<Work, 'plannedFiles'>, classification: BlockerClassification) =>
+export const uncoveredBlockerPaths = (work: Partial<Pick<Work, 'plannedFiles'>>, classification: BlockerClassification) =>
   classification.paths.filter(path => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+
+/** A planned-file-scope blocker whose files no fold represents under the plannedFiles cap: no widening decision can answer it, so it needs the master. */
+export const unrepresentableScope = (work: Partial<Pick<Work, 'plannedFiles' | 'criteria'>>, classification: BlockerClassification) => {
+  const missing = classification.class === 'planned-file-scope' ? uncoveredBlockerPaths(work, classification) : [];
+  return missing.length > 0 && !widenedPlannedFiles(work, missing).representable;
+};
 
 /**
  * The last probe of an item's standing blocker, as the loop recorded it on the item: which class
@@ -137,11 +146,11 @@ export interface BlockerView {
  * The view of an item's standing blocker, or null when it has none. A routine class stops counting
  * as routine once the loop has cleared this item's blocker `maxAutomaticClears` times in a row.
  */
-export function blockerView(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'>): BlockerView | null {
+export function blockerView(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'> & Partial<Pick<Work, 'plannedFiles' | 'criteria'>>): BlockerView | null {
   const classification = itemBlockerClass(work);
   if (!classification) return null;
   const probe = work.blockerProbe && work.blockerProbe.blocker === work.blocker ? work.blockerProbe : null;
-  const spent = (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears;
+  const spent = (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears || unrepresentableScope(work, classification);
   return {
     class: classification.class,
     needsSomeone: needsSomeone(classification.class) || spent,
@@ -151,7 +160,7 @@ export function blockerView(work: Pick<Work, 'blocker' | 'humanRequest' | 'block
 }
 
 /** Who acts next on an item blocked on a routine class: the loop, which re-checks the cause every cycle (GY-1008); null otherwise. */
-export function routineBlocker(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'>): { who: string; does: string } | null {
+export function routineBlocker(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'> & Partial<Pick<Work, 'plannedFiles' | 'criteria'>>): { who: string; does: string } | null {
   const view = blockerView(work);
   if (!view || view.needsSomeone) return null;
   const meaning = blockerClassMeaning[view.class];

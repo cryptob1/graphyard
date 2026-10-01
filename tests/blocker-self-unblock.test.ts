@@ -11,7 +11,8 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, workerPrompt, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { blockerClasses, blockerView, classifyBlocker, environmentalBlockerClasses, maxAutomaticClears, needsSomeone, type BlockerClass } from '../src/model/blocker-class.js';
+import { blockerClasses, blockerView, classifyBlocker, environmentalBlockerClasses, maxAutomaticClears, needsSomeone, unrepresentableScope, type BlockerClass } from '../src/model/blocker-class.js';
+import { plannedFilesMax } from '../src/model/scope.js';
 import { blockedAttemptMarker } from '../src/model/capacity.js';
 import { humanRequestBlocker } from '../src/model/human-request.js';
 import { buildBoard, masterBoard } from '../src/model/board.js';
@@ -137,6 +138,15 @@ test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their n
   // A scope ask with no file or no commit derives no widening: the master reads it.
   assert.equal(classifyBlocker('SCOPE NEEDED: a helper outside plannedFiles').class, 'genuine');
   assert.equal(classifyBlocker('SCOPE NEEDED: src/model/queue.ts').class, 'genuine');
+  // A URL the blocker cites is a reference: its host and path never become a planned path.
+  const linked = classifyBlocker('SCOPE NEEDED: src/model/queue.ts (see https://github.com/org/repo/issues/12) for commit 8106499e9f');
+  assert.deepEqual([linked.class, linked.paths, linked.commit], ['planned-file-scope', ['src/model/queue.ts'], '8106499e9f']);
+  // Files no fold can represent under the plannedFiles cap need the master, not a widening.
+  const full = { plannedFiles: Array.from({ length: plannedFilesMax }, (_, index) => `tests/bulk/file-${index}.test.ts`), criteria: [] };
+  const far = classifyBlocker('SCOPE NEEDED: newtop/next.ts for commit 8106499e9f');
+  assert.equal(unrepresentableScope(full, far), true);
+  assert.equal(unrepresentableScope({ plannedFiles: ['src/a.ts'], criteria: [] }, far), false);
+  assert.equal(blockerView({ blocker: 'SCOPE NEEDED: newtop/next.ts for commit 8106499e9f', humanRequest: null, blockerProbe: null, ...full } as never)?.needsSomeone, true);
   // An open human request is human-only whatever its text says.
   assert.equal(classifyBlocker('anything at all', { humanRequest: true }).class, 'human-only');
   assert.equal(classifyBlocker('').class, 'genuine');
@@ -282,6 +292,7 @@ test('unit:scope-blocker-becomes-decision — a planned-file-scope blocker becom
   assert.equal(classifyBlocker(waiting.blocker).class, 'needs-decision');
   await loop.cycle(state);
   assert.ok(loop.launched.includes(standing.id), 'the approver of the standing decision was launched');
+  assert.equal(state.approvals[`hand:${standing.id}`]?.decision, standing.id, 'the launched approver is watched from launch, so supervision closes it once judged');
   const launches = loop.launched.length;
   await loop.cycle(state);
   assert.equal(loop.launched.length, launches, 'launched once, not every cycle');

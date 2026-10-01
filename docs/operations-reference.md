@@ -24,10 +24,10 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 | `sandbox-path` | write the path (or nearest parent) in the sandbox | it succeeds |
 | `worktree-mismatch` | the attempt's lease | ended |
 | `outside-scope-test-failure` | base branch tip | moved |
-| `planned-file-scope` | additive `requirements` widening requested for the approver | files covered |
-| `needs-decision` | approver launched for the standing decision | none requested |
+| `planned-file-scope` | additive `requirements` widening for the approver | files covered |
+| `needs-decision` | approver launched and supervised | none requested |
 
-Probes are recorded (`POST /api/work/KEY/blocker-probe`) on change or every five minutes; a pass clears the blocker (`blocker.cleared`, naming the probe). The plane refuses to clear a `genuine` or `human-only` blocker, or a fourth clear without a submission; only those count as needing someone in `master status` and the board, which show the class, last probe and next probe time.
+Probes are recorded (`POST /api/work/KEY/blocker-probe`) on change or every five minutes; a pass clears the blocker (`blocker.cleared`, naming the probe). The plane refuses to clear a `genuine` or `human-only` blocker, or a fourth clear without a submission; only those, and scope no fold fits under the plannedFiles cap, need someone in `master status` and the board (class, last and next probe).
 
 ## Supervisor died leaving a containment quarantine
 

@@ -1,8 +1,9 @@
 // Concern: cycle step 2d — every standing blocker re-checked each cycle (GY-1008): environmental causes probed and cleared, a needs-decision blocker's approver launched.
 import type { Work } from '../model.js';
-import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, type BlockerClassification } from '../model/blocker-class.js';
+import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, unrepresentableScope, type BlockerClassification } from '../model/blocker-class.js';
 import { scopeRefusalBlocker } from '../model/scope.js';
-import { message, type DaemonAction } from './state.js';
+import { approvalWatchSchema, message, type DaemonAction } from './state.js';
+import { handWatchPrefix } from './cycle-decisions.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { record } from './effects.js';
@@ -12,8 +13,12 @@ import type { Cycle } from './cycle.js';
 /** How often an unchanged failing probe is written to the item again, so the board's "last probe" stays current without a revision every cycle. */
 export const blockerRecordMs = 5 * 60_000;
 export const blockerKey = (item: Pick<Work, 'id'>) => `blocker:${item.id}`;
-const baseKey = (item: Pick<Work, 'id'>, blocker: string) => `blocker:base:${item.id}:${blocker.length}:${blocker.slice(0, 40)}`;
+// Both are per blocker episode: the base tip keyed by the attempt that met the failure, the approver
+// launch by its decision. Each is retired with the blocker, so the cursor holds none past it.
+const baseKey = (item: Pick<Work, 'id' | 'epoch'>, blocker: string) => `blocker:base:${item.id}:${item.epoch}:${blocker.length}:${blocker.slice(0, 40)}`;
 const approverKey = (item: Pick<Work, 'id'>, decision: string) => `blocker:approver:${item.id}:${decision}`;
+const episodeKey = (item: Pick<Work, 'id'>, key: string) => key.startsWith(`blocker:base:${item.id}:`) || key.startsWith(`blocker:approver:${item.id}:`);
+const episodeKeys = (state: { actions: Record<string, unknown> }, item: Pick<Work, 'id'>) => Object.keys(state.actions).filter(key => episodeKey(item, key));
 
 /**
  * 2d. Blocked work unblocks itself (GY-1008). A recorded blocker has already ended its attempt
@@ -26,13 +31,20 @@ const approverKey = (item: Pick<Work, 'id'>, decision: string) => `blocker:appro
  * - a planned-file-scope blocker is put to the approver as an additive widening by the decision
  *   step (`blockerScopeDecision`), and cleared here once plannedFiles cover every file it names;
  * - a needs-decision blocker gets the approver of its standing decision launched when no session
- *   judges it yet, and is cleared once no decision on the item stands requested;
- * - a genuine or human-only blocker, or one this loop has cleared `maxAutomaticClears` times in a
- *   row, is left to the master (or the human), which is all `master status` counts as needing someone.
+ *   judges it yet — watched from launch as a hand-launched approver is, so the decision step closes
+ *   it once the decision is judged — and is cleared once no decision on the item stands requested;
+ * - a genuine or human-only blocker, a planned-file-scope one no fold represents under the
+ *   plannedFiles cap, or one this loop has cleared `maxAutomaticClears` times in a row, is left to
+ *   the master (or the human), which is all `master status` counts as needing someone.
+ * The per-episode cursor rows (the base tip, the approver launch) are retired once the blocker is
+ * gone, and a delivered or closed item's rows with it, so `state.actions` stays bounded.
  */
 export async function blockerStep(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open, launcher } = cycle;
   if (!effects.recordBlockerProbe) return;
+  // Rows of items no longer open (delivered, closed, gone from the snapshot) go with them.
+  const orphaned = Object.keys(state.actions).filter(key => key.startsWith('blocker:') && !open.some(item => key === blockerKey(item) || episodeKey(item, key)));
+  if (orphaned.length) { for (const key of orphaned) delete state.actions[key]; await effects.persist(state); }
   const intervalMs = (config.run.intervalSeconds ?? 20) * 1000;
   // One probe per cause per cycle: eight items blocked on one credential cost one `gh auth status`.
   const probes = new Map<string, Promise<BlockerProbeResult | null>>();
@@ -48,15 +60,25 @@ export async function blockerStep(cycle: Cycle) {
   for (const item of open) await isolate('blocker', item, item.key, async () => {
     const classification = itemBlockerClass(item);
     const key = blockerKey(item);
-    if (!classification || !item.blocker) { if (state.actions[key]) { delete state.actions[key]; await effects.persist(state); } return; }
+    if (!classification || !item.blocker) {
+      const retired = [...(state.actions[key] ? [key] : []), ...episodeKeys(state, item)];
+      if (retired.length) { for (const entry of retired) delete state.actions[entry]; await effects.persist(state); }
+      return;
+    }
     const blocker = item.blocker;
     const standing = (detail: string) => detailChanged(state.actions[key], detail) ? note(key, item, 'done', detail) : Promise.resolve(null);
-    if (needsSomeone(classification.class)) { await standing(`${item.key} is blocked (${classification.class}: ${blockerClassMeaning[classification.class]}); it needs someone: ${blocker}`); return; }
+    // Handed to the master (or the human): reported once, as the cycle's action, when it first stands.
+    const handOver = async (detail: string) => { const noted = await standing(detail); if (noted) performed.push(noted); };
+    if (needsSomeone(classification.class)) { await handOver(`${item.key} is blocked (${classification.class}: ${blockerClassMeaning[classification.class]}); it needs someone: ${blocker}`); return; }
     // A refused scope request is the scope step's to put to the approver; its answer clears it.
     if (blocker.startsWith(scopeRefusalBlocker)) return;
+    if (unrepresentableScope(item, classification)) {
+      await handOver(`${item.key} is blocked (planned-file-scope) on files no widening can represent under the plannedFiles cap, so it needs the master: ${blocker}`);
+      return;
+    }
     const clears = item.blockerProbe?.clears ?? 0;
     if (clears >= maxAutomaticClears) {
-      await standing(`${item.key} is blocked (${classification.class}) again after the loop cleared its blocker ${clears} times in a row without a submission, so it is left to the master: ${blocker}`);
+      await handOver(`${item.key} is blocked (${classification.class}) again after the loop cleared its blocker ${clears} times in a row without a submission, so it is left to the master: ${blocker}`);
       return;
     }
 
@@ -88,6 +110,11 @@ export async function blockerStep(cycle: Cycle) {
           const attempts = (previous?.attempts ?? 0) + 1;
           try {
             const launched = await effects.approver(item, decision.id);
+            // Watched from launch, as a `master approver` session is: the decision step's hand-watch
+            // supervision closes it once its decision is judged, and relaunches it within the bound.
+            const stamp = new Date(clock).toISOString();
+            state.approvals[`${handWatchPrefix}${decision.id}`] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: decision.id, requestedAt: stamp, agentName: launched.agentName, pane: launched.pane,
+              launchedAt: stamp, launches: 1, account: launched.account ?? null, runtime: launched.runtime ?? null, session: launched.session ?? null });
             performed.push(await note(launchKey, item, 'done', `${item.key} is blocked on decision ${decision.id} (${decision.action}) that no approver session judged; launched approver ${launched.agentName}${launched.pane ? ` in pane ${launched.pane}` : ''}`, attempts));
             result = { ...result, detail: `decision ${decision.id} (${decision.action}): approver ${launched.agentName} launched` };
           } catch (error) {
@@ -104,6 +131,7 @@ export async function blockerStep(cycle: Cycle) {
     if (!due) return;
     try {
       await effects.recordBlockerProbe!(item, { blocker, class: classification.class, probe: result.probe.slice(0, 300), result: outcome, detail: result.detail.slice(0, 500), nextAt: new Date(clock + intervalMs).toISOString() });
+      if (result.passed) for (const entry of episodeKeys(state, item)) delete state.actions[entry];
       if (result.passed) performed.push(await note(key, item, 'done', `Cleared ${item.key}'s ${classification.class} blocker: ${result.probe} passed (${result.detail}); it was: ${blocker}`));
       else await standing(`${item.key} is blocked (${classification.class}); the loop re-checks it every cycle: ${result.probe} fails (${result.detail})`);
     } catch (error) {
