@@ -150,6 +150,8 @@ class Repository {
         return this.diff(pr.merged ? pr.base.sha : this.main, pr.head.sha);
       }
       if (route.endsWith('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: APP }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+      match = /^\/git\/ref\/heads\/(.+)$/.exec(route);
+      if (match) { const name = decodeURIComponent(match[1]); const branch = [...this.pulls.values()].find(entry => entry.head.ref === name); return { ref: `refs/heads/${name}`, object: { type: 'commit', sha: branch ? branch.head.sha : this.main } }; }
       throw new Error(`Unexpected request ${method} ${path}`);
     };
     return github;
