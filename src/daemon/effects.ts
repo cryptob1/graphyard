@@ -736,11 +736,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       try { return { ...withTrees, checkouts: await reclaimCheckouts(root, config) }; }
       catch (error) { return { ...withTrees, errors: [...withTrees.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
     },
-    // The decision effects exist only while the live configuration names the master's
-    // operator-agent identity. Without one the loop has no way to request anything, so the cycle
-    // sees them absent and records each routine decision as the escalation naming the two commands,
-    // instead of a request that fails on every retry; provisioning the identity brings them back
-    // on the next reload, with no restart.
+    // The decision effects exist only while the live configuration names the master's operator-agent identity. Without one the loop
+    // has no way to request anything, so the cycle sees them absent and records each routine decision as the escalation naming the
+    // two commands, instead of a request that fails on every retry; provisioning the identity brings them back on the next reload, with no restart.
     get decide() { return current().operatorAgent ? decide : undefined; },
     get approver() { return current().operatorAgent ? approver : undefined; },
     get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
@@ -768,15 +766,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
-    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
-    // wherever NOTIFY_SOCKET is, and the loop only speaks to it when the supervisor set one.
-    // Node has no unix datagram socket, so the message goes through that short-lived child, which
-    // the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until
-    // the manager has processed the message, so it cannot exit before it is attributed; on an
-    // older systemd a keep-alive can be lost to that race, which is why the packaged window is
-    // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
-    // The keep-alive is a child too: it runs through the same runner, awaited on the event loop
-    // and bounded like every other child, and a keep-alive that fails is logged by the loop.
+    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present wherever NOTIFY_SOCKET is, and the loop
+    // only speaks to it when the supervisor set one. Node has no unix datagram socket, so the message goes through that short-lived
+    // child, which the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until the manager has processed
+    // the message, so it cannot exit before it is attributed; on an older systemd a keep-alive can be lost to that race, which is why
+    // the packaged window is 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row. The keep-alive is a
+    // child too: it runs through the same runner, awaited on the event loop and bounded like every other child, and a keep-alive that fails is logged by the loop.
     // GY-437: the loop upgrades its own checkout between cycles. The executors come first,
     // through the shipped restart command — a refusal (a claim in flight, another restart's
     // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
