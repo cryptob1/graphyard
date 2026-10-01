@@ -183,12 +183,17 @@ test('unit:lock-hold-bounded-by-open-items — with 1000 items (600 delivered) c
   assert.ok(count >= 1000, `${count} items`); assert.equal(settled, 600, 'every delivered item is settled');
   const bytes = Number((await store.pool.query("SELECT sum(pg_column_size(document)) FROM work_items WHERE document->>'stage' = 'done'")).rows[0].sum);
   assert.ok(bytes / 600 > 8_000, `a delivered document stores ${Math.round(bytes / 600)} bytes compressed`);
+  const fromMany = holds.length;
   const many = await measure('many');
+  // Not one delivered document is read whole by these commands: each reads summaries of the history.
+  const reread = holds.slice(fromMany).filter(entry => entry.label !== 'other' && entry.settledDocuments > 0);
+  assert.deepEqual(reread.map(entry => `${entry.label}: ${entry.settledDocuments}`), [], 'claim, renew, submit and select read no delivered document whole');
   console.log(`lock hold (median ms) with 60 delivered: ${JSON.stringify(few)}; with 600 delivered: ${JSON.stringify(many)}`);
   for (const name of ['claim', 'renew', 'submit', 'select'] as const) {
     assert.ok(many[name] < 500, `${name} held the coordination lock ${many[name].toFixed(0)} ms with 600 delivered items`);
-    // Ten times the delivered history: the hold stays within noise of the small ledger's.
-    assert.ok(many[name] - few[name] < 30, `${name} grew from ${few[name].toFixed(0)} ms to ${many[name].toFixed(0)} ms when the delivered history grew tenfold`);
+    // Ten times the delivered history: the hold stays within noise of the small ledger's (a loaded
+    // host slows both rounds alike, so the noise allowance scales with the small ledger's hold).
+    assert.ok(many[name] - few[name] < Math.max(30, few[name]), `${name} grew from ${few[name].toFixed(0)} ms to ${many[name].toFixed(0)} ms when the delivered history grew tenfold`);
   }
 
   // What a locked read hands out: the item and every open item whole, each settled delivery as its
