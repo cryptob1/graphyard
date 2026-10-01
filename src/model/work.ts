@@ -184,8 +184,7 @@ export interface Work extends Create {
    * The last time the control plane brought this candidate onto a base branch that had moved
    * under it, or refused to because the merge conflicts. Decided and written by Graphyard
    * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
-   * `baseRefreshRequest`: the coordinator's standing request to merge a repaired base into
-   * this head (GY-528), answered by the next `baseRefresh` of it.
+   * `baseRefreshRequest`: the standing request to merge a repaired base into this head (GY-528).
    */
   baseRefresh?: BaseRefresh | null; baseRefreshRequest?: BaseRefreshRequest | null; mergeRefusal?: MergeRefusal | null; // mergeRefusal: the guarded merge's refusal of this candidate (GY-831, merge-queue.ts)
   reworkRequested: boolean;

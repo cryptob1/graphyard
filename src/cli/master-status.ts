@@ -108,8 +108,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
-  // The loop's own health comes before every work item: an absent or stalled coordinator is why
-  // nothing else on this list is moving; a cycle past its interval names its costly step.
+  // The loop's own health leads: a stalled coordinator is why nothing else here moves.
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...baseFailureAttention(cycling.baseFailures, master.baseBranch)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
