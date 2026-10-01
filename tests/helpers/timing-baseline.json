@@ -442,6 +442,7 @@
     "tests/resume-after-unblock.test.ts": 712,
     "tests/resync-nonblocking.test.ts": 1185,
     "tests/revert-recheck.test.ts": 33893,
+    "tests/risk-lanes.test.ts": 1100,
     "tests/review-convergence-faults.test.ts": 457,
     "tests/review-followups-dedupe.test.ts": 620,
     "tests/review-followups.test.ts": 8380,
