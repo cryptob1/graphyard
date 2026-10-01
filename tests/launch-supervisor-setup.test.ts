@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { awaitRuntimeStart, observeStart, SessionStartError } from '../src/master.js';
 import { paneForeground } from '../src/master/launch.js';
-import { setupLine, supervise } from '../src/supervisor.js';
+import { setupLine } from '../src/supervisor.js';
+import { workspaceCommands } from '../src/cli/workspace.js';
+import type { CliContext } from '../src/cli/context.js';
 
 /** The worker launch command, as the launcher types it into the pane. */
 const command = 'GY=/w/.graphyard/launch/graphyard-claude-1; graphyard watch GY-1023 4 -- claude "$(cat "$GY.request")"';
@@ -31,29 +33,33 @@ function supervisorPane(screen: (elapsedMs: number) => string, foreground: (elap
   return { run, elapsed: () => now - start, bounds: { clock: () => now, wait: (ms: number) => { now += ms; } } };
 }
 
-/** The line the watch supervisor prints before its first control-plane call, captured from a real supervise() run. */
+/**
+ * The lines `graphyard watch GY-N EPOCH -- …` prints, in order with its control-plane calls. Every
+ * call is refused, so the command stops at the first one: whatever it printed came before it.
+ */
 async function printedSetupLine(subject: string, epoch: number) {
-  const printed: string[] = [], calls: string[] = [];
+  const printed: string[] = [], events: string[] = [];
+  const watch = workspaceCommands.find(command => command.name === 'watch')!;
+  const refuse = async (what: string) => { events.push(`${what} after ${printed.length} line(s)`); throw new Error('control plane unavailable'); };
+  const context = {
+    command: 'watch', id: subject, args: [String(epoch), '--', 'claude', 'go'], rest: [], base: 'http://127.0.0.1:1', connection: null,
+    api: (path: string) => refuse(`api ${path}`), print: () => {}, individualToken: () => refuse('token'),
+    individualHostId: () => 'vishrog', activeCliPath: () => refuse('cli'), repositoryRoot: () => process.cwd(),
+  } as CliContext;
   const original = console.error;
-  console.error = (...values: unknown[]) => { printed.push(values.join(' ')); };
-  try {
-    const containment = { command: process.execPath, args: ['-e', ''], signal: () => {}, empty: () => true };
-    const renew = async () => ({ updatedAt: new Date().toISOString(), lease: { epoch, expiresAt: new Date(Date.now() + 2000).toISOString() } });
-    await assert.rejects(supervise('ignored', [], epoch, renew, { containment, detached: false, subject, quarantine: {
-      establish: async () => { calls.push(`establish after ${printed.length} line(s)`); },
-      revalidate: async () => { throw Object.assign(new Error('stop before launch'), { settleAllowed: false }); },
-      settle: async () => {},
-    } }), /stop before launch/);
-  } finally { console.error = original; }
-  return { printed, calls };
+  console.error = (...values: unknown[]) => { printed.push(values.join(' ')); events.push(`printed ${values.join(' ')}`); };
+  try { await assert.rejects(watch.run(context, undefined), /control plane unavailable/); }
+  finally { console.error = original; }
+  return { printed, events };
 }
 
 test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is still setting up is starting, extended to the ceiling, and quotes the supervisor\'s setup line; a shell back in the foreground with nothing printed is absent', async () => {
   // AC-2: the supervisor prints one line naming the item and epoch, before its first control-plane call.
-  const { printed, calls } = await printedSetupLine('GY-1023', 4);
+  // The line comes from argv, ahead of the item lookup, the status read and every heartbeat.
+  const { printed, events } = await printedSetupLine('GY-1023', 4);
   assert.deepEqual(printed, ['graphyard: establishing containment for GY-1023 epoch 4']);
   assert.equal(printed[0], setupLine('GY-1023', 4));
-  assert.deepEqual(calls, ['establish after 1 line(s)'], 'the line is printed before the quarantine is established');
+  assert.deepEqual(events, ['printed graphyard: establishing containment for GY-1023 epoch 4', 'api work after 1 line(s)'], 'the line is printed before the first control-plane call');
 
   // AC-1: the pane's last line is the launch command and the shell is not the foreground group:
   // the launch command is running, so the start is `starting`, never `absent`.

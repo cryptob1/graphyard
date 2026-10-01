@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { supervise, systemdContainment } from '../supervisor.js';
+import { setupLine, supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
 import { managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
@@ -239,12 +239,19 @@ export const workspaceCommands = defineCommands([
   },
   {
     name: 'watch',
-    scope: 'work',
     help: ['  watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss'],
-    async run(context, work) {
-      const { args, api, base } = context;
+    // Not work-scoped: the dispatcher's item lookup is a control-plane call, and the pane must name
+    // the item and epoch before the first one (GY-1033), so watch resolves its item itself.
+    async run(context) {
+      const { id, args, api, base } = context;
       const epoch = Number(args[0]); const separator = args.indexOf('--');
-      if (separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      if (!id || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      // Both come from argv, so the line is on screen before any call to a control plane that may
+      // be slow under coordination-lock contention: the launcher reads it as a supervisor still
+      // setting up, not a launch that never started.
+      console.error(setupLine(id, epoch));
+      const items = await api('work'); const work = items.find((w: any) => w.id === id || w.key === id);
+      if (!work) throw new Error(`Unknown work item ${id}`);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
       const hostId = context.individualHostId();
       if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
@@ -277,7 +284,7 @@ export const workspaceCommands = defineCommands([
         }
       };
       process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
-          detached: !foreground, subject: work.key,
+          detached: !foreground,
           ...(scoped ? { containment: scoped } : {}),
           quarantine: foreground ? {
             // The quarantine records the exact scope unit and supervisor pid the session is
