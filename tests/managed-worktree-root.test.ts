@@ -18,7 +18,7 @@ import { daemonSummary } from '../src/daemon/run.js';
 import { cycleFaults } from '../src/daemon/faults.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import { emptyDispatchCursor, launchingKinds, runDispatchTick, runExecutorTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { hostMemoryAttention, hostMemoryFloor, hostMemoryHold, memoryConsumers, type HostMemoryReading } from '../src/master-resources.js';
+import { hostMemoryAttention, hostMemoryFloor, hostMemoryHold, memoryConsumers, memoryRecoveryMarginBytes, type HostMemoryReading } from '../src/master-resources.js';
 import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
@@ -679,6 +679,12 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   assert.deepEqual(claims, [['resync']]);
   assert.ok(claims[0].every(kind => !launchingKinds.includes(kind)));
   assert.match(idle.reason, /launches none: host machine-a has 2\.0 GB/);
+
+  // Barely back over the floor is not recovered: the deferral lifts only past the margin, so a host hovering at it does not flap.
+  memory = { totalBytes: 62 * GiB, availableBytes: hostMemoryFloor(62 * GiB) + memoryRecoveryMarginBytes / 2 };
+  await runCycle(config, state, loopEffects(log, () => memory));
+  assert.deepEqual(log, [], 'still deferred just above the floor');
+  assert.equal(state.actions[memoryActionKey].attempts, deferred.attempts, 'no resumption is recorded inside the margin');
 
   // Recovered: the loop resumes launching and says so, and the attention clears.
   memory = recovered;

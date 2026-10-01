@@ -779,7 +779,8 @@ export async function dispatchRefusal(url: string, fetcher: typeof fetch = fetch
 export interface MemoryConsumer { command: string; processes: number; rssBytes: number }
 export interface HostMemoryReading { totalBytes: number; availableBytes: number; consumers?: MemoryConsumer[] }
 export interface HostMemoryState { host: string | null; at: string; totalBytes: number; availableBytes: number; floorBytes: number; low: boolean; since: string | null; consumers: MemoryConsumer[] }
-export const memoryFloorShare = 0.1, memoryFloorMinimumBytes = 4 * 2 ** 30;
+/** A deferral lifts only this far above the floor, so a host hovering at it does not flap launches. */
+export const memoryFloorShare = 0.1, memoryFloorMinimumBytes = 4 * 2 ** 30, memoryRecoveryMarginBytes = 2 ** 30;
 export const hostMemoryFloor = (totalBytes: number) => Math.max(totalBytes * memoryFloorShare, memoryFloorMinimumBytes);
 const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GB`;
 
@@ -820,10 +821,11 @@ export const memoryDeferral = (state: HostMemoryState) =>
 
 /**
  * Judge one reading against the last: the state the loop keeps, and the event to record when the
- * host crossed its floor — `deferred` on the way down, `resumed` on the way back up.
+ * host crossed its floor — `deferred` on the way down, `resumed` once back above it by the margin.
  */
 export function judgeHostMemory(previous: HostMemoryState | null, reading: HostMemoryReading, now: number, host: string | null = null): { state: HostMemoryState; event: 'deferred' | 'resumed' | null; detail: string } {
-  const floorBytes = hostMemoryFloor(reading.totalBytes), low = reading.availableBytes < floorBytes, at = new Date(now).toISOString();
+  const floorBytes = hostMemoryFloor(reading.totalBytes), at = new Date(now).toISOString();
+  const low = reading.availableBytes < floorBytes + (previous?.low ? memoryRecoveryMarginBytes : 0);
   const state: HostMemoryState = { host, at, totalBytes: reading.totalBytes, availableBytes: reading.availableBytes, floorBytes, low,
     since: low ? previous?.low ? previous.since : at : null, consumers: low ? reading.consumers ?? previous?.consumers ?? [] : [] };
   if (low && !previous?.low) return { state, event: 'deferred', detail: `Launches deferred: ${memoryDeferral(state)}` };

@@ -86,7 +86,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 Session-started `npm test`, `test:browser`, `npm run typecheck`, `tsc --noEmit` take a host slot in `.verification-slots` under the managed worktree root (Codex: `--add-dir`): max(2, floor(total GB / 8)), or `GRAPHYARD_VERIFICATION_SLOTS`. A run finding all held prints what it waits on. CI and your shell run unbounded.
 
-Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no session there, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers, under one `memory-pressure` fault per dip; recovery resumes launches, recorded; running sessions are untouched.
+Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch nothing there, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming top consumers, under one `memory-pressure` fault per dip; 1 GB above the floor resumes launches, recorded; running sessions are untouched.
 
 ## Bootstrap mode for a self-proving change
 
