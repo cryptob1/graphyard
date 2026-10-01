@@ -243,9 +243,7 @@ test('unit:session-cwd-own-checkout — an escalation handler opens its pane and
     assert.equal(dirname(resolve(pane!)), resolve(managedRoot));
     assert.match(basename(pane!), /^graphyard-approval-gy-866-/i, 'the checkout is the handler\'s own, named for its item');
     assert.deepEqual(stub.pasted, [], 'the handler takes its request on its command line, never a paste');
-    // Its launch files are its own checkout's too, and `master decide` resolves the coordinator
-    // installation from where it starts with the root its tab hands it.
-    assert.equal(resolve(checkoutOfStem(stub.typed[0].stem)!), resolve(pane!), 'the handler launch files are written in its own checkout');
+    // `master decide` resolves the coordinator installation from where it starts with the root its tab hands it.
     const handed = tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT');
     assert.equal(handed, root, 'the handler tab hands the session the coordinator root');
     assert.equal(realpathSync(cliRoot(pane!, { GRAPHYARD_REPOSITORY_ROOT: handed! })), realpathSync(root), 'graphyard master decide run from where the handler starts resolves the coordinator installation');

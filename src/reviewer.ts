@@ -529,6 +529,19 @@ export async function anchorSessionCheckout(root: string, directory: string, run
   try { await run('git', ['-C', root, 'worktree', 'add', '--detach', '--no-checkout', '--quiet', directory, 'HEAD']); } catch { /* the session still starts outside the coordinator checkout */ }
 }
 
+/**
+ * GY-866: an interactive approver's or escalation handler's own directory under the managed
+ * worktree root, never the coordinator checkout, anchored like a reviewer's so `gh` and `git`
+ * reads reach the repository from where it starts. Its launch hands it the coordinator root in
+ * GRAPHYARD_REPOSITORY_ROOT, which the CLI resolves the `graphyard master` commands its request
+ * runs from, since the directory holds no installation of its own.
+ */
+export async function coordinationCheckout(root: string, config: MasterConfig, key: string, sha: string | undefined, filesystem?: FilesystemProbe) {
+  const checkout = await allocateManagedCheckout(root, config, 'approval', key, sha ?? '0'.repeat(40), randomUUID(), filesystem);
+  await anchorSessionCheckout(root, checkout.directory);
+  return checkout;
+}
+
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null) {
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
