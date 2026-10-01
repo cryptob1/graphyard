@@ -25,7 +25,7 @@ Every launch runs with the checkout unwritable to shell commands (GY-888). A cod
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-A runtime that fails to start fails over too; the dispatch result and `master status` name both (`opencode-a failed to start: …; launched on claude-b`). Three consecutive start failures raise one attention item naming account and runtime; a start resets it.
+A runtime failing to start fails over too; the dispatch result and `master status` name both (`opencode-a failed to start: …; launched on claude-b`). Three consecutive start failures raise one attention item, loop included, naming account and runtime; a start resets it.
 
 On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset.
 
