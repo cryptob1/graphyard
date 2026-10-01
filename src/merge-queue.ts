@@ -1,8 +1,8 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
-import { carriedApproval, evidenceBindsCandidate, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
+import { carriedApproval, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
-import { queuedRegressions, staleTipRegressions } from './regression-guard.js';
+import { evaluateLandability, landabilityEjection, type LandabilityAudit, type LandabilityVerdict } from './model/landability.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import type { BaseBreak } from './master/base-break-refresh.js';
 import { ciCheckName } from './model/ci-refusal.js';
@@ -333,11 +333,22 @@ export interface QueueEjection {
    * `speculativeConflict` still reads from their reason.
    */
   conflict?: { base: string | null } | null;
+  /**
+   * GY-878. Whether the ejection was a landability refusal: a reason the landability verdict gives
+   * (landability.ts `eject`). Such an entry re-enters on the same head once the verdict is landable
+   * again; null keeps any other ejection's same-head stickiness. Absent only on records that
+   * predate the field, which `landabilityFamily` reads from their reason.
+   */
+  family?: 'landability' | null;
+  /** GY-878: the verdict version and inputs behind a landability ejection, for the audit trail. */
+  verdict?: LandabilityAudit;
 }
 export interface QueueHistoryEntry {
   at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
   /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
+  /** For a landability ejection (GY-878): the verdict version and inputs it was refused by. */
+  verdict?: LandabilityAudit;
   /** For an ejection: the ejection's typed conflict record (`QueueEjection.conflict`), so the audit trail tells a conflict from any other ejection without reading `reason` (GY-583). Absent on other events and on entries that predate the field. */
   conflict?: { base: string | null } | null;
 }
@@ -623,9 +634,36 @@ export interface BranchRestore {
   requested: { by: string; at: string; reason: string } | null;
   reason: string;
   performedAt: string | null;
-  /** `restored`: the branch holds `own` merged onto the base; `conflict`: it holds `own`, and the merge is the worker's; `unrepairable`: no own head could be found under the foreign commits. */
-  outcome: 'restored' | 'conflict' | 'unrepairable' | null;
+  /**
+   * `restored`: GitHub shows the branch at `own` merged onto the base tip read at the restore;
+   * `conflict`: it holds `own`, and the merge is the worker's; `unrepairable`: no own head could be
+   * found under the foreign commits; `unpublished`: GitHub does not show the branch at the commit
+   * the restore produced, and `failure` says what it shows or what refused the write (GY-854).
+   */
+  outcome: 'restored' | 'conflict' | 'unrepairable' | 'unpublished' | null;
+  /**
+   * Why the restore is not recorded done, on a `conflict` or `unpublished` one (GY-854): the
+   * conflict itself, or what GitHub showed (or refused) instead of the restored commit. Absent on
+   * records that predate the field and on every other outcome.
+   */
+  failure?: string | null;
+  /**
+   * The stable category of `failure` (GY-854): what a repeat is judged by, never the diagnostic
+   * string, whose commits move with the base tip and the produced head between attempts. Absent
+   * on records that predate the field and on every other outcome.
+   */
+  failureKind?: RestoreFailureKind | null;
+  /** How many times the restore has run for this contaminated head; absent on records that predate the count. */
+  attempts?: number;
+  /**
+   * Set when a restore failed twice without the item's candidate changing (GY-854), whatever
+   * the kinds of the two failures: the reason it stops repeating, which `master status` names.
+   * Null while the first failure stands or a retry published its result.
+   */
+  escalated?: string | null;
 }
+/** What kind of refusal or shortfall a restore's `failure` records, stable across attempts. */
+export type RestoreFailureKind = 'branch reset refused' | 'merge refused' | 'read-back failed' | 'read-back mismatch' | 'conflict';
 
 /**
  * The base a candidate stays bound to while Graphyard has not yet brought it onto a moved branch
@@ -675,9 +713,11 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   // A head found carrying another item's unlanded commits is not brought onto a moved base: a
   // repair requested for it runs first and replaces it, and a head found unrepairable would only
   // carry the foreign commits along, with the record that names the remedy (rework) replaced by
-  // a refresh that says nothing of them (GY-127).
+  // a refresh that says nothing of them (GY-127). A restore that could not publish its result is
+  // likewise held: its retry rebuilds the reviewed head onto the tip read afresh, and a refresh
+  // of the contaminated head would only build a new tip on the foreign commits (GY-854).
   const restore = currentRestore(work)?.restore;
-  if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable')) return null;
+  if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable' || restore.outcome === 'unpublished')) return null;
   return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
 }
 
@@ -996,7 +1036,7 @@ export function standingMergeRefusal(work: Work): string | null {
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
-export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [], batch: MergeBatchView | null = null, window: TipWindowView | null = null): string | null {
+export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [], batch: MergeBatchView | null = null, window: TipWindowView | null = null, now: Date = new Date(), landability?: LandabilityVerdict): string | null {
   if (!work.queue || work.stage === 'done') return null;
   // A merged entry waits for its reconciliation, which delivers it and drops it from the order.
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
@@ -1014,22 +1054,17 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const tip = candidate.sha.slice(0, 12);
   if (observation.prState === 'closed') return 'Pull request was closed without merging';
-  // A tip still built behind an entry that left without landing (GY-568) is not reverting anything
-  // of its own: when its tree shows a refused conclusion — the unlanded work of the entries it was
-  // built behind — it leaves the queue so the control plane restores it, and the reason says so.
-  // A tip whose tree shows nothing refused is not ejected: the queue rebuilds it from the item's
-  // own reviewed head instead. The gate reads the tree before the carried-items excusal (GY-871):
-  // the carried work is what the restore is for, never this entry's revert.
-  const unexcused = staleTipRegressions(work, observation, all);
-  const stale = unexcused.length ? staleSpeculativeTip(work, all) : null;
-  if (stale) return `Speculative tip ${tip} was built behind ${stale.departed.join(', ')}, which left the merge queue without landing; landing it on ${unexcused[0].base.slice(0, 12)} would carry their unlanded work (${unexcused.map(entry => entry.text).join('; ')}), so the branch is restored to its own reviewed head`;
-  // The base this entry would land on holds work its head would delete, revert or rewrite: an
-  // observed adverse conclusion about the tip, which only a new head can answer. It names every
-  // file and the item that owns it; a file the observation could not compare ejects nothing, and
-  // a file carried from another item's commits on this head is excused exactly as the build gate
-  // excuses it (GY-871), so nothing that passed build is ejected over the same files.
-  const regressions = queuedRegressions(work, observation, all);
-  if (regressions.length) return `Landing speculative tip ${tip} on ${regressions[0].base.slice(0, 12)} would revert work outside its planned files: ${regressions.map(entry => entry.text).join('; ')}`;
+  // Landability is one verdict (GY-878, model/landability.ts): the entry leaves the queue on
+  // landability grounds only for a reason that verdict gives. Its build family carries the landing
+  // guard's conclusion about the tip: a tip still built behind an entry that left without landing
+  // (GY-568) whose tree shows a refused conclusion leaves for its branch restore, and otherwise
+  // the base this entry would land on holding work its head would delete, revert or rewrite is an
+  // observed adverse conclusion only a new head can answer. A file the observation could not
+  // compare ejects nothing, and a file carried from another item's commits on this head is excused
+  // exactly as the build gate excuses it (GY-871): nothing that passed build is ejected over it.
+  const verdict = landability ?? evaluateLandability(work, all, now);
+  const landing = landabilityEjection(verdict, 'landing');
+  if (landing) return landing;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
   // never leaves an entry ejected by the failure it replaced.
@@ -1086,28 +1121,12 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // requires conversation resolution (protection drift) makes a merge GitHub cannot land.
   const threads = conversationProtectionRefusal(work);
   if (threads) return threads;
-  // Evidence binds the tip exactly or carried across a Graphyard-authored tip; either way a
-  // failure or a withdrawal of it is an adverse conclusion about this tip. One record is not:
-  // a trusted `manual:` proof whose executed is 0 (GY-868) judged nothing — it is the unexercised
-  // finding the gates read it as (producerManualFailures excludes it), answered by the attestation
-  // the loop requests for it exact or carried (unexercisedFindings reads the carry), so the entry
-  // is held for that attestation rather than ejected for a failure no rework would ever be
-  // requested for (GY-875). GY-910: that attestation is requested only for a proof a criterion of
-  // this item names (attestationDecision, attestationExercise). A proof inherited from a bootstrap
-  // obligation is named by no local criterion, and for it nothing can request that attestation —
-  // proofRework excludes every unexercised manual finding and the proof group's failed state
-  // refuses a producer relaunch — so holding the entry for it would keep this entry and every
-  // entry behind it queued forever. The hold exempts only an attestable proof; any other
-  // executed = 0 record is the adverse conclusion it reads as and ejects, so the order moves and
-  // the control plane restores the branch.
-  const proof = work.evidence.find(item => item.trusted && item.result === 'fail' && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision
-    && !(item.proof.startsWith('manual:') && item.executed === 0
-      && work.criteria.some(criterion => criterion.proofs.includes(item.proof))));
-  if (proof) return `Proof ${proof.proof} failed on speculative tip ${tip}`;
-  // A withdrawn proof is an explicit adverse conclusion, not a missing one: the entry leaves the
-  // queue instead of holding its position while everything behind it waits.
-  const revoked = work.evidence.find(item => item.trusted && !!item.revocation && evidenceBindsCandidate(work, item) && item.policyRevision === work.policyRevision);
-  if (revoked) return `Proof ${revoked.proof} was revoked on speculative tip ${tip}: ${revoked.revocation!.reason}`;
+  // A proof the verdict's acceptance family still refuses, whose evidence binding this tip (exactly
+  // or carried across a Graphyard-authored tip) failed or was withdrawn, is an adverse conclusion
+  // about the tip, not a missing one: the entry leaves instead of holding everything behind it.
+  // A trusted `manual:` proof that executed nothing (GY-868) is not one — the verdict holds the
+  // entry for the attestation a criterion of this item can request (GY-875, GY-910).
+  return landabilityEjection(verdict, 'proof');
   return null;
 }
 
@@ -1170,14 +1189,20 @@ export function branchContamination(work: Work, all: Work[]): Contamination | nu
 }
 /**
  * The restore an ejection owes: the ejected tip is still the branch head and carries entries that
- * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed.
+ * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed
+ * — except a restore that could not publish its result (GY-854): that one is retried once, with
+ * the record of the first attempt carried so a second failure escalates, whatever its kind,
+ * instead of a third attempt running. An escalated restore, or one already attempted twice, is
+ * never retried by the loop.
  */
-export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string } | null {
+export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string; previous: BranchRestore | null } | null {
   const ejection = work.queueEjection;
-  if (!ejection || ejection.sha !== work.candidate?.sha || currentRestore(work)) return null;
+  if (!ejection || ejection.sha !== work.candidate?.sha) return null;
+  const current = currentRestore(work);
+  if (current && (current.restore!.outcome !== 'unpublished' || current.restore!.escalated || (current.restore!.attempts ?? 1) >= 2)) return null;
   const contamination = branchContamination(work, all);
   if (!contamination) return null;
-  return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
+  return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}`, previous: current?.restore ?? null };
 }
 
 /**
@@ -1217,6 +1242,8 @@ export function restoringAfterEjection(work: Work, all: Work[]): string | null {
   if (!stale) return null;
   const refresh = currentRestore(work), restore = refresh?.restore;
   if (restore?.outcome === 'unrepairable') return null;
+  if (restore?.outcome === 'unpublished' && restore.escalated)
+    return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing; Graphyard's restore of the branch failed twice and stopped repeating: ${restore.failure ?? restore.escalated}. The escalation stands until what GitHub refuses is fixed or the master decides`;
   const restored = restore?.performedAt && refresh!.head && refresh!.head !== stale.tip ? refresh!.head : null;
   const own = stale.own ? `its own reviewed head ${stale.own.slice(0, 12)}` : 'its own reviewed head';
   return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing, so its tree holds their unlanded work; ${restored
