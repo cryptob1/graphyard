@@ -433,6 +433,7 @@
     "tests/registry-drives-launch.test.ts": 1797,
     "tests/registry-slot-followups.test.ts": 940,
     "tests/regression-guard.test.ts": 567,
+    "tests/release-candidate.test.ts": 2400,
     "tests/repair-lane.test.ts": 729,
     "tests/report-adapters.test.ts": 1023,
     "tests/reporter.test.ts": 445,

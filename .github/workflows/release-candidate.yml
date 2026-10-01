@@ -1,0 +1,85 @@
+name: Release candidate
+# One moving main, a frozen candidate, UAT, then that exact SHA in production (docs/delivery.md).
+# A cut tags main's tip and nothing else, so merges keep flowing while the candidate is under test.
+# Railway's uat and production environments track release/uat and release/production, never main;
+# `graphyard release` moves those branches to the candidate's exact SHA.
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      promote:
+        description: Promote the candidate to production when its UAT validation passes
+        type: boolean
+        default: true
+permissions:
+  contents: write
+concurrency:
+  # One candidate at a time; a cut that finds the previous one still under test waits its turn.
+  group: release-candidate
+  cancel-in-progress: false
+jobs:
+  cut:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      id: ${{ steps.cut.outputs.id }}
+      sha: ${{ steps.cut.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Cut a release candidate from main's tip
+        id: cut
+        run: |
+          set -euo pipefail
+          node bin/graphyard.mjs release cut --trigger "${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}" | tee cut.json
+          echo "id=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.id : ''")" >> "$GITHUB_OUTPUT"
+          echo "sha=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.sha : ''")" >> "$GITHUB_OUTPUT"
+  uat:
+    needs: cut
+    if: needs.cut.outputs.id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # The uat environment holds the UAT URL and the credential that files a failed candidate's
+    # follow-up item; it holds nothing that can write to the production repository's work.
+    environment: uat
+    steps:
+      # The suites run the candidate's own code, checked out at its exact SHA.
+      - uses: actions/checkout@v4
+        with: { ref: '${{ needs.cut.outputs.sha }}', fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Deploy the candidate's exact SHA to UAT
+        run: node bin/graphyard.mjs release uat "${{ needs.cut.outputs.id }}"
+      - name: Run the long suites against the UAT deployment and record the verdict
+        # The built-in endpoint suite probes UAT itself; every --suite command gets GRAPHYARD_UAT_URL and
+        # runs while UAT must keep serving the candidate SHA, which is checked again after the last one.
+        # A failure files one follow-up item naming the failing suite and the candidate SHA.
+        run: node bin/graphyard.mjs release validate "${{ needs.cut.outputs.id }}" --url "$UAT_URL" --wait 1200 --suite "long=npm test"
+        env:
+          UAT_URL: ${{ vars.UAT_URL }}
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+  promote:
+    needs: [cut, uat]
+    if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Promote the UAT-passed candidate to production by its exact SHA
+        run: node bin/graphyard.mjs release promote "${{ needs.cut.outputs.id }}"
+      - name: Confirm production serves the promoted SHA
+        run: node bin/graphyard.mjs release verify --url "$PRODUCTION_URL" --wait 1200
+        env:
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
