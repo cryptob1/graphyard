@@ -243,7 +243,9 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   work.scopeDecision = decision;
   // An applied request is answered and cleared, exactly as an operator widening clears it;
   // a refused one stays open, carrying its refusal, because someone still has to decide it.
-  work.scopeRequest = verdict.state === 'approved' ? null : { ...request, decision };
+  // GY-954: a partly implied ask is granted for what the rules ground and stays open for the
+  // rest — one ungrounded companion no longer refuses the paths the item already implies.
+  work.scopeRequest = verdict.state === 'approved' && !verdict.rest?.length ? null : { ...request, decision };
   if (verdict.state === 'approved') {
     // Non-weakening intent the item already carried: applied to the live attempt, which
     // keeps its lease and its containment fence exactly as an operator widening would. A wide
@@ -253,13 +255,23 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
     work.policyRevision++;
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
-    if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
-  } else {
-    // Refused and escalated: the reason is the item's blocker, so the ready gate holds it
-    // until an operator decides the scope the item does not already imply.
-    work.blocker = `${scopeRefusalBlocker}: ${verdict.reason}`;
+    if (!verdict.rest?.length) {
+      if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+      return decision;
+    }
+    // The rest is refused for exactly the paths still outside the implication, and stays open
+    // carrying that refusal: the loop routes it to the independent approver as any refusal.
+    const refusal: ScopeDecision = { state: 'refused', reason: `${verdict.rest.join(', ')} ${verdict.rest.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; the independent approver decides scope the item does not already carry`,
+      at: now.toISOString(), decidedBy: 'graphyard', waitedMs: decision.waitedMs, paths: verdict.rest, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
+    work.scopeRequest = { ...request, paths: verdict.rest, decision: refusal };
+    work.blocker = `${scopeRefusalBlocker}: ${refusal.reason}`;
     recordIntervention(work, 'blocked');
+    return decision;
   }
+  // Refused and escalated: the reason is the item's blocker, so the ready gate holds it
+  // until an operator decides the scope the item does not already imply.
+  work.blocker = `${scopeRefusalBlocker}: ${verdict.reason}`;
+  recordIntervention(work, 'blocked');
   return decision;
 }
 
@@ -1120,12 +1132,16 @@ export class Engine {
         demand(request, 'No scope request is open for this item', 404);
         demand(request!.epoch === data.epoch, 'Scope request belongs to another attempt; reload before deciding');
         // A refusal may be decided again when the rules as they stand now would approve it; an
-        // approval never is, and a refusal the current rules still give is not rewritten.
-        demand(!request!.decision || request!.decision.state === 'refused', 'This scope request was already decided');
-        demand(!request!.decision || decideScopeRequest(work, request!).state === 'approved', 'The current rules still refuse this scope request');
+        // approval never is. A refusal the current rules still give is the control plane's own
+        // standing answer, not a failure (GY-954): the loop's re-decide reads it back instead of
+        // erroring, so a cycle whose snapshot predates the answer records the refusal rather
+        // than leaving the request undecided and the item unmeasured.
+        if (!request!.decision || (request!.decision.state === 'refused' && decideScopeRequest(work, request!).state === 'approved'))
+          decision = applyScopeDecision(work, request!, now);
+        else if (request!.decision.state === 'refused') decision = request!.decision;
+        else demand(false, 'This scope request was already decided');
         demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
-        decision = applyScopeDecision(work, request!, now);
       }
       if (command === 'session') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);

@@ -150,11 +150,13 @@ export const scopeBlockedBudgetMs = 900_000;
 export const scopeDecisionSample = 10;
 /** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
 export const plannedFilesMax = 100;
-export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[] }
+export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; rest?: string[] }
 /**
  * The decision itself, computed from the item's own record: never from what the requester claims.
- * A purely additive request whose every path is implied is approved with the implication as its
- * audited reason; everything else is refused with the reason it was refused for.
+ * A purely additive request is decided per path (GY-954): every path the item implies is approved
+ * with the implication as its audited reason, and — when the ask mixed implied paths with ones
+ * nothing implies — only the rest is refused, as `rest`, so one ungrounded companion no longer
+ * refuses the whole ask. A refusal names the reason it was refused for.
  */
 export function decideScopeRequest(
   item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null },
@@ -172,17 +174,23 @@ export function decideScopeRequest(
   const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : [])];
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) }));
-  const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
-  if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
+  const granted = matched.filter(entry => entry.by), rest = matched.filter(entry => !entry.by).map(entry => entry.path);
+  // GY-954: per-path, not all-or-nothing. What the rules imply is granted in the same answer; a
+  // refusal is only for what is left, so an ask that mixes its docs and consumers with companions
+  // the rules cannot name no longer blocks the whole change behind the approver.
+  if (!granted.length) return refused(`${rest.join(', ')} ${rest.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
   // An implied ask no fold can represent under the plannedFiles cap is refused, never applied or
   // routed: the schemas hold the same bound, and no narrower fold exists to grant instead (GY-630).
   // The refusal names the action that can carry it (GY-906): a requirements revision whose
   // plannedFiles can fold or split the ask under the cap — the plain union `master scope` posts is
   // refused by that same bound, so it can never carry an ask this refusal answered.
-  const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
+  const folded = collapsePlannedFiles(item.plannedFiles ?? [], granted.map(entry => entry.path), collapseArea(item)).plannedFiles;
   if (folded.length > plannedFilesMax)
     return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); decide it with graphyard master requirements GY-N FILE REASON, whose plannedFiles can fold or split the ask under the cap — a plain union of exact paths is refused by the same bound`);
-  return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
+  const reason = `additive scope the item already implies — ${granted.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`;
+  if (!rest.length) return { state: 'approved', reason, paths: granted.map(entry => entry.path) };
+  return { state: 'approved', reason: `${reason}; the rest (${rest.join(', ')}) ${rest.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply and ${rest.length === 1 ? 'goes' : 'go'} to the independent approver`,
+    paths: granted.map(entry => entry.path), rest };
 }
 
 // ---------------------------------------------------------------------------
@@ -289,3 +297,5 @@ export function scopeDecisionReason(key: string, request: Pick<ScopeRequestState
  * outcome reader lives beside the merge of pending asks, in model/scope-collapse.ts.
  */
 export { type ScopeRequestOutcome, scopeOutcomeMessage, scopeRequestOutcome } from './scope-collapse.js';
+/** Documentation-gate tests (GY-954) live in model/scope-docs-gate.ts, within the module budget. */
+export { documentationTestGround, touchesDocumentation } from './scope-docs-gate.js';

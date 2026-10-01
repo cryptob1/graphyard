@@ -294,7 +294,11 @@ test('unit:scope-implication — an item implies the files its criteria name and
   assert.equal(ask(['AGENTS.md']).state, 'approved', 'the agent contract itself');
   assert.equal(ask([theme, 'docs/widget.md', 'README.md']).state, 'approved');
   assert.equal(ask(['src/server/routes/work.ts']).state, 'refused', 'a source file nothing implies');
-  assert.equal(ask([theme, 'src/server/routes/work.ts']).state, 'refused', 'one unimplied path refuses the whole request');
+  const mixed = ask([theme, 'src/server/routes/work.ts']);
+  assert.equal(mixed.state, 'approved', 'the implied path is granted even beside one nothing implies (GY-954)');
+  assert.deepEqual(mixed.paths, [theme]);
+  assert.deepEqual(mixed.rest, ['src/server/routes/work.ts'], 'only the unimplied path is refused, for the approver');
+  assert.match(mixed.reason, /the rest \(src\/server\/routes\/work\.ts\) is outside what this item's own criteria/);
   assert.match(ask(['docs/']).reason, /outside what this item's own criteria/);
   assert.equal(ask(['docs/']).state, 'refused', 'the documentation rule covers a guide, never a whole tree');
   assert.equal(ask(['src/widget/Layout.tsx']).state, 'refused', 'a path already planned is no widening');
@@ -340,12 +344,15 @@ test('integration:scope-redecision — a refusal the current rules would approve
   assert.equal(work.scopeRequest!.decision!.state, 'refused', 'nothing plans the docs tree yet');
   assert.ok(work.blocker?.startsWith(scopeRefusalBlocker));
   assert.equal(redecidableScopeRefusal(work), false);
-  // A standing refusal the rules still give is not rewritten, by the loop or by a direct call.
+  // A standing refusal the rules still give is not rewritten, by the loop or by a direct call:
+  // the re-decide reads the control plane's standing answer back (GY-954) instead of failing.
   await cycle(state);
   assert.equal(scopeAction(state, work, asked.scopeRequest!.at).attempts, 1);
   const still = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
-  assert.notEqual(still.status, 200, JSON.stringify(still.body));
-  assert.match(still.body.error, /current rules still refuse/);
+  assert.equal(still.status, 200, JSON.stringify(still.body));
+  assert.equal(still.body.scopeDecision.state, 'refused');
+  assert.match(still.body.scopeDecision.reason, /outside what this item's own criteria/);
+  assert.deepEqual(still.body.plannedFiles, (await reload(work.id)).plannedFiles, 'the standing answer widens nothing');
 
   // The item now plans the whole docs/ tree, so the rule implies the consumers it asked for.
   await ok(master.token, 'POST', `work/${work.id}/requirements`, { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
