@@ -101,6 +101,8 @@ export interface ScopeFile {
   path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
   previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
   baseSha?: string | null; previousBaseSha?: string | null;
+  /** The timing-baseline companion verdict (GY-1023), judged from both versions' contents where they were read. */
+  companion?: { allowed: boolean; detail: string };
 }
 export interface Observation {
   clockOffset?: { min: number; max: number };
