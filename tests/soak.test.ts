@@ -1774,32 +1774,6 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   assert.ok(master.wakes.length < cycles / 2, `wakes are events, not every cycle: ${master.wakes.length} wakes in ${cycles} cycles`);
 });
 
-test('unit:soak-invariants-hold — automatic quarantine settlement on a plane whose snapshot read is too slow to bound the clock: at most one light timed read per cycle and only while a quarantine waits, a failed read falls back to the snapshot, a persistent slow read is escalated once for the day, both dead workers\' quarantines settle, and every invariant holds', { timeout: 300_000 }, async () => {
-  // GY-795: each planned death's first attempt is a supervised launch whose quarantine outlives
-  // it. The loop verifies the dead supervisor and settles the fence through its timed clock read,
-  // so the items are offered again and delivered.
-  const day = await simulateDay({ hours: 6, containment: true });
-  const { items, final, sessions, violations, failures, cycles, escalations, containmentDay } = day;
-  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-  assert.deepEqual(failures, [], 'no cycle failed');
-  assert.equal(sessions.filter(session => session.state === 'dead').length, basePlan.deaths.size, 'two workers died');
-  const undelivered = final.filter(item => [...basePlan.deaths].some(n => items[n - 1].key === item.key) && (item.stage !== 'done' || !item.delivery));
-  assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}`), [], 'both quarantined items were offered again and delivered');
-  const readsPerCycle = new Map<number, number>();
-  for (const read of containmentDay.reads) readsPerCycle.set(read.cycle, (readsPerCycle.get(read.cycle) ?? 0) + 1);
-  assert.ok(Math.max(...readsPerCycle.values()) === 1, `at most one timed read per cycle: ${JSON.stringify([...readsPerCycle])}`);
-  assert.ok(containmentDay.reads.length <= 40 && containmentDay.reads.length < cycles / 10, `the timed read runs only while a quarantine waits to be assessed: ${containmentDay.reads.length} reads in ${cycles} cycles`);
-  const [fallsBack, slowRead] = [...basePlan.deaths].map(n => sessions.find(session => session.key === items[n - 1].key && session.attempt === 1)!);
-  assert.deepEqual(containmentDay.settled.sort(), [`${fallsBack.key}:${fallsBack.epoch}`, `${slowRead.key}:${slowRead.epoch}`].sort(), 'both dead workers\' quarantines were settled by the loop');
-  assert.equal(containmentDay.reads.filter(read => read.mode === 'failed').length, 1, 'one timed read failed');
-  assert.equal(containmentDay.reads.filter(read => read.mode === 'slow').length, containmentDay.slowReads, 'the slow reads stood for their stretch of cycles');
-  const containmentEscalations = (key: string) => escalations.filter(detail => detail.startsWith(`${key}: containment quarantine`));
-  assert.deepEqual(containmentEscalations(fallsBack.key).map(detail => /the snapshot read of the control-plane clock took 12000ms round trip, so settlement waits on a faster control-plane read, not on a clock disagreement/.test(detail)), [true],
-    `the failed read fell back to the snapshot's bound, refused once naming that read: ${containmentEscalations(fallsBack.key).join(' | ')}`);
-  assert.deepEqual(containmentEscalations(slowRead.key).map(detail => /the timed read of the control-plane clock took 6000ms round trip, so settlement waits on a faster control-plane read/.test(detail)), [true],
-    `the persistent slow read was escalated once for the whole day: ${containmentEscalations(slowRead.key).join(' | ')}`);
-});
-
 // GY-475's citation day runs before the regression day: the days share one control plane, and
 // the regression day leaves items mid-flight on purpose, whose rework a later day's loop would
 // take up with the pull request of a simulated GitHub that day can no longer reach.
@@ -1933,4 +1907,32 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+// GY-795's containment day runs last: the days share one control plane, which grows with every
+// day, so a day placed earlier would slow each later one past its own bound.
+test('unit:soak-invariants-hold — automatic quarantine settlement on a plane whose snapshot read is too slow to bound the clock: at most one light timed read per cycle and only while a quarantine waits, a failed read falls back to the snapshot, a persistent slow read is escalated once for the day, both dead workers\' quarantines settle, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-795: each planned death's first attempt is a supervised launch whose quarantine outlives
+  // it. The loop verifies the dead supervisor and settles the fence through its timed clock read,
+  // so the items are offered again and delivered.
+  const day = await simulateDay({ hours: 4, containment: true });
+  const { items, final, sessions, violations, failures, cycles, escalations, containmentDay } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.equal(sessions.filter(session => session.state === 'dead').length, basePlan.deaths.size, 'two workers died');
+  const undelivered = final.filter(item => [...basePlan.deaths].some(n => items[n - 1].key === item.key) && (item.stage !== 'done' || !item.delivery));
+  assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}`), [], 'both quarantined items were offered again and delivered');
+  const readsPerCycle = new Map<number, number>();
+  for (const read of containmentDay.reads) readsPerCycle.set(read.cycle, (readsPerCycle.get(read.cycle) ?? 0) + 1);
+  assert.ok(Math.max(...readsPerCycle.values()) === 1, `at most one timed read per cycle: ${JSON.stringify([...readsPerCycle])}`);
+  assert.ok(containmentDay.reads.length <= 40 && containmentDay.reads.length < cycles / 10, `the timed read runs only while a quarantine waits to be assessed: ${containmentDay.reads.length} reads in ${cycles} cycles`);
+  const [fallsBack, slowRead] = [...basePlan.deaths].map(n => sessions.find(session => session.key === items[n - 1].key && session.attempt === 1)!);
+  assert.deepEqual(containmentDay.settled.sort(), [`${fallsBack.key}:${fallsBack.epoch}`, `${slowRead.key}:${slowRead.epoch}`].sort(), 'both dead workers\' quarantines were settled by the loop');
+  assert.equal(containmentDay.reads.filter(read => read.mode === 'failed').length, 1, 'one timed read failed');
+  assert.equal(containmentDay.reads.filter(read => read.mode === 'slow').length, containmentDay.slowReads, 'the slow reads stood for their stretch of cycles');
+  const containmentEscalations = (key: string) => escalations.filter(detail => detail.startsWith(`${key}: containment quarantine`));
+  assert.deepEqual(containmentEscalations(fallsBack.key).map(detail => /the snapshot read of the control-plane clock took 12000ms round trip, so settlement waits on a faster control-plane read, not on a clock disagreement/.test(detail)), [true],
+    `the failed read fell back to the snapshot's bound, refused once naming that read: ${containmentEscalations(fallsBack.key).join(' | ')}`);
+  assert.deepEqual(containmentEscalations(slowRead.key).map(detail => /the timed read of the control-plane clock took 6000ms round trip, so settlement waits on a faster control-plane read/.test(detail)), [true],
+    `the persistent slow read was escalated once for the whole day: ${containmentEscalations(slowRead.key).join(' | ')}`);
 });
