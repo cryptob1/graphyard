@@ -96,7 +96,7 @@ test('unit:followups-wait-on-parent — an approval of an unshipped parent files
   assert.deepEqual(await followUpsOf(parent.key), [], 'no follow-up item exists while the parent has not shipped');
   const held = await reload(parent.key);
   assert.deepEqual(held.pendingFollowUps?.findings.map(finding => finding.text), ['src/a.ts:10 — the retry is unbounded', 'docs/x.md — stale wording']);
-  assert.ok((await events(held)).some(event => event.kind === 'followups.held'));
+  assert.ok((await events(held)).some(event => event.kind === 'followups.recorded'), 'recorded on the parent (GY-896)');
   // Listed on the parent (its document, which its page and `graphyard status` show) and in master status.
   const status = buildMasterStatus({ work: await store.list(), now: new Date().toISOString() }, [], []);
   const listed = status.pendingFollowUps.find(entry => entry.parent === parent.key)!;
@@ -260,4 +260,13 @@ test('unit:one-open-followup-any-stage — three approvals of a parent whose fol
   assert.deepEqual(followUpEntries(open[0]!).map(finding => finding.text), ['src/a.ts — the retry is unbounded', 'src/b.ts — the cache never expires', 'src/c.ts — the name hides what it counts', 'docs/x.md — stale wording']);
   assert.equal(open[0]!.description.match(/the cache never expires/g)?.length, 1, 'a finding named twice is listed once');
   assert.equal((await reload(parent.key)).pendingFollowUps ?? null, null, 'the open item took them: nothing is held on the parent');
+  // Findings recorded on the parent itself (GY-896's direct record, no `parent` flag) while that item is
+  // open are held on it; once it ships they join the open item rather than filing a second one.
+  await ok(operator, `work/${parent.key}/followups`, { findings: [{ path: 'src/d.ts', text: 'src/d.ts — recorded on the parent' }], reason: 'direct record' });
+  await deliver(parent);
+  assert.equal((await shipHeldFollowUps(await store.list(), ship)).length, 1);
+  const after = (await followUpsOf(parent.key)).filter(item => item.stage !== 'done');
+  assert.deepEqual(after.map(item => item.key), [existing.key], 'still one open follow-up item');
+  assert.equal(followUpEntries(after[0]!).at(-1)?.text, 'src/d.ts — recorded on the parent');
+  assert.equal((await reload(parent.key)).pendingFollowUps?.filed?.item, existing.key);
 });
