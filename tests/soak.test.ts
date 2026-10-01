@@ -1367,7 +1367,8 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const loopReruns = github.baseReruns.filter(entry => entry.by === 'loop').map(entry => entry.jobId);
   assert.ok(new Set(loopReruns).size === blocked.length && loopReruns.length === blocked.length, `each blocked job rerun once by the loop's remedy: ${JSON.stringify(github.baseReruns)}`);
   assert.deepEqual(Object.keys(state.baseFailures), [], 'the base failure retired once its candidates were refreshed');
-  assert.deepEqual(decideCalls.filter(call => call.action === 'rework').map(call => call.key).sort(),
+  // Distinct items: the low-lane rework (GY-883) is refused once at apply and requested again.
+  assert.deepEqual([...new Set(decideCalls.filter(call => call.action === 'rework').map(call => call.key))].sort(),
     items.filter((_, index) => basePlan.rework.has(index + 1) || index + 1 === basePlan.spentProducer).map(item => item.key).sort(),
     'the only rework decisions are the reviewers\' three and the spent producer\'s — no base-failure blocked candidate was sent back');
   // GY-500: disjoint items merged optimistically and infrastructure changes queued; the one that
