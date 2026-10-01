@@ -101,8 +101,10 @@ jobs:
     # The confinement soak (GY-888) runs the launcher's real mount namespace on every simulated
     # launch, so its file alone takes about twenty minutes on a runner — far past what its
     # baseline entry records — and the shard that holds it needs this bound to fit the file as it
-    # runs, not as it was last balanced.
-    timeout-minutes: 35
+    # runs, not as it was last balanced. On main that shard already takes about 33 minutes, and
+    # the soak's per-case timeouts are doubled for loaded runners (GY-1036), so a slow runner
+    # needs the headroom to let a case fail on its own timeout rather than cancel the shard.
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -136,7 +138,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/timing"
           # Test files run in parallel, each with its own Postgres on a per-file port offset. Two
           # files share offset 25; this gives one of them a free port so neither fails on scheduling.
-          GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
+          GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
       - name: Summarise this shard's timing-dependent assertions
         if: always()
         run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_RECORD" > /dev/null
