@@ -322,6 +322,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
   const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope;
+  // GY-793's base breakage runs on the main day only: the credential day's own blocked pushes
+  // would race the broken window it opens.
+  const baseBreakDay = mainDay && !options.credentialBlocked;
   // The documentation day's world (GY-574): the project keeps the 12,000-word budget and its base
   // sits 15 words under it, within the 3% warning — so the loop's headroom step counts it, and the
   // queue tips whose entries grow the pages are what the day judges.
@@ -522,7 +525,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const credentialBlocks = !!options.credentialBlocked && ((n === options.credentialBlocked.recovers && attempt <= 2) || n === options.credentialBlocked.never);
     const pane = herdr.open(profile.agentName, idling ? 'done' : 'working', path);
     // The base-break item's first attempt works fast and pushes inside the broken window (GY-793).
-    const pushAfterMs = mainDay && plan.baseBreak.item === n && attempt === 1 ? plan.baseBreak.pushAfterMs : plan.workMs;
+    const pushAfterMs = baseBreakDay && plan.baseBreak.item === n && attempt === 1 ? plan.baseBreak.pushAfterMs : plan.workMs;
     sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: idling ? Number.MAX_SAFE_INTEGER : clock.now() + pushAfterMs,
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
       exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
@@ -1038,7 +1041,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // pushes inside the window, so its candidate is built against the broken commit; the fix's own
     // run completes one CI duration after it, which is when the judgement can first name the tip
     // that fixed the breakage. Only the main day runs it: the other days exercise their own faults.
-    if (mainDay) {
+    if (baseBreakDay) {
       if (!baseBreak.broken && elapsed >= plan.baseBreak.brokenAt) {
         baseBreak.broken = github.commit('Break the base-branch suite', [...github.files, 'src/soak/base-broken.ts'], clock.now(), [github.tip], undefined, { broken: true }).sha;
         github.baseBreaks.add(baseBreak.broken);
