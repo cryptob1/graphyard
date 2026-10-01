@@ -15,19 +15,19 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 
 ## Blocked work unblocks itself
 
-A worker's `blocked GY-N EPOCH REASON` commits what its worktree had not committed (`WIP: GY-N attempt N blocked`) and, in the same transaction as the blocker, ends the attempt as released: the lease goes, the attempt's capacity record carries `blocked on epoch N: REASON` with the kept commit, and the next attempt's request names it. Each cycle (`blockers` step) the loop reads every standing blocker into one class (`src/model/blocker-class.ts`) and acts:
+`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`) and, in the blocker's transaction, releases the lease; the capacity record carries `blocked on epoch N: REASON` for the next attempt. Each cycle (`blockers` step) the loop classes every standing blocker (`src/model/blocker-class.ts`):
 
 | Class | Probe, every cycle | Cleared when |
 | --- | --- | --- |
-| `github-credential` | `gh auth status` and `git ls-remote origin HEAD` inside the worker's runtime sandbox, in the attempt's worktree | both pass |
-| `control-plane-error` | the server's health check | it reports healthy |
-| `sandbox-path` | the named path (or its nearest existing parent) written inside the sandbox | the write succeeds |
-| `worktree-mismatch` | whether the attempt still holds a lease | it has ended |
-| `outside-scope-test-failure` | the base branch tip | it moved past the tip first seen |
-| `planned-file-scope` | the decision step requests an additive `requirements` widening for the approver | plannedFiles cover the named files |
-| `needs-decision` | the standing decision's approver is launched if no session judges it | no decision stands requested |
+| `github-credential` | `gh auth status`, `git ls-remote origin HEAD` in the worker's sandbox and worktree | both pass |
+| `control-plane-error` | server health | healthy |
+| `sandbox-path` | write the path (or nearest parent) in the sandbox | it succeeds |
+| `worktree-mismatch` | the attempt's lease | ended |
+| `outside-scope-test-failure` | base branch tip | moved |
+| `planned-file-scope` | additive `requirements` widening requested for the approver | files covered |
+| `needs-decision` | approver launched for the standing decision | none requested |
 
-Each probe is written to the item (`POST /api/work/KEY/blocker-probe`, coordinator) when its result or detail changes and at least every five minutes; a pass clears the blocker in that write (`blocker.cleared`, naming the probe). The control plane re-classifies the blocker first and refuses to clear a `genuine` or `human-only` one, or a fourth clear in a row without a submission. Those are the only blockers `master status` and the board count as needing someone; the rest show who acts next as `Graphyard (automatic)` with the class, last probe and next probe time.
+Probes are recorded (`POST /api/work/KEY/blocker-probe`) on change or every five minutes; a pass clears the blocker (`blocker.cleared`, naming the probe). The plane refuses to clear a `genuine` or `human-only` blocker, or a fourth clear without a submission; only those count as needing someone in `master status` and the board, which show the class, last probe and next probe time.
 
 ## Supervisor died leaving a containment quarantine
 
