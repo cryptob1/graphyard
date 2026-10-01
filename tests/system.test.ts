@@ -508,12 +508,14 @@ test('revocation withdraws every accepted run for the candidate and republishes 
   assert.equal(published.length, 1);
   assert.ok(published[0].gates.some(gate => !gate.passed), 'the published check must stop reporting success for a revoked candidate');
   // Revocation is not a dead end for the proof: a fresh accepted run satisfies acceptance again.
-  // The merge queue treats the withdrawal like a failed proof, so the ejected commit itself does
-  // not re-enter; a new candidate does, at the back of the queue.
+  // The withdrawal ejected the entry as a landability refusal, and such an ejection is never
+  // sticky (GY-878): once the verdict is landable the same commit re-enters, at the back of the queue.
   w = await proven(w);
   assert.ok(w.gates.find(gate => gate.name === 'acceptance')!.passed);
-  assert.match(w.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue: Proof integration:claim-safety was revoked/);
-  assert.equal(w.mergeAuthorization ?? null, null);
+  assert.doesNotMatch(w.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
+  assert.equal(w.queueEjection, null);
+  assert.ok(w.queue, 'the same head re-entered the queue');
+  assert.equal(w.queueHistory?.findLast(entry => entry.event === 'ejected')?.reason, 'Proof integration:claim-safety was revoked on speculative tip ' + head.slice(0, 12) + ': Producer retracted both reported runs');
 });
 test('delivered work refuses revocation and keeps its authorized delivery record', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
