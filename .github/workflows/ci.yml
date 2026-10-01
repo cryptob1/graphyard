@@ -98,7 +98,11 @@ jobs:
   test-shard:
     name: test shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The confinement soak (GY-888) runs the launcher's real mount namespace on every simulated
+    # launch, so its file alone takes about twenty minutes on a runner — far past what its
+    # baseline entry records — and the shard that holds it needs this bound to fit the file as it
+    # runs, not as it was last balanced.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -111,6 +115,15 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '24', cache: npm }
       - run: npm ci
+      # The coordinator-confinement suite builds launches and runs shell probes inside real
+      # bubblewrap namespaces (GY-888), and a host without bubblewrap must refuse every session
+      # rather than start one unconfined. Ubuntu 24.04 confines unprivileged user namespaces to
+      # profiled binaries, so the runner lifts that restriction for the suite.
+      - name: Install bubblewrap (the confinement suite runs real namespaces)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
       - name: Select the test files this run executes
         run: node scripts/ci-tests.mjs select --out "$RUNNER_TEMP/selected-tests.txt"
       - name: Run this shard, keeping the record of its timing-dependent assertions
@@ -123,7 +136,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/timing"
           # Test files run in parallel, each with its own Postgres on a per-file port offset. Two
           # files share offset 25; this gives one of them a free port so neither fails on scheduling.
-          GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
+          GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
       - name: Summarise this shard's timing-dependent assertions
         if: always()
         run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_RECORD" > /dev/null

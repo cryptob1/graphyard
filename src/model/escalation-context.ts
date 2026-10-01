@@ -65,6 +65,14 @@ export interface PrecedentEntry {
   id: string; work: string; trigger: string | null; state: string; requestedBy: string; requestedAt: string; reason: string;
   approvedBy: string | null; approvalReason: string | null; outcome: string | null; refusals: number; precedent: string[]; context: string | null;
 }
+/** One applied requirements revision: the criterion facts a requirement-weakening judgement is made from (GY-873). */
+export interface RequirementRevision {
+  seq: string; at: string; actor: string;
+  /** The decision that applied this revision, when the ledger names one; a direct application names its event instead. */
+  decision: string | null;
+  /** Each criterion whose text or proofs changed, before and after; a side is null when the criterion was retired or added. */
+  changed: { id: string; before: { text: string; proofs: string[] } | null; after: { text: string; proofs: string[] } | null }[];
+}
 export interface EscalationContext {
   version: number; repository: string; key: string; action: typeof escalationAction;
   escalation: Escalation;
@@ -80,6 +88,8 @@ export interface EscalationContext {
     refusal: { escalation: Escalation; standing: Escalation[]; gates: Work['gates']; blocker: string | null; violations: string[] };
     candidate: Work['candidate']; submission: Work['submission']; lease: Work['lease']; implementers: string[];
     history: { total: number; kinds: LedgerKindCount[]; recent: HistoryEntry[]; omitted: number };
+    /** The item's requirements history as revisions of changed criteria, newest first (GY-873); absent in older contexts. */
+    requirementRevisions?: RequirementRevision[];
   };
   precedent: { action: typeof escalationAction; total: number; matching: number; detail: PrecedentEntry[]; summary: { trigger: string | null; state: string; count: number }[]; omitted: number };
   /** `assembled` is the size at the summary floor when that did not fit; `omitted` names each section the squeeze dropped. */
@@ -113,6 +123,45 @@ const precedentEntry = (decision: PrecedentDecision): PrecedentEntry => ({
   requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, reason: decision.reason, approvedBy: decision.approvedBy, approvalReason: decision.approvalReason,
   outcome: decision.outcome, refusals: decision.refusals.length, precedent: [...decision.precedent].sort(), context: decision.context,
 });
+
+// A requirements revision is bounded twice: the newest revisions kept, and each fact inside them.
+const revisionLimit = 5, revisionTextLimit = 200, revisionProofLimit = 12;
+const revisionCriteria = (value: unknown): { id: string; text: string; proofs: string[] }[] | null =>
+  Array.isArray(value) ? value.map(entry => {
+    const record = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
+    if (typeof record.id !== 'string') return null;
+    return { id: record.id, text: typeof record.text === 'string' ? record.text.slice(0, revisionTextLimit) : '',
+      proofs: Array.isArray(record.proofs) ? record.proofs.filter((proof): proof is string => typeof proof === 'string').map(proof => proof.slice(0, revisionTextLimit)).slice(0, revisionProofLimit) : [] };
+  }).filter((entry): entry is { id: string; text: string; proofs: string[] } => entry !== null) : null;
+const revisionDecision = (reason: unknown, details: Record<string, unknown>) =>
+  typeof reason === 'string' ? (/\[decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(reason)?.[1]
+    ?? (typeof details.decision === 'string' ? details.decision : null)) : null;
+
+/**
+ * The item's requirements history, read the way the ledger records it: each `requirements` event
+ * as a revision of changed criteria — before and after, retired and added sides named — and the
+ * decision that applied it, whose id an applied decision quotes in its reason. Rows arrive newest
+ * first; the newest `revisionLimit` are kept, so a requirement-weakening judgement can state this
+ * item's own revision instead of copying another item's reason (GY-873).
+ */
+export function requirementRevisions(rows: LedgerRow[]): RequirementRevision[] {
+  const revisions: RequirementRevision[] = [];
+  for (const row of rows) {
+    if (row.kind !== 'requirements' || revisions.length >= revisionLimit) continue;
+    const details = (row.details && typeof row.details === 'object' && !Array.isArray(row.details) ? row.details : {}) as Record<string, unknown>;
+    const before = revisionCriteria((details.before as Record<string, unknown> | undefined)?.criteria);
+    const after = revisionCriteria((details.intent as Record<string, unknown> | undefined)?.criteria) ?? revisionCriteria(details.criteria);
+    const changed: RequirementRevision['changed'] = [];
+    if (before && after) for (const id of [...new Set([...before.map(entry => entry.id), ...after.map(entry => entry.id)])]) {
+      const was = before.find(entry => entry.id === id) ?? null, now = after.find(entry => entry.id === id) ?? null;
+      if (!was || !now || was.text !== now.text || JSON.stringify(was.proofs) !== JSON.stringify(now.proofs))
+        changed.push({ id, before: was && { text: was.text, proofs: was.proofs }, after: now && { text: now.text, proofs: now.proofs } });
+    }
+    revisions.push({ seq: row.seq, at: row.at, actor: row.actor, decision: revisionDecision(details.reason, details), changed });
+  }
+  return revisions;
+}
+
 /** Same trigger first, newest first within each group; the order every level of the ladder cuts from. */
 export function orderPrecedent(decisions: PrecedentDecision[], trigger: EscalationTrigger) {
   const rank = (decision: PrecedentDecision) => decision.input?.trigger === trigger ? 0 : 1;
@@ -161,6 +210,7 @@ export function assembleAt(inputs: ContextInputs, level: { recent: number; detai
       refusal: { escalation, standing: standingEscalations(work), gates: work.gates, blocker: work.blocker, violations: work.violations },
       candidate: work.candidate, submission: work.submission, lease: work.lease, implementers: work.implementers ?? [],
       history: { total: inputs.history.total, kinds: inputs.history.kinds, recent: recentRows.map(summariseLedgerRow), omitted: Math.max(0, nonRoutine - recentRows.length) },
+      requirementRevisions: requirementRevisions(inputs.history.recent),
     },
     precedent: { action: escalationAction, total: ordered.length, matching: ordered.filter(decision => decision.input?.trigger === trigger).length, detail: detail.map(precedentEntry),
       summary: [...summary.values()].sort((a, b) => (a.trigger ?? '').localeCompare(b.trigger ?? '', 'en') || a.state.localeCompare(b.state, 'en')), omitted: ordered.length - detail.length },
@@ -176,7 +226,9 @@ type Draft = Omit<EscalationContext, 'fingerprint'>;
  * goals graph and history go first because they are context around the decision, and precedent
  * outranks history: a handler that knows how the same incident was decided can follow that line,
  * while one that knows the item's history but has nothing to cite cannot record anything. The
- * item's own requirements and refusal go last. Each step drops one section whole and says whether it had anything.
+ * item's own requirements and refusal go last, with the requirement revisions beside the criteria:
+ * both are what a requirement-weakening judgement reads this item's own revision from (GY-873).
+ * Each step drops one section whole and says whether it had anything.
  */
 export const contextSqueeze: readonly { section: string; drop: (document: Draft) => boolean }[] = [
   { section: 'goals.graph', drop: document => {
@@ -193,6 +245,7 @@ export const contextSqueeze: readonly { section: string; drop: (document: Draft)
   { section: 'item.refusal.standing', drop: document => document.item.refusal.standing.length > 1 && !!(document.item.refusal.standing = [document.escalation]) },
   { section: 'item.description', drop: document => !!document.item.description && !(document.item.description = '') },
   { section: 'item.criteria', drop: document => !!document.item.criteria.length && !!(document.item.criteria = []) },
+  { section: 'item.requirementRevisions', drop: document => !!document.item.requirementRevisions?.length && !!(document.item.requirementRevisions = []) },
   { section: 'item.candidate', drop: document => (!!document.item.candidate || !!document.item.submission) && !(document.item.candidate = document.item.submission = null) },
 ];
 
@@ -258,34 +311,6 @@ export function rulesRef(work: Work, baseBranch: string) {
 }
 
 // ---- The spawned handler -----------------------------------------------------------------------
-/**
- * A handler's judgement: the resolve decision it requests, the reason, and the precedent it relied
- * on. `followPrecedent` is the built-in judgement: adopt the newest applied decision of the same
- * trigger and cite it. A decision's reason is a claim about one kind of incident, so an applied
- * decision of another trigger is never adopted — it stays in the context for a judging session to
- * weigh — and with no applied precedent of its own trigger the judgement declines rather than
- * invent a line.
- */
-export interface EscalationJudgement { trigger: EscalationTrigger; reason: string; precedent: string[]; followed: PrecedentEntry | null }
-export function followPrecedent(context: EscalationContext): EscalationJudgement | null {
-  const followed = context.precedent.detail.find(entry => entry.state === 'applied' && entry.trigger === context.escalation.trigger);
-  if (!followed) return null;
-  const line = followed.reason.replace(/^Following precedent [0-9a-f-]+ on GY-\d+ \([^)]*\): /, '');
-  return { trigger: context.escalation.trigger, precedent: [followed.id], followed,
-    reason: `Following precedent ${followed.id} on ${followed.work} (${followed.trigger ?? context.action}, ${followed.state}): ${line}`.slice(0, 2000) };
-}
-export type EscalationJudge = (context: EscalationContext) => Promise<EscalationJudgement | null> | EscalationJudgement | null;
-export interface DecisionRequest { action: typeof escalationAction; input: { trigger: EscalationTrigger; expectedRevision: number }; reason: string; precedent: string[]; context: string }
-export interface HandledEscalation { key: string; trigger: EscalationTrigger; fingerprint: string; judgement: EscalationJudgement | null; request: DecisionRequest | null; decision: unknown; declined: string | null }
-/**
- * Run one handler: it sees the assembled context and nothing else, judges, and records its decision
- * request with the reason, the precedent it cites and the fingerprint of the context it judged
- * from, so a later handler can follow the same line and an auditor can rebuild what it saw.
- */
-export async function handleEscalation(context: EscalationContext, judge: EscalationJudge, record: (request: DecisionRequest) => Promise<unknown>): Promise<HandledEscalation> {
-  const judgement = await judge(context);
-  const base = { key: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, judgement };
-  if (!judgement) return { ...base, request: null, decision: null, declined: `No applied ${context.action} precedent of the ${context.escalation.trigger} trigger to follow among ${context.precedent.total} recorded decision(s); a judging session decides this escalation` };
-  const request: DecisionRequest = { action: escalationAction, input: { trigger: judgement.trigger, expectedRevision: context.item.revision }, reason: judgement.reason, precedent: judgement.precedent, context: context.fingerprint };
-  return { ...base, request, decision: await record(request), declined: null };
-}
+// The built-in judgement and the handler that records it live beside, in escalation-judgement.ts;
+// this module re-exports them, since every reader of the context reads the judgement with it.
+export { type EscalationJudgement, followPrecedent, followOwnRevision, type EscalationJudge, type DecisionRequest, type HandledEscalation, handleEscalation } from './escalation-judgement.js';

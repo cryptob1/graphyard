@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
@@ -20,6 +18,7 @@ import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-106: an item may not hold a failing gate with no action computed and nobody told.
@@ -50,7 +49,7 @@ before(async () => {
   // An offset no other test file takes: two files sharing a port fail whichever starts its
   // Postgres second, in its `before` hook, with no reason given.
   const port = Number(process.env.GRAPHYARD_ACTION_TOTALITY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 106);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-action-totality-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-totality'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [CI_APP], 120, 'owner/project');
@@ -217,6 +216,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'reviewer roster spent', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'agent', reviewerProfiles: profiles }, observation: { ...unproven.observation!, reviews: [] },
       reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'timeout', reason: 'the reviewer session timed out', at: now.toISOString(), sha: head, baseSha: base, policyRevision: unproven.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work },
     { name: 'a required check failed', work: { ...unproven, observation: { ...unproven.observation!, checks: [{ name: 'test', result: 'failure', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }] } } as Work },
+    { name: 'a check only branch protection requires failed', work: { ...unproven, observation: { ...unproven.observation!, requiredChecks: [{ name: 'secrets', appId: null }], checks: [...unproven.observation!.checks, { name: 'secrets', result: 'failure', appId: CI_APP }] } } as Work },
     { name: 'a required check has not answered', work: { ...unproven, observation: { ...unproven.observation!, checks: [] } } as Work },
     { name: 'no trusted evidence', work: unproven },
     { name: 'an inherited bootstrap obligation', work: unproven, all: [deferrer, unproven] },

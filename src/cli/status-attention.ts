@@ -1,4 +1,6 @@
-import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
+import { agentOwner, humanOwner, installationOwner, type AttentionItem } from '../master.js';
+import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
+import { docsHeadroomStatus } from '../daemon/faults.js';
 import type { Work } from '../model.js';
 import { mergeStalls } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
@@ -8,20 +10,36 @@ import { elapsed } from '../model/sessions.js';
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
 
 /**
- * One attention item per requested decision whose approver could not be launched (GY-101). A
- * decision changes nothing until a session judges it, and a launch the runtime refuses — for a
+ * One attention item per requested decision whose approver could not be launched (GY-101, GY-849).
+ * A decision changes nothing until a session judges it, and a launch the runtime refuses — for a
  * name it will not take, a credential it cannot read, a workspace that is gone — leaves the watch
- * standing with a session that never started. `master status` used to show that as a decision
- * "waiting for approver session NAME to judge it", naming a session nobody could find. It is
- * named here as what it is, with the loop's own refusal and the command that launches it again.
+ * standing with a session that never started. A launch that fails due to approver capacity
+ * (all accounts spent, role concurrency limit reached) is not counted against the launch bound;
+ * the loop relaunches it when capacity frees, oldest decision first. `master status` shows both
+ * as needing attention: one awaiting relaunch, one waiting for a slot. The capacity wait is kept
+ * on the watch only while it is the newest launch state (GY-920): a later launch — adopted,
+ * failed for another reason, or successful — clears it, so the classification here follows the
+ * launch rather than a wait that is over.
  */
 export function approverLaunchAttention(daemon: {
-  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null }[];
+  approvals?: { key: string; work: string; action: string; decision: string; agentName: string | null; launches: number; launchedAt: string | null; requestedAt: string; settledAt: string | null; capacity?: string | null }[];
   actions?: { key: string; kind: string; state: string; detail: string; at: string }[];
 }): AttentionItem[] {
   const actions = daemon.actions ?? [];
   return (daemon.approvals ?? []).flatMap(watch => {
     if (watch.settledAt) return [];
+    // GY-849: Decisions waiting for approver capacity (not counted against launch attempts) are
+    // shown as waiting for a slot with the live sessions holding the role, not as stalled.
+    // GY-920: the wait is classified only while it is still the newest launch state. A watch whose
+    // launch went on anyway — an adopted session, or one the loop holds in flight — is classified
+    // by that launch below, never by a wait the launch superseded.
+    if (watch.capacity && !watch.agentName) {
+      // GY-849: the wait is the loop's to clear — it relaunches the decision itself, oldest
+      // waiting decision first, once an account or slot frees — so the remedy names no command:
+      // a hand `master approver` here would race the relaunch the watch already covers.
+      return [{ subject: watch.work, text: `${watch.work} is waiting for approver capacity to relaunch ${watch.action} decision ${watch.decision}: ${watch.capacity}`,
+        ...agentOwner('master', `nothing to run: the loop relaunches ${watch.decision} itself, oldest waiting decision first, when capacity frees`, 'approver') }];
+    }
     // The loop records a refused launch under the decision it was requested for (the request that
     // could not reach an approver) or under that launch's own key (a replacement that could not).
     const since = Date.parse(watch.launchedAt ?? watch.requestedAt);
@@ -85,6 +103,29 @@ export function routedScopeRequests(approvals: readonly { work: string; action: 
   return (work: { key: string; scopeRequest?: { epoch: number; at: string } | null }) => !!work.scopeRequest && routed.has(`${work.key}:${work.scopeRequest.epoch}:${work.scopeRequest.at}`);
 }
 
+/** The deployed generated-file manifest against the repository's, as installation attention; an unreadable manifest is the master's to fix. */
+export function generatedFilesAttention(root: string, coordinator: any): AttentionItem[] {
+  const generatedFiles: AttentionItem[] = [];
+  try {
+    const deployed = coordinator?.delegationLimits?.deployed?.[generatedFilesVariable];
+    for (const text of generatedFilesDrift(deployed, generatedFilesAssignment(root))) generatedFiles.push({ subject: 'installation', text, ...installationOwner('delegation-limits', text) });
+  } catch (error) {
+    generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
+      ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
+  }
+  return generatedFiles;
+}
+
 /** A merge pending past five minutes on a head GitHub reports mergeable, with no refusal (GY-344). */
 export const mergeStallAttention = (snapshot: { work: Work[]; now: string }): AttentionItem[] =>
   mergeStalls(snapshot.work, Date.parse(snapshot.now)).map(stall => ({ subject: stall.key, text: stall.text, ...agentOwner('master', stall.next) }));
+
+/**
+ * The documentation word budget on the base branch (GY-574), as `reportedAttention` carries it: the
+ * reading, with its attention pushed onto the installation attention it lands beside.
+ */
+export async function docsBudgetAttention(root: string, baseBranch: string, onto: AttentionItem[]) {
+  const docs = await docsHeadroomStatus(root, baseBranch);
+  onto.push(...docs.attention);
+  return docs.docs;
+}

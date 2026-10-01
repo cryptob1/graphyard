@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, utimes, writeFile, mkdir } from 'node:fs/promises';
-import { tmpdir, hostname } from 'node:os';
+import { readFile, rm, utimes, writeFile, mkdir } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { currentAgents, dispatchReservationDirectory, dispatchReserved, dispatchedFile, profileLaunchedFile, removeJudged, reserveDispatch, takeOverStale } from '../src/master/dispatch-reservation.js';
 // @ts-expect-error The standalone executor is a dependency-free entry point script.
 import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import type { HerdrAgent, WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-356: the follow-ups from the approved review of GY-273's dispatch reservation.
 const profile = { name: 'codex-a', agentName: 'agent-codex-a' } as WorkerProfile;
@@ -15,7 +16,7 @@ const item = (epoch = 0) => ({ key: 'GY-1', epoch } as Work);
 const hour = 3_600_000;
 
 test('unit:stale-takeover-keeps-a-fresh-lock — a dispatcher that judged a lock stale never removes the lock a faster takeover created', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-takeover-'));
+  const root = await temporaryDirectory('takeover');
   try {
     const directory = dispatchReservationDirectory(root);
     await mkdir(directory, { recursive: true });
@@ -58,7 +59,7 @@ test('unit:stale-takeover-keeps-a-fresh-lock — a dispatcher that judged a lock
 
 // GY-509: a live dispatcher that stalls past the takeover guard's age between its read and its removal.
 test('unit:stalled-takeover-removes-only-what-it-judged — removal judges the lock it moved aside, never a lock created during a stall', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-stall-'));
+  const root = await temporaryDirectory('stall');
   try {
     const lock = join(root, 'work-GY-1.lock');
     const old = new Date(Date.now() - hour);
@@ -84,7 +85,7 @@ test('unit:stalled-takeover-removes-only-what-it-judged — removal judges the l
 });
 
 test('unit:launch-marker-ignores-clock-skew — a profile launch marker re-reads Herdr whatever the control plane clock says', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-skew-'));
+  const root = await temporaryDirectory('skew');
   try {
     await mkdir(dispatchReservationDirectory(root), { recursive: true });
     const snapshot: HerdrAgent[] = [];

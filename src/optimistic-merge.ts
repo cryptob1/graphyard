@@ -30,8 +30,8 @@ declare module './model/work.js' {
     optimistic?: OptimisticLane | null;
     /** Every optimistic merge of this item, oldest first, each with its post-merge verdict and any revert. */
     optimisticMerges?: OptimisticMerge[];
-    /** Why a delivered item was reopened for a rework round, when it was: the failure its revert attaches. */
-    reopened?: { reason: string; at: string; source: 'optimistic-revert' } | null;
+    /** Why a delivered item was reopened for a rework round, when it was: the failure its revert attaches, and the delivery the revert withdrew. */
+    reopened?: { reason: string; at: string; source: 'optimistic-revert'; delivery: { pr: number; mergeSha: string; mergedAt: string } } | null;
   }
 }
 
@@ -108,6 +108,38 @@ export type OptimisticEligibility = { eligible: true; lane: Omit<OptimisticLane,
 const listed = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join(', ')} and ${paths.length - 6} more` : paths.join(', ');
 
 /**
+ * Everything the guard reads off one item, as one comparable token: its stage, its delivered merge
+ * and, for every optimistic merge, its verdict and where its revert stands. Two readings of the
+ * same array agree on the guard exactly when every item's token is unchanged.
+ */
+const guardToken = (work: Pick<Work, 'stage' | 'delivery' | 'optimisticMerges'>) => {
+  const merges = work.optimisticMerges;
+  return `${work.stage}|${work.delivery?.mergeSha ?? ''}|${merges ? merges.map(merge => `${merge.mergeSha},${merge.mergedAt},${merge.postMerge?.verdict ?? ''},${merge.revert ? `${merge.revert.state},${merge.revert.pr ?? ''},${merge.revert.resolvedBy?.sha ?? ''}` : '-'}`).join(';') : ''}`;
+};
+/**
+ * The guard state of one evaluation pass, computed once per distinct reading of `all`.
+ * `Engine.evaluate` judges every item of a pass against the same array, so recomputing the window
+ * per item made one pass O(n²) in work items (GY-518); here the first call computes and the rest
+ * revalidate against the tokens above, which costs each call one pass over the items and nothing
+ * more. A mutated item changes its token, so the state is recomputed — a caller that carries
+ * mutations within one pass still reads the guard those mutations stand on, never a stale one.
+ */
+const passGuards = new WeakMap<readonly unknown[], { tokens: WeakMap<object, string>; guard: GuardState }>();
+const passGuard = (all: Parameters<typeof mainGuard>[0]): GuardState => {
+  let cache = passGuards.get(all);
+  if (!cache) { cache = { tokens: new WeakMap(), guard: mainGuard(all) }; for (const work of all) cache.tokens.set(work, guardToken(work)); passGuards.set(all, cache); return cache.guard; }
+  for (const work of all) {
+    if (cache.tokens.get(work) !== guardToken(work)) {
+      cache.guard = mainGuard(all);
+      cache.tokens = new WeakMap();
+      for (const item of all) cache.tokens.set(item, guardToken(item));
+      break;
+    }
+  }
+  return cache.guard;
+};
+
+/**
  * Whether an entry may merge optimistically now. Every condition must hold:
  * - optimistic mode is on (`mergeQueue.optimistic`, default on);
  * - every gate passes on the entry's own head (`gatesPass`, which placeInQueue decides) and the
@@ -148,7 +180,7 @@ export function optimisticEligibility(work: Work, all: Work[], input: { enabled:
     const overlap = files.filter(path => other.optimistic!.files.includes(path));
     if (overlap.length) reasons.push(`${other.key} is merging optimistically over the same files: ${listed(overlap)}`);
   }
-  const red = mainGuard(all);
+  const red = passGuard(all);
   if (red.state !== 'green' && red.state !== 'pending') reasons.push(`Main is red after an optimistic merge (${describeGuard(red)}); optimistic merges wait until it is green`);
   if (reasons.length) return { eligible: false, reasons };
   return { eligible: true, lane: { head: candidate.sha, baseSha: candidate.baseSha, baseTip: observation.baseTip!, files, baseChanges: [...baseChanges!].sort(), policyRevision: work.policyRevision } };
@@ -361,12 +393,15 @@ export function reopenReverted(work: Work, revert: OptimisticRevert, now: Date):
   // Counted while the submission still stands: a reopened delivery is a rework round.
   recordRework(work, now);
   work.stage = 'ready'; work.stageEnteredAt = now.toISOString();
+  // The delivery is withdrawn with the merge, but what it shipped is kept on the reopen record:
+  // consumers that assume a done item keeps its delivery can read here what was taken back.
+  const delivery = { pr: merge.pr, mergeSha: merge.mergeSha, mergedAt: work.delivery!.mergedAt };
   delete work.delivery; work.optimistic = null;
   work.submission = null; work.candidate = null; work.observation = null;
   work.mergeAuthorization = null; work.mergeExecution = null; work.reviewRequest = null;
   work.queue = null; work.queueEjection = null;
   work.reworkRequested = false;
-  work.reopened = { reason: reworkReason(work, merge, revert), at: now.toISOString(), source: 'optimistic-revert' };
+  work.reopened = { reason: reworkReason(work, merge, revert), at: now.toISOString(), source: 'optimistic-revert', delivery };
 }
 export function reworkReason(work: Pick<Work, 'key'>, merge: Pick<OptimisticMerge, 'pr' | 'mergeSha'>, revert: Pick<OptimisticRevert, 'failing' | 'pr' | 'mergeSha' | 'kept'>): string {
   return `${work.key}'s optimistic merge (PR #${merge.pr}, ${merge.mergeSha.slice(0, 12)}) broke main: ${revert.failing.join(', ') || 'the required checks failed'} on its merge commit. It was reverted${revert.pr ? ` by PR #${revert.pr}` : ''}${revert.mergeSha ? ` (${revert.mergeSha.slice(0, 12)})` : ''}${revert.kept.length ? `; ${revert.kept.join(', ')} stayed on main` : ''}. Fix the failure on a new pull request from the current base`;
@@ -403,7 +438,7 @@ export function optimisticMetrics(all: Pick<Work, 'id' | 'key' | 'stage' | 'deli
   });
   const guard = mainGuard(all);
   return {
-    enabled, merges: merges.length, reverts: merges.filter(merge => merge.revert && merge.revert.state !== 'refused').length,
+    enabled, merges: merges.length, reverts: merges.filter(merge => merge.revert?.state === 'merged').length,
     postMerge: { passed: merges.filter(merge => merge.postMerge?.verdict === 'pass').length, failed: merges.filter(merge => merge.postMerge?.verdict === 'fail').length,
       pending: merges.filter(merge => !merge.revert && (!merge.postMerge || merge.postMerge.verdict === 'pending')).length },
     timeToMerge: { optimistic: timing(optimistic), queued: timing(queued) },

@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +10,7 @@ import { cycleCost, daemonSummary, emptyCycleSteps, emptyDaemonState, loopAttent
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { cycleBudget } from '../src/cli/master-status.js';
 import { listHerdrAgents, masterConfigSchema, startAgentSession, type HerdrAgent, type MasterConfig, type MasterRun, type ProducerProfile, type WorkerProfile } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error The standalone executor is a dependency-free entry point script.
 import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import type { DispatchRequest } from '../src/model/dispatch.js';
@@ -52,8 +52,8 @@ function effects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
     ...overrides,
   };
 }
-async function privateDirectory(prefix: string) {
-  const directory = await mkdtemp(join(tmpdir(), prefix));
+async function privateDirectory(label: string) {
+  const directory = await temporaryDirectory(label);
   const token = join(directory, 'coordinator.token');
   await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   return { directory, token };
@@ -161,7 +161,7 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
 });
 
 test('integration:snapshot-read-unblocked-by-launch — while the dispatcher waits thirty seconds on a Herdr session start, a cycle beside it reads its snapshot in under two seconds and completes without a failure', async () => {
-  const { directory, token } = await privateDirectory('graphyard-unblocked-');
+  const { directory, token } = await privateDirectory('unblocked');
   const herdr = await slowHerdr(directory, 30_000);
   const run = childRunner({ timeoutMs: 60_000, env: { ...process.env, PATH: herdr.path } });
   // A control plane on this host: the snapshot is a real HTTP read with the loop's own bound.
@@ -243,7 +243,7 @@ test('unit:child-wait-attributed — every cycle step reports its own childWaitM
 
   // A cycle whose dispatch step spent eighty seconds waiting on a child (a launch) and eight
   // hundred milliseconds of its own work: the step says so, and so does the cycle.
-  const { directory, token } = await privateDirectory('graphyard-attributed-');
+  const { directory, token } = await privateDirectory('attributed');
   try {
     const master = config(token, { run: { intervalSeconds: 20 }, workers: [{ name: 'launch', principal: 'worker-a', agentName: 'agent-launch', mode: 'launch', kind: 'codex', credentialFile: token, agentArgs: [], approvals: 'auto', environment: {} } as WorkerProfile] });
     let now = clock, pending = 0;

@@ -21,6 +21,7 @@ import { eventStats } from '../../store/snapshot-delta.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
+import { snapshotPage } from '../../store/paged-snapshot.js';
 
 /** Control-plane status and the work reads every client polls. */
 export const statusRoutes = defineRoutes('status', [
@@ -95,6 +96,17 @@ export const statusRoutes = defineRoutes('status', [
       const work = operatorVisible(await engine.store.list());
       return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
         production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds });
+    },
+  },
+  {
+    // The installation and the App's requested permissions, read now with the App's own credential
+    // (GY-964): `master browser app-permissions` and `installation-accept` decide and verify from
+    // this, never from whatever the operator's gh token happens to be scoped to see.
+    method: 'GET', path: '/api/github/installation',
+    async handle({ actor, services: { github } }) {
+      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+      demand(github, 'GitHub is not configured on this control plane', 503);
+      return github.installationState();
     },
   },
   {
@@ -179,6 +191,26 @@ export const statusRoutes = defineRoutes('status', [
         const visibleWork = operatorVisible(snapshot.work);
         return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
       };
+      // Paging (GY-864): a reader that must still walk every document — an export, a migration —
+      // asks for `cursor` (the number of the work item it last saw, the suffix of its key) and
+      // `pageSize`, and streams page by page. The page is chosen in the database, so a page reads
+      // only its own documents, never the whole ledger. Only a request that names one of the two
+      // is paged; every other response is what it always was, so no reader is truncated
+      // silently. The coordination view, the loop's own bounded poll, is not paged.
+      const cursorParam = url.searchParams.get('cursor'), pageSizeParam = url.searchParams.get('pageSize');
+      const maxPageSize = 1000, defaultPageSize = 100;
+      if (cursorParam !== null || pageSizeParam !== null) {
+        const cursor = cursorParam === null ? undefined : Number(cursorParam);
+        const pageSize = pageSizeParam === null ? defaultPageSize : Number(pageSizeParam);
+        demand(cursor === undefined || Number.isSafeInteger(cursor) && cursor >= 0, 'cursor must be a work item number', 400);
+        demand(Number.isSafeInteger(pageSize) && pageSize >= 1 && pageSize <= maxPageSize, `pageSize must be an integer from 1 to ${maxPageSize}`, 400);
+        demand(view !== 'coordination', 'the coordination view is not paged; it is the bounded read the loop polls', 400);
+        // A scoped operator agent's page is chosen from its own work, so the cursor and `hasMore`
+        // disclose nothing of the items outside its scope.
+        const visible = actor.role === 'operator-agent' && !actor.scope?.workItems.includes('*') ? actor.scope?.workItems ?? [] : undefined;
+        const page = scope(await snapshotPage(services.engine.store.pool, view as 'bounded' | 'full', { cursor, pageSize, visible }));
+        return view === 'bounded' ? { ...page, view } : page;
+      }
       if (view === 'bounded') return { ...scope(await boundedSnapshot(services.engine.store.pool)), view };
       if (view === 'full') return scope(await services.engine.store.workSnapshot());
       // The coordination view is trimmed in the database (GY-185): the histories it bounds never

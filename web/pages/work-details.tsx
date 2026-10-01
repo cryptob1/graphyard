@@ -10,6 +10,7 @@ import { assignment } from '../../src/model/assignment';
 import { CandidatePr, CandidateSha, shortShas } from '../candidate';
 import EvidenceArtifacts from '../components/evidence-artifacts';
 import PostDeployment from '../components/post-deployment';
+import TestCases from '../components/test-cases';
 import StatusAge from '../components/status-age';
 import Term, { Explained } from '../components/term';
 import { age } from '../../src/model/format';
@@ -20,6 +21,7 @@ import { plainStatus } from '../../src/model/plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, describeTip, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
+import { blastRadius } from '../../src/model/blast-radius';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -42,7 +44,8 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
  * section answers one question, in this order: What is left (one plain line per unmet
  * requirement, grouped by step, naming who clears it; gate reasons only through `plainReason`),
  * Requirements (one line per criterion with its met or pending mark, the full text on expand),
- * Pull request (link, commit, changed files, checks, review) and Activity (the latest events, the
+ * Pull request (link, commit, changed files, checks, review), Test cases (the e2e cases linked to
+ * the pull request, with their result on its head, GY-162) and Activity (the latest events, the
  * full history on expand). Everything technical — gate internals, sessions and their attach
  * commands, review provider, next action and executors, agent requests, evidence — is in one
  * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
@@ -108,6 +111,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const checks = checkStates(item, release.ciAppIds);
   // The review gate's own verdict, whichever provider gave it (GitHub, Codex or an agent reviewer).
   const reviewGate = item.gates.find(g => g.name === 'review');
+  // What merging it would reach and what could take it back (GY-972), from its scope and gates.
+  const radius = blastRadius(item);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
@@ -144,7 +149,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
       </dl> : <p className="muted">No pull request yet.</p>}
+      {item.candidate && <details className={`blast-radius danger-${radius.danger}`}><summary>{radius.headline}</summary><ul>{radius.sentences.map(sentence => <li key={sentence}>{sentence}</li>)}</ul></details>}
     </section>
+    <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}
       <details className="full-history"><summary>{historyLabel(events.length)}</summary><History key={item.id} events={events}/></details>

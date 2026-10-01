@@ -1,6 +1,7 @@
 import { deliveryState, type Gate, type Work } from '../model.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
+import { ciCheckRefusalPattern } from './ci-refusal.js';
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
 
 /**
@@ -48,7 +49,7 @@ export function plainReason(reason: string, gate: string): { text: string; stuck
     [/^A new independent GitHub approval after the requirement-review baseline/, () => 'Waiting for a fresh approval on GitHub, because the requirements changed'],
     [/^Independent approval of the current commit is required$/, () => 'Waiting for someone else to approve the latest code'],
     [/^Outstanding change requests must be resolved/, () => 'A reviewer asked for changes'],
-    [/^Required CI check (.+) has not passed on the current candidate$/, m => `Automated check “${m[1]}” has not passed yet`],
+    [ciCheckRefusalPattern, m => `Automated check “${m[1]}” has not passed yet${m[2] ? `; rerun: ${m[2]}` : ''}`],
     [/^(AC-\d+): (\S+) needs trusted passing evidence[^;]*(; previously accepted evidence was revoked)?/, m => `${m[1]} is not proven yet (${m[2]})${m[3] ? ' — an earlier proof was withdrawn' : ''}`],
     [/^Bootstrap obligation inherited from (\S+) (\S+): (\S+) needs/, m => `Owes the proof ${m[3]} that ${m[1]} put off`],
     [/^Trusted (\S+) evidence from (\S+) is no longer independent/, m => `The ${m[1]} proof no longer counts: ${m[2]} later worked on this item`, true],

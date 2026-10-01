@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { classify, shippedThisWeek } from '../groups';
 import { releaseView } from '../../src/model/release';
 import { prSteps, stepIds, stepLabel, type StepId } from '../../src/model/pr-steps';
@@ -206,16 +206,19 @@ export function flowNow(work: Dashboard['work'], now: number, status: Dashboard[
 
 /** The dots one Now column shows before its '+N more' control (GY-705); the step header above it carries the column's full count. */
 export const nowColumnLimit = 12;
-/** How many Now dots wrap into one row of a step column. */
+/** Initial density before the lane is measured (also used by server rendering). */
 export const nowPerRow = 2;
-const nowRowHeight = 22;
+const nowRowHeight = 28;
+/** Reserve a 24px target plus spacing, or enough room for a labelled pill. */
+export const nowRowCapacity = (width: number, compact: boolean) =>
+  Math.max(1, Math.min(nowColumnLimit, Math.floor(width / stepIds.length / (compact ? 28 : 88))));
 /** Where the `index`th dot of a step column stands: its wrapped row, and its slot in that row. */
-const nowSlot = (step: StepId, index: number) => `${(stepIds.indexOf(step) + (index % nowPerRow + 0.5) / nowPerRow) / stepIds.length * 100}%`;
+const nowSlot = (step: StepId, index: number, nowPerRow: number) => `${(stepIds.indexOf(step) + (index % nowPerRow + 0.5) / nowPerRow) / stepIds.length * 100}%`;
 const nowTop = (row: number) => `${10 + row * nowRowHeight}px`;
 
 /**
  * The Now view (GY-705): every item in the flow at its true step, its column wrapping the dots
- * `nowPerRow` to a row and showing at most `nowColumnLimit` of them before a '+N more' control
+ * to the measured width and showing at most `nowColumnLimit` of them before a '+N more' control
  * that expands the column (and folds it again). The lane is only as tall as its fullest shown
  * column, and CSS caps it (an expanded column scrolls inside it), so a busy step never makes the
  * panel tall. A dot is keyed by its item, so it moves only when that item changes step.
@@ -227,19 +230,32 @@ export function NowLane({ entries, blocked, expanded, onToggle, onSelect }: {
   onToggle: (step: StepId) => void;
   onSelect: (id: string) => void;
 }) {
+  const laneRef = useRef<HTMLDivElement>(null);
+  const [perRow, setPerRow] = useState(nowPerRow);
+  useEffect(() => {
+    const lane = laneRef.current;
+    if (!lane) return;
+    const compact = window.matchMedia('(max-width:1250px)');
+    const measure = () => setPerRow(nowRowCapacity(lane.clientWidth, compact.matches));
+    const observer = new ResizeObserver(measure);
+    observer.observe(lane);
+    compact.addEventListener('change', measure);
+    measure();
+    return () => { observer.disconnect(); compact.removeEventListener('change', measure); };
+  }, []);
   const columns = stepIds.map(step => {
     const all = entries.filter(entry => entry.steps.current === step);
     const open = expanded.has(step) && all.length > nowColumnLimit;
     return { step, all, open, shown: open ? all : all.slice(0, nowColumnLimit) };
   });
   // A column with more than the limit gives its control a row of its own under its dots.
-  const rows = Math.max(1, ...columns.map(({ all, shown }) => Math.ceil(shown.length / nowPerRow) + (all.length > nowColumnLimit ? 1 : 0)));
-  return <div className="flow-lane now-lane" data-flow="now" style={{ height: `${20 + rows * nowRowHeight}px` }}>
+  const rows = Math.max(1, ...columns.map(({ all, shown }) => Math.ceil(shown.length / perRow) + (all.length > nowColumnLimit ? 1 : 0)));
+  return <div ref={laneRef} className="flow-lane now-lane" data-flow="now" style={{ height: `${20 + rows * nowRowHeight}px` }}>
     {columns.flatMap(({ step, all, open, shown }) => [
       ...shown.map(({ item, steps }, index) => <button type="button" key={item.id} className={`now-dot group-${blocked.has(item.id) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
-        data-row={Math.floor(index / nowPerRow)} style={{ left: nowSlot(step, index), top: nowTop(Math.floor(index / nowPerRow)) }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[step]}: ${steps.label}`} onClick={() => onSelect(item.id)}><span className="mono">{item.key}</span></button>),
+        data-row={Math.floor(index / perRow)} style={{ left: nowSlot(step, index, perRow), top: nowTop(Math.floor(index / perRow)) }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[step]}: ${steps.label}`} onClick={() => onSelect(item.id)}><span className="mono">{item.key}</span></button>),
       all.length > nowColumnLimit && <button type="button" key={`more-${step}`} className="now-more" data-step={step} data-hidden={open ? 0 : all.length - shown.length} aria-expanded={open}
-        style={{ left: column(step), top: nowTop(Math.ceil(shown.length / nowPerRow)) }} aria-label={open ? `Show fewer items at ${stepLabel[step]}` : `Show all ${all.length} items at ${stepLabel[step]}`}
+        style={{ left: column(step), top: nowTop(Math.ceil(shown.length / perRow)) }} aria-label={open ? `Show fewer items at ${stepLabel[step]}` : `Show all ${all.length} items at ${stepLabel[step]}`}
         onClick={() => onToggle(step)}>{open ? 'Show fewer' : <>+{all.length - shown.length}<span className="now-more-word"> more</span></>}</button>,
     ])}
   </div>;

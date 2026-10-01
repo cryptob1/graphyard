@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Work } from './model.js';
@@ -16,6 +17,7 @@ import { dispatchReserved, type HerdrAgent, type MasterConfig, type MergeExecuto
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { processConnectAccounts } from './master/environments.js';
+import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
 import { loopUnitName } from './supervisor.js';
 import { executorUnitDirectory } from './repository-setup.js';
 
@@ -97,6 +99,19 @@ export function watchdogEffects<E extends ExecutorEffects>(effects: E, alive: ()
 export const executorMergeExecutor = (principal: string, instance = `executor-${randomUUID()}`): MergeExecutor => ({ principal, instance });
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+/**
+ * How the coordinator checkout stands, read synchronously: the executor is a thin startup path
+ * that loads its modules from this checkout before anything runs, and the guard below judges it
+ * once, at construction, before the first claim. An unreadable checkout (no git, no commit) is
+ * never dirty: it cannot be read as code either.
+ */
+const executorCheckout = (root: string): ReturnType<typeof parseCoordinatorCheckout> => {
+  const git = (args: string[]) => { try { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }); } catch { return null; } };
+  const commit = git(['rev-parse', 'HEAD']);
+  if (commit === null) return { root, commit: null, modified: [], untracked: [] };
+  const status = git(['status', '--porcelain', '-z', '--untracked-files=normal']);
+  return status === null ? { root, commit: commit.trim() || null, modified: [], untracked: [] } : parseCoordinatorCheckout(root, commit, status);
+};
 /** An executor holds no cool-off state of its own: a failed attempt backs off on its own action row. */
 const statelessProfiles = { profiles: {} } as unknown as DaemonState;
 
@@ -133,10 +148,19 @@ export function startConnectAccountWorker(config: () => MasterConfig, options: {
  * construction, and `judgmentInExecutorLoop` below is what keeps that true as kinds are added.
  */
 export function controlPlaneHandlers(config: () => MasterConfig, effects: ControlPlaneEffects): Partial<Record<NextActionKind, ExecutorHandler>> {
+  // GY-857: an executor runs the modules it imported from the coordinator checkout once, at
+  // startup. When that checkout holds uncommitted work, no claim may run it — the modules are
+  // behaviour no commit names — so every handler is replaced by the refusal, each claim is
+  // settled failed naming the dirty paths, and the connect-account worker never starts. The
+  // process stays up so its supervisor does not restart it onto the same dirty checkout; a
+  // restart after the checkout is cleaned is what puts the fleet back on committed code.
+  const cliPath = config().cliPath;
+  const checkout = typeof cliPath === 'string' && cliPath ? executorCheckout(coordinatorCheckoutRoot(cliPath)) : null;
+  const checkoutRefusal = checkout && checkoutGuardApplies(checkout.root) ? coordinatorCheckoutRefusal(checkout, 'this executor') : null;
   // A host with a declared identity serves connects: a fresh installation's operator connects its
   // first accounts from the UI before any session can launch, and this is the process that is
   // already resident on the agent host with a coordinator credential (GY-409).
-  if (config().url && config().hostId) startConnectAccountWorker(config);
+  if (!checkoutRefusal && config().url && config().hostId) startConnectAccountWorker(config);
   const find = async (action: ActionRow) => {
     const snapshot = await effects.snapshot();
     const work = snapshot.work.find(item => item.id === action.work);
@@ -212,7 +236,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     throw new Error(`no worker profile can take ${work.key}: every healthy profile is reserved by another dispatch (${held.join('; ')})`);
   };
 
-  return {
+  const handlers: Partial<Record<NextActionKind, ExecutorHandler>> = {
     dispatch: async action => {
       const { work, all, observedAt } = await find(action);
       if (action.inputs.kind !== 'dispatch') throw new Error('unreachable');
@@ -279,9 +303,14 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // The step throws when it does not record the merge request, so reaching here means GitHub
       // now holds the authorized head (GY-258). What it returns is its own account — requested and
       // not yet observed, or already merged — and the row records that verbatim rather than a word
-      // of the executor's own: only the observation says merged.
-      const result = await effects.merge(work) as { result?: string } | undefined;
-      return `${work.key}: ${result?.result ?? 'the guarded merge returned without a result of its own'}`;
+      // of the executor's own: only the observation says merged. An outcome that is neither pending
+      // nor merged is named as such, the way the loop names it (GY-246), so the row never reads it
+      // the same as an accepted merge (GY-442).
+      const result = await effects.merge(work) as { result?: string; pending?: boolean; merged?: boolean } | undefined;
+      const unaccounted = result?.merged !== true && result?.pending !== true;
+      const unaccountedNote = 'the merge reported neither a pending request nor a merge GitHub performed';
+      if (!result?.result) return `${work.key}: ${unaccounted ? unaccountedNote : 'the guarded merge returned without a result of its own'}`;
+      return `${work.key}: ${result.result}${unaccounted ? `; ${unaccountedNote}` : ''}`;
     },
     'verify-deployment': async action => {
       const { work } = await find(action);
@@ -293,6 +322,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}`;
     },
   };
+  if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {
+    handlers[kind] = (async () => { throw new Error(checkoutRefusal); }) as ExecutorHandler;
+  }
+  return handlers;
 }
 
 /**

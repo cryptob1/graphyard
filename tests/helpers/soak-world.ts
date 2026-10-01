@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
+import { GitHub, landingCheck, scopeLookupBudget, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
-import type { Observation, Work } from '../../src/model.js';
+import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
@@ -13,6 +13,8 @@ import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../.
 // anything for Graphyard: the loop and the engine act, and this world only answers them.
 
 export const minute = 60_000, hour = 60 * minute;
+/** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
+export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
 const uuid = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 
@@ -81,6 +83,15 @@ export interface WorldOptions {
   ciMs: number; reviewMs: number;
   /** The first pull request number: a second world on the same control plane numbers its own. */
   firstPullRequest: number;
+  /**
+   * The project's documentation word budget (GY-574), when it keeps one: the pages it counts with
+   * their base word counts, and the budget its committed graphyard.json configures. Set, the world
+   * holds those pages as real prose (so the word counter reads real text), runs the project's
+   * `unit:docs-word-budget` check on every head — a page over the per-page cap fails it, a total
+   * over the budget warns and passes, as the product rule goes — and answers the tree and blob
+   * reads the real word counter makes.
+   */
+  docs?: { budget: { total: number; perPage: number }; pages: Record<string, number> };
 }
 
 export class SimulatedGitHub {
@@ -88,13 +99,20 @@ export class SimulatedGitHub {
   tip: string;
   prs = new Map<number, PullRequest>();
   /** Every merge GitHub performed, in order, with the time it did. */
-  merges: { key: string; pr: number; sha: string; at: number; state: string; mode: 'immediate' | 'auto-merge' }[] = [];
+  merges: { key: string; pr: number; sha: string; at: number; state: string; mode: 'immediate' | 'auto-merge' | 'outside' }[] = [];
+  /** Every landed peer an observation reported, as `observed KEY -> landed KEY` (GY-756). */
+  landedReports: string[] = [];
   /** Reviewers' plans per item: the verdict each successive review of it gives. */
   verdicts = new Map<string, ('APPROVED' | 'CHANGES_REQUESTED')[]>();
   /** Reviewer profiles that are out of quota: a request dispatched to one is answered with a usage-limit verdict. */
   exhaustedProfiles = new Set<string>();
   /** Items whose GitHub merge state settles as UNSTABLE (a failing optional check), and those GitHub is slow to recompute after their required check passes. */
   unstable = new Set<string>(); slowRecompute = new Set<string>();
+  /**
+   * Items GitHub keeps BLOCKED for `blockedMergeMs` after their required check passed (GY-430): a
+   * branch-protection condition Graphyard does not gate on, such as a review GitHub still requires.
+   */
+  blockedMerge = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
   /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
@@ -120,11 +138,40 @@ export class SimulatedGitHub {
    * as reverts — the reading this item fixes, staged as a fault the simulated day must recover from.
    */
   staleMergeBase = new Set<string>();
+  /**
+   * GY-831. Heads for which `gh pr view` answers a head other than the record's, so every guarded
+   * merge attempt for them refuses with one unchanged message. A rework round's new head is never
+   * listed, so the fault holds only the candidate it was staged for.
+   */
+  stuckHeads = new Set<string>();
+  /**
+   * GY-854. Items whose branch restores GitHub refuses once listed here: the restore's branch reset
+   * and its merge are each answered 403, as GitHub answers a protected branch update, so a restore
+   * the loop owes the item can never publish. Tip publications are left alone: the fault is the
+   * restore's, and a tip the queue owes before the ejection is not what it exercises.
+   */
+  refusedBranches = new Set<string>();
+  /** GY-854. Items GitHub takes this long to compute mergeable once their check passed, so they stay queued, unlanded. */
+  slowMergeable = new Map<string, number>();
+  /** Every write a branch restore made or was refused, per item, in order (GY-854). */
+  restoreWrites: { key: string; write: 'reset' | 'merge'; refused: boolean; at: number }[] = [];
+  /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
+  botReviewers = new Set<string>();
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
   landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
   private serial = 0;
   constructor(readonly options: WorldOptions, files: string[]) {
-    const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files, contents: new Map(files.map(path => [path, sha('content', path, 'root')])), at: clock.now(), message: 'root' };
+    const paths = [...files];
+    const contents = new Map<string, string>();
+    if (options.docs) {
+      // The budgeted documentation is real prose, so the word counter counts words, and the
+      // committed configuration beside it names the budget the project keeps (GY-574).
+      const prose = (words: number) => Array.from({ length: words }, (_, index) => `w${index}`).join(' ');
+      for (const [page, words] of Object.entries(options.docs.pages)) { paths.push(page); contents.set(page, prose(words)); }
+      paths.push('graphyard.json');
+      contents.set('graphyard.json', JSON.stringify({ documentation: { paths: ['docs/', 'README.md'], changelog: null, wordBudget: { total: options.docs.budget.total, perPage: options.docs.budget.perPage } } }));
+    }
+    const root: Commit = { sha: sha('root'), tree: sha('tree', 'root'), parents: [], files: paths, contents: new Map([...paths.map(path => [path, sha('content', path, 'root')] as const), ...contents]), at: clock.now(), message: 'root' };
     this.commits.set(root.sha, root); this.tip = root.sha;
   }
   get tree() { return this.commits.get(this.tip)!.tree; }
@@ -166,17 +213,18 @@ export class SimulatedGitHub {
   /**
    * A commit onto the base branch: a merged pull request, or a change landed outside Graphyard (a file
    * split). It changed `changed` (default: the files added or removed) and fails the required suite
-   * when `broken` (default: as its first parent does).
+   * when `broken` (default: as its first parent does). `contents` overrides the merged content, as a
+   * hand edit's tree really holds it.
    */
-  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string, change: { changed?: string[]; broken?: boolean } = {}) {
+  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string, change: { changed?: string[]; broken?: boolean } = {}, contents?: Map<string, string>) {
     const parent = this.commits.get(parents[0]), before = new Set(parent?.files ?? []), after = new Set(files);
     const changed = change.changed ?? [...files.filter(path => !before.has(path)), ...[...before].filter(path => !after.has(path))];
-    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message, changed, broken: change.broken ?? !!parent?.broken });
+    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message, changed, broken: change.broken ?? !!parent?.broken }, contents);
     this.tip = commit.sha;
     return commit;
   }
-  /** A worker pushes a head to its item's branch, opening the pull request on the first push. */
-  push(key: string, branch: string, author: string, head: string, files: string[]) {
+  /** A worker pushes a head to its item's branch, opening the pull request on the first push. `grow` is the head's documentation edit (GY-574): `words` more words on `page`. */
+  push(key: string, branch: string, author: string, head: string, files: string[], grow?: { page: string; words: number }) {
     let pr = [...this.prs.values()].find(entry => entry.branch === branch && entry.open);
     if (!pr) {
       pr = { number: this.options.firstPullRequest + this.prs.size, key, branch, author, head, base: this.tip, files, createdAt: clock.now(), open: true, merged: null, pushed: new Map(), reviews: [], graphyardCheck: new Map(),
@@ -184,7 +232,15 @@ export class SimulatedGitHub {
       this.prs.set(pr.number, pr);
     }
     // A worker syncs before it pushes (graphyard sync): the head contains the base tip.
-    this.record({ sha: head, tree: sha('tree', head), parents: [this.tip], files: [...new Set([...this.files, ...files])], at: clock.now(), message: `${key} head` });
+    const parent = this.commits.get(this.tip)!;
+    const contents = new Map(parent.contents);
+    if (grow) {
+      const prose = (words: number) => Array.from({ length: words }, (_, index) => `g${index}`).join(' ');
+      const text = contents.get(grow.page);
+      contents.set(grow.page, text === undefined ? prose(grow.words) : `${text} ${prose(grow.words)}`);
+    }
+    for (const path of [...new Set([...this.files, ...files])]) if (!contents.has(path)) contents.set(path, sha('content', path, head));
+    this.record({ sha: head, tree: sha('tree', head), parents: [this.tip], files: [...new Set([...this.files, ...files])], at: clock.now(), message: `${key} head` }, contents);
     Object.assign(pr, { head, base: this.tip, files, autoMerge: false, mergeRequestedAt: null });
     pr.pushed.set(head, clock.now());
     return pr;
@@ -234,10 +290,10 @@ export class SimulatedGitHub {
   }
   /** A pull request's file list as GitHub's files endpoint answers it: the head's changes since its merge base with the pull request's base. */
   prFiles(pr: PullRequest) { return this.diff(this.mergeBase(pr.base, pr.head), pr.head); }
-  /** The pull request as `GET /pulls/:number` answers what the landing check's `landedOn` reads of it. */
+  /** The pull request as `GET /pulls/:number` answers what the landing check's `landedOn` reads of it, its head included. */
   pull(pr: number) {
     const record = this.prs.get(pr);
-    return record ? { merged: !!record.merged, merge_commit_sha: record.merged?.sha ?? null, state: record.open ? 'open' : 'closed' } : null;
+    return record ? { merged: !!record.merged, merge_commit_sha: record.merged?.sha ?? null, head: { sha: record.head }, state: record.open ? 'open' : 'closed' } : null;
   }
   /**
    * The production landing check over this repository, exactly as the real observer computes it
@@ -272,11 +328,23 @@ export class SimulatedGitHub {
     if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
     if (!this.runs.has(head)) {
       const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
-      this.runs.set(head, ['test', 'typecheck'].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now })));
+      const runs = ['test', 'typecheck'].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now }));
+      // The project's own documentation budget check (GY-574): the budget is the project's own
+      // rule, counted over the pages its configuration names (here docs/ and README.md, as the
+      // committed graphyard.json does), and this project's CI fails the check when that total is
+      // over the budget. Each queued entry passes alone; the combination on a tip is what
+      // overflows — the fault the queue's attribution answers.
+      if (this.options.docs) {
+        const commit = this.commits.get(head)!;
+        const total = [...commit.contents].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path))
+          .reduce((sum, [, text]) => sum + text.split(/\s+/).filter(Boolean).length, 0);
+        runs.push({ name: 'unit:docs-word-budget', result: total > this.options.docs.budget.total ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now });
+      }
+      this.runs.set(head, runs);
     }
     return this.runs.get(head)!.filter(run => run.at <= now);
   }
-  /** GitHub's "rerun failed jobs": the failed run's job runs again on the same commit, reporting `ciMs` later. */
+  /** GitHub's "rerun failed jobs": the failed run's job runs again on the same commit, reporting `ciMs` later. A documentation-budget breach is not a flake: the rerun judges the commit's pages again (GY-574). */
   rerun(checkRunId: number) {
     const [head, runs] = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId)) ?? [];
     const failed = runs?.find(entry => entry.id === checkRunId);
@@ -284,7 +352,11 @@ export class SimulatedGitHub {
     const pr = [...this.prs.values()].find(entry => entry.head === head)!;
     const now = clock.now();
     this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
-    runs.push({ name: failed.name, result: this.flaky.get(pr.key) === 'rerun-fails' ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
+    const breached = failed.name === 'unit:docs-word-budget' && this.options.docs
+      ? [...(this.commits.get(head)?.contents ?? [])].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path))
+          .reduce((sum, [, text]) => sum + text.split(/\s+/).filter(Boolean).length, 0) > this.options.docs.budget.total
+      : undefined;
+    runs.push({ name: failed.name, result: breached !== undefined ? (breached ? 'failure' : 'success') : this.flaky.get(pr.key) === 'rerun-fails' ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
     return { runId: 900_000 + checkRunId };
   }
   /** One minute of GitHub: CI finishes, reviewers post verdicts, reviewer Apps answer, and auto-merge lands what it may. */
@@ -292,12 +364,13 @@ export class SimulatedGitHub {
     for (const pr of [...this.prs.values()].filter(entry => entry.open)) {
       const pushedAt = pr.pushed.get(pr.head)!;
       const ciDone = now - pushedAt >= this.options.ciMs;
-      // The reviewer judges a head once CI reported on it.
+      // The reviewer judges a head once CI reported on it. An item in `botReviewers` is judged by
+      // the bound reviewer App identity, whose approval a Graphyard-authored tip carries.
       if (ciDone && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
         const plan = this.verdicts.get(pr.key) ?? [];
         const state = plan.shift() ?? 'APPROVED';
         this.verdicts.set(pr.key, plan);
-        pr.reviews.push({ reviewer: 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
+        pr.reviews.push({ reviewer: this.botReviewers.has(pr.key) ? 'graphyard-reviewer[bot]' : 'reviewer', sha: pr.head, state, id: ++this.serial, submittedAt: new Date(now).toISOString() });
       }
       // A reviewer App answers the request it was dispatched: an exhausted profile with its usage-limit verdict.
       const request = pr.agentRequests.at(-1);
@@ -315,15 +388,24 @@ export class SimulatedGitHub {
   mergeState(pr: PullRequest, now: number) {
     const check = pr.graphyardCheck.get(pr.head);
     if (check?.conclusion !== 'success') return 'BLOCKED';
-    return now - check.at >= (this.slowRecompute.has(pr.key) ? 6 * minute : 0) ? pr.settledState : 'BLOCKED';
+    return now - check.at >= (this.blockedMerge.has(pr.key) ? blockedMergeMs : this.slowMergeable.get(pr.key) ?? (this.slowRecompute.has(pr.key) ? 6 * minute : 0)) ? pr.settledState : 'BLOCKED';
   }
-  private merge(pr: PullRequest, now: number, mode: 'immediate' | 'auto-merge') {
+  /** A merge somebody made on GitHub by hand, outside Graphyard's queue: nothing asked for it. */
+  mergeOutside(pr: PullRequest, now: number) { this.merge(pr, now, 'outside'); return pr.merged!; }
+  private merge(pr: PullRequest, now: number, mode: 'immediate' | 'auto-merge' | 'outside') {
     const state = this.mergeState(pr, now);
     // A head that already contains the base tip lands its own tree, as GitHub's merge commit does.
     const head = this.commits.get(pr.head)!, landsTree = this.contains(pr.head, this.tip);
     // The merge breaks main when it lands a breaking head, itself or inside a speculative tip built on it; a revert restores what it broke.
     const broken = !!this.commits.get(this.tip)!.broken || this.breaking.has(pr.head) || head.parents.some(parent => this.breaking.has(parent));
-    const commit = this.commit(`Merge pull request #${pr.number} from ${pr.branch}`, [...new Set([...this.files, ...head.files])], now, [this.tip, pr.head], landsTree ? head.tree : undefined, { changed: pr.files, broken });
+    // The merge commit holds the base's content with the pull request's changes taken from its
+    // head — what GitHub's merge of those two commits really holds — so a page the pull request
+    // grew is grown on the base branch after it lands (GY-574's documentation counts read it).
+    const firstParent = this.commits.get(this.tip)!.contents ?? new Map<string, string>();
+    const contents = new Map(firstParent);
+    for (const [path, blob] of head.contents) if (pr.files.includes(path) || !contents.has(path)) contents.set(path, blob);
+    const commit = this.record({ sha: sha('commit', ...[this.tip, pr.head], `Merge pull request #${pr.number} from ${pr.branch}`), tree: landsTree ? head.tree : sha('tree', this.tip, pr.head, `Merge pull request #${pr.number} from ${pr.branch}`), parents: [this.tip, pr.head], files: [...new Set([...this.files, ...head.files])], at: now, message: `Merge pull request #${pr.number} from ${pr.branch}`, changed: pr.files, broken }, contents);
+    this.tip = commit.sha;
     pr.merged = { sha: commit.sha, at: now }; pr.open = false; pr.autoMerge = false;
     this.merges.push({ key: pr.key, pr: pr.number, sha: commit.sha, at: now, state, mode });
   }
@@ -347,6 +429,44 @@ export class SimulatedGitHub {
     return ['test', 'typecheck'].map((name, index) => ({ name, result: name === 'test' && found.broken ? 'failure' : 'success', appId: this.options.ciAppId, id: Number.parseInt(commit.slice(0, 8), 16) * 2 + index }));
   }
 
+  /** The distinct docs trees and blobs the real word counter has read (GY-574): the cache bounds the soak asserts. */
+  docsReads = { trees: new Set<string>(), blobs: new Set<string>() };
+  private docsCounter?: GitHub;
+  /**
+   * The docs word counts production observes for a failing published tip (GY-574), computed by the
+   * real `GitHub.tipDocs` over this world: the counter's HTTP reads are answered from the simulated
+   * commits, so the identical code the production observer runs judges the simulated tips.
+   */
+  async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]) {
+    if (!this.options.docs) return undefined;
+    const counter = this.docsCounter ??= Object.create(GitHub.prototype) as GitHub;
+    for (const field of ['docsTrees', 'docsBudgets', 'docsCounts', 'docsBlobWords'] as const) (counter as unknown as Record<string, unknown>)[field] ??= new Map();
+    (counter as unknown as { request: (path: string) => Promise<unknown> }).request = this.docsPort();
+    return await GitHub.prototype.tipDocs.call(counter, work, head, base, checks);
+  }
+  /** The tree and blob reads the word counter makes, answered from the simulated commits and counted. */
+  private docsPort() {
+    const world = this;
+    const blobSha = (text: string) => createHash('sha1').update(text).digest('hex');
+    const commitOf = (ref: string) => world.commits.get(ref) ?? [...world.commits.values()].find(entry => entry.tree === ref);
+    return async (path: string): Promise<unknown> => {
+      const tree = /\/git\/trees\/([0-9a-f]{40})\?recursive=1$/.exec(path);
+      if (tree) {
+        world.docsReads.trees.add(tree[1]);
+        const commit = commitOf(tree[1]);
+        if (!commit) throw new Error(`No commit or tree ${tree[1].slice(0, 12)}`);
+        return { truncated: false, tree: commit.files.map(file => ({ path: file, type: 'blob', sha: blobSha(commit.contents.get(file) ?? file) })) };
+      }
+      const blob = /\/git\/blobs\/([0-9a-f]{40})$/.exec(path);
+      if (blob) {
+        world.docsReads.blobs.add(blob[1]);
+        for (const commit of world.commits.values()) for (const text of commit.contents.values()) if (blobSha(text) === blob[1]) return { encoding: 'base64', content: Buffer.from(text).toString('base64') };
+        throw new Error(`No blob ${blob[1].slice(0, 12)}`);
+      }
+      throw new Error(`Unexpected ${path}`);
+    };
+  }
+
   /** The adapter `processJob` drives, answering exactly what the real one reads from GitHub. */
   adapter(): GitHub {
     const world = this, options = this.options;
@@ -360,10 +480,20 @@ export class SimulatedGitHub {
         // revert, from the head's merge base with that commit, so a stale refusal clears on an
         // unchanged head (GY-839).
         const landing = pr.open && !pr.merged ? await world.landing(work, peers) : undefined;
+        // Every landed peer the landing check reported (GY-756), as `observed KEY -> landed KEY`.
+        world.landedReports.push(...(landing?.landed ?? []).map(entry => `${work.key} -> ${entry.key}`));
+        const checks = world.checks(pr, now).map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id, attempt: run.attempt }));
+        // A failing published tip carries its docs counts, observed exactly as production observes
+        // them (GY-574): the real word counter over this world's trees and blobs.
+        const speculation = work.queue?.speculation;
+        const published = !!speculation && speculation.tip === pr.head && speculation.policyRevision === work.policyRevision;
+        const docsBudget = published && pr.open && !pr.merged
+          ? await world.tipDocs(work, pr.head, speculation!.base, checks.map(run => ({ id: run.id, name: run.name, status: 'completed', conclusion: run.result })))
+          : undefined;
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
-          checks: world.checks(pr, now).map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id, attempt: run.attempt })),
+          checks,
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
           reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review }])).values()], reviewIds: pr.reviews.map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
@@ -373,6 +503,8 @@ export class SimulatedGitHub {
           protected: true, files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
           // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
           ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
+          // The failing published tip's docs counts (GY-574), from which its overflow is attributed.
+          ...(docsBudget ? { docsBudget } : {}),
         };
       },
       // The main guard (GY-500): CI's verdict on base-branch commits, and the revert pull requests it opens and lands head-bound.
@@ -422,20 +554,37 @@ export class SimulatedGitHub {
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },
       // Restores a branch that carries another item's unlanded commits (GY-127): back to the item's
-      // own reviewed head, then the base branch merged onto it, exactly as production moves it.
-      async restoreBranch(work: Work, restore: { contaminated: string; foreign: string[]; own: string | null; cause: string; requested: unknown; reason: string }): Promise<BaseRefresh> {
-        const pr = world.pr(work), at = new Date(clock.now()).toISOString();
-        const base = (fields: object, outcome: string, own: string | null, head = own ?? pr.head) => ({
-          from: { sha: own ?? pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head, conflict: null, merge: null, carry: null,
-          trigger: restore.cause === 'repair' ? 'repair' : 'ejection restore', ...fields, restore: { ...restore, own, performedAt: at, outcome } }) as BaseRefresh;
-        const own = restore.own;
-        if (!own || own === pr.head) return base({}, 'unrepairable', own);
-        pr.head = own; pr.pushed.set(own, clock.now());
-        const onto = world.commits.get(world.tip)!;
-        const merged = world.record({ sha: sha('restore', own, world.tip), tree: sha('tree', 'restore', own, world.tip), parents: [own, world.tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message: `Graphyard branch restore for ${work.key} onto ${world.options.baseBranch}` },
-          world.mergedContents(own, world.tip, work.plannedFiles ?? []));
-        pr.head = merged.sha; pr.base = world.tip; pr.pushed.set(merged.sha, clock.now());
-        return base({ head: merged.sha }, 'restored', own, merged.sha);
+      // own reviewed head, then the base branch merged onto it. The production restore runs over this
+      // repository, so what it records — published, refused, retried or escalated (GY-854) — is
+      // decided where production decides it; the world only answers its reads and writes.
+      async restoreBranch(work: Work, restore: Parameters<GitHub['restoreBranch']>[1]): Promise<BaseRefresh> {
+        const pr = world.pr(work), base = world.options.baseBranch;
+        const write = (kind: 'reset' | 'merge') => {
+          const refused = world.refusedBranches.has(work.key);
+          world.restoreWrites.push({ key: work.key, write: kind, refused, at: clock.now() });
+          if (refused) throw new Refusal(`GitHub ${kind === 'reset' ? 'PATCH /git/refs/heads/' + pr.branch : 'POST /merges'} failed (403): Protected branch update failed for refs/heads/${pr.branch}`, 502);
+        };
+        const provider: GitHub = Object.assign(Object.create(GitHub.prototype), {
+          config: { repository: world.options.repository, base },
+          request: async (path: string) => {
+            if (path === `/pulls/${pr.number}`) return { number: pr.number, head: { sha: pr.head, ref: pr.branch }, base: { ref: base }, state: pr.open ? 'open' : 'closed', draft: false };
+            throw new Error(`The simulated restore asked GitHub for ${path}`);
+          },
+          baseBranch: async () => ({ tip: world.tip, tree: world.tree }),
+          ownReviewedHead: async () => pr.head,
+          refHead: async () => pr.head,
+          describeMerge: async () => null,
+          updateBranch: async (_branch: string, own: string) => { write('reset'); pr.head = own; pr.pushed.set(own, clock.now()); },
+          mergeBranch: async (_branch: string, tip: string, message: string) => {
+            write('merge');
+            const own = pr.head, onto = world.commits.get(tip)!;
+            const merged = world.record({ sha: sha('restore', own, tip), tree: sha('tree', 'restore', own, tip), parents: [own, tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message },
+              world.mergedContents(own, tip, work.plannedFiles ?? []));
+            pr.head = merged.sha; pr.base = tip; pr.pushed.set(merged.sha, clock.now());
+            return merged.sha;
+          },
+        });
+        return provider.restoreBranch(work, restore);
       },
       async requestAgentReview(work: Work, profile: { name: string; reviewerApp: string; runtime: string }): Promise<ReviewRequest> {
         const pr = world.pr(work), request: ReviewRequest = { commentId: ++world.serial, sha: pr.head, baseSha: pr.base, policyRevision: work.policyRevision, body: `review ${profile.name}`, createdAt: new Date(clock.now()).toISOString(),
@@ -474,9 +623,17 @@ export class SimulatedGitHub {
   gh(repository: string) {
     return async (command: string, args: string[]) => {
       if (command !== 'gh') throw new Error(`Unexpected command ${command}`);
-      if (args[0] === 'pr' && args[1] === 'view') { const pr = this.prs.get(Number(args[2]))!; return JSON.stringify({ headRefOid: pr.head, baseRefName: this.options.baseBranch, state: pr.open ? 'OPEN' : 'MERGED', isDraft: false }); }
+      if (args[0] === 'pr' && args[1] === 'view') {
+        const pr = this.prs.get(Number(args[2]))!;
+        return JSON.stringify({ headRefOid: this.stuckHeads.has(pr.head) ? sha('stuck', pr.head) : pr.head, baseRefName: this.options.baseBranch, state: pr.open ? 'OPEN' : 'MERGED', isDraft: false });
+      }
       const path = args.find(arg => arg.startsWith(`repos/${repository}/`)) ?? '';
       if (path.endsWith(`/git/ref/heads/${this.options.baseBranch}`)) return JSON.stringify({ ref: `refs/heads/${this.options.baseBranch}`, object: { type: 'commit', sha: this.tip } });
+      const reviews = /\/pulls\/(\d+)\/reviews$/.exec(path);
+      if (reviews) {
+        const pr = this.prs.get(Number(reviews[1]))!;
+        return JSON.stringify(pr.reviews.map(review => ({ id: review.id, user: { login: review.reviewer }, commit_id: review.sha, state: review.state })));
+      }
       const commit = /\/commits\/([0-9a-f]{40})$/.exec(path)?.[1];
       if (commit) return JSON.stringify({ sha: commit, commit: { tree: { sha: this.commits.get(commit)?.tree ?? sha('tree', commit) } } });
       throw new Error(`Unexpected gh call: ${args.join(' ')}`);

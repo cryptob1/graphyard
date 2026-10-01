@@ -6,6 +6,7 @@ import { researchWorkerSection } from '../research.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
+import { sweepExpiredWorkerCredentials, withdrawWorkerCredential, workerCredentialDirectory, workerCredentialEnvironment, workerCredentialRoot } from '../worker-credential.js';
 import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { documentationWorkerSection } from '../model/documentation.js';
@@ -47,7 +48,15 @@ export interface DispatchOptions {
   stopSupervisor?: (target: { key: string; epoch: number; pane: string | undefined }) => boolean | Promise<boolean>;
   /** Herdr's agents read afresh, under the profile's reservation (GY-273); the loop passes `listHerdrAgents`. */
   agents?: () => HerdrAgent[] | Promise<HerdrAgent[]>;
+  /**
+   * Mints the attempt's push credential into its session directory (GY-999). The worktree
+   * prepareWorkerLaunch creates always gets one (mintWorkerCredential); a worktree an injected
+   * preparer supplies gets one only when a minter is given.
+   */
+  credential?: CredentialMinter;
 }
+/** Mints the push credential of `key` epoch `epoch` for `profile` into `directory`. */
+export type CredentialMinter = (root: string, input: { key: string; epoch: number; profile: WorkerProfile; directory: string }) => Promise<unknown>;
 /** Refuses a hand launch past its `claimBy`: the item's backed-off dispatch action is the executor's again, so the launch claims nothing. */
 export function assertClaimDeadline(key: string, claimBy: number | undefined, now = Date.now()) {
   if (claimBy !== undefined && now >= claimBy)
@@ -108,7 +117,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         try {
           assertClaimDeadline(work.key, options.claimBy);
           let epoch: number;
-          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor));
+          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null)));
           // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
           const at = new Date().toISOString();
           await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -139,8 +148,10 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null) {
   const prepared = await prepare(root, work.key, profile.name, undefined, claimBy);
+  // The session pushes with its own short-lived credential, never the host's login (GY-999).
+  const credential = credentialMint && profile.credentialFile ? workerCredentialDirectory(profile.credentialFile, work.key, prepared.epoch) : null;
   // The worker writes its worktree, the worktree's own Git admin directory and the shared one;
   // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
   const paths = workerPaths(prepared.path);
@@ -154,10 +165,14 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
   let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
   try {
+    // Minted before anything starts: a launch that cannot get one is refused and its claim
+    // released below, so the item is launched again once a credential can be minted.
+    if (credential) await credentialMint!(root, { key: work.key, epoch: prepared.epoch, profile, directory: credential });
+    const credentialEnvironment = credential ? workerCredentialEnvironment(credential) : {};
     // A sandbox that cannot write them is a launch failure naming the path, not a worker that
     // fails at its first sync; the claim is released below like any other failed launch.
     if (sandboxProbe) sandbox = verifyWorkerSandbox({ ...launch, args }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
-    const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+    const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries({ ...launch.environment, ...credentialEnvironment }).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
     const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request, on the runtime's command line under
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
@@ -195,6 +210,8 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       catch { throw new Error(`${failed}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
       withLaunchClose(error, `${stop}${note} before epoch ${prepared.epoch} was released`);
     }
+    // A running supervisor withdraws its session's credential itself when it stops.
+    if (credential && !supervised) await withdrawWorkerCredential(credential).catch(() => {});
     try { await release(root, work.key, prepared.epoch, profile.name); }
     catch { throw new Error(supervised ? `${failed}; pane ${pane} was left to its running supervisor, but Graphyard could not release epoch ${prepared.epoch}` : `${failed}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
     // A supervised pane is never relaunched over: the failure is reported as it is, not as a retryable prompt.
@@ -257,6 +274,19 @@ function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
 // runtime bound, so a slow checkout is never mistaken for a hung one (GY-114).
 export const workerLaunchTimeoutMs = 600_000;
 const workerCommand: WorkerCommand = (command, args, options = {}) => defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
+
+/**
+ * The default minter (GY-999): the CLI, as the worker's own principal, asks the control plane for
+ * the lease holder's push credential and writes it into the session directory. The profile's
+ * expired session directories are swept first. A refusal fails the launch, naming why.
+ */
+export async function mintWorkerCredential(root: string, input: { key: string; epoch: number; profile: WorkerProfile; directory: string }, run: WorkerCommand = workerCommand) {
+  const config = await loadMasterConfig(root);
+  if (!input.profile.credentialFile) throw new Error('A complete launch profile is required');
+  await sweepExpiredWorkerCredentials(workerCredentialRoot(input.profile.credentialFile)).catch(() => []);
+  try { return await run(process.execPath, [config.cliPath, 'push-credential', input.key, String(input.epoch), input.directory], { cwd: root, env: workerEnvironment(config, input.profile) }); }
+  catch (error) { throw new Error(`Worker launch failed: no push credential could be minted for ${input.key} epoch ${input.epoch} (${failureText(error).slice(0, 300)}); the item is launched again once one can be`); }
+}
 
 export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);

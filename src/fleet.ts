@@ -10,7 +10,7 @@ import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -104,6 +104,13 @@ export const skipCause = (reason: string): AccountSkipCause =>
  * is read here, so a credential this host cannot read is the control plane being unaskable, not a
  * fleet decision. `httpFleetClient` and the connect-account worker (GY-409) both go through it.
  */
+/**
+ * How long a registry request may take. Registry writes (select, session end) run in a coordination
+ * transaction and queue behind the global lock; on 2026-10-01 45 of 46 selects were abandoned at the
+ * old 10 s bound while the server still completed them, so dispatches failed and the abandoned
+ * selections left phantom live sessions (GY-1027 removes the queueing itself).
+ */
+export const fleetRequestTimeoutMs = 30_000;
 export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, path: string, init: { method?: 'GET' | 'POST'; body?: unknown; fetch?: typeof fetch; timeoutMs?: number; idempotencyKey?: string } = {}): Promise<any> {
   let token: string;
   try { token = await readCredentialFile(config.credentialFile); }
@@ -112,7 +119,7 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
   let response: Response;
   try {
     const method = init.method ?? (body === undefined ? 'GET' : 'POST');
-    response = await (init.fetch ?? fetch)(`${config.url}/api/${path}`, { method, signal: AbortSignal.timeout(init.timeoutMs ?? 10_000),
+    response = await (init.fetch ?? fetch)(`${config.url}/api/${path}`, { method, signal: AbortSignal.timeout(init.timeoutMs ?? fleetRequestTimeoutMs),
       headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'POST' ? { 'Idempotency-Key': init.idempotencyKey ?? randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   } catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
   const text = await response.text();
@@ -121,7 +128,7 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
   return parsed;
 }
 
-export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = 10_000): FleetClient {
+export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
   const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
   return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); } };
 }
@@ -141,7 +148,7 @@ export type FleetRead = { managed: true; registry: AgentRegistry; client: FleetC
 /** Whether the registry decides `role` for this executor, and the registry when it does. */
 export async function readFleet(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}): Promise<FleetRead> {
   if (!probe.registry && (!config.url || !config.hostId)) return { managed: false, reason: 'this configuration names no control plane' };
-  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000);
+  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
   const now = probe.now?.() ?? Date.now(), failed = probe.registry ? undefined : unreachable.get(config.url!);
   let registry: AgentRegistry;
   try {
@@ -185,10 +192,13 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
 
 /**
  * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) with no result since it last changed. An interactive
- * runtime's session is its own check — a session that cannot start fails its launch.
+ * runtime (Pi, the narrow roles' runner) with no result since it last changed, or whose last test
+ * failed `smokeRetestMs` ago or more (GY-515). An interactive runtime's session is its own check — a
+ * session that cannot start fails its launch — and the registry's launch contract names no
+ * one-prompt headless mode for it, so it has no smoke test to run.
  */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime) => runtime.launch.kind === 'pi' && account.enabled && !account.smoke;
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => runtime.launch.kind === 'pi' && account.enabled
+  && (!account.smoke || smokeFailureDue(account, now));
 
 /**
  * The session a launch runs on, chosen by the control plane — or null when the registry does not
@@ -213,7 +223,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime), model = registry.models.find(entry => entry.name === account.model);
     const observation = observations.find(entry => entry.account === account.name);
-    if (!runtime || !model || !needsSmoke(account, runtime) || observation?.quota.loggedIn === false) return;
+    if (!runtime || !model || !needsSmoke(account, runtime, probe.now?.() ?? Date.now()) || observation?.quota.loggedIn === false) return;
     const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
       fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
     let result: SmokeResult;
@@ -246,22 +256,26 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
 /**
  * Whether a role can launch from the registry right now, without choosing anything: what the
  * durable loop and `master status` read before they dispatch. Null when the registry does not
- * decide the role.
+ * decide the role. `running` counts the settled document the control plane serves (GY-974): a
+ * session whose lease or request has gone is already ended there, so it never holds a slot.
+ * A Pi account whose only fault is a smoke failure that has aged past
+ * `smokeRetestMs` reads healthy here (GY-515): the launch this admits is what runs the retest,
+ * and the choice it asks for still refuses until the fresh result is folded.
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
-  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [] }; }
+  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
-    const reason = account ? accountIneligibility(fleet.registry, account, now, host) : `${name} is not a registered account`;
+    const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) : `${name} is not a registered account`;
     return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role && !runtimeSessionGone(session, probe.runtime, host, now)).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
-  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts };
+  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
 }
 
 /**
@@ -282,7 +296,7 @@ export function settledRecordSessions(role: 'reviewer' | 'producer', records: re
  */
 export async function reconcileFleetSessions(config: FleetConfig, runtime: RuntimeInventory, finished: ReadonlyMap<string, string>, probe: FleetProbe = {}) {
   if (!probe.registry && (!config.url || !config.hostId)) return [];
-  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000);
+  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
   const registry = await client.document(), now = probe.now?.() ?? Date.now(), ended: { session: string; role: FleetRoleName; work: string | null; account: string; reason: string }[] = [];
   for (const session of liveSessions(registry)) {
     const reason = finished.get(session.id) ?? runtimeSessionGone(session, runtime, config.hostId, now);
@@ -384,7 +398,10 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
   const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
-  const roles: FleetRole[] = !accounts.length ? [] : fleetRoles.flatMap(name => {
+  // The master role is never proposed (GY-898): it is one account the operator names for it with
+  // `master registry role set master`, and the durable loop launches nothing until it is named.
+  const proposed = fleetRoles.filter(name => name !== 'master');
+  const roles: FleetRole[] = !accounts.length ? [] : proposed.flatMap(name => {
     const added = accounts.filter(account => serves(account, name)).map(account => account.name);
     const existing = current.roles.find(role => role.name === name);
     if (existing) return [{ ...existing, accounts: [...existing.accounts, ...added.filter(account => !existing.accounts.includes(account))] }];
@@ -458,7 +475,10 @@ export const connectProviders: readonly ConnectProvider[] = [
   {
     id: 'anthropic-api', label: 'Anthropic API', kind: 'api-key', runtime: 'claude', model: 'claude-default', tier: 'strong',
     authFile: 'settings.json',
-    authDocument: (existing, key) => ({ ...existing, env: { ...((existing.env ?? {}) as Record<string, unknown>), ANTHROPIC_API_KEY: key } }),
+    authDocument: (existing, key) => {
+      const updated = { ...existing, env: { ...((existing.env ?? {}) as Record<string, unknown>), ANTHROPIC_API_KEY: key } };
+      return updated;
+    },
     smoke: { command: 'claude', args: ['-p', smokePrompt], envVariable: 'CLAUDE_CONFIG_DIR' },
     help: 'An Anthropic API key Claude Code bills to your API account.',
   },
@@ -489,8 +509,8 @@ export const connectProviders: readonly ConnectProvider[] = [
   {
     id: 'cursor', label: 'Cursor (subscription)', kind: 'subscription', runtime: 'cursor', model: 'cursor-default', tier: 'strong',
     // Without NO_OPEN_BROWSER the login opens a browser on the host; the card's URL is the only path.
-    login: { command: 'cursor-agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
-    smoke: { command: 'cursor-agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
+    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
+    smoke: { command: 'agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
     help: 'Your Cursor plan. Finish the sign-in in your own browser.',
   },
 ];
@@ -534,7 +554,7 @@ export function parseLoginOutput(text: string): { url: string | null; code: stri
  * and the first code it returns is written to the login once. The child is bounded: past the
  * window it is stopped and the failure is what the card shows.
  */
-export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown; answer?: () => Promise<string | null> } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
+export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown; answer?: () => Promise<string | null>; isCancelled?: () => Promise<boolean> } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
   const login = options.login ?? { command: provider.login!.command, args: provider.login!.args };
   const pollMs = options.pollMs ?? 2_000, timeoutMs = options.loginTimeoutMs ?? 10 * 60_000;
   const file = resolve(home, provider.loginFile ?? '');
@@ -555,13 +575,13 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
     const printed = () => { found ??= parseLoginOutput(text); return found; };
     // The login blocks until the operator signs in, and the operator needs the URL to do that: hand
     // it on the moment it is printed (with the code, once both are out or the output settles).
-    let told = false, settle: ReturnType<typeof setTimeout> | undefined;
+    let announced = false, settle: ReturnType<typeof setTimeout> | undefined, lastAnnounced: { url: string | null; code: string | null } | null = null;
     const tell = () => {
-      if (told || settled) return;
+      if (settled) return;
       const now = parseLoginOutput(text);
       if (!now.url && !now.code) return;
       clearTimeout(settle);
-      const announce = () => { if (told || settled) return; told = true; found = parseLoginOutput(text); void Promise.resolve(options.onPrinted?.(found)).catch(() => {}); };
+      const announce = () => { if (settled) return; found = parseLoginOutput(text); if (!announced || found.url !== lastAnnounced?.url || found.code !== lastAnnounced?.code) { announced = true; lastAnnounced = found; void Promise.resolve(options.onPrinted?.(found)).catch(() => {}); } };
       if (now.url && now.code) announce(); else settle = setTimeout(announce, 500);
     };
     const read = (chunk: Buffer) => { text += chunk.toString(); tell(); };
@@ -572,11 +592,11 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
     let answered = !pasteCode || !options.answer, asking = false;
     child.stdin?.on('error', () => { /* the login exited before reading the code; its exit reports why */ });
     const ask = () => {
-      if (answered || asking || !told || settled) return;
+      if (answered || asking || !announced || settled) return;
       asking = true;
       void options.answer!().then(code => { if (code && !answered && !settled) { answered = true; child.stdin?.end(`${code.trim()}\n`); } }, () => {}).finally(() => { asking = false; });
     };
-    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); }, pollMs);
+    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); void (options.isCancelled?.() ?? Promise.resolve(false)).then(cancelled => { if (cancelled) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: 'The connect was cancelled' }); }, () => { /* a failed cancellation poll leaves the login running, as the answer poll does */ }); }, pollMs);
     limit.unref?.(); polling.unref?.();
     child.on('error', error => finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} failed: ${error instanceof Error ? error.message : 'unknown reason'}` }));
     child.on('close', status => { void seen().then(there => {

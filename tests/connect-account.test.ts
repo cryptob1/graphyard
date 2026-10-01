@@ -1,9 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -31,7 +31,7 @@ let originalPath = '';
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_CONNECT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 48);
-  scratch = await mkdtemp(join(tmpdir(), 'graphyard-connect-'));
+  scratch = await temporaryDirectory('connect');
   bin = join(scratch, 'bin');
   await mkdir(bin, { recursive: true });
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -45,7 +45,7 @@ before(async () => {
   // a real device login does — until the operator signs in (the test drops `signed-in` into the
   // login home), and only then writes the login file; anything else is the smoke prompt answering
   // fine. Real spawn, real PATH — only the executables are fakes.
-  for (const command of ['codex', 'claude', 'opencode', 'cursor-agent']) {
+  for (const command of ['codex', 'claude', 'opencode', 'agent']) {
     await writeFile(join(bin, command), [
       '#!/bin/sh',
       'case "$1" in',
@@ -95,7 +95,6 @@ after(async () => {
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close();
   if (database) await database.stop();
-  if (scratch) await rm(scratch, { recursive: true, force: true });
 });
 
 async function call(path: string, actor: Principal, data?: unknown) {

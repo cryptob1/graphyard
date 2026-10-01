@@ -16,10 +16,11 @@ import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
-import { defaultAwaitReviewers, launchedSessionHandle } from '../auto-dispatch.js';
+import { defaultAwaitReviewers, launchedSessionHandle, readDispatchCursor } from '../auto-dispatch.js';
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
+import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
@@ -28,7 +29,7 @@ import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
-import { neededDecision, type RoutineDecisionAction } from './decisions.js';
+import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import type { ControlPlaneStatus } from '../master.js';
 import { readCredentialFile } from '../master.js';
@@ -40,6 +41,11 @@ import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import type { ResearchEvent } from '../research.js';
+import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
+import { diagnosticianSettings } from '../runner/payloads.js';
+import { piRunner } from '../runner/pi.js';
+import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
+import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -50,7 +56,17 @@ export const stoppedStates = ['idle', 'done', 'blocked'];
 export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
+/**
+ * The address a paste to a session is delivered to (GY-852): the pane, which is the session's own
+ * stable coordinate, and only for a session the runtime lists without one — a session the loop
+ * cannot see in any pane — its name. Profiles reuse agent names across sessions, so a paste
+ * resolved by name first lands on whichever session holds the name now, which is how one item's
+ * re-prompt reached another item's pane (2026-09-26).
+ */
+export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
+/** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
+export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
 export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
@@ -90,6 +106,12 @@ export interface DaemonEffects {
   replan?: (work: Work, paths: string[], reason: string) => Promise<unknown>;
   merge: (work: Work) => Promise<unknown>;
   /**
+   * GY-831. Report a guarded merge refused for one reason since `since` to the control plane,
+   * which clears a carried approval (a fresh review is requested) or marks the candidate for a
+   * rework decision.
+   */
+  refuseMerge?: (work: Work, reason: string, since: string) => Promise<Work>;
+  /**
    * The deployed release and which deliveries it serves. The containment the previous observation
    * retained is handed back so the cycle re-derives only what the release has not already been
    * shown to contain (see `observeDeployment`).
@@ -114,6 +136,11 @@ export interface DaemonEffects {
   publishMergeBatchSize?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
+  /**
+   * The producer requests the dispatcher has stopped attempting (GY-496), from its cursor: the loop
+   * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
+   */
+  exhaustedProofs?: () => Promise<ExhaustedProof[]>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
    * base branch, checks out its tip when the checkout is a clean detached checkout, and, when the
@@ -290,7 +317,14 @@ export interface DaemonEffects {
    * operator-agent identity, under an idempotency key naming the class and its instances. Absent
    * while no such identity is provisioned: the classes are still recorded and reported.
    */
-  fileFaultClass?: (input: ReturnType<typeof faultClassItem>, key: string) => Promise<Work>;
+  fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
+  /**
+   * The diagnostician (GY-439): its settings, the runners of its primary and fallback runs, the
+   * excerpts it reads, and filing and deciding as the master's operator-agent identity. Absent while
+   * `run.diagnostician.enabled` is false or the operator-agent or approver identity is missing:
+   * recurring-fault items are then filed and left for the master, as before.
+   */
+  diagnostician?: DiagnosticianEffects;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
@@ -308,6 +342,7 @@ export interface DaemonEffects {
    * it causes, a resource at its bound named in place of its symptom — so one cause is tracked as the report shows it, once.
    */
   reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
+  masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 
 /** Put an action on the cursor, through storeAction, which bounds it and notes it against the fault record (GY-173). */
@@ -346,7 +381,7 @@ export const promptDigest = (text: string) => createHash('sha256').update(text).
  * becomes claimable only once its partial work is on the record. Nothing is preserved for an
  * attempt that submitted — its work is on the pull request — or one the quota path already kept.
  */
-export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[]) {
+export async function preserveInterruptedAttempt(state: DaemonState, effects: DaemonEffects, item: Work, epoch: number, profile: WorkerProfile | undefined, observed: string, now: () => number, performed: DaemonAction[], options: { endsBlocker?: true } = {}) {
   if (!effects.reportCapacity) return null;
   const key = preserveKey(item, epoch), previous = state.actions[key];
   if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return previous;
@@ -355,7 +390,7 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
   await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'started', detail: `Keeping what attempt ${epoch} of ${item.key} left in its worktree: ${observed}`, attempts, cycle: state.cycle }, now(), effects.persist);
   try {
     const partialWork = await effects.preserveWork?.(item, epoch, 'interrupted before it could submit') ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
-    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork });
+    await effects.reportCapacity(item, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch, profile: profile?.name ?? principal ?? 'unknown', account: null, runtime: profile?.kind ?? null, reason: observed.slice(0, 500), resetsAt: null, partialWork, ...options });
     const where = partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}${partialWork.branch ? ` on ${partialWork.branch}` : ''}${partialWork.path ? ` (${partialWork.path})` : ''}` : '';
     return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'done', detail: `${item.key} attempt ${epoch} ${observed}. Partial work ${partialWork.state}${where}${partialWork.detail ? `: ${partialWork.detail}` : ''}; the attempt ended on the record and the next attempt's request names the commit`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   } catch (error) {
@@ -505,6 +540,36 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
+  /**
+   * The diagnostician's effects under the live configuration (GY-439). Its first run takes the
+   * registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
+   * the fallback run is Pi on the stronger `fallbackModel`. The excerpts are the loop journal, the
+   * server log when a command for it is configured, and `gh pr view` of each named pull request.
+   */
+  const diagnostician = (config: MasterConfig): DiagnosticianEffects => {
+    const settings = diagnosticianSettings(config.run);
+    const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
+    return {
+      settings, cwd: root,
+      runner: async (attempt, subject) => {
+        if (attempt === 'primary') {
+          const fleet = await selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, { work: subject.work?.key });
+          if (fleet) { const launch = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release }; }
+        }
+        const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
+        return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
+      },
+      context: async (_subject, numbers) => ({
+        journal: await lines(settings.journalCommand).catch(error => [`(the loop journal could not be read with ${settings.journalCommand.join(' ')}: ${message(error)})`]),
+        serverLog: settings.serverLogCommand ? await lines(settings.serverLogCommand).catch(error => [`(the server log could not be read with ${settings.serverLogCommand!.join(' ')}: ${message(error)})`])
+          : ['(no run.diagnostician.serverLogCommand is configured, so no server log excerpt was read)'],
+        pullRequests: await Promise.all(numbers.map(async number => ({ number, state: await Promise.resolve(run('gh', ['pr', 'view', String(number), '--repo', config.repository, '--json', 'number,title,state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,reviewDecision,statusCheckRollup']))
+          .then(output => JSON.parse(String(output)), (error: unknown) => ({ error: message(error) })) }))),
+      }),
+      file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
+      decide: (work, action, reason, input) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
+    };
+  };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
   return {
@@ -523,7 +588,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The decline is typed into the pane and given a moment to close the dialog, so the instruction
     // that follows lands in the runtime's input rather than in the closing menu.
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
-    promptSession: async (agent, text) => { await deliverPrompt(agent.name ?? agent.pane_id!, text, run); },
+    promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
@@ -613,8 +678,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
     },
     get widenScope() {
-      return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
-        asOperatorAgent('POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)) : undefined;
+      return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
+        // An unrepresentable widening is refused before it is posted (GY-630): answeringWidening
+        // returns null rather than a revision the schema would reject on every retry.
+        const revision = answeringWidening(work, request, paths, reason);
+        return revision ? asOperatorAgent('POST', `work/${work.id}/requirements`, revision) : undefined;
+      } : undefined;
     },
     requestProof: async work => {
       const config = current();
@@ -622,6 +691,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
     merge: work => mergeExecutor(current(), snapshot, mutate, deps.executor, randomUUID(), run)(work),
+    refuseMerge: (work, reason, since) => mutate(`work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since }),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     publishProductionEnvironment: async () => {
@@ -638,6 +708,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedMergeQueue = published;
     },
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
+    exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
+      .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
@@ -685,7 +757,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
-    get fileFaultClass() { return current().operatorAgent ? (input: ReturnType<typeof faultClassItem>, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
+    // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
+    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
+    get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
       () => herdrJson(['status', 'server', '--json'], run)) }),
@@ -719,6 +793,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
+    masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
   };
 }
