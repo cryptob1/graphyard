@@ -19,7 +19,11 @@ On the worker `graphyard master settle-containment GY-N "reason"` verifies nothi
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by recorded reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding out-of-item causes. GY-643 (2026-09-26) measured 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework rounds by recorded reason; `master status` reports the split (`speed.reworkRounds.ownChange`): median excluding out-of-item causes. GY-643: 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
+
+## Retro synthesis
+
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rework interventions by cause (declared refusal shape `build/out-of-scope-count`; loop refusal trigger; normalised rework reason). A cause at the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed: standards/criteria wording, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent with `decision:approve` (not a human session, the drafter or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording cause, fingerprint, instances closed, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals), counting recurrences. Drafted instances never recount; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 
@@ -70,19 +74,19 @@ After an hour without deliveries `master status` points to `https://github.com/s
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else the size of the volume holding the database's data directory when the plane can read it (same host, role allowed to read `data_directory`), else an advisory 10 GiB that only warns.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`. The database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else the data directory's volume size when readable (same host, role may read `data_directory`), else an advisory 10 GiB that only warns.
 
 ## Storage retention
 
-- **Receipts** answer a retried command for one day, then the server prunes them every 10 minutes, 5,000 rows a run.
-- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of at most 2,000 rows per phase and five batches a run. It never deletes another kind, a row a delta extends, an item's newest save, a delivery event or the revision a delivery cites, a row of an item merged but not done, or a row the flow projection has not read. Each batch appends a `ledger.compacted` event with counts per kind. Postgres reuses the space; only `VACUUM FULL` returns it to the volume.
+- **Receipts** answer a retried command for one day, pruned every 10 minutes, 5,000 rows a run.
+- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed unless they move the stage or delivery.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of at most 2,000 rows per phase and five batches a run. It never deletes another kind, a row a delta extends, an item's newest save, a delivery event or the revision a delivery cites, a row of an item merged but not done, or a row the flow projection has not read. Each batch appends a `ledger.compacted` event with counts per kind. Only `VACUUM FULL` returns space to the volume.
 
 ### Host memory
 
-Heavy verification runs a session starts (`npm test`, `test:browser`, `npm run typecheck`, `tsc --noEmit`) take a host slot first from `.verification-slots`, a lock directory under the managed worktree root. Default slots: max(2, floor(total memory GB / 8)); `GRAPHYARD_VERIFICATION_SLOTS` sets that host's bound. A run finding every slot held prints that it waits, and on what. Launches create it under an existing root and put the wrappers first on the session's `PATH`; Codex's sandbox gets the directory via `--add-dir`. Runs outside sessions (CI, your shell) are unbounded.
+Session-started `npm test`, `test:browser`, `npm run typecheck`, `tsc --noEmit` take a host slot in `.verification-slots` under the managed worktree root (Codex: `--add-dir`): max(2, floor(total GB / 8)), or `GRAPHYARD_VERIFICATION_SLOTS`. A run finding all held prints what it waits on. CI and your shell run unbounded.
 
-Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no worker, reviewer or producer on that host, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers; launches resume, recorded, once memory recovers, running sessions untouched. One `memory-pressure` fault instance stands for the whole dip: the fault's text is fixed; the attention item keeps the moving consumer ranking.
+Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch no session there, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming the top consumers, under one `memory-pressure` fault per dip; recovery resumes launches, recorded; running sessions are untouched.
 
 ## Bootstrap mode for a self-proving change
 
