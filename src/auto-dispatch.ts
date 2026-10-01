@@ -310,8 +310,8 @@ export interface DispatchEffects {
   /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
   agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
-  /** `released` names the panes of settled sessions the pass closed (GY-1072): their names are free for this tick's launches. */
-  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[]; released?: string[] }>;
+  /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
+  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
@@ -672,7 +672,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
-  const agents = (herdr ?? []).filter(agent => !agent.pane_id || !released?.includes(agent.pane_id));
+  const agents = (herdr ?? []).filter(agent => !released?.some(entry => entry.pane === agent.pane_id && entry.agentName === agent.name));
   const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
   // The sessions this tick has started join the inventory at once, so two requests in one tick
   // never both take a profile's last slot. A launcher that does not report its session name is

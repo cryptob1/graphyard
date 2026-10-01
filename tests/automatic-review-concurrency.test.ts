@@ -1,102 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import type { Observation, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { automaticReviewerConcurrency, loadMasterConfig, profileConcurrency, setupMaster, withReviewerDefaults, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { automaticReviewerConcurrency, loadMasterConfig, profileConcurrency, withReviewerDefaults } from '../src/master.js';
 import { assertNameAvailable } from '../src/master-resources.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
-import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile, type DispatchEffects } from '../src/auto-dispatch.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
+import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
+import { fleet, requested, starts } from './helpers/review-fleet.js';
 
 // GY-1072: on 2026-10-01 every automatic review went to the one profile run.reviewerProfile named,
 // whose concurrency was unset (one session), and a finished reviewer left idle in its pane held
 // that profile's only name, so 26 launches in an hour were refused at the agent-name bound. Each
 // test is named for the proof it produces: unit:automatic-reviews-run-in-parallel and
 // unit:settled-reviewer-releases-name.
-
-const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
-const B = sha40('b1');
-const at = '2026-10-01T10:00:00.000Z';
-const requestId = (n: number) => createHash('sha256').update(`gy-1072-review-${n}`).digest('hex').slice(0, 32);
-
-function observation(candidate: { sha: string; baseSha: string; pr: number; branch: string }): Observation {
-  return { candidate: { ...candidate, author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-    files: ['src/server/routes/a.ts'], scopeFiles: [{ path: 'src/server/routes/a.ts', status: 'modified' as const, sha: sha40('s'), additions: 1, deletions: 1, binary: false }], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true };
-}
-/** A submitted, observed candidate for item N with an open review request under a fixed id. */
-function requested(n: number): Work {
-  const now = new Date();
-  const candidate = { sha: sha40(`a${n}`), baseSha: B, pr: 500 + n, branch: `graphyard/gy-${500 + n}-1`, author: 'implementer' };
-  const item = { id: `work-${500 + n}`, key: `GY-${500 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
-    criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:review'] }],
-    policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
-    lease: null, workspaces: [{ host: 'h', path: `/w/gy-${500 + n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [] } as unknown as Work;
-  // The review request follows the head's mechanical proofs (GY-115): it is the one a proven twin raises.
-  const twin = structuredClone(item);
-  twin.evidence = [{ id: 'twin-unit', proof: 'unit:review', sha: candidate.sha, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }] as Work['evidence'];
-  reconcileAutoDispatch(twin, [twin], now);
-  item.autoDispatch = { ...twin.autoDispatch!, producers: [], review: { ...twin.autoDispatch!.review!, id: requestId(n) } };
-  return item;
-}
-
-/**
- * A master bound to a reviewer App with a stubbed Herdr: every typed launch becomes a visible agent,
- * and `pane close` removes one unless the test makes Herdr refuse it.
- */
-async function fleet(reviewer: Record<string, unknown>, automatic: string | null) {
-  const root = await temporaryDirectory('auto-review'), credentialDirectory = await temporaryDirectory('auto-review-credentials');
-  execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
-  await saveReviewerProfile(root, reviewer);
-  await saveReviewerProfile(root, { name: 'spare-reviewer', agentName: 'review-spare', kind: 'claude' });
-  if (automatic) {
-    const file = join(root, '.graphyard/master.json');
-    const current = JSON.parse(await readFile(file, 'utf8'));
-    current.run.reviewerProfile = automatic;
-    await writeFile(file, JSON.stringify(current, null, 2), { mode: 0o600 });
-  }
-  const agents: HerdrAgent[] = [];
-  const calls: string[][] = [];
-  const refuseClose = new Set<string>();
-  let panes = 0;
-  const run = (_command: string, args: string[]) => {
-    calls.push(args);
-    if (args[0] === 'tab' && args[1] === 'create') { panes++; return JSON.stringify({ result: { root_pane: { pane_id: `pane-${panes}`, tab_id: `tab-${panes}` } } }); }
-    if (args[0] === 'pane' && (args[1] === 'run' || args[1] === 'read')) return '';
-    if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { agent: 'claude', agent_status: 'working', pane_id: args[2] } } });
-    if (args[0] === 'agent' && args[1] === 'rename') { agents.push({ name: args[3], pane_id: args[2], agent_status: 'working' }); return JSON.stringify({ result: {} }); }
-    if (args[0] === 'pane' && args[1] === 'close') {
-      if (refuseClose.has(args[2])) throw new Error('herdr: timed out closing the pane');
-      const index = agents.findIndex(agent => agent.pane_id === args[2]); if (index >= 0) agents.splice(index, 1); return JSON.stringify({ result: {} });
-    }
-    if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
-    return JSON.stringify({ result: {} });
-  };
-  const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
-  const effects = (items: () => Work[], config: () => MasterConfig, observe: NonNullable<Parameters<typeof reconcileReviews>[2]>['observe'] = () => null): DispatchEffects => ({
-    snapshot: async () => ({ work: items(), now: new Date().toISOString() }),
-    agents: () => [...agents],
-    credentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])),
-    reconcileReviews: (work, herdr) => reconcileReviews(root, config(), { run, work, agents: herdr, observe }),
-    reconcileProducers: async () => ({ producers: [] }),
-    launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, mint, requestId: request.id }),
-    launchProducer: async () => { throw new Error('no producer is launched here'); },
-    persist: async () => {},
-  }) as DispatchEffects;
-  const cleanup = async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); };
-  return { root, agents, calls, run, mint, refuseClose, effects, cleanup };
-}
-const starts = (calls: string[][]) => calls.filter(call => call[0] === 'agent' && call[1] === 'rename').map(call => call[3]);
 
 test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set and its concurrency unset, three concurrent review requests all launch at once and none is refused for the agent-name bound', async () => {
   const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
@@ -155,7 +72,7 @@ test('unit:settled-reviewer-releases-name — a reviewer whose request settled b
     const pane = host.agents[0].pane_id!;
 
     // The verdict is posted; Herdr fails to close the pane, so the settled reviewer stays idle in it.
-    host.refuseClose.add(pane);
+    host.refuseClose.set(pane, Infinity);
     const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 501, submittedAt: new Date().toISOString() };
     await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: record => record.key === 'GY-501' ? verdict : null });
     const settled = (await readReviewLedger(host.root)).reviews.find(record => record.key === 'GY-501')!;
@@ -183,5 +100,53 @@ test('unit:settled-reviewer-releases-name — a reviewer whose request settled b
     const closes = host.calls.filter(call => call[0] === 'pane' && call[1] === 'close').length;
     await reconcileReviews(host.root, config, { run: host.run, work: [first, second], agents: [...host.agents, { name: 'claude-reviewer', pane_id: pane, agent_status: 'idle' }], observe: () => null });
     assert.equal(host.calls.filter(call => call[0] === 'pane' && call[1] === 'close').length, closes);
+  } finally { await host.cleanup(); }
+});
+
+test('unit:automatic-reviews-run-in-parallel — launches answering different requests from one stale inventory stop at the automatic profile\'s limit', async () => {
+  const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
+  try {
+    // Six launches at once, each handed the same empty inventory: the ledger's pending sessions, read under its lock, are what count.
+    const items = [1, 2, 3, 4, 5, 6].map(n => requested(n));
+    const results = await Promise.allSettled(items.map(item => launchReview(host.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: host.run, mint: host.mint, requestId: item.autoDispatch!.review!.id })));
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, automaticReviewerConcurrency, 'exactly the default number launch');
+    for (const result of results.filter(result => result.status === 'rejected')) assert.match(String((result as PromiseRejectedResult).reason), /profile claude-reviewer is at its concurrency limit \(4 running, limit 4/);
+    assert.equal(host.agents.length, automaticReviewerConcurrency);
+    assert.equal((await readReviewLedger(host.root)).reviews.filter(record => record.state === 'pending').length, automaticReviewerConcurrency);
+  } finally { await host.cleanup(); }
+});
+
+test('unit:settled-reviewer-releases-name — a settled reviewer\'s pane Herdr keeps refusing to close is tried a bounded number of times, then reported naming the pane, and the ledger stops changing', async () => {
+  const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude', concurrency: 1 }, 'claude-reviewer');
+  try {
+    const config = await loadMasterConfig(host.root);
+    const first = requested(1);
+    await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [first], () => config), Date.now);
+    const pane = host.agents[0].pane_id!;
+    host.refuseClose.set(pane, Infinity);
+    const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 501, submittedAt: new Date().toISOString() };
+    await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: record => record.key === 'GY-501' ? verdict : null });
+    const ledgerFile = join(host.root, '.graphyard/reviews.json');
+    const passes: { changed: number; ledger: string }[] = [];
+    for (let pass = 0; pass < settledCloseAttempts + 4; pass++) {
+      const result = await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: () => null });
+      passes.push({ changed: result.changed, ledger: await readFile(ledgerFile, 'utf8') });
+    }
+    // The settlement's own close, then the sweep's bounded retries, and nothing after.
+    assert.deepEqual(host.closes.filter(entry => entry === pane).length, 1 + settledCloseAttempts);
+    assert.deepEqual(passes.map(entry => entry.changed > 0), [...Array(settledCloseAttempts).fill(true), false, false, false, false], 'one ledger change per retry, then none');
+    assert.equal(new Set(passes.slice(settledCloseAttempts - 1).map(entry => entry.ledger)).size, 1, 'the ledger is not rewritten once the retries are spent');
+    const record = (await readReviewLedger(host.root)).reviews.find(entry => entry.key === 'GY-501')!;
+    assert.equal(record.closeAttempts, settledCloseAttempts);
+    const held = heldNameAttention([record]);
+    assert.equal(held.length, 1, 'the held name is reported, not left as a silent bound');
+    assert.match(held[0].text, new RegExp(`Settled reviewer session claude-reviewer on GY-501 .* still holds its agent name in pane ${pane}`));
+    assert.match(held[0].next, new RegExp(`herdr pane close ${pane}`));
+
+    // Once the pane is gone (closed by hand), the failure clears in one pass and nothing is reported.
+    host.agents.splice(0, host.agents.length);
+    const cleared = await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [], observe: () => null });
+    assert.equal(cleared.changed, 1);
+    assert.deepEqual(heldNameAttention((await readReviewLedger(host.root)).reviews), []);
   } finally { await host.cleanup(); }
 });
