@@ -1907,8 +1907,9 @@ export class Engine {
       work.baseRefresh = { ...refresh, carry: null };
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : 'branch.unrepairable', now,
-        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, trigger: refresh.trigger ?? null, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason, ...(refresh.conflict ? { conflict: refresh.conflict } : {}) });
+      await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : restore!.outcome === 'unpublished' ? 'branch.restore-unpublished' : 'branch.unrepairable', now,
+        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, trigger: refresh.trigger ?? null, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason,
+          ...(refresh.conflict ? { conflict: refresh.conflict } : {}), ...(restore!.failure ? { failure: restore!.failure } : {}), ...(restore!.failureKind ? { failureKind: restore!.failureKind } : {}), ...(restore!.attempts ? { attempts: restore!.attempts } : {}), ...(restore!.escalated ? { escalated: restore!.escalated } : {}) });
       await wakeJob(db, work.id);
       return work;
     });
