@@ -112,8 +112,24 @@ export function recordTiming(measurement: TimingMeasurement, file = process.env[
  */
 export function assertTiming(input: Parameters<typeof measureTiming>[0], file?: string) {
   const measurement = recordTiming(measureTiming(input), file);
-  if (!measurement.passed) throw new TimingAssertionError(measurement);
+  if (!measurement.passed && !withinSlack(measurement)) throw new TimingAssertionError(measurement);
   return measurement;
+}
+
+/**
+ * How far a shared CI runner may run past a timing budget before the assertion fails:
+ * `GRAPHYARD_TIMING_SLACK` (a multiplier, at least 1; default 1, so local runs keep the exact
+ * budget). On 2026-10-01 a 100-item cycle measured 20 072 ms against a 20 000 ms budget on a
+ * loaded runner and failed main's CI, and such misses ejected good candidates from the merge queue.
+ */
+export const timingSlackVariable = 'GRAPHYARD_TIMING_SLACK';
+export function timingSlack(env: Record<string, string | undefined> = process.env) {
+  const value = Number(env[timingSlackVariable]);
+  return Number.isFinite(value) && value >= 1 ? value : 1;
+}
+/** Whether an over-budget upper-bound measurement still sits inside the run's slack. */
+export function withinSlack(m: Pick<TimingMeasurement, 'measuredMs' | 'budgetMs' | 'comparison'>, slack = timingSlack()) {
+  return m.comparison === '<=' && m.measuredMs <= m.budgetMs * slack;
 }
 
 /** Read a timing record back; a missing file is a run that made no timing assertion. */
