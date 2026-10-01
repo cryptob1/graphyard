@@ -14,6 +14,8 @@ import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
+import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
+export { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory } from './checkout-git.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -545,13 +547,6 @@ export interface ConfinementInput {
 const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
 /** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
 const isDirectoryPath = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-/** The linked-worktree admin directory a checkout's `.git` pointer file names, resolved against the checkout, or null when its `.git` is unreadable or not a pointer. The path runs to the end of the line as Git writes it, so one holding whitespace resolves too (GY-957, acceptance finding). */
-const gitPointerAdminDirectory = (directory: string): string | null => {
-  let pointer: string;
-  try { pointer = readFileSync(join(directory, '.git'), 'utf8'); } catch { return null; }
-  const match = /^gitdir: (.+?)[\r\n]*$/.exec(pointer);
-  return match ? resolve(directory, match[1]) : null;
-};
 /** The bubblewrap executable on this PATH, or null: the synchronous lookup a spawn wrapper needs. */
 export const bwrapOnPath = (env: NodeJS.ProcessEnv = process.env): string | null => {
   for (const directory of (env.PATH ?? '').split(delimiter)) {
@@ -599,46 +594,6 @@ const runtimeSandboxConfines = (input: ConfinementInput): boolean => {
   // wrapper, which re-exposes only the session's own Git paths (GY-888, GY-957 review findings).
   return !sandboxWritableScope(input.args, input.sessionDirectory).some(path =>
     (overlaps(path, root) || overlaps(path, git)) && !exempt.some(zone => inside(path, zone)));
-};
-
-/**
- * The common Git directory the checkout at `root` writes through: its `.git` when that is the repository
- * directory itself, otherwise the common directory the `.git` pointer's worktree admin names through its
- * `commondir` marker — a directory outside the checkout when the checkout itself is a linked worktree
- * (GY-957, review finding). Every Git path the confinement protects or re-exposes resolves here, never
- * under a `.git` that may be a pointer file; a pointer that names no Git directory throws the
- * `checkoutGitProblem` reason rather than falling back to the pointer file.
- */
-export const checkoutGitDirectory = (root: string): string => {
-  const resolved = resolveCheckoutGitDirectory(root);
-  if ('problem' in resolved) throw new Error(resolved.problem);
-  return resolved.directory;
-};
-/**
- * Why the checkout's `.git` is a file that names no Git directory, or null: a pointer that cannot be
- * parsed, or whose admin or common directory is missing, would otherwise leave the confinement
- * protecting the pointer file itself and re-exposing nothing, so every launch refuses on it instead
- * (GY-957, review follow-up).
- */
-export const checkoutGitProblem = (root: string): string | null => { const resolved = resolveCheckoutGitDirectory(root); return 'problem' in resolved ? resolved.problem : null; };
-const resolveCheckoutGitDirectory = (root: string): { directory: string } | { problem: string } => {
-  const checkout = resolve(root), gitPath = join(checkout, '.git');
-  try { if (statSync(gitPath).isDirectory()) return { directory: gitPath }; } catch { return { directory: gitPath }; }
-  const admin = gitPointerAdminDirectory(checkout);
-  if (!admin) return { problem: `its .git at ${gitPath} is a file but not a readable "gitdir: <path>" pointer` };
-  if (!isDirectoryPath(admin)) return { problem: `its .git pointer names ${admin}, which is not a directory` };
-  let common: string;
-  try { common = readFileSync(join(admin, 'commondir'), 'utf8').trim(); } catch { return { directory: admin }; }
-  const directory = common ? resolve(admin, common) : admin;
-  return isDirectoryPath(directory) ? { directory } : { problem: `its worktree admin ${admin} names the common Git directory ${directory}, which is not a directory` };
-};
-
-/** The checkout's own linked-worktree admin directory — where its HEAD, index and FETCH_HEAD live — or null when its `.git` is the repository directory itself, so those paths sit directly under the common Git directory. */
-export const checkoutWorktreeAdminDirectory = (root: string): string | null => {
-  const checkout = resolve(root);
-  if (isDirectoryPath(join(checkout, '.git'))) return null;
-  const admin = gitPointerAdminDirectory(checkout);
-  return admin && isDirectoryPath(admin) ? admin : null;
 };
 
 /**
