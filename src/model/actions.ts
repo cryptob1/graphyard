@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { demand } from './refusal.js';
-import { actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
+import { actionRetryAt, actionStall, actionWaitRecheckMs, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 
@@ -32,7 +32,7 @@ export * from './action-progress.js';
 
 export const actionStates = ['pending', 'claimed', 'done'] as const;
 export type ActionState = typeof actionStates[number];
-export type ActionEvent = 'requested' | 'claimed' | 'reclaimed' | 'completed' | 'failed' | 'cancelled' | 'reopened';
+export type ActionEvent = 'requested' | 'claimed' | 'reclaimed' | 'completed' | 'failed' | 'waited' | 'cancelled' | 'reopened';
 
 export interface ActionClaim {
   /** The executor identity and the host it runs on; two executors never share a claim. */
@@ -76,7 +76,7 @@ export interface ActionRow {
    * `actionStall` recomputes it from the history so the two can never disagree.
    */
   stall?: ActionStall;
-  resolvedAt?: string; result?: 'done' | 'failed'; resolution?: string;
+  resolvedAt?: string; result?: 'done' | 'failed' | 'wait'; resolution?: string;
   history: ActionRecord[];
 }
 export interface ActionQueue { actions: ActionRow[]; history: ActionRow[] }
@@ -271,8 +271,18 @@ export function renewClaim(work: Work, id: string, renewer: { executor: string; 
  * expired and was taken by another executor can no longer report a result, so an executor that
  * comes back from the dead cannot overwrite the attempt that replaced it, and no action is
  * counted twice.
+ *
+ * `wait` (GY-948) is the third outcome, beside done and failed: the handler could not run the
+ * action because it waits on a condition outside the action's own reach — every worker profile
+ * at its role's concurrency limit, an observation job held on a permission only the operator can
+ * grant. A wait is not a failure: it joins no failure run (`actionStall` skips it), so a row
+ * whose condition cannot change by being asked never accumulates the identical failures that
+ * read as a stall and end in an escalation; it is attempted again on the fixed
+ * `actionWaitRecheckMs`, which is the relaunch the capacity-wait doctrine owes — the row moves
+ * again on the first pass after the slot frees or the permission is accepted. The reason it
+ * settled with is the wait sentence every reader shows.
  */
-export function settleAction(work: Work, id: string, settler: { executor: string; principal: string }, result: 'done' | 'failed', reason: string, now: Date): ActionTransition {
+export function settleAction(work: Work, id: string, settler: { executor: string; principal: string }, result: 'done' | 'failed' | 'wait', reason: string, now: Date): ActionTransition {
   const { executor, principal } = settler;
   const row = work.actionQueue?.actions.find(entry => entry.id === id);
   demand(row, 'Action is not open on this work item', 404);
@@ -283,7 +293,7 @@ export function settleAction(work: Work, id: string, settler: { executor: string
   demand((row!.claim!.principal ?? principal) === principal, `Action was claimed with the credential of ${row!.claim!.principal}; another credential cannot settle it`, 409);
   demand(claimLive(row!, now), 'Action claim expired; another executor may already be running it', 409);
   const at = now.toISOString();
-  const event: ActionEvent = result === 'done' ? 'completed' : 'failed';
+  const event: ActionEvent = result === 'done' ? 'completed' : result === 'wait' ? 'waited' : 'failed';
   row!.state = result === 'done' ? 'done' : 'pending';
   row!.claim = null;
   row!.resolvedAt = at; row!.result = result; row!.resolution = reason;
@@ -291,11 +301,15 @@ export function settleAction(work: Work, id: string, settler: { executor: string
   // says whether this row is retrying or stalling.
   record(row!, { at, event, requester: row!.requestedBy, executor, result, reason });
   // A completed action holds its situation while its effect lands; a failed one backs off — on a
-  // widening interval while its failures change, on a fixed recheck once they stop changing.
+  // widening interval while its failures change, on a fixed recheck once they stop changing; and
+  // a wait one rechecks on the wait interval, whatever its attempt count, because the condition
+  // it names is outside the action's own reach and moving again is the whole point.
   if (result === 'failed') {
     const stall = actionStall(row!);
     if (stall) row!.stall = stall; else delete row!.stall;
     row!.retryAt = actionRetryAt(row!, now);
+  } else if (result === 'wait') {
+    row!.retryAt = new Date(now.getTime() + actionWaitRecheckMs).toISOString();
   } else { delete row!.retryAt; delete row!.stall; }
   return { event, action: row! };
 }

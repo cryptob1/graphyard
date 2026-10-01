@@ -11,6 +11,7 @@ import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, 
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
+import { actionWaitOf } from './model/action-progress.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
@@ -1266,7 +1267,8 @@ export type ExecutorHandler = (action: ActionRow, identity: ExecutorIdentity) =>
 export interface ExecutorEffects {
   /** Ask the control plane for one row this executor can run; null when the queue has nothing for it. */
   claim: (request: { host: string; executor: string; kinds: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
-  settle: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown>;
+  /** `wait` (GY-948) records a launch the fleet could not take yet — a capacity refusal, an operator-held observation — as the row's named wait, never a failure. */
+  settle: (action: ActionRow, result: 'done' | 'failed' | 'wait', reason: string) => Promise<unknown>;
   /**
    * Say the handler is still running, so the claim holds for another lease. An executor wired
    * without it can still run every kind — it is simply bounded by one claim lease, and a handler
@@ -1344,8 +1346,15 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
     await effects.settle(action, 'done', reason.slice(0, 2000));
     return step(action, 'done', reason);
   } catch (error) {
+    // A wait (GY-948) is a handler saying the action could not run yet because it waits on
+    // something outside its own reach — a worker role at its concurrency limit, an observation
+    // job held on a permission the operator must grant. It settles as the row's named wait, so
+    // the row rechecks promptly without the reason ever joining the failure run that would read
+    // as a stall and end in an escalation; the step still reads `failed` to the executor's own
+    // log, which paces its next poll the same either way.
+    const wait = actionWaitOf(error);
     const reason = message(error).slice(0, 2000);
-    await effects.settle(action, 'failed', reason).catch(() => {});
+    await effects.settle(action, wait ? 'wait' : 'failed', reason).catch(() => {});
     return step(action, 'failed', reason);
   } finally { if (holding) clearInterval(holding); }
 }

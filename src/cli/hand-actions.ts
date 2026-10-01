@@ -218,7 +218,7 @@ export function dispatchRaceRefusal(work: Pick<Work, 'key' | 'actionQueue'> & Pa
   if (row && claimable(row, now)) return `${work.key}: ${named(row)} is pending and claimable; the loop's dispatcher claims it on its next tick, so master dispatch is refused`;
   const retryAt = dispatchRetryAt(work, now);
   if (row && retryAt !== null && retryAt - now.getTime() < handDispatchFenceMs)
-    return `${work.key}: ${named(row)} is in a failure backoff that ends at ${row.retryAt}, inside the ${Math.round(handDispatchFenceMs / 1000)}s a hand dispatch has to reach its lease claim; the dispatcher claims it then, so master dispatch is refused`;
+    return `${work.key}: ${named(row)} is waiting to be attempted again at ${row.retryAt} (failure backoff or named wait), inside the ${Math.round(handDispatchFenceMs / 1000)}s a hand dispatch has to reach its lease claim; the dispatcher claims it then, so master dispatch is refused`;
   const released = window.releasedAt ? Date.parse(window.releasedAt) : NaN;
   if (Number.isFinite(released) && now.getTime() - released < window.intervalMs)
     return `${work.key} was released at ${window.releasedAt}, within the loop's ${Math.round(window.intervalMs / 1000)}s dispatch interval; the dispatcher's next tick claims its dispatch action, so master dispatch is refused`;

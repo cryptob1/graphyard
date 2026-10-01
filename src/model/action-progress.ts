@@ -48,6 +48,26 @@ export const actionStallThreshold = 3;
  */
 export const actionStallRecheckMs = 60_000;
 /**
+ * How long a row that was settled as a **wait** (`wait`, GY-948) waits between attempts.
+ *
+ * A wait names a condition outside the action's own reach — every worker profile at its role's
+ * concurrency limit, an observation job held on a permission only the operator can grant. It is
+ * not a failure: it counts toward no stall, escalates for nothing, and the row is attempted again
+ * on this fixed recheck, so the relaunch the doctrine owes happens on the first pass after the
+ * slot frees or the permission is accepted. The same patience a stalled row's first recheck gets.
+ */
+export const actionWaitRecheckMs = 60_000;
+/**
+ * The error a handler throws when the action it was claimed for cannot run because it waits on a
+ * condition outside the action's own reach (GY-948). `runExecutorTick` settles it as a `wait` —
+ * the row is attempted again on `actionWaitRecheckMs` and the reason counts toward no stall —
+ * where a plain error settles a failure and joins the row's failure run. (A tag, not a subclass:
+ * the settlement lives in auto-dispatch.ts, which this module must not import.)
+ */
+export interface ActionWaitError extends Error { actionWait: true }
+export const actionWaitError = (reason: string): ActionWaitError => Object.assign(new Error(reason), { actionWait: true as const });
+export const actionWaitOf = (error: unknown): boolean => error instanceof Error && (error as Error & { actionWait?: unknown }).actionWait === true;
+/**
  * The longest a stalled row waits between attempts (GY-185).
  *
  * A fixed one-minute recheck assumed the condition would clear. One that never did — a delivered
@@ -104,9 +124,11 @@ export function actionStall(row: ActionRow): ActionStall | null {
   const failures: ActionRecord[] = [];
   for (const entry of [...row.history].reverse()) {
     if (entry.event === 'failed') { failures.push(entry); continue; }
-    // A claim or a reclaim sits between two attempts and says nothing about either. Anything else
-    // — a completion, a reopening, a fresh request — is progress, and ends the run of failures.
-    if (entry.event === 'claimed' || entry.event === 'reclaimed') continue;
+    // A claim, a reclaim or a wait sits between two attempts and says nothing about either. A
+    // wait is the row's own record that it cannot run yet (GY-948), so it neither joins nor ends
+    // the run of failures around it. Anything else — a completion, a reopening, a fresh request —
+    // is progress, and ends the run of failures.
+    if (entry.event === 'claimed' || entry.event === 'reclaimed' || entry.event === 'waited') continue;
     break;
   }
   const run: ActionRecord[] = [];
@@ -172,6 +194,8 @@ export interface QueueEntry {
   retryAt: string | null;
   /** Why the row is making no progress, once its failures stopped changing; null when they have not. */
   stall: ActionStall | null;
+  /** The wait the row's last settlement named (`wait`, GY-948), when that was the last one. */
+  wait: string | null;
 }
 export interface QueueSnapshot {
   /**
@@ -209,6 +233,7 @@ export function queueSnapshot(all: Work[], now: Date): QueueSnapshot {
   const view = (row: ActionRow): QueueEntry => ({ key: row.key, work: row.work, id: row.id, kind: row.kind, reason: row.reason,
     waitedMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)), attempts: row.attempts,
     lastFailure: row.result === 'failed' ? row.resolution ?? null : null,
+    wait: row.result === 'wait' ? row.resolution ?? null : null,
     retryAt: waitingToRetry(row, now) ? row.retryAt ?? null : null, stall: actionStall(row) });
   const longestFirst = (a: QueueEntry, b: QueueEntry) => b.waitedMs - a.waitedMs;
   const waiting = rows.filter(({ row }) => claimable(row, now)).map(({ row }) => view(row)).sort(longestFirst);
