@@ -1386,7 +1386,7 @@ export function enqueueRequestCurrent(work: Work, request: Pick<MergeEnqueueRequ
   return !!request && !!work.candidate && request.sha === work.candidate.sha && request.baseSha === work.candidate.baseSha && request.policyRevision === work.policyRevision;
 }
 export type MergeQueueAction =
-  | { kind: 'enqueue'; reason: string }
+  | { kind: 'enqueue'; reason: string; mergeNow?: boolean }
   | { kind: 'dequeue'; reason: string }
   | { kind: 'hold'; reason: string };
 /**
@@ -1458,7 +1458,13 @@ function blockedMergeStall(item: Work, state: GitHubMergeQueueState, now: number
     text: `merge-stalled: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been set to auto-merge for ${Math.floor(ageMs / 60_000)} minutes (since ${state.requestedAt}) while GitHub reports mergeStateStatus BLOCKED: ${why}`,
     next: failed.length ? `the failed-CI rework rule returns ${item.key} to a worker; gh pr checks ${candidate.pr} shows the failing run` : `gh pr view ${candidate.pr} shows what GitHub is waiting on` };
 }
-export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null): MergeQueueAction {
+/**
+ * How long auto-merge may wait on an authorized head GitHub reports BLOCKED before the control plane
+ * asks GitHub to merge that head at once: GitHub never says why auto-merge does not fire, but a
+ * head-bound merge either lands or is refused with the rule that blocks it, recorded as the reason.
+ */
+export const blockedAutoMergeProbeMs = 10 * 60_000;
+export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null, now = Date.now()): MergeQueueAction {
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
   const withdrawn = !mergeAuthorized(work) ? `${work.key} is no longer authorized to merge: ${[...work.gates.flatMap(gate => gate.reasons), ...work.violations].join('; ') || 'no all-gates authorization binds the current candidate'}`
@@ -1466,6 +1472,9 @@ export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, reque
       : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
         : null;
   if (withdrawn) return held ? { kind: 'dequeue', reason: withdrawn } : { kind: 'hold', reason: withdrawn };
+  const waitedMs = request ? now - Date.parse(request.at) : 0;
+  if (state.mode === 'auto-merge' && state.mergeStateStatus === 'BLOCKED' && waitedMs > blockedAutoMergeProbeMs)
+    return { kind: 'enqueue', mergeNow: true, reason: `${work.key}: auto-merge has waited ${Math.floor(waitedMs / 60_000)} minutes at ${sha!.slice(0, 12)} while GitHub reports it BLOCKED with every gate passing; asking GitHub to merge that head now, so it merges or names the rule that blocks it` };
   if (held) return { kind: 'hold', reason: `${work.key} is ${state.mode === 'queued' ? `in GitHub's merge queue${state.entryState ? ` (${state.entryState.toLowerCase()}${state.position !== null ? `, position ${state.position}` : ''})` : ''}` : 'set to auto-merge'} at ${sha!.slice(0, 12)}; GitHub performs the merge` };
   return { kind: 'enqueue', reason: `${work.key}: every gate passes for ${sha!.slice(0, 12)} and the merge was requested; ${state.queue ? 'adding it to GitHub\'s merge queue' : mergeableNow(state) ? 'merging it now, bound to that head (GitHub reports it mergeable and the base branch has no merge queue)' : 'enabling auto-merge (the base branch has no merge queue)'}` };
 }
