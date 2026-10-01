@@ -58,7 +58,7 @@ With `run.research` set, a feature (or `"research": true`) gets one read-only Pi
 
 ## Machine-filed backlog
 
-One follow-up item per parent; approvals append their findings. With `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Approvals' follow-up findings are recorded on the approved item's own record, never filed as items; an operator promotes one with `graphyard promote-followup` ([follow-ups](followups.md)). Legacy follow-up items and fault items are machine-filed: with `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
