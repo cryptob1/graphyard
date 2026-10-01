@@ -2082,26 +2082,32 @@ export class Engine {
    * 2026-10-01 re-reading ~1000 whole documents cost each batch 15-19 s for 1 s of work. A stand-in
    * is not reconciled here: a settled delivery needs nothing (it holds no queue entry, action or
    * lease), and an open one is its own batch's row in turn. The batch budget counts from before the
-   * read, so a batch's whole lock hold stays within it.
+   * read, so a batch's whole lock hold stays within it. A batch that spends its budget before its
+   * rows are done leaves the rest to be read whole again, so the next batch reads only as many rows
+   * as that one finished (doubling back towards `reconcileBatchItems` as batches finish theirs): on a
+   * slow host the pass still reads each open document whole about once, not once per batch.
    */
   async reconcile() {
-    let cursor = 0, first = true;
+    let cursor = 0, first = true, limit = this.reconcileBatchItems;
     for (;;) {
       const finished = await this.store.transaction(async (db, now) => {
         const started = performance.now();
-        const rows = await lockedRows(db, [], { after: cursor, limit: this.reconcileBatchItems }), all = rows.map(row => row.document);
+        const rows = await lockedRows(db, [], { after: cursor, limit }), all = rows.map(row => row.document);
         // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
         if (first) { await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now); first = false; }
         let reconciled = 0;
         for (const { number, document: work } of rows) {
           if (number <= cursor || isStandIn(work)) continue;
           // The batch's rows are done, or its budget is spent: the next batch reads from the cursor.
-          if (reconciled >= this.reconcileBatchItems || reconciled && performance.now() - started >= this.reconcileBatchMs) return false;
+          if (reconciled >= limit) break;
+          if (reconciled && performance.now() - started >= this.reconcileBatchMs) { limit = reconciled; return false; }
           await this.reconcileItem(db, work, all, now);
           cursor = number; reconciled++;
         }
         // A batch that filled its rows may have more after them; one short of the limit was the last.
-        return reconciled < this.reconcileBatchItems;
+        const last = reconciled < limit;
+        limit = Math.min(this.reconcileBatchItems, limit * 2);
+        return last;
       }, { lane: 'background' });
       if (finished) return;
       await new Promise(resolve => setImmediate(resolve));

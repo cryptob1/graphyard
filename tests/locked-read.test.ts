@@ -60,7 +60,8 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   // Each former call site reads through lockedWork, naming the item it acts on.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
   assert.ok((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 10, 'the engine\'s commands read through the bounded read, naming their item');
-  assert.match(engineSource, /const rows = await lockedRows\(db, \[\], \{ after: cursor, limit: this\.reconcileBatchItems \}\)/, 'each reconciliation batch reads its own rows whole through the bounded read');
+  assert.match(engineSource, /const rows = await lockedRows\(db, \[\], \{ after: cursor, limit \}\)/, 'each reconciliation batch reads its own rows whole through the bounded read');
+  assert.match(engineSource, /limit = Math\.min\(this\.reconcileBatchItems, limit \* 2\)/, 'a batch reads at most reconcileBatchItems of its own rows');
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
   assert.doesNotMatch(readFileSync(join(src, 'store/locked-read.ts'), 'utf8'), /settled IS NOT TRUE|NOT i\.settled/, 'the locked read does not read every open document whole');
 
@@ -278,4 +279,14 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   console.log(`second reconcile pass: ${second.toFixed(0)} ms of lock hold`);
   assert.ok(second < 5_000, `a second pass held the lock ${second.toFixed(0)} ms`);
   assert.equal(holds.slice(again).reduce((sum, entry) => sum + seededDelivered(entry), 0), 0, 'a second pass reads no delivered document whole');
+  // A slow host spends each batch's budget before its rows are done (CI on 2026-10-01: 35 batches
+  // read 1082 open documents whole for 407 open items). The next batch reads only as many rows as
+  // that one finished, so the pass still reads each open document whole about once.
+  const budget = engine.reconcileBatchMs, slow = holds.length;
+  engine.reconcileBatchMs = 1; label = 'reconcile';
+  try { await engine.reconcile(); } finally { engine.reconcileBatchMs = budget; label = 'other'; }
+  const slowBatches = holds.slice(slow), slowRead = slowBatches.reduce((sum, entry) => sum + seededOpen(entry), 0);
+  console.log(`slow reconcile pass: ${slowBatches.length} batches, ${slowRead} open documents read whole (${opened_} open)`);
+  assert.ok(slowBatches.length > batches.length, `a 1 ms budget yields more often: ${slowBatches.length} batches against ${batches.length}`);
+  assert.ok(slowRead < opened_ * 2, `with every batch yielding on its budget the pass read ${slowRead} open documents whole for ${opened_} open items`);
 });

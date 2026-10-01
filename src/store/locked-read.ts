@@ -19,17 +19,19 @@ import { coordinationDocumentSql, coordinationRelevance, coordinationTail, detoa
  * observation without its per-file scope, the candidate's evidence, running sessions, recent
  * histories), and a settled delivery (`settledSql`) as the work index's summary, projected on write
  * (src/store/tables/work-index.ts). Each stand-in is cached in-process by the version of the row it
- * was built from, so a read builds only the stand-ins that changed since the last one and the lock
- * hold grows with neither the history nor the open items' histories.
+ * was built from, parsed and deep-frozen, so a read fetches and parses only the stand-ins that
+ * changed since the last one and the lock hold grows with neither the history nor the open items'
+ * histories (parsing every summary on each read cost ~20 ms per thousand items, and grew with them).
  *
- * A stand-in is never a document: `save` refuses one (`assertSavable`), so a path that writes an
- * item must name it in `focus`, or read it whole itself.
+ * A stand-in is never a document: `save` refuses one (`assertSavable`), and it is frozen, shared by
+ * every read of its version, so a path that writes or edits an item must name it in `focus`, or read
+ * it whole itself.
  */
 export type Queryable = { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> };
 
 const summaries = new WeakSet<object>(), projections = new WeakSet<object>();
-/** Stand-ins as JSON text by the version of the row each was built from, in insertion order; bounded so a long-lived process stays bounded. */
-const cache = new Map<string, string>();
+/** Stand-ins, parsed and frozen, by the version of the row each was built from, in insertion order; bounded so a long-lived process stays bounded. */
+const cache = new Map<string, Work>();
 export const lockedSummaryCacheLimit = 20_000;
 
 /** Whether `work` is a settled delivery's summary handed out by `lockedWork` rather than its document. */
@@ -70,13 +72,13 @@ export async function lockedRows(db: Queryable, focus: readonly (string | null |
   await readWhole(db, [...listed.filter(row => row.focus), ...own].map(row => row.number), forUpdate, whole);
 
   // The stand-ins: what this call fetched is kept for this call, since the bounded cache may evict it before it is used.
-  const fetched = new Map<string, string>();
+  const fetched = new Map<string, Work>();
   const rest = listed.filter(row => !whole.has(row.number));
   const missingSummaries = rest.filter(row => row.settled && !cache.has(versionOf(row))).map(row => row.id);
   if (missingSummaries.length) {
     for (const row of (await db.query(`SELECT id::text AS id, xmin::text AS ix, summary::text AS text FROM work_index WHERE settled AND summary IS NOT NULL AND id::text = ANY($1::text[])`, [missingSummaries])).rows) {
-      const version = `${cluster}/i/${row.id}:${row.ix}`;
-      fetched.set(row.id, row.text); remember(version, row.text);
+      const document = standIn(summaries, row.text);
+      fetched.set(row.id, document); remember(`${cluster}/i/${row.id}:${row.ix}`, document);
     }
   }
   const missingProjections = rest.filter(row => !row.settled && !cache.has(versionOf(row))).map(row => row.number);
@@ -84,17 +86,15 @@ export async function lockedRows(db: Queryable, focus: readonly (string | null |
     for (const row of (await db.query(`SELECT d.id, d.wx, x.document::text AS text
       FROM (SELECT w.id::text AS id, w.xmin::text AS wx, ${detoasted('w.document')} AS document FROM work_items w WHERE w.number = ANY($1::bigint[]) OFFSET 0) d
       CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`, [missingProjections])).rows) {
-      fetched.set(row.id, row.text); remember(`${cluster}/w/${row.id}:${row.wx}`, row.text);
+      const document = standIn(projections, row.text);
+      fetched.set(row.id, document); remember(`${cluster}/w/${row.id}:${row.wx}`, document);
     }
   }
   const standIns = new Map<number, Work>();
   for (const row of rest) {
-    const text = fetched.get(row.id) ?? cache.get(versionOf(row));
+    const document = fetched.get(row.id) ?? cache.get(versionOf(row));
     // Changed between the two reads (a settled item reopened, say): it is read whole below.
-    if (!text) continue;
-    const document = JSON.parse(text) as Work;
-    (row.settled ? summaries : projections).add(document);
-    standIns.set(row.number, document);
+    if (document) standIns.set(row.number, document);
   }
 
   // What the focus's answer turns on, read whole: its dependencies and the open items that overlap it.
@@ -143,9 +143,23 @@ function scopesOf(work: Work) {
   return known;
 }
 
-function remember(version: string, text: string) {
+/** A stand-in parsed from its JSON text, marked as the kind it is and frozen throughout. */
+function standIn(kind: WeakSet<object>, text: string) {
+  const document = deepFreeze(JSON.parse(text)) as Work;
+  kind.add(document);
+  return document;
+}
+function deepFreeze(value: unknown): unknown {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function remember(version: string, document: Work) {
   cache.delete(version);
-  cache.set(version, text);
+  cache.set(version, document);
   while (cache.size > lockedSummaryCacheLimit) cache.delete(cache.keys().next().value!);
 }
 
