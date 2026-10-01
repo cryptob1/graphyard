@@ -481,6 +481,7 @@
     "tests/stale-rework-requests.test.ts": 1177,
     "tests/stale-scope-request.test.ts": 2838,
     "tests/stalled-actions.test.ts": 3302,
+    "tests/stalled-gate-faults.test.ts": 5000,
     "tests/store-close.test.ts": 5529,
     "tests/store-init.test.ts": 10464,
     "tests/store-locks.test.ts": 46626,
