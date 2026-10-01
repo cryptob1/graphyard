@@ -1076,6 +1076,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
     if (!deploying) {
       for (const act of pending.splice(0)) await act();
+      // GY-845: the follow-up steps run once the approvers have judged, never between the cycle that
+      // requested a decision and its approval: a held finding moves the parent's revision, so a
+      // release, unblock or unpinned resolve bound to the earlier revision would be refused as raced.
+      await followUpsTick();
       await engine.reconcile();
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) await processJob(engine, adapter);
       for (const item of await store.list()) {
@@ -1167,7 +1171,6 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
-      await followUpsTick();
       // GY-898: at most one master session, whatever the cycle did.
       if (options.master) {
         // A settled launch carries the start the loop recorded: the budget is measured from it.
@@ -1926,7 +1929,7 @@ test('unit:soak-invariants-hold — review follow-ups across a day: approvals of
   // reverted and reopened before it ships, and approved again; item 4's ship is refused all day.
   const parents = [1, 2, 3, 4], refused = 4, reverted = 3;
   const { items, final, violations, failures, followUpDay } = await simulateDay({
-    hours: 5, followUps: { parents, refused },
+    hours: 3, followUps: { parents, refused },
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([2]), deaths: new Set(), breaksMain: reverted, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
