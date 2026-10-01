@@ -2103,11 +2103,13 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   // its bound is too wide to settle with — the shared cause of GY-466, GY-521 and GY-543. The
   // loop's light timed read of the plane's clock fails for the first stretch of the day, answers in
   // 6 s for the next, and only then answers fast: the fences stand, escalated once per cause, and
-  // settle within a cycle or two of the fast reads.
-  const failUntil = 75 * minute, slowUntil = 2 * hour, deaths = [2, 4];
+  // settle within a cycle or two of the fast reads. The day is short and its items released close
+  // together: it runs late in the file, where each one-minute cycle costs the most, and a six-hour
+  // day overran its bound and the CI shard's on a loaded runner.
+  const failUntil = 35 * minute, slowUntil = hour, deaths = [2, 4];
   const { items, final, violations, failures, lost, escalations, fenced, cycles } = await simulateDay({
-    hours: 6, containment: { failUntil, slowUntil },
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(deaths), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set([3]), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+    hours: 3, containment: { failUntil, slowUntil },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, releaseEveryMs: 5 * minute, workMs: 20 * minute, rework: new Set(), deaths: new Set(deaths), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set([3]), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds while the fences stand and once they settle');
