@@ -7,6 +7,7 @@
 // src/daemon/cycle-base-failures.ts.
 import { createHash } from 'node:crypto';
 import type { Work } from './work.js';
+import { failedCheckResults as protectionFailedResults, requiredCheckRun, requiredChecksOf } from '../merge-queue.js';
 
 /** The conclusions a required check has failed with; the latest attempt of each check decides. */
 export const failedCheckResults: readonly string[] = ['failure', 'timed_out', 'action_required', 'cancelled'];
@@ -15,15 +16,16 @@ const latestAttempt = (runs: Check[]) => runs.length ? runs.reduce((newest, chec
 /**
  * The required checks that failed on exactly the current head, each with its latest run. The same
  * judgement `failedCheckRework` makes: an open submitted candidate observed at its own head, not
- * merged or closed, and the latest attempt of the check failed.
+ * merged or closed, and the latest attempt of the check failed. The policy's checks and the base
+ * branch's other required checks alike (GY-430).
  */
 export function failedRequiredChecks(work: Work): { name: string; check: Check }[] {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return [];
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return [];
-  return work.policy.checks.flatMap(name => {
-    const latest = latestAttempt(observation.checks.filter(check => check.name === name));
-    return latest && failedCheckResults.includes(latest.result) ? [{ name, check: latest }] : [];
+  return requiredChecksOf(work).flatMap(required => {
+    const latest = required.policy ? latestAttempt(observation.checks.filter(check => check.name === required.name)) : requiredCheckRun(required, observation.checks, null);
+    return latest && (required.policy ? failedCheckResults : protectionFailedResults).includes(latest.result) ? [{ name: required.name, check: latest }] : [];
   }).sort((a, b) => a.name.localeCompare(b.name));
 }
 

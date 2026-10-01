@@ -7,6 +7,7 @@ import { readyToRetry } from './sessions.js';
 import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
 import { roleSessionMaximumMs } from '../model/sessions.js';
+import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
@@ -155,6 +156,26 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     const scopeDetail = request ? `${item.key} epoch ${epoch} waits on its scope request of ${request.at} for ${request.paths.join(', ')}, and ${profile.agentName} is re-prompted once it is answered` : null;
     if (blockerDetail && state.actions[keys.blocker]?.detail !== boundDetail(blockerDetail)) await entry(keys.blocker, 'waiting', blockerDetail);
     if (scopeDetail && state.actions[keys.scope]?.detail !== boundDetail(scopeDetail)) await entry(keys.scope, 'waiting', scopeDetail);
+    // GY-999: a blocker that is a GitHub credential failure is the session's credential, not the
+    // item. Waiting on it only holds the lease and the profile's slot, and the same session would
+    // fail the same way once unblocked, so the attempt is ended at once with its work kept on its
+    // branch, and the next launch mints a fresh credential — or is refused until one can be minted.
+    // The end counts on the GY-885 retry ladder, so a failure no fresh mint cures is relaunched
+    // after a backoff and held at the cap for an approver instead of ending and relaunching for ever.
+    if (item.blocker && !request && credentialFailure(item.blocker)) {
+      const key = credentialBlockedKey(item, epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+      const reason = credentialBlockedReason(item, epoch, item.blocker), attempts = (previous?.attempts ?? 0) + 1;
+      await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
+      try {
+        const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, reason, { endsBlocker: true });
+        performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch and ending the blocker it recorded`, attempts));
+        await drop(keys.blocker, keys.idle);
+      } catch (error) {
+        performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
+      }
+      return;
+    }
     // GY-867: blocked again on an epoch whose blocker was already cleared once. Re-prompting the
     // same session again would only repeat the cycle, so the attempt ends and the item goes on.
     const cleared = item.blocker && !request ? clearedBefore(state, item, epoch) : null;
