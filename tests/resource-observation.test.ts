@@ -348,7 +348,7 @@ test('integration:health-reflects-write-capability — /healthz is unhealthy nam
       assert.match((await strict.json() as any).causes[0], /^Control-plane database is at its bound/);
       assert.match((await dispatchRefusal(url))!, /control plane reports itself unhealthy \(Control-plane database is at its bound/, 'the loop reads the verdict from the body');
     } finally { if (previous === undefined) delete process.env.GRAPHYARD_DATABASE_MAX_BYTES; else process.env.GRAPHYARD_DATABASE_MAX_BYTES = previous; }
-    // The unconfigured default bound is advisory: it warns in `master status` and fails nothing.
+    // The unconfigured default bound is advisory: `master status` reports it, but it raises no attention and fails nothing (GY-963).
     assert.equal(planeVerdict(null, { database: { used: 20 * 1024 ** 3, bound: 10 * 1024 ** 3, advisory: true }, github: null }).healthy, true);
   });
 
