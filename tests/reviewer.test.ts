@@ -392,7 +392,7 @@ test('branch protection reconciles to the review policy of every open item and r
   const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
   const native = work(), agent = work({ id: 'agent', key: 'GY-43', policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
   const codex = work({ id: 'codex', key: 'GY-45', policy: { checks: ['test'], review: true, reviewProvider: 'codex' } as any });
-  const current = (reviews: any) => ({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+  const current = (reviews: any) => ({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
   assert.equal(requiredReviewProtection([native]).protection.requiredApprovals, 1);
   // Every provider nativeReviewRequired rejects lands on the zero-approval side, so the model and the branch never disagree.
   for (const item of [agent, codex]) {
@@ -433,7 +433,7 @@ test('applying protection changes only the review subresource and verifies the r
   const run = (_command: string, args: string[], input?: string) => {
     calls.push({ args, input });
     if (args.includes('PATCH')) { reviews = { ...reviews, ...JSON.parse(input!) }; return '{}'; }
-    return JSON.stringify({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+    return JSON.stringify({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
   };
   const applied = await applyProtection(config, [agent], run);
   assert.equal(applied.applied, true); assert.equal(applied.consistent, true); assert.equal(reviews.required_approving_review_count, 0);
@@ -454,7 +454,7 @@ test('unit:protection-no-conversation-resolution — master protection plans con
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
   let protection: any = { required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true, dismissal_restrictions: { users: [{ login: 'lead' }], teams: [], apps: [] },
     bypass_pull_request_allowances: { users: [{ login: 'release-bot' }], teams: [{ slug: 'maintainers' }], apps: [{ slug: 'graphyard-control' }] } },
-    required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true },
+    required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true },
     allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false }, required_linear_history: { enabled: true }, required_conversation_resolution: { enabled: true } };
   const plan = protectionPlan(protection, config, [agent]);
   assert.deepEqual(plan.changes, ['required_conversation_resolution true to false'], 'the reviews already match; conversation resolution is the one change');
@@ -478,7 +478,7 @@ test('unit:protection-no-conversation-resolution — master protection plans con
   assert.match(put.args[3], /repos\/owner\/project\/branches\/main\/protection$/);
   const body = JSON.parse(put.input!);
   assert.equal(body.required_conversation_resolution, false);
-  assert.deepEqual(body.required_status_checks, { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }] }, 'the App-bound check and strict-off stay as observed');
+  assert.deepEqual(body.required_status_checks, { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, 'the App-bound check and strict-off stay as observed');
   assert.equal(body.enforce_admins, true); assert.equal(body.required_linear_history, true); assert.equal(body.allow_force_pushes, false); assert.equal(body.allow_deletions, false);
   assert.deepEqual(body.required_pull_request_reviews, { required_approving_review_count: 0, dismiss_stale_reviews: true, require_code_owner_reviews: false, require_last_push_approval: false, dismissal_restrictions: { users: ['lead'], teams: [], apps: [] },
     bypass_pull_request_allowances: { users: ['release-bot'], teams: ['maintainers'], apps: ['graphyard-control'] } }, 'dismissal restrictions and pull request bypass allowances are kept, by login and slug');
@@ -504,7 +504,7 @@ test('the master CLI installs its harness rules and reconciles protection agains
 const { readFileSync, writeFileSync } = require('node:fs');
 const args = process.argv.slice(2), state = ${JSON.stringify(state)};
 if (args.includes('PATCH')) { writeFileSync(state, JSON.stringify({ ...JSON.parse(readFileSync(state, 'utf8')), ...JSON.parse(readFileSync(0, 'utf8')) })); console.log('{}'); process.exit(0); }
-console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileSync(state, 'utf8')), required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } }));
+console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileSync(state, 'utf8')), required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } }));
 `, { mode: 0o755 });
     const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${binary}:${process.env.PATH}`, GRAPHYARD_CONFIG_HOME: credentialDirectory };
     for (const name of Object.keys(environment)) if (name.startsWith('GRAPHYARD_') && name !== 'GRAPHYARD_CONFIG_HOME') delete environment[name];

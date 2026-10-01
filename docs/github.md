@@ -9,7 +9,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 | --- | --- | --- |
 | Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
-| Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` on the exact candidate commit (the required check) |
+| Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit (the required checks) |
 | Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
@@ -28,7 +28,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` and `graphyard/landable` (the [landability verdict](coordination.md)) from this App, beside CI: `strict` **off**, admin-enforced, no force pushes or deletion; `master browser protection` reconciles it.
+On the base branch require `Graphyard / merge` and `graphyard/landable` (the [landability verdict](coordination.md)) from this App, beside CI: `strict` **off**, admin-enforced, no force pushes or deletion. `master protection --apply` and `master browser protection` reconcile both, adding `graphyard/landable` to an already-protected branch and to the merge-queue ruleset while keeping every check already required.
 
 The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
 

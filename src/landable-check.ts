@@ -34,7 +34,25 @@ export function landableCheckRun(work: Work, all: Work[], now: Date, verdict: La
   }
   const reasons = verdict.reasons.map(entry => `- ${entry.gate}: ${entry.reason}`);
   return { name: LANDABLE_CHECK, head_sha: sha, status: 'completed', conclusion: 'failure', external_id: work.id,
-    output: { title: `Refused: ${reasons.length} reason${reasons.length === 1 ? '' : 's'}`, summary: `${reasons.join('\n')}\n\n${identity}`.slice(0, summaryLimit) } };
+    output: { title: `Refused: ${reasons.length} reason${reasons.length === 1 ? '' : 's'}`, summary: refusalSummary(reasons, identity) } };
+}
+
+/**
+ * Every refusal reason, then the candidate's identity, within GitHub's summary bound. A list too long
+ * for it keeps whole reasons only and says how many it left out, so no reason is silently dropped;
+ * the title still counts them all.
+ */
+function refusalSummary(reasons: string[], identity: string) {
+  const whole = `${reasons.join('\n')}\n\n${identity}`;
+  if (whole.length <= summaryLimit) return whole;
+  const omitted = (count: number) => `- … ${count} more reason${count === 1 ? '' : 's'} omitted: GitHub bounds a check summary at ${summaryLimit} characters`;
+  const kept: string[] = [];
+  let length = identity.length + 2 + omitted(reasons.length).length + 1;
+  for (const reason of reasons) {
+    if (length + reason.length + 1 > summaryLimit) break;
+    kept.push(reason); length += reason.length + 1;
+  }
+  return `${[...kept, omitted(reasons.length - kept.length)].join('\n')}\n\n${identity}`.slice(0, summaryLimit);
 }
 
 /** Whether a published check run already says exactly what `body` would: an unchanged verdict is not written again. */

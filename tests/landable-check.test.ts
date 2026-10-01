@@ -4,6 +4,7 @@ import { GitHub, CHECK_NAME } from '../src/github.js';
 import { LANDABLE_CHECK, landableCheckRun } from '../src/landable-check.js';
 import { evaluateLandability } from '../src/model/landability.js';
 import { GRAPHYARD_CHECKS, protectionPayload, protectionSatisfied } from '../src/install/github.js';
+import { applyProtection, mergeQueueRuleset, protectionPlan } from '../src/protection.js';
 import type { Evidence, Observation, Work } from '../src/model.js';
 
 // GY-887. The landability verdict (GY-878) reaches GitHub as one required check, graphyard/landable,
@@ -135,7 +136,7 @@ test('unit:landable-check-published — graphyard/landable concludes success on 
   assert.notEqual(LANDABLE_CHECK, CHECK_NAME);
 });
 
-test('unit:landable-check-required — the reconciled branch protection requires graphyard/landable, bound to the Graphyard App, beside CI', () => {
+test('unit:landable-check-required — the reconciled branch protection requires graphyard/landable, bound to the Graphyard App, beside CI', async () => {
   const inputs = { repository: 'owner/repo', branch: 'main', requiredChecks: ['test', 'typecheck'], graphyardAppId: APP, reviewCount: 1 };
   assert.ok(GRAPHYARD_CHECKS.includes(LANDABLE_CHECK));
 
@@ -157,4 +158,53 @@ test('unit:landable-check-required — the reconciled branch protection requires
   const unbound = { ...before, required_status_checks: { strict: false, checks: [...before.required_status_checks.checks, { context: LANDABLE_CHECK, app_id: null }] } };
   assert.equal(protectionSatisfied(inputs, unbound), false);
   assert.deepEqual(protectionPayload(inputs, unbound).required_status_checks.checks.find((check: any) => check.context === LANDABLE_CHECK), { context: LANDABLE_CHECK, app_id: APP });
+
+  // `master protection` (src/protection.ts) reconciles an already-installed branch the same way: the
+  // missing verdict is a change it applies, keeping every observed check, and verifies on re-read.
+  const config = { repository: 'owner/repo', baseBranch: 'main', githubAppId: APP };
+  const open = [{ key: 'GY-1', stage: 'build', policy: { checks: ['test'], review: true } } as unknown as Work];
+  const queueRules = (checks: readonly string[]) => [{ type: 'merge_queue', parameters: {} }, { type: 'required_status_checks', parameters: { required_status_checks: checks.map(context => ({ context, integration_id: APP })) } }];
+  assert.deepEqual(mergeQueueRuleset(config).rules.find(rule => rule.type === 'required_status_checks')?.parameters.required_status_checks,
+    [{ context: CHECK_NAME, integration_id: APP }, { context: LANDABLE_CHECK, integration_id: APP }], 'the merge queue requires the verdict on every merge group');
+  const stale = protectionPlan(before, config, open, queueRules([CHECK_NAME]));
+  assert.equal(stale.consistent, false);
+  assert.ok(stale.changes.includes(`required check ${LANDABLE_CHECK}: missing to required from App ${APP}`), stale.changes.join('; '));
+  assert.ok(stale.changes.some(change => change.startsWith(`merge queue required check ${CHECK_NAME} and ${LANDABLE_CHECK}`)), stale.changes.join('; '));
+  assert.equal(protectionPlan(unbound, config, open, queueRules(GRAPHYARD_CHECKS)).consistent, false, 'an unbound graphyard/landable does not satisfy master protection');
+
+  let protection: any = structuredClone(before), rules: unknown = queueRules([CHECK_NAME]);
+  const writes: { path: string; body: any }[] = [];
+  const run = (_command: string, args: string[], input?: string) => {
+    const path = args.find(arg => arg.startsWith('repos/'))!;
+    if (args.includes('--method')) {
+      const body = JSON.parse(input ?? '{}');
+      writes.push({ path, body });
+      if (path.endsWith('/protection/required_status_checks')) protection = { ...protection, required_status_checks: body };
+      if (/\/rulesets(\/\d+)?$/.test(path)) rules = body.rules;
+      return '{}';
+    }
+    if (path.endsWith('/protection')) return JSON.stringify(protection);
+    if (path.includes('/rules/branches/')) return JSON.stringify(rules);
+    if (path.includes('/rulesets')) return '[]';
+    if (path === 'repos/owner/repo') return JSON.stringify({ owner: { type: 'Organization' }, allow_auto_merge: false });
+    throw new Error(`Unexpected gh ${args.join(' ')}`);
+  };
+  const applied = await applyProtection(config, open, run);
+  assert.equal(applied.consistent, true, [...applied.changes, ...applied.blockers].join('; '));
+  const checksWrite = writes.find(write => write.path.endsWith('/protection/required_status_checks'))!;
+  assert.deepEqual(checksWrite.body, { strict: false, checks: [...before.required_status_checks.checks, { context: LANDABLE_CHECK, app_id: APP }] }, 'master protection adds the App-bound verdict and keeps every observed check');
+  assert.ok(protectionPlan(protection, config, open, rules).consistent, 'the reconciled protection requires graphyard/landable');
+});
+
+test('a refusal list longer than GitHub\'s summary bound keeps whole reasons and counts the ones it omits', () => {
+  const work = item();
+  const audit = evaluateLandability(work, [work], now);
+  const reasons = Array.from({ length: 200 }, (_, index) => ({ gate: 'acceptance' as const, reason: `reason ${index} ${'x'.repeat(500)}` }));
+  const run = landableCheckRun(work, [work], now, { ...audit, verdict: 'refused', reasons })!;
+  assert.equal(run.conclusion, 'failure');
+  assert.equal(run.output.title, 'Refused: 200 reasons');
+  assert.ok(run.output.summary.length <= 65_535, `${run.output.summary.length}`);
+  const kept = run.output.summary.split('\n').filter(line => /^- acceptance: reason \d+ x+$/.test(line)).length;
+  assert.ok(kept > 0 && kept < 200);
+  assert.match(run.output.summary, new RegExp(`- … ${200 - kept} more reasons omitted: GitHub bounds a check summary at 65535 characters\\n\\nCandidate ${head}`));
 });

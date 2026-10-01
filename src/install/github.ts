@@ -1,16 +1,10 @@
 import { createSign } from 'node:crypto';
 import type { Transport } from './transport.js';
-import { enableAutoMergeArgs, mergeMode, mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState, queueRulesetRefused, repositoryMergeSettings, type RepositoryMergeSettings } from '../protection.js';
+import { enableAutoMergeArgs, GRAPHYARD_CHECKS, mergeMode, mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState, queueRulesetRefused, repositoryMergeSettings, type RepositoryMergeSettings } from '../protection.js';
 import { LANDABLE_CHECK } from '../landable-check.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
-export { LANDABLE_CHECK };
-/**
- * The checks Graphyard's App publishes that branch protection requires, bound to that App: the merge
- * gate and the landability verdict (GY-887), which every candidate head carries, so GitHub enforces
- * what Graphyard decided beside the repository's own CI.
- */
-export const GRAPHYARD_CHECKS = [CHECK_NAME, LANDABLE_CHECK] as const;
+export { LANDABLE_CHECK, GRAPHYARD_CHECKS };
 export const VERIFICATION_CHECK = 'Graphyard / install verification';
 
 export interface AppFacts { appId: number; slug: string; installationId: number; privateKey: string; webhookSecret: string }
