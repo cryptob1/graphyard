@@ -7,6 +7,8 @@ import { handWatchPrefix } from './cycle-decisions.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { record } from './effects.js';
+import { workerHandle } from './cycle-resume.js';
+import { credentialBlockedKey, credentialFailure } from '../worker-credential.js';
 import type { BlockerProbeResult } from './blocker-probes.js';
 import type { Cycle } from './cycle.js';
 
@@ -41,6 +43,7 @@ const episodeKeys = (state: { actions: Record<string, unknown> }, item: Pick<Wor
  */
 export async function blockerStep(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open, launcher } = cycle;
+  for (const item of open) await isolate('blocker', item, item.key, () => endCredentialBlockedSession(cycle, item));
   if (!effects.recordBlockerProbe) return;
   // Rows of items no longer open (delivered, closed, gone from the snapshot) go with them.
   const orphaned = Object.keys(state.actions).filter(key => key.startsWith('blocker:') && !open.some(item => key === blockerKey(item) || episodeKey(item, key)));
@@ -138,4 +141,32 @@ export async function blockerStep(cycle: Cycle) {
       performed.push(await note(key, item, 'failed', `Could not record ${item.key}'s ${classification.class} blocker probe (${result.probe}: ${outcome}): ${message(error)}`, (state.actions[key]?.attempts ?? 0) + 1));
     }
   });
+}
+
+/**
+ * GY-999 on an attempt its blocked report already ended: a GitHub credential failure lived in that
+ * session's credential, so the session is done with — once per epoch the loop closes the pane its
+ * handle records (unless another agent now holds it) and marks the handle finished, and the ending
+ * counts on the retry ladder through the marker the engine wrote on it. The next attempt is launched
+ * with a freshly minted push credential once the blocker clears, after the ladder's backoff.
+ */
+async function endCredentialBlockedSession(cycle: Cycle, item: Work) {
+  const { config, state, effects, now, performed, agents } = cycle;
+  const epoch = item.lastAssignment?.epoch ?? item.epoch, owner = item.lastAssignment?.owner;
+  if (!item.blocker || !credentialFailure(item.blocker) || (item.lease && item.lease.epoch >= epoch) || !owner) return;
+  const key = credentialBlockedKey(item, epoch);
+  if (state.actions[key]) return;
+  const profile = config.workers.find(worker => worker.principal === owner && worker.mode === 'launch');
+  if (!profile) return;
+  const handle = item.sessions?.find(session => session.kind === 'implementation' && session.id === `${owner}:${epoch}`);
+  const pane = handle?.pane ?? null, holder = pane ? agents.find(agent => agent.pane_id === pane) : undefined;
+  const closable = !!pane && (!holder || holder.name === profile.agentName);
+  let closed = 'no pane was left to close';
+  if (closable) {
+    try { await effects.closeSession(pane!); closed = `pane ${pane} was closed`; }
+    catch (error) { closed = `pane ${pane} could not be closed (${message(error)})`; }
+  }
+  await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: credential-blocked attempt on epoch ${epoch}`, true);
+  performed.push(await record(state, key, { kind: 'session', work: item.key, principal: owner, epoch, state: 'done', attempts: 1, cycle: state.cycle,
+    detail: boundDetail(`${profile.agentName} on ${item.key} recorded a GitHub credential failure, which ended epoch ${epoch} with its work kept; ${closed}, and ${item.key} is launched again with a freshly minted push credential once its blocker clears`) }, now(), effects.persist));
 }

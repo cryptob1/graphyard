@@ -21,6 +21,7 @@ import { confinedCommand, loopBlockerProbe, probeBlocker } from '../src/daemon/b
 import { emptyRegistry, type AgentRegistry } from '../src/model/registry.js';
 import { keepBlockedWork } from '../src/cli/lease.js';
 import { assignmentSurrender } from '../src/supervisor.js';
+import { credentialBlockedKey, credentialBlockedMarker } from '../src/worker-credential.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -243,6 +244,9 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   assert.match(first.args.join(' '), /gh auth status/);
   assert.match(first.args.join(' '), /git ls-remote --exit-code origin HEAD/);
   assert.equal((await reload(genuine.id)).blockerProbe ?? null, null, 'a genuine blocker is not probed');
+  // GY-999: a GitHub credential failure's ending counts on the retry ladder, and the loop records the ended session once.
+  assert.ok(work.capacity!.exhaustions.at(-1)!.reason.startsWith(`${credentialBlockedMarker} on epoch ${credential.epoch}: `), work.capacity!.exhaustions.at(-1)!.reason);
+  assert.equal(state.actions[credentialBlockedKey(work, credential.epoch)]?.state, 'done');
 
   // Still failing on the next cycle: probed again, still blocked.
   const before = loop.probes.length;

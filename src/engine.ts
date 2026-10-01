@@ -34,6 +34,7 @@ import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liven
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
+import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
@@ -1107,7 +1108,11 @@ export class Engine {
           // the next attempt's request names that commit, as for any interrupted attempt.
           const partialWork = data.partialWork ?? { state: 'not-applicable' as const, detail: 'the blocked attempt reported no partial work; its commits stay on its branch' };
           const record: ExhaustionRecord = { role: 'worker', cause: 'interrupted', epoch: data.epoch, profile: actor.id.slice(0, 80), account: null, runtime: actor.runtime?.slice(0, 40) ?? null,
-            reason: `${blockedAttemptMarker}${data.epoch}: ${data.reason}`.slice(0, 500), resetsAt: null, partialWork, at: now.toISOString(), owner: actor.id, recordedBy: actor.id };
+            // A GitHub credential failure's end carries GY-999's marker, so it counts on the retry
+            // ladder: a failure no freshly minted credential cures is relaunched after a backoff
+            // and held at the cap for an approver, never ended and relaunched for ever.
+            reason: (credentialFailure(data.reason) ? credentialBlockedReason(work, data.epoch, data.reason) : `${blockedAttemptMarker}${data.epoch}: ${data.reason}`).slice(0, 500),
+            resetsAt: null, partialWork, at: now.toISOString(), owner: actor.id, recordedBy: actor.id };
           const capacity = work.capacity ?? { exhaustions: [], escalations: [] };
           work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
           endAttempt(work, data.epoch, 'released', now);
