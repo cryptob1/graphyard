@@ -94,8 +94,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
   // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
-  // Start failures per account and each profile's last launch (GY-417).
-  const launches = await timedStep('worker launches', () => workerLaunchStatus(root, master));
+  const launches = await timedStep('worker launches', () => workerLaunchStatus(root, master)); // GY-417
   dispatchItems.push(...launches.items);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
   // Disk is read from the host: the volume filling stops the loop. The plan is `master reclaim`'s,
@@ -114,12 +113,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
-  // Browser administration is reported beside the work it unblocks: a pending sudo code is
-  // the one thing the operator must act on, and the recent ledger entries say who changed what.
+  // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // A worker session Herdr no longer reports, its lease still advancing, is an orphaned supervisor.
-  // Reviewer and producer profiles go in with their concurrency (GY-107): status reports, per
-  // role, sessions running against the limit and the longest wait for a slot.
+  // Reviewer and producer profiles carry their concurrency (GY-107): running vs limit, longest wait.
   const mergeQueue = mergeQueueStatus(master, snapshot, coordinator);
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
   const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue), snapshot.work, agentOwner),
@@ -246,7 +243,7 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));
-  // Never-starting accounts too: the loop tracks every class from this view, not only the report (GY-417).
+  // Never-starting accounts too (GY-417): the loop tracks every class from this view.
   const launches = await timedStep('attention: launches', () => workerLaunchStatus(root, master));
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...launches.items];
   // The report's last step, which the loop runs too: a cause named once, in place of its symptoms.
