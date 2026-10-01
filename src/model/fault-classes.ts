@@ -50,7 +50,7 @@ export const faultClassMeaning: Record<FaultClass, string> = {
  */
 export const faultCatalogue = {
   'session-liveness': ['session', 'launch-review', 'launch-producer', 'consent-hold', 'overlong-session', 'unanswered-request', 'stuck-request', 'escalation:lease-loss',
-    'action:close', 'action:dispatch', 'action:session', 'action:preserve'],
+    'action:close', 'action:dispatch', 'action:session', 'action:preserve', 'action:wake'],
   'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'escalation:security-concern', 'action:review'],
   'decision': ['approver-launch', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
     'action:decision', 'action:escalation'],

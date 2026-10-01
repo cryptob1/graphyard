@@ -21,7 +21,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
+The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, the reviewer's reminder, or its event wake of the master session) comes from the same launcher and is acted on without confirmation.
 
 Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
@@ -82,6 +82,8 @@ Preferred account first; applies next launch:
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Codex overflow"
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
+
+`--concurrency` counts settled sessions: any registry read ends those whose lease or request lapsed (`sessions-settled`, with reasons, in `master registry history`).
 
 ### Size review and proof capacity
 
