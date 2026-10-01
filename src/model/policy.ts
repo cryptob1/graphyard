@@ -3,6 +3,122 @@ import { deploySmokeProof, proofSchema } from './proof.js';
 import { postMergeProofRefusal } from './post-merge-proofs.js';
 import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
 
+// ---- Risk lanes (GY-883) -------------------------------------------------------------------------
+
+/**
+ * The ceremony an item runs is decided by the risk of what it changes, not by one high-ceremony
+ * path for everything. `low` lands with its required CI checks green and one approving review —
+ * catch-and-revert suits it; `medium` adds its producer-run proofs; `high` keeps the full path,
+ * producer proofs, manual attestations and approver decisions alike (`laneRequirements`).
+ */
+export const lanes = ['low', 'medium', 'high'] as const;
+export type Lane = typeof lanes[number];
+
+/**
+ * The shipped high-risk path policy: any changed path under one of these makes the change high.
+ * The installation and deployment surfaces are the repository's own: installation changes go
+ * through `src/install/` and deployment through the `deploy/` tree, the Dockerfile and
+ * compose.yaml. The schema and credential surfaces are the repository's real ones: the database
+ * schema and its persistence layer under `src/store/`, authentication and principals under
+ * `src/server/`, beside the public-API routes and the assembler that wires them
+ * (`src/server/index.ts`); the server bootstrap that loads credentials (`src/server/main.ts`), the
+ * operator agent's credential handling (`src/operator-agent.ts`) and the proof-authority grants
+ * (`src/proof-grants.ts`).
+ */
+export const highRiskPaths = [
+  /^migrations\/schema/, /^auth\/credentials/,
+  /^src\/store\//, /^src\/server\/(routes|auth|principals|index|main)/,
+  /^src\/operator-agent\.ts$/, /^src\/proof-grants\.ts$/,
+  /^src\/install\//, /^deploy\//, /^Dockerfile(\.|$)/, /^compose\.ya?ml$/,
+] as const;
+
+/** The shipped low-risk path policy: a change only of tests or of docs is low. */
+export const testOnlyPaths = /(^|\/)(tests?|__tests__)\/|\.test\.[A-Za-z]+$|\.spec\.[A-Za-z]+$/;
+export const docsOnlyPaths = /^docs\/|(^|\/)README\.md$|^AGENTS\.md$|\.mdx?$/;
+
+/**
+ * The lane one change rides in, from the shipped path policy: any high-risk path makes the change
+ * high; a change only of tests or only of docs is low; a change kept inside one module — every
+ * path sharing the same leading segments, such as `src/model/` — is low; everything else is
+ * medium. An unknown change (no paths at all) is high: until the policy can see what a change
+ * touches, it keeps the full path — no proof, attestation or approver is waived for it. The shared prefix counts only up to the first segment
+ * where the paths diverge: `src/model/index.ts` and `src/cli/index.ts` share `src/` and nothing
+ * past it, so they are two modules, not one.
+ */
+export function determineLane(paths: readonly string[]): Lane {
+  const changed = [...new Set(paths)];
+  if (!changed.length) return 'high';
+  if (changed.some(path => highRiskPaths.some(pattern => pattern.test(path)))) return 'high';
+  if (changed.every(path => testOnlyPaths.test(path) || docsOnlyPaths.test(path))) return 'low';
+  const segments = changed.map(path => path.split('/').filter(Boolean));
+  const first = segments[0];
+  let shared = 0;
+  while (shared < first.length && segments.every(parts => parts[shared] === first[shared])) shared++;
+  return shared >= 2 ? 'low' : 'medium';
+}
+
+/**
+ * The shipped per-lane speed targets: the submit→merge p50 each lane is expected to meet, in
+ * milliseconds, reported beside its lane. They split the pipeline target (GY-54) by lane: the
+ * smaller the change, the faster it is expected to land.
+ */
+export const laneSpeedTargets: Record<Lane, number> = { low: 30 * 60_000, medium: 60 * 60_000, high: 4 * 60 * 60_000 };
+
+/**
+ * What each lane's landability asks for beyond the gates every lane keeps (ready, build, review,
+ * test, merge): which proof families the verdict requires of the change, and whether a rework
+ * round waits for an approved two-party decision. Low lands with its required CI checks green and
+ * one approving review — the producer-run proofs and manual attestations its criteria name are not
+ * required of it, and its reworks are applied without an approver; medium adds its producer-run
+ * proofs; high keeps the full path: producer proofs, manual attestations and approver decisions.
+ */
+export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
+export function laneRequirements(lane: Lane): LaneRequirements {
+  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: false }
+    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: false }
+    : { producerProofs: true, manualAttestations: true, reworkApprover: true };
+}
+
+/**
+ * Whether the lane requires one proof family of the change: the producer-run `unit:` and
+ * `integration:` proofs from medium, `manual:` attestations only in high, and `e2e:` in every lane
+ * — it runs against the deployed or CI-built system, not in a producer session.
+ */
+export function laneRequiresFamily(lane: Lane, family: string): boolean {
+  const requirements = laneRequirements(lane);
+  return family === 'unit' || family === 'integration' ? requirements.producerProofs
+    : family === 'manual' ? requirements.manualAttestations
+    : true;
+}
+export const laneRequiresProof = (lane: Lane, proof: string) => laneRequiresFamily(lane, proof.slice(0, Math.max(0, proof.indexOf(':'))));
+
+/**
+ * The changed paths an item's lane is decided from: every observed scope file's path and, for a
+ * rename, both of its endpoints — a rename out of a high-risk tree is a change to the high-risk
+ * surface whatever its destination, so the source rides beside it. The observation's file list is
+ * the diff when no scope was read at all; an empty scope list is no paths, the unknown change that
+ * keeps the full (high) path.
+ */
+export function observedPaths(observation: { scopeFiles?: readonly { path: string; previousPath?: string }[] | null; files?: readonly string[] } | null | undefined): string[] {
+  if (!observation) return [];
+  return observation.scopeFiles
+    ? observation.scopeFiles.flatMap(file => file.previousPath && file.previousPath !== file.path ? [file.path, file.previousPath] : [file.path])
+    : [...(observation.files ?? [])];
+}
+
+/** The lane of the change an item carries: the diff its observation holds; an unknown change rides high. */
+export function itemLane(work: { observation?: Parameters<typeof observedPaths>[0] }): Lane {
+  return determineLane(observedPaths(work.observation));
+}
+
+/**
+ * Whether a rework round on this item waits for an independent approver (GY-883 AC-2): only in the
+ * high lane. A low or medium item's rework decision is applied as soon as it is requested, with the
+ * lane recorded as its ground — the requester's own authority to request it is checked as ever. A
+ * change nobody has observed rides high, so it keeps its approver.
+ */
+export const reworkNeedsApprover = (work: Parameters<typeof itemLane>[0]) => laneRequirements(itemLane(work)).reworkApprover;
+
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a
 // standing obligation on the named contract paths, and the next change touching those paths

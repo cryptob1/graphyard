@@ -1,13 +1,15 @@
-import { ciPendingReason, conversationProtectionRefusal, requiredCheck, checkRerunStatus, tipValidation } from '../merge-queue.js';
+import { ciPendingReason, conversationProtectionRefusal, failedCheckResults, requiredCheck, requiredCheckPassed, requiredCheckRun, requiredChecksOf, checkRerunStatus, tipValidation } from '../merge-queue.js';
 import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
 import { ciCheckRefusal } from './ci-refusal.js';
+import { requiredCheckFailure } from './required-check-refusal.js';
 import { leadHoldRefusal } from './delegation.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
+import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -21,6 +23,12 @@ declare module './work.js' {
 
 /** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
+
+// ---- Risk lanes (GY-883) -------------------------------------------------------------------------
+
+// The per-lane required set lives with the path policy it scales (model/policy.ts); the verdict
+// here is one of its readers.
+export { laneRequirements };
 
 /**
  * The test-gate lift the merge queue's validation pays for (GY-332): a tip the queue accounts for
@@ -39,9 +47,14 @@ export function settleTestGate(test: Gate, validating: string[] | null): void {
  * window (GY-498) and `optimistic` (GY-500). Without it the queue is validated batch by batch (GY-330),
  * as every caller that names no settings expects.
  */
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
+  // The lane rides the one landability verdict, not beside it (GY-883 AC-3): the verdict
+  // (model/landability.ts) takes the item's lane and decides which facts it requires; the
+  // evaluation reports the lane with its speed target.
+  const lane = itemLane(work);
+  const speedTarget = laneSpeedTargets[lane];
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
   add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`), ...(work.blocker ? [work.blocker] : [])]);
   const candidate = work.candidate;
@@ -78,8 +91,15 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
     ...(!reviewPassed ? [reviewRefusal] : []),
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
   ] : []);
-  const checkReasons = work.policy.checks.filter(name => requiredCheck(work, name, ciAppIds)?.result !== 'success')
-    .map(name => ciCheckRefusal(name, current ? checkRerunStatus(work, name) : ''));
+  // The policy's checks and every other check the base branch's protection requires (GY-430):
+  // GitHub refuses the merge while any of them has not passed, so none is left for it to find.
+  const checkReasons = requiredChecksOf(work).flatMap(check => {
+    const run = check.policy ? requiredCheck(work, check.name, ciAppIds) : current ? requiredCheckRun(check, obs!.checks, ciAppIds) : undefined;
+    if (requiredCheckPassed(check, run)) return [];
+    return [!check.policy && run && failedCheckResults.includes(run.result)
+      ? requiredCheckFailure(check.name)
+      : ciCheckRefusal(check.name, current ? checkRerunStatus(work, check.name) : '')];
+  });
   gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
   family('acceptance');
   // The merge queue owns the last hop. A candidate that has proven itself enters the queue,
@@ -122,5 +142,5 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history };
+  return { stage, gates, violations, lane, speedTarget, queue: queueState.queue, queueSequence: queueState.queueSequence, queueEjection: queueState.ejection, queueHistory: queueState.history };
 }
