@@ -1,5 +1,5 @@
 // Concern: the landability verdict as GitHub sees it — the one `graphyard/landable` check run on a candidate head.
-import type { Work } from './model.js';
+import { LANDABLE_CHECK, type Work } from './model.js';
 import { evaluateLandability, type LandabilityVerdict } from './model/landability.js';
 
 /**
@@ -9,7 +9,7 @@ import { evaluateLandability, type LandabilityVerdict } from './model/landabilit
  * sets: branch protection requires it beside CI (install/github.ts), and GitHub enforces what
  * Graphyard decided with no second copy of the decision.
  */
-export const LANDABLE_CHECK = 'graphyard/landable';
+export { LANDABLE_CHECK };
 
 /** GitHub's bound on a check run's output summary. */
 const summaryLimit = 65_535;

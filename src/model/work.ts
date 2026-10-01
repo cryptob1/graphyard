@@ -23,6 +23,8 @@ import { workOriginSchema } from './interventions.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
+/** GY-887. The landability verdict's own required check (landable-check.ts): Graphyard publishes it, so it is never a CI input to the verdict. */
+export const LANDABLE_CHECK = 'graphyard/landable';
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;

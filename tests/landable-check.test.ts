@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GitHub, CHECK_NAME } from '../src/github.js';
+import { GitHub, CHECK_NAME, mergeRequiredChecks } from '../src/github.js';
+import { requiredChecksOf } from '../src/merge-queue.js';
 import { LANDABLE_CHECK, landableCheckRun } from '../src/landable-check.js';
 import { evaluateLandability } from '../src/model/landability.js';
 import { GRAPHYARD_CHECKS, protectionPayload, protectionSatisfied } from '../src/install/github.js';
@@ -91,6 +92,15 @@ test('unit:landable-check-published — graphyard/landable concludes success on 
   // Every refusal reason is in the summary, word for word, under the gate that gives it.
   for (const entry of reasons) assert.ok(failure.output.summary.includes(`- ${entry.gate}: ${entry.reason}`), `summary names: ${entry.reason}`);
   assert.match(failure.output.summary, /unit:own-proof/);
+
+  // Once protection and the merge-queue ruleset require graphyard/landable (AC-2), the verdict still
+  // concludes success: Graphyard's own checks never become CI inputs to the verdict they publish.
+  const protectionChecks = [{ name: 'test', appId: 1 }, { name: CHECK_NAME, appId: APP }, { name: LANDABLE_CHECK, appId: APP }, { name: LANDABLE_CHECK, appId: null }];
+  assert.deepEqual(mergeRequiredChecks(protectionChecks), [{ name: 'test', appId: 1 }]);
+  const required = item({ observation: { ...landable.observation!, requiredChecks: [{ name: 'test', appId: 1 }, { name: LANDABLE_CHECK, appId: APP }] } } as Partial<Work>);
+  assert.deepEqual(requiredChecksOf(required).map(check => check.name), ['test']);
+  assert.equal(evaluateLandability(required, [required], now).verdict, 'landable');
+  assert.equal(landableCheckRun(required, [required], now)!.conclusion, 'success');
 
   // No candidate head, no check run.
   assert.equal(landableCheckRun(item({ candidate: null } as Partial<Work>), [], now), null);

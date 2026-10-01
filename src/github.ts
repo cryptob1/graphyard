@@ -2133,11 +2133,15 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
-/** Required checks by name, deduplicated, without Graphyard's own merge check (GY-430). */
-function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+/**
+ * Required checks by name, deduplicated, without Graphyard's own merge check (GY-430) or its
+ * landability verdict (GY-887): the verdict is computed from these, so requiring itself would
+ * refuse every candidate forever once protection lists it.
+ */
+export function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
   const merged = new Map<string, { name: string; appId: number | null }>();
   for (const check of checks) {
-    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME) continue;
+    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME || check.name === LANDABLE_CHECK) continue;
     const appId = Number.isSafeInteger(check.appId) ? check.appId as number : null;
     const known = merged.get(check.name);
     // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
