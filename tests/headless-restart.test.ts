@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type DecidePayload } from '../src/runner/payloads.js';
@@ -14,6 +13,7 @@ import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunche
 import { maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { EventEmitter } from 'node:events';
 import type { RunResult } from '../src/runner/types.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /** The coordinator checkout the loop reads at its start (GY-857), clean: this test is not about it. */
 const cleanCheckout = () => ({ root: '/', commit: null, modified: [], untracked: [] });
@@ -36,7 +36,7 @@ process.exit(0);
 `;
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-headless-restart-'));
+  const root = await temporaryDirectory('headless-restart');
   const script = join(root, 'fake-pi.mjs');
   await writeFile(script, fakePi);
   let count = 0;
@@ -278,7 +278,7 @@ test('unit:restart-leaves-runs a run launched from a systemd service gets its ow
 test('unit:restart-leaves-runs a confined run from a systemd service starts its scope outside the confinement, which masks the user bus', async () => {
   // Production spawns every headless run through confiningSpawn (GY-888), whose bubblewrap masks
   // the user bus and systemd runtime directory: a systemd-run inside it could never start a scope.
-  const base = await mkdtemp(join(tmpdir(), 'graphyard-headless-scope-'));
+  const base = await temporaryDirectory('headless-scope');
   try {
     const root = join(base, 'coordinator'), cwd = join(root, '.graphyard', 'worktrees', 'GY-1-1'), runs = join(base, 'runs');
     await mkdir(cwd, { recursive: true });

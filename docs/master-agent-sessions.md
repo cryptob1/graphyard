@@ -53,7 +53,7 @@ The runtime is **ready** when Herdr reports it active with no prompt or its bann
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline` (least privilege); everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline` — the least-privilege options, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -69,7 +69,7 @@ Every paste goes to the **pane on the attempt's own session handle**, never the 
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; when the loop ends that session it closes the pane in the same step and records the close. Research and triage run headless, opening no pane. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host**, whose session has ended or whose worktree is gone, matched only against what this host's launchers recorded, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the host's pane count and oldest agentless pane (`master status` `daemon.actions`), raising attention once agentless panes exceed **20** (`daemon.escalations`) and recording the drain at zero.
+Every launch records its pane on the item's session handle; when the loop ends that session it closes the pane in the same step and records the close. Research and triage run headless, opening no pane. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host**, whose session has ended or whose worktree is gone, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the host's pane count and oldest agentless pane (`master status` `daemon.actions`), raising attention once agentless panes exceed **20** (`daemon.escalations`) and recording the drain at zero.
 
 ### The dispatcher's own state
 
