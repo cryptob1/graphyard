@@ -1,5 +1,6 @@
 import { agentOwner, type AttentionItem } from '../master.js';
 import { elapsed } from '../model/sessions.js';
+import { classified } from '../model/fault-classes.js';
 import { unansweredRequests, unobtainableReview, unobtainableReviewLine, type RequestProgress, type SettledReviewSession, type UnansweredRequest, type UnobtainableReview } from '../model/dispatch.js';
 
 /** Who answers a request whose session settled unanswered, and with which command. */
@@ -21,10 +22,12 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
   return rows.flatMap(row => unansweredRequests(row.dispatch).map(request => {
     // A producer that recorded its proofs as not exercising their criterion answered the request
     // with a finding (GY-817): the head awaits rework, which the loop requests as it does for a
-    // failing proof, and no producer is launched for it again.
+    // failing proof, and no producer is launched for it again. Classified `proof-unexercised`
+    // (GY-889) — a defect of the candidate's proofs, not a session that went quiet.
     if (request.unexercised?.length) return { subject: row.key, requestId: request.requestId,
       text: `${row.key} is awaiting rework for a non-exercising proof: ${request.unexercised.join('; ')}. The ${request.group ?? 'producer'} proofs are a defect of the candidate's tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh`,
-      ...agentOwner('master', `the loop requests the rework decision for ${row.key}, approved by the approver agent; graphyard master decide ${row.key} rework REASON only when the loop cannot`, 'approver') };
+      ...agentOwner('master', `the loop requests the rework decision for ${row.key}, approved by the approver agent; graphyard master decide ${row.key} rework REASON only when the loop cannot`, 'approver'),
+      ...classified('proof-unexercised') };
     const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
     const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
     return { subject: row.key, requestId: request.requestId, text: `${subject} for ${row.key} has stood unanswered for ${elapsed(request.sinceMs)}: its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}; nothing is running for it and no further attempt is scheduled`,
