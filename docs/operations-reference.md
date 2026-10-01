@@ -66,11 +66,11 @@ A rate-limit `403`/`429` pauses requests; gates read stale until it lifts: nothi
 
 ### Webhook liveness
 
-After an hour without deliveries `master status` points to `https://github.com/settings/apps/APP-SLUG`.
+After an hour without deliveries `master status` links `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else the size of the volume holding the database's data directory when the plane can read it (same host, role allowed to read `data_directory`), else an advisory 10 GiB that only warns.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else the size of the volume holding the database's data directory when the plane can read it (same host, role allowed to read `data_directory`), else an advisory 10 GiB: reported, never an attention item or a health failure.
 
 ## Storage retention
 
