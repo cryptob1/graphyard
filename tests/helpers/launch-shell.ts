@@ -23,7 +23,8 @@ export function expandTypedCommand(command: string): TypedLaunch {
   // A supervised worker: `node CLI watch KEY EPOCH -- KIND ARGS…`; otherwise the runtime leads.
   const separator = words.indexOf('--');
   const runtime = separator >= 0 ? words.slice(separator + 1) : words;
-  return { stem, words, kind: runtime[0], args: runtime.slice(1) };
+  // Herdr reports the runtime by kind, not by the command that started it: Cursor's is `agent` (GY-976).
+  return { stem, words, kind: runtime[0] === 'agent' ? 'cursor' : runtime[0], args: runtime.slice(1) };
 }
 
 /** The instruction the runtime would read from its own arguments, per the real CLI contracts. */

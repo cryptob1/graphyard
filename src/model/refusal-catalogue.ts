@@ -1,4 +1,6 @@
 import type { NextActionKind } from './action-kinds.js';
+import { ciCheckRefusalPattern, ciCheckRefusalSource } from './ci-refusal.js';
+import { requiredCheckFailurePattern } from './required-check-refusal.js';
 
 /**
  * The refusals the engine can produce, declared beside the mapping that has to cover them.
@@ -77,8 +79,10 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider' },
   { gate: 'review', id: 'provider-reason', match: /.*/, example: 'Pull request is draft; mark it ready to request code review', kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'], free: true },
   // test
-  { gate: 'test', id: 'check-not-passed', match: /^Required CI check .+ has not passed on the current candidate$/, kinds: ['resync', 'request-rework'],
+  { gate: 'test', id: 'check-not-passed', match: ciCheckRefusalPattern, kinds: ['resync', 'request-rework'],
     example: 'Required CI check test has not passed on the current candidate' },
+  { gate: 'test', id: 'required-check-failed', match: requiredCheckFailurePattern, kinds: ['request-rework'],
+    example: 'Required check secrets failed on the current candidate' },
   // acceptance
   { gate: 'acceptance', id: 'criterion-unproven', match: /^AC-\d+: .+ needs trusted passing evidence/, kinds: ['dispatch', 'escalate'],
     example: 'AC-1: integration:example needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
@@ -99,7 +103,7 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'merge', id: 'queue-position', match: /^Merge queue position \d+ of \d+: .+ is ahead$/, example: 'Merge queue position 2 of 3: GY-1 is ahead', kinds: ['merge'] },
   { gate: 'merge', id: 'tip-unpublished', match: /^Speculative tip on predicted base [0-9a-f]+ has not been published and validated for this candidate$/, kinds: ['merge'],
     example: 'Speculative tip on predicted base bbbbbbbbbbbb has not been published and validated for this candidate' },
-  { gate: 'merge', id: 'tip-validating', match: /^Merge queue is validating speculative tip [0-9a-f]+: Required CI check .+ has not passed on the current candidate$/, kinds: ['merge'],
+  { gate: 'merge', id: 'tip-validating', match: new RegExp(`^Merge queue is validating speculative tip [0-9a-f]+: ${ciCheckRefusalSource}`), kinds: ['merge'],
     example: 'Merge queue is validating speculative tip aaaaaaaaaaaa: Required CI check test has not passed on the current candidate' },
   { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
   { gate: 'merge', id: 'predecessor-wait', match: /^Waiting for \S+(?:, \S+)* to land or leave the merge queue: /, kinds: ['merge'],

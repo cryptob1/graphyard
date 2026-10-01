@@ -1,10 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { CHECK_NAME, GitHub } from '../src/github.js';
@@ -33,7 +32,7 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 744;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-landing-ancestry-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('landing-ancestry'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('landing_ancestry_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/landing_ancestry_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/repo'); engine.submissionObserver = null;
@@ -43,7 +42,7 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
 /** A GitHub whose base branch tip is the peer's merge commit, with pull requests keyed by number. */
-function fakeGitHub(pulls: Record<number, any>) {
+function fakeGitHub(pulls: Record<number, any>, tip = mainTip) {
   const github = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
   github.controlPlaneLogin = async () => 'graphyard-owner-repo[bot]';
   const requests: string[] = [];
@@ -54,7 +53,7 @@ function fakeGitHub(pulls: Record<number, any>) {
     if (pull) return structuredClone(pulls[Number(pull[1])]);
     if (/^\/pulls\/\d+\/files/.test(path)) return path.includes('page=1') || !path.includes('page=') ? pulls[Number(path.split('/')[2])].files : [];
     if (/^\/pulls\/\d+\/reviews/.test(path)) return [];
-    if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: mainTip } };
+    if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: tip } };
     if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: sha(`tree-${path.slice(9)}`) } }, parents: [] };
     if (path.startsWith('/compare/')) {
       const [from, to] = path.slice(9).split('?')[0].split('...');
@@ -144,4 +143,80 @@ test('unit:ancestry-landing-reconciled — a delivery detected by ancestry recon
   // Delivered, it is never named unlanded again: a later observation leaves it out of the peers entirely.
   const again = await github.observe({ ...(await store.list()).find(item => item.id === work.id)!, submission: { epoch: 1, pr: 302 } }, await store.list());
   assert.deepEqual(again.landing?.landed ?? [], []); assert.deepEqual(again.landing?.foreign ?? [], []);
+});
+
+/**
+ * GY-756. The review of GY-744 found three gaps: a merge commit bound a head GitHub never merged, a
+ * peer landed by ancestry but not merged was re-observed on every cycle, and several observations
+ * in one round each re-observed the same peer from their own stale snapshot.
+ */
+test('unit:landing-merge-bound-to-recorded-head — a peer force-pushed past its recorded head and then merged is not landed at the recorded head: its files stay under the guard', async () => {
+  const peer = await stalePeer(311);
+  const work = await claimed('Worker after a force-push', ['src/own.ts']);
+  // The peer's branch was force-pushed from the recorded head to `forced`, which GitHub merged; the
+  // recorded head never reached main, but the worker's head still carries it.
+  const forced = sha('peer-forced'), forcedTip = sha('main-tip-forced'), carrying = sha('worker-carrying');
+  Object.assign(history, { [forced]: [forced, root], [forcedTip]: [forcedTip, forced, root], [carrying]: [carrying, peerHead, forcedTip, forced, root] });
+  Object.assign(blobs, { [forcedTip]: { 'src/shared.ts': current }, [carrying]: { 'src/shared.ts': current } });
+  const { github } = fakeGitHub({
+    311: pullRequest(311, forced, peer.workspaces[0].branch, [{ filename: 'src/shared.ts', status: 'modified', sha: shipped, additions: 3, deletions: 1 }], forcedTip),
+    312: pullRequest(312, carrying, work.workspaces[0].branch, [{ filename: 'src/own.ts', status: 'added', sha: sha('own'), additions: 5, deletions: 0 }], null),
+  }, forcedTip);
+  const observation = await github.observe({ ...work, submission: { epoch: 1, pr: 312 } }, await store.list());
+  // GitHub's merge commit is on the tip, but it merged `forced`, not the head the item recorded.
+  assert.deepEqual(observation.landing?.landed, []);
+  assert.deepEqual(observation.landing?.foreign, [{ key: peer.key, pr: 311, head: peerHead }]);
+  // Merged at a head the item recorded, the same merge commit lands it.
+  const merged = fakeGitHub({
+    311: pullRequest(311, peerHead, peer.workspaces[0].branch, [{ filename: 'src/shared.ts', status: 'modified', sha: shipped, additions: 3, deletions: 1 }], forcedTip),
+    312: pullRequest(312, carrying, work.workspaces[0].branch, [{ filename: 'src/own.ts', status: 'added', sha: sha('own'), additions: 5, deletions: 0 }], null),
+  }, forcedTip);
+  const bound = await merged.github.observe({ ...work, submission: { epoch: 1, pr: 312 } }, await store.list());
+  assert.deepEqual(bound.landing?.landed, [{ key: peer.key, pr: 311, head: peerHead, mergeSha: forcedTip }]);
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document, '{stage}', '\"done\"') WHERE id=$1", [peer.id]);
+});
+
+test('unit:landing-reconcile-once — a peer landed by ancestry but not merged is observed once per base tip, and a second observation in the same round that names it skips it', async () => {
+  const peer = await stalePeer(321);
+  const work = await claimed('Worker beside an unmerged peer', ['src/own.ts']);
+  // The peer's commits reached main by a push; its pull request was closed unmerged.
+  const closed = { ...pullRequest(321, peerHead, peer.workspaces[0].branch, [{ filename: 'src/shared.ts', status: 'modified', sha: shipped, additions: 3, deletions: 1 }], null), state: 'closed', mergeable: null };
+  const { github, requests } = fakeGitHub({ 321: closed, 322: pullRequest(322, head, work.workspaces[0].branch, [{ filename: 'src/own.ts', status: 'added', sha: sha('own'), additions: 5, deletions: 0 }], null) });
+  const snapshot = await store.list();
+  const observation = await github.observe({ ...work, submission: { epoch: 1, pr: 322 } }, snapshot);
+  assert.deepEqual(observation.landing?.landed, [{ key: peer.key, pr: 321, head: peerHead, mergeSha: null }]);
+  const observer = (probe: Work, peers?: Work[]) => github.observe(probe, peers);
+  const logged: string[] = [], log = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.join(' ')); };
+  try {
+    // Not merged, the observation is saved all the same, so its item records this tip.
+    const first = await engine.reconcileLanded(observation, snapshot, observer);
+    assert.deepEqual(first.map(item => [item.key, item.observation?.merged, item.observation?.baseTip]), [[peer.key, false, mainTip]]);
+    // A second observation this round, holding the same stale snapshot, finds it already observed at this tip.
+    const reviews = requests.filter(path => path.startsWith('/pulls/321/reviews')).length;
+    assert.deepEqual(await engine.reconcileLanded(observation, snapshot, observer), []);
+    // And so does the next cycle's, until the base branch moves.
+    assert.deepEqual(await engine.reconcileLanded(observation, await store.list(), observer), []);
+    assert.equal(requests.filter(path => path.startsWith('/pulls/321/reviews')).length, reviews, 'the peer was not observed again');
+  } finally { console.error = log; }
+  assert.deepEqual(logged, [], 'nothing failed on a stale revision');
+});
+
+test('unit:landing-reconcile-once — a merged peer two observations name in one round is delivered by the first and skipped by the second, not refused on a stale revision', async () => {
+  const peer = await stalePeer(331);
+  const work = await claimed('Worker in a busy round', ['src/own.ts']);
+  const { github } = fakeGitHub({
+    331: pullRequest(331, peerHead, peer.workspaces[0].branch, [{ filename: 'src/shared.ts', status: 'modified', sha: shipped, additions: 3, deletions: 1 }], mainTip),
+    332: pullRequest(332, head, work.workspaces[0].branch, [{ filename: 'src/own.ts', status: 'added', sha: sha('own'), additions: 5, deletions: 0 }], null),
+  });
+  const snapshot = await store.list();
+  const observation = await github.observe({ ...work, submission: { epoch: 1, pr: 332 } }, snapshot);
+  const observer = (probe: Work, peers?: Work[]) => github.observe(probe, peers);
+  const logged: string[] = [], log = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.join(' ')); };
+  try {
+    assert.deepEqual((await engine.reconcileLanded(observation, snapshot, observer)).map(item => [item.key, item.stage]), [[peer.key, 'done']]);
+    assert.deepEqual(await engine.reconcileLanded(observation, snapshot, observer), []);
+  } finally { console.error = log; }
+  assert.deepEqual(logged, [], 'the second observation did not fail on a stale revision');
 });

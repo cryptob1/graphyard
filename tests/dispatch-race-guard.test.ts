@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +17,7 @@ import { controlPlaneHandlers } from '../src/executor.js';
 import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchClaimTimeoutMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-175: the master-side rules the loop depends on are enforced by the master CLI itself, not
 // remembered by one agent. A hand dispatch never races the executor's, and a system-driven item is
@@ -53,8 +53,8 @@ const claimed = (): Partial<ActionRow> => ({ state: 'claimed', attempts: 1, clai
 
 /** A master checkout bound to a stub control plane; `run` executes one master command through the launcher. */
 async function masterHarness(state: { work: Work[]; releasedAt?: string | null }, options: { operatorAgent?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'gy-hand-'));
-  const credentials = await mkdtemp(join(tmpdir(), 'gy-hand-cred-'));
+  const root = await temporaryDirectory('gy-hand');
+  const credentials = await temporaryDirectory('gy-hand-cred');
   const credentialFile = join(credentials, 'coordinator.token');
   const reads: string[] = [];
   const http = createServer((req, res) => {
@@ -148,7 +148,9 @@ function gradedUnderProof(work: Work): Work {
     workspaces: [{ host: 'host-1', path: '/tmp/gy-7', branch: 'graphyard/gy-7-1', epoch: 1, owner: 'agent-a' }], implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 }, epoch: 1,
     submission: { epoch: 1, pr: 12 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' },
     observation: { clockOffset: { min: 0, max: 0 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' }, checks: [{ name: 'test', result: 'success', appId: 1234 }],
-      reviews: [{ reviewer: 'reviewer', sha: headSha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/x.ts'], scopeFiles: [], at: iso(-60_000),
+      reviews: [{ reviewer: 'reviewer', sha: headSha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null,
+      // GY-883: a public API path keeps the item in the high lane, which still demands the manual proof the escalation presupposes.
+      files: ['src/server/routes/x.ts'], scopeFiles: [{ path: 'src/server/routes/x.ts', status: 'added' as const, sha: 'f'.repeat(40), baseSha: null, additions: 1, deletions: 0, binary: false }], at: iso(-60_000),
       prState: 'open', draft: false, baseTip: baseSha, baseTipContained: true },
     queue: null, queueSequence: 0, queueHistory: [] } as unknown as Work;
   const result = evaluate(graded, [graded], new Date(), [1234]);

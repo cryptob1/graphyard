@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blockedPromptFailMs, dispatchKey, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -9,6 +8,7 @@ import { classifyRuntimePrompt, destructivePromptGuidance, masterConfigSchema, w
 import { producerPrompt } from '../src/producer.js';
 
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T00:00:00Z');
@@ -46,7 +46,7 @@ const unknownPrompt = [
 ].join('\n');
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-blocked-'));
+  const directory = await temporaryDirectory('blocked');
   const credentialFile = join(directory, 'coordinator.token'), worker = join(directory, 'worker.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await writeFile(worker, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -189,6 +189,12 @@ test('unit:destructive-prompt-classifies-command — the command a prompt would 
     menu(' Force a refresh of the model list before continuing?'),
     menu(' Delete key bindings are not configured. Configure them now?'),
     menu(' Run npm run format to overwrite nothing but formatting?'),
+    // Neither an append, a descriptor duplication, /dev/null, an arrow nor a comparison overwrites a file (GY-472).
+    menu('   npm test 2>&1 | tee -a test.log >> summary.txt', ' Do you want to proceed?'),
+    menu('   node build.mjs > /dev/null', ' Do you want to proceed?'),
+    menu(' Rename a -> b.txt and check that x > 5.0 still holds?'),
+    menu('   find . -name "*.log" -print', ' Do you want to proceed?'),
+    menu('   rsync -a src/ backup/', ' Do you want to proceed?'),
   ]) assert.equal(classifyRuntimePrompt(screen)!.kind, 'unknown', screen);
   // A destructive command, at a command position and inside a box border, is declined.
   for (const screen of [
@@ -199,6 +205,12 @@ test('unit:destructive-prompt-classifies-command — the command a prompt would 
     menu('   git push -f origin HEAD', ' Do you want to proceed?'),
     menu('   mv generated/ "$OUT"', ' Do you want to proceed?'),
     menu(' This action cannot be undone. Continue?'),
+    // Other ways to delete or overwrite (GY-472): find -delete, git rm, a truncating redirect, rsync --delete.
+    menu('   find . -name "*.log" -delete', ' Do you want to proceed?'),
+    menu('● Bash(git rm -r --cached src/old)', ' Do you want to proceed?'),
+    menu('   echo "{}" > config/settings.json', ' Do you want to proceed?'),
+    menu('   node gen.mjs 2> errors.log', ' Do you want to proceed?'),
+    menu('   sudo rsync -a --delete dist/ /srv/app/', ' Do you want to proceed?'),
   ]) assert.equal(classifyRuntimePrompt(screen)!.kind, 'destructive-command', screen);
   // A command's own inline confirmation is declined with `n`.
   const inline = classifyRuntimePrompt("$ rm -i notes.txt\nrm: remove regular file 'notes.txt'? [y/N]")!;
@@ -213,9 +225,12 @@ test('unit:launched-session-prompt-on-handle — a reviewer blocked at a prompt 
     const reviewer: NonNullable<Work['sessions']>[number] = { id: 'review-request-1', kind: 'review', principal: 'coordinator', epoch: null, runtime: 'claude', host: 'machine-a', agentName: 'graphyard-reviewer-1',
       role: 'review', head: 'a'.repeat(40), workspace: 'w1', tab: null, pane: 'w1:p7', attach: 'herdr pane attach w1:p7', transcript: null, subject: 'GY-174: review aaaaaaaaaaaa (PR #7)',
       startedAt: iso(-60_000), updatedAt: iso(-60_000), endedAt: null, state: 'running', outcome: null };
+    // An earlier running handle under the same reused agent name and pane: the launch's request id,
+    // not the name, binds the outcome to the handle its launcher registered (GY-472).
+    const stale: NonNullable<Work['sessions']>[number] = { ...reviewer, id: 'review-request-0', startedAt: iso(-600_000), updatedAt: iso(-600_000) };
     // No worker holds the item; its reviewer session is the one blocked.
     const run = async (screen: string) => {
-      const item = { current: held({ lease: null, sessions: [reviewer] } as Partial<Work>) };
+      const item = { current: held({ lease: null, sessions: [stale, reviewer] } as Partial<Work>) };
       const { log, effects } = harness(screen, item);
       const agent: HerdrAgent = { name: 'graphyard-reviewer-1', pane_id: 'w1:p7', agent_status: 'blocked' };
       const order: string[] = [];
@@ -225,7 +240,10 @@ test('unit:launched-session-prompt-on-handle — a reviewer blocked at a prompt 
         endSession: async () => { order.push('ended'); },
         relaunch: async () => { order.push('relaunched'); return { profile: 'reviewer-b' }; },
         // Only the reviewer's handle is followed; the dispatch step may register a worker's in the same cycle.
-        recordSession: async (_work: Work, handle: { id: string; state?: string; outcome?: string }) => { if (handle.id !== 'review-request-1') return; order.push(`handle:${handle.state}`); log.sessions.push(handle); },
+        recordSession: async (_work: Work, handle: { id: string; state?: string; outcome?: string }) => {
+          if (handle.id === 'review-request-0') order.push('stale');
+          if (handle.id !== 'review-request-1') return; order.push(`handle:${handle.state}`); log.sessions.push(handle);
+        },
       } satisfies Partial<DaemonEffects>);
       return { log, effects, order, state: emptyDaemonState(master) };
     };
@@ -235,6 +253,7 @@ test('unit:launched-session-prompt-on-handle — a reviewer blocked at a prompt 
     assert.deepEqual(answered.log.keys, [['2']], 'the reviewer\'s destructive prompt is declined');
     const handle = answered.log.sessions.at(-1) as { id: string; kind: string; state: string; outcome: string };
     assert.equal(handle.id, 'review-request-1', 'on the handle its launcher registered');
+    assert.ok(!answered.order.includes('stale'), 'not on the earlier handle sharing its agent name');
     assert.equal(handle.kind, 'review');
     assert.equal(handle.state, 'running');
     assert.match(handle.outcome, /Dangerous rm operation/);
@@ -248,5 +267,6 @@ test('unit:launched-session-prompt-on-handle — a reviewer blocked at a prompt 
     assert.equal(closed.state, 'finished');
     assert.match(closed.outcome!, /closed as failed: blocked for 5 minutes on a runtime prompt \(the loop cannot classify it\)/);
     assert.deepEqual(unknown.order.slice(-3), ['ended', 'handle:finished', 'relaunched'], 'the handle ends before the relaunch reopens it');
+    assert.ok(!unknown.order.includes('stale'), 'the earlier handle sharing its agent name is never written');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
