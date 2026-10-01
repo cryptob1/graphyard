@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
  *
  * A heavy run — `npm test`, `npm run test:browser`, `npm run typecheck` and `tsc --noEmit`, directly
  * or through `npx` — started by a Graphyard session takes one slot of a host-wide semaphore first:
- * a directory `slot-N` created (atomically) under the lock directory, holding its owner's pid. A run
+ * a directory `slot-N` renamed (atomically) into the lock directory, holding its owner's pid. A run
  * that finds every slot held waits, saying so and naming the directory and the holders, and takes
  * the first slot that frees. A slot whose owner died is taken back by the next waiter.
  *
@@ -84,13 +84,17 @@ function tryTake(directory: string, slots: number, owner: SlotOwner, alive: (pid
   for (let slot = 0; slot < slots; slot++) {
     const path = join(directory, `slot-${slot}`);
     for (let attempt = 0; attempt < 2; attempt++) {
+      // The slot appears with its owner already in it (renamed into place), so a waiter always names who holds it.
+      const taking = join(directory, `.taking-${slot}-${owner.pid}-${Date.now()}`);
+      mkdirSync(taking);
+      writeFileSync(join(taking, 'owner.json'), JSON.stringify(owner));
       try {
-        mkdirSync(path);
-        writeFileSync(join(path, 'owner.json'), JSON.stringify(owner));
+        renameSync(taking, path);
         let released = false;
         return { slot, path, release: () => { if (!released) { released = true; rmSync(path, { recursive: true, force: true }); } } };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        rmSync(taking, { recursive: true, force: true });
+        if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
         if (!reclaimStale(path, alive)) break;
       }
     }

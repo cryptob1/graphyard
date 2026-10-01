@@ -501,7 +501,8 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     // and the wrapper directory first on PATH. A fake `tsc` stands in for the real one after it.
     const managedRoot = join(scratch, 'managed'), fakeBin = join(scratch, 'fake-bin'), log = join(scratch, 'runs.log');
     await mkdir(fakeBin, { recursive: true });
-    await writeFile(join(fakeBin, 'tsc'), `#!/bin/sh\necho "start $$" >> "$RUN_LOG"\nsleep 0.4\necho "end $$" >> "$RUN_LOG"\n`);
+    // It holds its slot until the test opens the gate, so how many runs wait never depends on how fast five wrappers start.
+    await writeFile(join(fakeBin, 'tsc'), `#!/bin/sh\necho "start $$" >> "$RUN_LOG"\nwhile [ ! -e "$RUN_GATE" ]; do sleep 0.05; done\necho "end $$" >> "$RUN_LOG"\n`);
     await chmod(join(fakeBin, 'tsc'), 0o755);
     const environment = verificationEnvironment(managedRoot, { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_VERIFICATION_SLOTS: '2' });
     const directory = verificationSlotsDirectory(managedRoot);
@@ -512,13 +513,20 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     assert.ok(!existsSync(managedRoot), 'nothing is written under the managed root at launch');
 
     // Five runs, two slots: `tsc --noEmit` as a session types it, through the wrapper on its PATH.
-    const runs = 5;
-    const outcomes = await Promise.all(Array.from({ length: runs }, () => new Promise<{ code: number | null; stderr: string }>(done => {
-      const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log }, stdio: ['ignore', 'ignore', 'pipe'] });
-      let stderr = '';
-      child.stderr.on('data', chunk => { stderr += chunk; });
-      child.on('close', code => done({ code, stderr }));
+    const runs = 5, gate = join(scratch, 'gate'), stderrs: string[] = Array(runs).fill('');
+    const waitPattern = /waits for a host verification slot: all 2 under .+ are held by tsc --noEmit \(pid \d+/;
+    const finished = Promise.all(Array.from({ length: runs }, (_, index) => new Promise<{ code: number | null; stderr: string }>(done => {
+      const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
+      child.stderr.on('data', chunk => { stderrs[index] += chunk; });
+      child.on('close', code => done({ code, stderr: stderrs[index] }));
     })));
+    // Two runs hold the slots and the other three wait, saying so; only then do the holders finish.
+    const deadline = Date.now() + 30_000;
+    while (stderrs.filter(stderr => waitPattern.test(stderr)).length < runs - 2 && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
+    const heldWhileWaiting = heldSlots(directory).length;
+    await writeFile(gate, '');
+    const outcomes = await finished;
+    assert.equal(heldWhileWaiting, 2, 'the bound is held while the others wait');
     assert.deepEqual(outcomes.map(outcome => outcome.code), Array(runs).fill(0), 'every run completes');
     const events = (await readFile(log, 'utf8')).trim().split('\n').map(line => line.split(' ')[0]);
     let running = 0, peak = 0;
@@ -526,8 +534,8 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     assert.equal(events.filter(event => event === 'start').length, runs);
     assert.equal(events.filter(event => event === 'end').length, runs);
     assert.equal(peak, 2, 'no more than the bound ran at once, and the bound was used');
-    const waited = outcomes.filter(outcome => /waits for a host verification slot: all 2 under .+ are held by tsc --noEmit \(pid \d+/.test(outcome.stderr));
-    assert.ok(waited.length >= runs - 2, 'each run that waited said it waits, on what, and who holds the slots');
+    const waited = outcomes.filter(outcome => waitPattern.test(outcome.stderr));
+    assert.equal(waited.length, runs - 2, 'each run that waited said it waits, on what, and who holds the slots');
     assert.deepEqual(heldSlots(directory), [], 'every slot is given back');
 
     // A slot whose owner died is taken back by the next run rather than held forever.
