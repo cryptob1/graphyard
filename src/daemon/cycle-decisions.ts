@@ -229,9 +229,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         // without holding the account again.
         if (watch.heldExhaustion !== session) {
           // An approver on no named account spent its runtime's own login, which an escalation handler launches on too.
-          for (const name of account ? [account] : ownLoginAccounts({ name: approverProfile, kind: watch.runtime ?? undefined })) await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
-          watch.heldExhaustion = session;
-          await effects.persist(state);
+          for (const name of account ? [account] : ownLoginAccounts({ name: approverProfile, kind: watch.runtime ?? undefined })) {
+            await effects.holdAccount?.(name, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'approver', profile: approverProfile, work: item.key });
+            watch.heldExhaustion = session;
+            await effects.persist(state);
+          }
         }
         await effects.reportCapacity(item, { event: 'exhausted', role: 'approver', requestId: watch.decision.slice(0, 64), profile: approverProfile, account, runtime: watch.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
           partialWork: { state: 'not-applicable', detail: 'an approver session edits nothing: it judges a decision and leaves no work to keep' } });
