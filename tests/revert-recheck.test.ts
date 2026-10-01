@@ -169,7 +169,7 @@ function history(a = 'a') {
   repo.main = repo.commit('main', { 'src/base.ts': blob('base') }, []);
   const a1 = repo.change('GY-A: add a', repo.main, { [`src/${a}.ts`]: 'a', [`tests/${a}.test.ts`]: 'a test' });
   const a2 = repo.change('GY-A: rework', a1, { [`docs/${a}.md`]: 'a guide' });
-  const b0 = repo.change('GY-B: add b', repo.main, { 'src/b.ts': 'b' });
+  const b0 = repo.change('GY-B: add b', repo.main, { 'src/server/routes/b.ts': 'b' });
   const tip = repo.merge('Graphyard speculative tip for GY-B behind GY-A', b0, a1) as string;
   const b1 = repo.change('GY-B: carry only this item\'s changes', tip, { [`src/${a}.ts`]: null, [`tests/${a}.test.ts`]: null });
   return { repo, a1, a2, b0, b1 };
@@ -210,10 +210,10 @@ test('integration:deletion-by-stale-base — a deletion the merge would apply an
   const tip = queued.repo.merge('Graphyard speculative tip for GY-B behind GY-A', queued.b1, queued.a2) as string;
   assert.equal(queued.repo.tree(tip)['src/a.ts'], undefined, 'git merges the deletion in cleanly: GY-A left the file alone since the commit GY-B deleted it from');
   queued.repo.pulls.get(2)!.head.sha = tip;
-  const behind = item('GY-B', 2, ['src/b.ts'], tip, queued.a2, { queue: { sequence: 2, enqueuedAt: '2026-09-20T10:00:00Z', policyRevision: 1,
+  const behind = item('GY-B', 2, ['src/server/routes/b.ts'], tip, queued.a2, { queue: { sequence: 2, enqueuedAt: '2026-09-20T10:00:00Z', policyRevision: 1,
     speculation: { ref: 'refs/graphyard/queue/gy-b', tip, base: queued.a2, baseTree: 'unused'.padEnd(40, '0'), predecessors: ['GY-A'], policyRevision: 1, publishedAt: '2026-09-20T10:01:00Z' } }, queueSequence: 2 } as Partial<Work>);
   const observed = await github.observe(behind, [ahead, behind]);
-  assert.deepEqual(observed.files, ['docs/a.md', 'src/b.ts'], 'the candidate\'s own diff never mentions the files it would delete');
+  assert.deepEqual(observed.files, ['docs/a.md', 'src/server/routes/b.ts'], 'the candidate\'s own diff never mentions the files it would delete');
   assert.deepEqual(buildReasons({ ...behind, observation: { ...observed, landing: undefined } }, [ahead, behind]), [], 'so the comparison with its bound base, the only one there was, passes');
   assert.equal(observed.landing!.base, queued.a2, 'a tip behind an unlanded entry lands on its predicted base');
   assert.deepEqual(observed.landing!.files!.filter(file => file.status === 'removed').map(file => [file.path, file.baseSha]), [['src/a.ts', blob('a')], ['tests/a.test.ts', blob('a test')]]);
@@ -228,7 +228,7 @@ test('integration:deletion-by-stale-base — a deletion the merge would apply an
   const held = history();
   held.repo.open(1, 'graphyard/gy-a-1', held.a2); held.repo.open(2, 'graphyard/gy-b-1', held.b1);
   const submittedBase = held.repo.main, adapter = held.repo.github();
-  let candidate = item('GY-B', 2, ['src/b.ts'], held.b1, submittedBase, { stage: 'review' });
+  let candidate = item('GY-B', 2, ['src/server/routes/b.ts'], held.b1, submittedBase, { stage: 'review' });
   const atSubmit = await adapter.observe(candidate);
   assert.deepEqual([atSubmit.candidate.baseSha, atSubmit.landing, buildReasons({ ...candidate, observation: atSubmit }, [candidate])], [submittedBase, { base: submittedBase }, []],
     'right when it was written: the base held none of GY-A, and the candidate lands where it is bound');
@@ -251,9 +251,9 @@ test('integration:deletion-by-stale-base — a deletion the merge would apply an
   const provider = carried.repo.github();
   const unlanded = item('GY-A', 1, ['src/a.ts', 'tests/'], carried.a1, carried.repo.main);
   unlanded.observation = await provider.observe(unlanded);
-  const swallowing = item('GY-B', 2, ['src/b.ts'], carried.b1, carried.repo.main);
+  const swallowing = item('GY-B', 2, ['src/server/routes/b.ts'], carried.b1, carried.repo.main);
   const seen = await provider.observe(swallowing, [unlanded, swallowing]);
-  assert.deepEqual(seen.scopeFiles!.map(file => file.path), ['src/b.ts']); assert.equal(seen.landing!.files, undefined);
+  assert.deepEqual(seen.scopeFiles!.map(file => file.path), ['src/server/routes/b.ts']); assert.equal(seen.landing!.files, undefined);
   assert.deepEqual(seen.landing!.carried, [{ key: 'GY-A', pr: 1, head: carried.a1, dropped: [
     { path: 'src/a.ts', detail: 'the file is absent from this head and from the commit it would land on' }, { path: 'tests/a.test.ts', detail: 'the file is absent from this head and from the commit it would land on' }] }]);
   const swallowed = buildReasons({ ...swallowing, observation: seen }, [unlanded, swallowing]);
@@ -267,7 +267,7 @@ test('integration:deletion-by-stale-base — a deletion the merge would apply an
   whole.repo.open(1, 'graphyard/gy-a-1', whole.a1); whole.repo.open(2, 'graphyard/gy-b-1', whole.repo.merge('tip', whole.b0, whole.a1) as string);
   const intactOwner = item('GY-A', 1, ['src/a.ts', 'tests/'], whole.a1, whole.repo.main);
   intactOwner.observation = await whole.repo.github().observe(intactOwner);
-  const intact = await whole.repo.github().observe(item('GY-B', 2, ['src/b.ts'], whole.repo.pulls.get(2)!.head.sha, whole.repo.main), [intactOwner]);
+  const intact = await whole.repo.github().observe(item('GY-B', 2, ['src/server/routes/b.ts'], whole.repo.pulls.get(2)!.head.sha, whole.repo.main), [intactOwner]);
   assert.deepEqual(intact.landing!.carried, [], 'a head that carries another candidate and holds its files as it shipped them reverts nothing');
 });
 
@@ -324,7 +324,7 @@ test('integration:revert-recheck-on-base-advance — two overlapping candidates 
   const { repo, a2, b1 } = history();
   const github = repo.github();
   github.publish = async () => {};
-  let first = await submitted('Adds a', ['src/a.ts', 'tests/', 'docs/'], 1), second = await submitted('Adds b', ['src/b.ts'], 2);
+  let first = await submitted('Adds a', ['src/a.ts', 'tests/', 'docs/'], 1), second = await submitted('Adds b', ['src/server/routes/b.ts'], 2);
   repo.open(1, first.workspaces[0].branch, a2); repo.open(2, second.workspaces[0].branch, b1);
 
   // Both are clean against the base they were submitted on, proved and approved, so both queue;
@@ -364,7 +364,7 @@ test('integration:revert-recheck-on-base-advance — two overlapping candidates 
   // The same verdict is reached while the first entry is still ahead, from the predicted base
   // alone: nothing has to land for the entry to be refused.
   const early = history('early'), provider = early.repo.github(); provider.publish = async () => {};
-  let ahead = await submitted('Adds a again', ['src/early.ts', 'tests/', 'docs/'], 3), behind = await submitted('Adds b again', ['src/b.ts'], 4);
+  let ahead = await submitted('Adds a again', ['src/early.ts', 'tests/', 'docs/'], 3), behind = await submitted('Adds b again', ['src/server/routes/b.ts'], 4);
   early.repo.open(3, ahead.workspaces[0].branch, early.a2); early.repo.open(4, behind.workspaces[0].branch, early.b1);
   ahead = await job(ahead, provider); ahead = await prove(ahead); ahead = await job(ahead, provider); ahead = await job(ahead, provider);
   behind = await job(behind, provider); behind = await prove(behind); behind = await job(behind, provider);
@@ -434,7 +434,7 @@ test('unit:reverted-delivery-visible — a merged item whose content is not on t
   const { repo, a1, b1 } = history();
   repo.open(1, 'graphyard/gy-a-1', a1); repo.open(2, 'graphyard/gy-b-1', b1);
   const github = repo.github();
-  const owner = item('GY-A', 1, ['src/a.ts', 'tests/'], a1, repo.main), swallowing = item('GY-B', 2, ['src/b.ts'], b1, repo.main);
+  const owner = item('GY-A', 1, ['src/a.ts', 'tests/'], a1, repo.main), swallowing = item('GY-B', 2, ['src/server/routes/b.ts'], b1, repo.main);
   const main = repo.land(2, '2026-09-21T02:37:05Z');
   assert.deepEqual([repo.pulls.get(1)!.merged, repo.tree(main)['src/a.ts']], [true, undefined]);
   swallowing.observation = await github.observe(swallowing, [owner, swallowing]);
@@ -470,7 +470,7 @@ test('unit:reverted-delivery-visible — a merged item whose content is not on t
   assert.equal((await later.repo.github().observe(merged, [merged])).revertedDelivery, undefined, 'a delivery the base branch holds is not reported');
   const removing = later.repo.land(2, '2026-09-21T02:00:00Z');
   assert.notEqual(removing, delivered);
-  const gone = await later.repo.github().observe(merged, [merged, item('GY-B', 2, ['src/b.ts'], later.b1, delivered)]);
+  const gone = await later.repo.github().observe(merged, [merged, item('GY-B', 2, ['src/server/routes/b.ts'], later.b1, delivered)]);
   assert.deepEqual([gone.revertedDelivery!.files.map(file => file.path), gone.revertedDelivery!.removedBy], [['src/a.ts', 'tests/a.test.ts'], { key: 'GY-B', pr: 2, mergeSha: removing, commit: later.b1 }]);
   // A file somebody changed afterwards is not a revert, and an unmoved branch is not asked about twice.
   const changed = later.repo.change('GY-C: edit a guide', removing, { 'docs/a.md': 'a better guide' }); later.repo.main = changed;
