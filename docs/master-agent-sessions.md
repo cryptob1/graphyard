@@ -3,7 +3,7 @@
 
 ## Launch profiles
 
-`master worker add FILE` adds workers ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); `master reviewer setup` and `master reviewer add FILE`, reviewers ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)). `master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
+`master worker add FILE` adds workers, `master reviewer setup` or `master reviewer add FILE` reviewers ([worker](../examples/master/claude-worker.json), [reviewer](../examples/master/claude-reviewer.json) examples). `master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
 
 ### Session handles
 
@@ -11,19 +11,19 @@
 
 ### Approval modes
 
-`"approvals": "auto"` means: Claude Code `--permission-mode bypassPermissions`, `.claude.json` trust; Codex `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir`; Cursor `--force --trust` via `agent` (not `cursor-agent`); opencode allow-all `OPENCODE_PERMISSION`; Gemini, Qwen `--yolo`; Copilot `--allow-all-tools --allow-all-paths`; Muse `--approval-mode never --trust-workspace`; Pi none. `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
+`"approvals": "auto"` adds each runtime's no-prompt flags (Claude Code `--permission-mode bypassPermissions` and `.claude.json` trust, opencode `OPENCODE_PERMISSION`, Gemini and Qwen `--yolo`); Cursor runs as `agent`, not `cursor-agent`. `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's runs with the checkout unwritable to shell commands, or is refused: Codex by `--sandbox workspace-write` (while no grant on the checkout or its `.git` leaves the session's worktree), others under bubblewrap (checkout read-only, PIDs unshared, fresh `/proc`, bus and systemd hidden; only the session's directory and shared Git areas writable). The loop and executors never start, self-upgrade or restart on a dirty checkout; the escalation names paths and leases.
+Every launch but the master session's gets the checkout unwritable to shell commands, or is refused: Codex by `--sandbox workspace-write` (no grant on the checkout or its `.git`), others by bubblewrap (PIDs unshared, fresh `/proc`, bus and systemd hidden; only the session's directory and shared Git areas writable). The loop and executors never start, self-upgrade or restart on a dirty checkout; the escalation names paths and leases.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`); with none left, the role waits (one uncounted `capacity` line), relaunching oldest-first. On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` and relaunches on the next account or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`); with none, the role waits (one uncounted `capacity` line) and relaunches oldest-first. On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` and relaunches on the next account or after reset.
 
 ## The loop's own master session
 
-A fleet role (`master registry role set master ACCOUNTS …`) pinned to one session; the loop and `master start` adopt a live one named `masterAgentName`. It starts on the master prompt plus a handover and relaunches on exit, a limit notice, or past `run.masterSessionMinutes` (default 240; deferred up to 30 minutes for a merge). Cycles wake it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`daemon.master`).
+A fleet role (`master registry role set master ACCOUNTS …`) pinned to one session; the loop and `master start` adopt a live one named `masterAgentName`. It starts on the master prompt plus a handover, relaunching on exit, a limit notice, or past `run.masterSessionMinutes` (default 240; a merge defers it up to 30 minutes). Changed subjects wake it; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`daemon.master`).
 
 ### The request is the session's first message
 
@@ -39,21 +39,21 @@ GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo
 
 #### The start bound reads the pane
 
-A runtime ready (active with no prompt, or banner shown: `the claude runtime is on screen while Herdr reports it unknown`) within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`); else it is refused with the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. One back at its shell fails at once, quoting its last lines (`Automatic producer launch for GY-N refused N time(s)`). A failed launch stops its supervisor, closes its pane, releases its claim.
+A runtime ready (no prompt, or banner shown: `the claude runtime is on screen while Herdr reports it unknown`) within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`); else it is refused with the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. One back at its shell fails at once (`Automatic producer launch for GY-N refused N time(s)`). A failed launch releases its supervisor, pane and claim.
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (a **credential** or **payment** prompt above all) escalates. A worker is held in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it, leaving the item dispatchable.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (above all **credential** or **payment**) escalates. A held worker is in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it, leaving the item dispatchable.
 
 ### Acknowledgement, resume and idle sessions
 
 A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless, it is **`never started`**, relaunched free a minute later, up to three (`retry.neverStarted`).
 
-A resolved blocker or scope request re-prompts the attempt's inactive session once (`complete GY-N EPOCH PR`); blocking again on that epoch hands it to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then handed on after 30 more. Pastes go to the attempt's own handle's pane, never a shared agent name; a gone pane hands it on.
+A resolved blocker or scope request re-prompts the attempt's inactive session once (`complete GY-N EPOCH PR`); blocking again hands the epoch to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, handed on after 30 more. Pastes target the attempt's own pane, never a shared agent name; a gone pane hands it on.
 
 ### Panes are closed and reclaimed
 
-Ending a session closes its pane. A per-cycle sweep closes panes Graphyard launched **on this host** whose session or worktree is gone, agentless past **120 s**, **6** a pass at most, never one with an agent or live lease. `daemon.actions` records the count and oldest agentless pane; over **20** raise attention (`daemon.escalations`).
+Ending a session closes its pane; each cycle also closes up to **6** panes launched **on this host** whose session or worktree is gone, agentless past **120 s**, never one with an agent or live lease. Over **20** agentless raise attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 
@@ -61,4 +61,4 @@ Ending a session closes its pane. A per-cycle sweep closes panes Graphyard launc
 - **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
   path that failed.
 - **A tick failure is attributed and surfaced** in `dispatch.lastFailure`. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
-- **A session that exits at launch is classified from its pane.** For a runtime that exits **at launch** `herdr agent get` answers only `agent_not_found`, so `herdr pane read` decides: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+- **A session that exits at launch is classified from its pane.** One that exits **at launch** leaves `herdr agent get` only `agent_not_found`, so `herdr pane read` decides: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
