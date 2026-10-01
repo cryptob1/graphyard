@@ -315,6 +315,8 @@
     "tests/flow-report-cache.test.ts": 2549,
     "tests/followup-key-reuse.test.ts": 1398,
     "tests/followup-migration.test.ts": 429,
+    "tests/followup-promotion-on-demand.test.ts": 984,
+    "tests/followups-batched-not-filed.test.ts": 938,
     "tests/generated-files-setup.test.ts": 3905,
     "tests/generated-index.test.ts": 5315,
     "tests/github-cache-persistence.test.ts": 1859,
