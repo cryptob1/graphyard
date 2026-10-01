@@ -433,6 +433,8 @@ export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500;
+/** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
+export const retainedDispatchFailureRuns = 500;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
 export const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
@@ -492,9 +494,8 @@ export function pruneDaemonState(state: DaemonState) {
   const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
   const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
   if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
-  // A run is retired when its item dispatches or is blocked; this bound only catches items the loop stopped seeing.
   const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));
-  if (runs.length > retainedClocks) for (const [id] of runs.slice(0, runs.length - retainedClocks)) delete state.dispatchFailures[id];
+  if (runs.length > retainedDispatchFailureRuns) for (const [id] of runs.slice(0, runs.length - retainedDispatchFailureRuns)) delete state.dispatchFailures[id];
   return state;
 }
 

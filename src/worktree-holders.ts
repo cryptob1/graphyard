@@ -89,7 +89,12 @@ export function reclaimBranchHolders(root: string, branch: string, target: strin
     if (holder.via !== 'checkout' && resolve(dirname(holder.path)) !== sessions) refusals.push(`${name} is not a session worktree under ${sessions}`);
     else if (holder.via !== 'checkout' && holder.key !== work.key) refusals.push(`${name} belongs to ${holder.key ?? 'no Graphyard item'}, not ${work.key}`);
     else if (live(holder)) refusals.push(`${name} belongs to ${work.key} epoch ${holder.epoch}, which holds a live lease`);
-    else if (holder.via !== 'checkout' && git(['status', '--porcelain'], holder.path).stdout.trim()) refusals.push(`${name} has uncommitted changes`);
+    else if (holder.via !== 'checkout') {
+      // An unreadable status is not a clean one: the worktree is left alone and named.
+      const status = git(['status', '--porcelain'], holder.path);
+      if (status.status !== 0) refusals.push(`${name} could not be checked for uncommitted changes (${gitFailure(['status', '--porcelain'], status)})`);
+      else if (status.stdout.trim()) refusals.push(`${name} has uncommitted changes`);
+    }
   }
   if (refusals.length) throw new Error(`Branch ${branch} is held by another worktree that was not reclaimed: ${refusals.join('; ')}. Finish or abort its operation, or remove that worktree, before retrying.`);
   const reclaimed: ReclaimedHolder[] = [];

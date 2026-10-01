@@ -14,6 +14,13 @@ import type { DaemonState, DispatchFailureRun } from './state.js';
 export const dispatchFailureBlockAfter = 3;
 
 /**
+ * How long the loop waits before asking again for a blocker the control plane refused: five
+ * minutes after the first refusal, doubling with each one to at most an hour, so a control plane
+ * that keeps refusing is not asked every cycle while the item stays held in the loop.
+ */
+export const dispatchBlockRetryMs = (refusals: number) => Math.min(5 * 60_000 * 2 ** Math.max(0, refusals - 1), 60 * 60_000);
+
+/**
  * A dispatch failure's cause, with what differs between attempts of one cause taken out: the
  * epoch each attempt claimed, the assignment path and branch named for it, commit ids and the
  * command line that ran. Two failures with the same cause read the same here; any other change

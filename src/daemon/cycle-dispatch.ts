@@ -18,7 +18,7 @@ import { credentialBlockedMarker } from '../worker-credential.js';
 import { attemptEndsNeedingRetry, attemptRetryHold, capBinding, capBindingPrefix, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
 import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
-import { dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from './dispatch-failures.js';
+import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from './dispatch-failures.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -206,15 +206,19 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
    * GY-1078: the item's dispatches failed `dispatchFailureBlockAfter` times in a row for one cause.
    * The cause becomes the item's blocker, so neither this loop nor an executor dispatches it again
    * until an operator clears it; the run is then forgotten, and a later failure starts a new one.
-   * Without the effect, or when the control plane refuses, the run stands and holds the item here.
+   * Without the effect, or when the control plane refuses, the run stands and holds the item here;
+   * a refused block is asked for again only after `dispatchBlockRetryMs`, never every cycle. The
+   * run keeps one escalation record, whose attempts count the refusals.
    */
   async function blockRepeatedFailure(item: Work): Promise<DaemonAction[]> {
     const run = state.dispatchFailures[item.id]!, reason = dispatchFailureBlocker(run), key = `escalation:dispatch-failures:${item.id}:${run.firstAt}`;
-    const note = async (outcome: 'done' | 'failed' | 'waiting', detail: string) => detailChanged(state.actions[key], detail)
-      ? [await record(state, key, { kind: 'escalation', work: item.key, principal: null, epoch: item.epoch, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)] : [];
+    const previous = state.actions[key];
+    const note = async (outcome: 'done' | 'failed' | 'waiting', detail: string, always = false) => always || detailChanged(previous, detail)
+      ? [await record(state, key, { kind: 'escalation', work: item.key, principal: null, epoch: item.epoch, state: outcome, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)] : [];
     if (!effects.blockDispatch) return note('waiting', `${reason}. This loop cannot record a blocker, so it holds ${item.key} itself until it restarts`);
+    if (previous?.state === 'failed' && now() - Date.parse(previous.at) < dispatchBlockRetryMs(previous.attempts)) return [];
     try { await effects.blockDispatch(item, reason); }
-    catch (error) { return note('failed', `Could not record the blocker on ${item.key}, so the loop holds it: ${message(error)}. ${reason}`); }
+    catch (error) { return note('failed', `Could not record the blocker on ${item.key}, so the loop holds it and asks again after ${dispatchBlockRetryMs((previous?.attempts ?? 0) + 1) / 60_000} minutes: ${message(error)}. ${reason}`, true); }
     delete state.dispatchFailures[item.id];
     return note('done', `Recorded the blocker on ${item.key}: ${reason}. It is dispatched again once the blocker is cleared (graphyard unblock ${item.key} REASON)`);
   }
