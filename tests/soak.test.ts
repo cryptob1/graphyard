@@ -2171,7 +2171,7 @@ test('unit:soak-invariants-hold — start failures on the real dispatch path fal
   const { root, master, profile } = await failoverInstalled();
   const world = new FailoverWorld(new Set(['opencode']));
   const { final, violations, failures, lost, reportedDispatches, sessions, failover } = await simulateDay({
-    hours: 2, failover: { root, master, world, dispatches: [], samples: [] },
+    hours: 3, failover: { root, master, world, dispatches: [], samples: [] },
     plan: { items: 5, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 5, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 5 } },
   });
   assert.ok(failover, 'the day ran the failover scenario');
