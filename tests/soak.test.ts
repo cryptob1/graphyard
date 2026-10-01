@@ -23,6 +23,7 @@ import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import type { DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { Launcher } from '../src/daemon/cycle.js';
+import { branchReport, buildMasterStatus } from '../src/master/status.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAttention } from '../src/daemon/faults.js';
 import { docsTrimTitle } from '../src/model/documentation.js';
 import { successorWidening } from '../src/model/successors.js';
@@ -283,7 +284,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -399,6 +400,14 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // GY-498: in the queue-only day one item's first tip fails and keeps failing after its rerun, so
   // the window has to attribute the failure to it and rebuild the tips behind it without it.
   if (options.queued?.failTip) github.flaky.set(items[options.queued.failTip - 1].key, 'rerun-fails');
+  // GY-854: the entry ahead of the failing one passes but GitHub is slow to make it mergeable, so
+  // the failing tip is ejected while that entry is still queued, unlanded, and the ejected tip holds
+  // its commits; GitHub refuses every write of every restore of the failing entry's branch.
+  if (options.queued?.failTip && options.protectedBranch) {
+    github.slowMergeable.set(items[options.queued.failTip - 2].key, 45 * minute);
+    github.refusedBranches.add(items[options.queued.failTip - 1].key);
+  }
+  // GY-854: GitHub refuses every write of every restore of the failing entry's branch.
   // GY-831: the lostCarry item's reviews are the bound reviewer App's own, whose approval a
   // Graphyard-authored tip carries — and whose review the day will take away once it is carried.
   if (options.stale) github.botReviewers.add(items[options.stale.lostCarry - 1].key);
@@ -914,6 +923,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
     { stuckArmedAt: null, stuckHead: null, stuckReported: false, lostAt: null, carried: null };
   const releasedScope = new Set<number>();
+  const restoreLines: string[] = [];
   // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
@@ -1065,6 +1075,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
           }
         }
       }
+      // GY-854: what master status says of the failing entry's branch while a restore is owed on it.
+      if (options.protectedBranch) {
+        const key = items[options.queued!.failTip! - 1].key;
+        const line = branchReport(buildMasterStatus(await store.workSnapshot(), [], []).work).contaminated.find(entry => entry.key === key)?.line;
+        if (line && restoreLines.at(-1) !== line) restoreLines.push(line);
+      }
       // GY-498: sample the window after the pass's publications, then apply a mid-day master-config
       // edit, which the cycle about to run publishes the way an operator's edit is published.
       if (options.queued) {
@@ -1162,7 +1178,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, master };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, restoreLines, master };
 }
 
 /**
@@ -1488,6 +1504,43 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.equal(status.mergeQueue.parallelTips, reconfigure.window, 'status reports the narrowed window');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-854: a queue-only day in which item three's first tip, chained behind item two's, fails and
+  // keeps failing after its rerun. Item two's tip passes but GitHub is slow to make it mergeable, so
+  // item three is ejected while item two is still queued: the ejected tip holds item two's unlanded
+  // commits and the control plane owes the branch a restore. GitHub refuses every write of every
+  // restore. The loop offers a failed restore once more, then escalates it, and every cycle after
+  // that writes nothing more to the branch; once item two lands, the day delivers every item.
+  const failTip = 3;
+  const day = await simulateDay({ hours: 3, queued: { window: 4, failTip, releaseEveryMs: 3 * minute }, protectedBranch: true,
+    plan: { items: 4, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
+  const { items, final, github, violations, failures, dayStart } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  const ejectee = final.find(item => item.key === items[failTip - 1].key)!, ahead = final.find(item => item.key === items[failTip - 2].key)!;
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item is delivered');
+  const restore = ejectee.baseRefresh?.restore;
+  assert.ok(restore, `the ejected tip was restored: ${JSON.stringify(ejectee.queueHistory)}`);
+  assert.deepEqual(restore!.foreign, [ahead.key], 'the restore names the unlanded entry the tip carried');
+  assert.equal(restore!.outcome, 'unpublished', 'a refused restore is never recorded done');
+  assert.equal(restore!.attempts, 2, 'the failed restore was retried once');
+  assert.match(restore!.escalated ?? '', /failed twice without the candidate changing and stops repeating \(branch reset refused\)/, 'the second failure escalated with its reason');
+  assert.match(restore!.failure ?? '', /Protected branch update failed/, 'the record carries what GitHub refused');
+  // Each attempt stopped at its refused branch reset: two writes over the whole day, both refused,
+  // and none in the cycles after the escalation was recorded.
+  const writes = github.restoreWrites.filter(write => write.key === ejectee.key);
+  assert.deepEqual(writes.map(write => [write.write, write.refused]), [['reset', true], ['reset', true]], `at most two restore attempts for the contaminated head: ${JSON.stringify(writes)}`);
+  assert.ok(Date.parse(restore!.performedAt!) - dayStart < 45 * minute, 'the escalation was recorded early in the day, with many cycles after it');
+  assert.ok(writes.every(write => write.at <= Date.parse(restore!.performedAt!)), 'no branch write followed the escalation');
+  const landedAhead = github.merges.find(merge => merge.key === ahead.key)!;
+  assert.ok(landedAhead.at - Date.parse(restore!.performedAt!) >= 15 * minute, 'the entry ahead landed well after the escalation: the contaminated head stood through many cycles');
+  assert.equal(github.restoreWrites.filter(write => write.key !== ejectee.key).length, 0, 'no other branch was restored');
+  // master status named the escalation, with what GitHub refused, while it stood; the worker's
+  // rework round for the failed tip then replaced the branch head, which ends the contamination.
+  const escalation = day.restoreLines.find(entry => /the restore is not on the branch .* escalated: it stops repeating/.test(entry));
+  assert.ok(escalation?.includes(restore!.failure!), `master status named the escalation: ${JSON.stringify(day.restoreLines)}`);
 });
 
 const docsTotalDebug = (count: Record<string, number> | undefined) => count === undefined ? undefined : Object.values(count).reduce((a: number, b: number) => a + b, 0);
