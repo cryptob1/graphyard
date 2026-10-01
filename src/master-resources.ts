@@ -433,9 +433,9 @@ export async function readDisk(root: string, config: MasterConfig) {
  * anything removed, from the reclaim record (GY-1074). Null when the volume cannot be read, or
  * reports no inode count (a filesystem without fixed inodes).
  */
-export async function readTmpInodes(root: string, path = tmpdir()): Promise<TmpInodes | null> {
+export async function readTmpInodes(root: string, path = tmpdir(), volume: (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }> = statfs): Promise<TmpInodes | null> {
   try {
-    const info = await statfs(path);
+    const info = await volume(path);
     const totalInodes = Number(info.files), freeInodes = Number(info.ffree);
     if (!Number.isFinite(totalInodes) || totalInodes <= 0) return null;
     const last = (await readReclaimReports(root)).filter(report => report.tmp?.removed).at(-1);

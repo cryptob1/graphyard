@@ -117,10 +117,11 @@ test('unit:loop-sweeps-stale-test-temp — the loop removes this user\'s test te
   assert.equal((await readReclaimReports(root)).at(-1)?.tmp.removed, stale.length, 'the reclaim record carries the count removed');
 
   // Master status: the tmp-inodes reading names the free inodes and the count the pass removed.
-  const inodes = await readTmpInodes(root, tmp);
+  // The volume is stubbed: a test tmpdir may sit on a filesystem without fixed inodes (btrfs reports none).
+  const inodes = await readTmpInodes(root, tmp, async () => ({ files: 1_048_576, ffree: 354_178 }));
   assert.ok(inodes, 'the temporary directory\'s inodes are read');
-  assert.equal(inodes.removed, stale.length);
-  assert.ok(inodes.totalInodes > 0 && inodes.freeInodes >= 0 && inodes.freeInodes <= inodes.totalInodes);
+  assert.deepEqual({ ...inodes, removedAt: typeof inodes.removedAt }, { path: tmp, totalInodes: 1_048_576, freeInodes: 354_178, removed: stale.length, removedAt: 'string' });
+  assert.equal(await readTmpInodes(root, tmp, async () => ({ files: 0, ffree: 0 })), null, 'a filesystem without fixed inodes reads as unknown');
   const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
   const reading = readResources(input).find(entry => entry.id === 'tmp-inodes');
   assert.ok(reading, 'master status reads /tmp inodes');
