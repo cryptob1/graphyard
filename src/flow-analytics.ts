@@ -4,6 +4,7 @@ import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
 import { eventHistoryLimits } from './events-history.js';
+import { nearestRankPercentiles } from './pipeline-speed.js';
 
 // Delivery-flow analytics.
 //
@@ -20,6 +21,17 @@ export type FlowWindow = typeof flowWindows[number];
 export const flowLimits = { batch: 400, batches: 20, scan: 20_000, work: 2000, buckets: 90, drilldown: 200, distinct: 25, deployments: 500, deploymentMerges: 5000, payloadBytes: 4_000_000, remainingProbe: 100_000 };
 export const sparseSampleSize = 5;
 const day = 86_400_000;
+const min = 60_000;
+
+export const stageTargets = {
+  readyToClaimMs: 2 * min,
+  claimToFirstPushMs: 30 * min,
+  pushToCiGreenMs: 20 * min,
+  ciGreenToReviewVerdictMs: 10 * min,
+  reviewToMergeMs: 10 * min,
+  mergeToDeployedMs: 15 * min,
+} as const;
+
 /**
  * The deployment-provider environment whose successful deployments end the production
  * phase. Providers name environments freely, so a staging or preview deployment must never
@@ -732,6 +744,7 @@ export const metricDefinitions: Record<string, { label: string; formula: string;
   operations: { label: 'Operational analytics', formula: 'Counts of recorded blockers, gate refusal reasons, review rounds and findings, rework, lease lifecycle, and queue depth sampled at daily boundaries. Aggregates are never keyed by a person.', sources: ['flow_facts:blocker.set', 'flow_facts:gates.changed', 'flow_facts:review.submitted', 'flow_facts:rework.requested', 'flow_facts:lease.claimed'] },
   deployments: { label: 'Deployment frequency, latency, failure and rollback', formula: 'Deployment-provider observations of every environment join their independently observed contained merge SHAs to merged facts. Latency is deployment start minus the latest contained observed merge. Deployment observations are repository-wide, so slice, type and stage filters do not narrow them. Absent observations are reported as unavailable, never as zero.', sources: ['deployment_observations', 'deployment_merge_observations', 'flow_facts:merged'] },
   bottleneck: { label: 'Bottleneck summary', formula: 'Each undelivered item is classified by its latest durable gate fact into exactly one wait category.', sources: ['flow_facts:gates.changed', 'flow_facts:delivered'] },
+  stageSpeed: { label: 'Per-stage speed', formula: 'For each of six delivery pipeline stages, the p50 and p90 tail durations over items that reached that stage and delivered. Stages are ready→claim (work.released to lease.claimed), claim→first push (lease.claimed to first candidate.observed), push→CI green (first candidate to first passing terminal check per name), CI green→review verdict (latest check to approval), review→merge (approval to merged), merge→deployed (merged to production deployment). Each stage is judged against its target; the bottleneck is the stage with largest p90 excess over target among those meeting the sparse-sample threshold.', sources: ['flow_facts:work.released', 'flow_facts:lease.claimed', 'flow_facts:candidate.observed', 'flow_facts:check.observed', 'flow_facts:review.submitted', 'flow_facts:review.completed', 'flow_facts:merged', 'deployment_observations'] },
 };
 
 // Blocker aggregates and their drill-down share one bounded reason label.
@@ -769,6 +782,157 @@ export function productionDeployment(deployments: DeploymentObservation[], merge
   if (deployment) return { deployment, reason: null };
   return { deployment: undefined, reason: !deployments.length ? 'no-deployment-provider-observations-recorded' : containing.length ? 'deployed-only-outside-production-environment' : 'no-production-deployment-observed-for-this-commit' };
 }
+
+export interface StageSpeedRow {
+  id: string; label: string; n: number; p50Ms: number; p90Ms: number; targetMs: number;
+  met: boolean | null; sparse: boolean;
+}
+export interface StageSpeedResult {
+  stages: StageSpeedRow[];
+  bottleneck: { id: string; excessMs: number; p90Ms: number; targetMs: number } | null;
+  statement: string;
+}
+
+export function stageSpeed(dataset: FlowDataset, productionEnvironment: string = defaultProductionEnvironment): StageSpeedResult {
+  const to = time(dataset.to)!, from = time(dataset.from)!;
+  const latest = new Map(dataset.latest.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
+  const carry = new Map(dataset.carryIn.map(fact => [`${fact.workId}:${fact.kind}`, fact]));
+  const itemFacts = (id: string, kind: FlowKind) => dataset.facts.filter(fact => fact.workId === id && fact.kind === kind);
+  const scanRead = readByScan(dataset);
+  const matches = (fact: FlowFact, sha: string | null) => !fact.details.sha || sha === null || fact.details.sha === sha;
+
+  const deliveredIds = new Set(dataset.work.filter(item => latest.has(`${item.id}:delivered`)).map(item => item.id));
+  const scope = dataset.included.filter(item => latest.has(`${item.id}:work.created`) && deliveredIds.has(item.id));
+
+  interface StageValue { key: string; durationMs: number }
+  const stages: Record<string, StageValue[]> = {
+    'ready-to-claim': [],
+    'claim-to-first-push': [],
+    'push-to-ci-green': [],
+    'ci-green-to-review-verdict': [],
+    'review-to-merge': [],
+    'merge-to-deployed': [],
+  };
+
+  for (const item of scope) {
+    const releasedFact = latest.get(`${item.id}:work.released`);
+    const leaseFacts = [...(carry.get(`${item.id}:lease.claimed`) ? [carry.get(`${item.id}:lease.claimed`)!] : []), ...itemFacts(item.id, 'lease.claimed')];
+    const firstLease = leaseFacts.sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
+    const candidateFacts = [...(carry.get(`${item.id}:candidate.observed`) ? [carry.get(`${item.id}:candidate.observed`)!] : []), ...itemFacts(item.id, 'candidate.observed')];
+    const firstCandidate = candidateFacts.sort((a, b) => time(a.recordedAt)! - time(b.recordedAt)!)[0];
+    const mergedFact = latest.get(`${item.id}:merged`);
+    const mergedSha = mergedFact?.details.mergeSha ?? firstCandidate?.details.sha ?? null;
+
+    if (releasedFact && firstLease && time(firstLease.observedAt)! > time(releasedFact.observedAt)!) {
+      const ms = time(firstLease.observedAt)! - time(releasedFact.observedAt)!;
+      if (ms >= 0) stages['ready-to-claim'].push({ key: item.key, durationMs: ms });
+    }
+
+    if (firstLease && firstCandidate) {
+      const candidateTime = firstCandidate.details.prCreatedAt ? time(firstCandidate.details.prCreatedAt)! : time(firstCandidate.recordedAt)!;
+      const ms = candidateTime - time(firstLease.observedAt)!;
+      if (ms >= 0) stages['claim-to-first-push'].push({ key: item.key, durationMs: ms });
+    }
+
+    if (firstCandidate && mergedSha) {
+      // Push-to-ci-green and later stages bind to the episode that landed (the merged sha)
+      const landedCandidate = candidateFacts.find(c => c.details.sha === mergedSha) ?? firstCandidate;
+      const checkedFacts = itemFacts(item.id, 'check.observed').filter(fact => matches(fact, mergedSha) && scanRead(fact));
+      const checksByName = new Map<string, FlowFact[]>();
+      for (const fact of checkedFacts) {
+        (checksByName.get(fact.details.name) ?? checksByName.set(fact.details.name, []).get(fact.details.name)!).push(fact);
+      }
+
+      let ciGreenAt: number | null = null;
+      if (checksByName.size > 0) {
+        const terminalPerName = Array.from(checksByName.values()).map(checks => {
+          const ordered = checks.sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
+          const terminal = ordered.filter(c => !c.details.pending).sort((a, b) => time(a.observedAt)! - time(b.observedAt)!);
+          return terminal.at(-1);
+        }).filter((c): c is FlowFact => !!c && ['success', 'neutral', 'skipped'].includes(c.details.result));
+
+        if (terminalPerName.length === checksByName.size) {
+          ciGreenAt = Math.max(...terminalPerName.map(c => time(c.observedAt)!));
+        }
+      }
+
+      const candidateTime = landedCandidate.details.prCreatedAt ? time(landedCandidate.details.prCreatedAt)! : time(landedCandidate.recordedAt)!;
+      if (ciGreenAt !== null && ciGreenAt > candidateTime) {
+        const ms = ciGreenAt - candidateTime;
+        if (ms >= 0) stages['push-to-ci-green'].push({ key: item.key, durationMs: ms });
+      }
+
+      if (ciGreenAt !== null) {
+        const reviewFacts = itemFacts(item.id, 'review.submitted').concat(itemFacts(item.id, 'review.completed')).filter(fact => matches(fact, mergedSha));
+        const approval = reviewFacts.sort((a, b) => time(a.observedAt)! - time(b.observedAt)!)[0];
+        if (approval && time(approval.observedAt)! > ciGreenAt) {
+          const ms = time(approval.observedAt)! - ciGreenAt;
+          if (ms >= 0) stages['ci-green-to-review-verdict'].push({ key: item.key, durationMs: ms });
+        }
+
+        if (approval && mergedFact && time(mergedFact.observedAt)! > time(approval.observedAt)!) {
+          const ms = time(mergedFact.observedAt)! - time(approval.observedAt)!;
+          if (ms >= 0) stages['review-to-merge'].push({ key: item.key, durationMs: ms });
+        }
+      }
+    }
+
+    if (mergedFact && mergedSha) {
+      const production = productionDeployment(dataset.deployments, mergedSha, productionEnvironment);
+      if (production.deployment && time(production.deployment.startedAt)! > time(mergedFact.observedAt)!) {
+        const ms = time(production.deployment.startedAt)! - time(mergedFact.observedAt)!;
+        if (ms >= 0) stages['merge-to-deployed'].push({ key: item.key, durationMs: ms });
+      }
+    }
+  }
+
+  const stageLabels: Record<string, string> = {
+    'ready-to-claim': 'Ready→Claim',
+    'claim-to-first-push': 'Claim→Push',
+    'push-to-ci-green': 'Push→CI Green',
+    'ci-green-to-review-verdict': 'CI Green→Verdict',
+    'review-to-merge': 'Review→Merge',
+    'merge-to-deployed': 'Merge→Deployed',
+  };
+
+  const stageTargetValues: Record<string, number> = {
+    'ready-to-claim': stageTargets.readyToClaimMs,
+    'claim-to-first-push': stageTargets.claimToFirstPushMs,
+    'push-to-ci-green': stageTargets.pushToCiGreenMs,
+    'ci-green-to-review-verdict': stageTargets.ciGreenToReviewVerdictMs,
+    'review-to-merge': stageTargets.reviewToMergeMs,
+    'merge-to-deployed': stageTargets.mergeToDeployedMs,
+  };
+
+  const stageRows: StageSpeedRow[] = Object.entries(stages).map(([id, values]) => {
+    const durations = values.map(v => v.durationMs);
+    const percentiles = nearestRankPercentiles(durations);
+    const n = percentiles.count;
+    const sparse = n > 0 && n < sparseSampleSize;
+    const target = stageTargetValues[id];
+    const met = n === 0 ? null : percentiles.p90Ms <= target;
+    return {
+      id, label: stageLabels[id], n, p50Ms: percentiles.p50Ms, p90Ms: percentiles.p90Ms, targetMs: target,
+      met, sparse,
+    };
+  });
+
+  let bottleneck: { id: string; excessMs: number; p90Ms: number; targetMs: number } | null = null;
+  let maxExcess = 0;
+  for (const stage of stageRows) {
+    if (stage.n >= sparseSampleSize && stage.p90Ms > stage.targetMs) {
+      const excess = stage.p90Ms - stage.targetMs;
+      if (excess > maxExcess) { maxExcess = excess; bottleneck = { id: stage.id, excessMs: excess, p90Ms: stage.p90Ms, targetMs: stage.targetMs }; }
+    }
+  }
+
+  const bottleneckStatement = bottleneck
+    ? `${bottleneck.id}: p90 ${Math.round(bottleneck.p90Ms / 60_000 * 10) / 10} min exceeds target ${Math.round(bottleneck.targetMs / 60_000 * 10) / 10} min by ${Math.round(bottleneck.excessMs / 60_000 * 10) / 10} min`
+    : 'No stage measured at or above the sparse-sample threshold with p90 exceeding its target.';
+
+  return { stages: stageRows, bottleneck, statement: bottleneckStatement };
+}
+
 // Pure aggregation. Given the bounded dataset it always produces the same report.
 export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const to = time(dataset.to)!, from = time(dataset.from)!;
@@ -1204,6 +1368,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
   const exclusions = [...excluded].map(([reason, keys]) => ({ reason, count: keys.size, items: [...keys].sort().slice(0, flowLimits.distinct) }))
     .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
 
+  const stageSpeedResult = stageSpeed(dataset, productionEnvironment);
+
   return {
     generatedAt: dataset.observedAt, timezone: 'UTC', productionEnvironment,
     // The window as asked for, and — when a bound cut the scan short — the interval these figures
@@ -1221,7 +1387,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
       statement: 'Flow analytics describe observed work, queueing, and capacity. No metric is keyed by a person, and no principal, provider login, or producer identity is stored in a flow fact or returned by this API.',
     },
     coverage, exclusions, unavailable,
-    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, mergeQueue, phases, ci, evidence, operations, bottleneck,
+    stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, mergeQueue, phases, ci, evidence, operations, bottleneck, stageSpeed: stageSpeedResult,
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;
