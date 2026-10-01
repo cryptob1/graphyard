@@ -25,9 +25,9 @@ The loop launches, wakes and rotates the [master session](master-agent-sessions.
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, the loop's unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
+Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
-A candidate held only by `manual:` proofs no producer may run is the loop's: it requests one `attest` decision per proof, one at a time, bound to head, base and policy revision, and launches an independent approver; a head change withdraws it. `master status` lists these under `loopDecisions.attestations`, not needs-human.
+Unproduced `manual:` proofs are the loop's: one `attest` decision per proof and head (base, policy revision), independent approver launched, withdrawn on a head change; status: `loopDecisions.attestations`, not needs-human.
 
 ### Session liveness is reconciled, not trusted
 
@@ -54,13 +54,13 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Research and diagnosis
 
-With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows the recommendation, a differing answer reworks, failure never blocks; product questions need a human.
+With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision; build follows it, failure never blocks.
 
 `Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file.
 
 ## Machine-filed backlog
 
-Approvals' follow-up findings are recorded on the approved item's own record, never filed as items; an operator promotes one with `graphyard promote-followup` ([follow-ups](followups.md)). Legacy follow-up items and fault items are machine-filed: with `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Approvals' follow-up findings stay on the approved item's record; an operator promotes one with `graphyard promote-followup` ([follow-ups](followups.md)). Legacy follow-up and fault items are machine-filed: with `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
@@ -82,7 +82,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming proof, criterion and surviving mutation, ; `master status` shows it as awaiting rework, not an unanswered producer request. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming proof, criterion and surviving mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
