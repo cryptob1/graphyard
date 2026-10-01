@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { createServer } from 'node:net';
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -113,7 +114,9 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     }
     for (const socket of launchTargets.busSockets.filter(path => existsSync(path) && !isDirectory(path))) {
       const socketIdx = confinement.wrapper.indexOf(realpathSync(socket));
-      assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && confinement.wrapper[socketIdx - 1] === '/dev/null', `the namespace replaces the bus socket ${socket} with an unconnectable device`);
+      const replacement = confinement.wrapper[socketIdx - 1];
+      assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && (replacement === '/dev/null' || (!!launchTargets.secretsBus && replacement === realpathSync(launchTargets.secretsBus))),
+        `the namespace replaces the bus socket ${socket} with an unconnectable device or the keyring-only proxy`);
     }
     assert.ok(processLaunchMaskWords({ directories: ['/run/user/4242/systemd', '/run/dbus', '/run/dbus'], busSockets: ['/run/user/4242/bus', '/run/user/4242/nested'] }, [root]).length > 0, 'the mask words are built for channels that exist');
     if (isDirectory('/run/dbus')) {
@@ -156,7 +159,37 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
   }
 });
 
-test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
+test('unit:sandbox-keyring-proxy — the session bus is replaced by the keyring-only proxy when its socket is live, and by an unconnectable device otherwise', async () => {
+  const base = await temporaryDirectory('confinement-secrets-bus');
+  const server = createServer(), busServer = createServer();
+  try {
+    const bus = join(base, 'bus'), proxy = join(base, 'graphyard-secrets-bus'), stale = join(base, 'stale-file');
+    writeFileSync(bus, ''); writeFileSync(stale, '');
+    await new Promise<void>(done => server.listen(proxy, done));
+    const canonicalBus = realpathSync(bus);
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: proxy }, []), ['--ro-bind', realpathSync(proxy), canonicalBus], 'a live proxy socket stands in for the session bus');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: join(base, 'missing') }, []), ['--ro-bind', '/dev/null', canonicalBus], 'no proxy socket keeps the bus unconnectable');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: stale }, []), ['--ro-bind', '/dev/null', canonicalBus], 'a regular file is never taken for the proxy');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: 'relative/socket' }, []), ['--ro-bind', '/dev/null', canonicalBus], 'a relative proxy path is ignored');
+    const liveBus = join(base, 'live-bus'), linked = join(base, 'linked-bus'), hardLinked = join(base, 'hard-linked-bus'), linkedProxy = join(base, 'linked-proxy');
+    await new Promise<void>(done => busServer.listen(liveBus, done));
+    symlinkSync(liveBus, linked); linkSync(liveBus, hardLinked); symlinkSync(proxy, linkedProxy);
+    const canonicalLiveBus = realpathSync(liveBus);
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [liveBus], secretsBus: linked }, []), ['--ro-bind', '/dev/null', canonicalLiveBus], 'a symlink planted at the proxy path to the real bus is never followed');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [liveBus], secretsBus: hardLinked }, []), ['--ro-bind', '/dev/null', canonicalLiveBus], 'a hard link to the real bus is never taken for the proxy');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [liveBus], secretsBus: linkedProxy }, []), ['--ro-bind', '/dev/null', canonicalLiveBus], 'even a symlink to a live proxy is refused');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [liveBus], secretsBus: proxy }, []), ['--ro-bind', realpathSync(proxy), canonicalLiveBus], 'the proxy socket itself still stands in for a live bus');
+    assert.equal(secretsBusPath(1000, { GRAPHYARD_SECRETS_BUS: proxy }), proxy, 'the environment names the proxy socket');
+    assert.equal(secretsBusPath(1000, { XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/graphyard-secrets-bus', 'the default lives in the runtime directory');
+    assert.equal(secretsBusPath(4242, {}), '/run/user/4242/graphyard-secrets-bus', 'without XDG_RUNTIME_DIR the default is the uid runtime directory');
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+    if (busServer.listening) await new Promise<void>(done => busServer.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:allocated-checkout-re-exposed —a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
   const base = await temporaryDirectory('confinement-session');
   try {
     const { root } = coordinatorFixture(base);
@@ -261,6 +294,8 @@ test('unit:launcher-knows-its-checkout — the launcher derives its coordinator 
   // only the first, so every launcher-started session ran unconfined in production (review finding).
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/bin/graphyard.mjs', false), '/srv/graphyard');
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/src/cli.ts', false), '/srv/graphyard');
+  assert.equal(launcherCoordinatorRoot('/srv/graphyard/scripts/graphyard-executor.mjs', false), '/srv/graphyard', 'an executor slot launches workers in-process, so it confines them too');
+  assert.equal(launcherRootUndetermined('/graphyard-executor.mjs', false) !== null, true, 'an executor that cannot name its checkout refuses instead of launching unconfined');
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/src/cli.ts', true), null, 'nothing is confined under the test runner');
   assert.equal(launcherCoordinatorRoot('/usr/bin/node', false), null, 'a foreign entry is not a launcher');
   assert.equal(launcherCoordinatorRoot(undefined, false), null);

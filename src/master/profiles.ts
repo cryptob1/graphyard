@@ -1,6 +1,6 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
@@ -618,27 +618,50 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
  * `/var/run` → `/run` on Debian-family hosts — resolves against its own staging root, where the
  * target does not exist, so the launch dies with "Can't mkdir". The canonical path also aliases
  * that pair to one mask, and hiding the real directory hides every symlink to it.
+ *
+ * When `secretsBus` names a live socket, each session-bus socket is replaced by it instead of by
+ * `/dev/null`. That socket is an `xdg-dbus-proxy --filter --talk=org.freedesktop.secrets` proxy
+ * (`graphyard-secrets-bus.service`): a session reaches the keyring that holds the operator's
+ * GitHub login, so `git push` through `gh auth git-credential` works, while systemd1 and every
+ * other bus name stay unreachable, so `systemd-run --user` is still refused.
  */
 export const processLaunchMaskWords = (
-  targets: { directories?: readonly string[]; busSockets?: readonly string[] },
+  targets: { directories?: readonly string[]; busSockets?: readonly string[]; secretsBus?: string | null },
   protect: readonly string[],
 ): readonly string[] => {
   const hides = (path: string) => !protect.some(p => p === path || withinCheckout(p, path));
   const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
   const directories = [...new Set((targets.directories ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path) && hides(path)).map(canonical))];
   const sockets = [...new Set((targets.busSockets ?? []).filter(path => isAbsolute(path) && existsSync(path) && !isDirectoryPath(path) && hides(path)).map(canonical))];
-  return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', '/dev/null', path])];
+  const proxy = targets.secretsBus && isAbsolute(targets.secretsBus) && isProxySocket(targets.secretsBus, targets.busSockets ?? []) ? canonical(targets.secretsBus) : '/dev/null';
+  return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
 };
+/**
+ * Whether `path` is itself a socket that is not one of the session buses. The runtime directory
+ * stays writable inside the namespace, so a confined session could plant a symlink or a hard link
+ * to the real bus where the proxy listens; neither is followed, or the next launch would bind the
+ * unfiltered bus and reopen `systemd-run --user` (GY-1005 review finding).
+ */
+const isProxySocket = (path: string, busSockets: readonly string[]) => {
+  try {
+    const own = lstatSync(path), real = lstatSync(realpathSync(path));
+    if (!own.isSocket() || !real.isSocket() || own.dev !== real.dev || own.ino !== real.ino) return false;
+    return !busSockets.some(bus => { try { const found = statSync(bus); return found.dev === own.dev && found.ino === own.ino; } catch { return false; } });
+  } catch { return false; }
+};
+/** Where `graphyard-secrets-bus.service` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
+export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
+  env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
 /**
  * The host's own process-launch channels that exist here: the systemd manager directories and
  * session-bus sockets of the user's runtime directory (`/run/user/<uid>`, `$XDG_RUNTIME_DIR`) and
  * the system bus directory. Whether a candidate may be hidden is `processLaunchMaskWords`'s call.
  */
-export const hostProcessLaunchTargets = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): { directories: string[]; busSockets: string[] } => {
+export const hostProcessLaunchTargets = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): { directories: string[]; busSockets: string[]; secretsBus: string | null } => {
   const runtimeDirectories = [...new Set([uid === undefined ? null : `/run/user/${uid}`, env.XDG_RUNTIME_DIR || null]
     .filter((path): path is string => !!path && isAbsolute(path)).map(path => { try { return realpathSync(path); } catch { return path; } }))];
   const directories = [...runtimeDirectories.map(directory => join(directory, 'systemd')), '/run/dbus', '/var/run/dbus'];
-  return { directories, busSockets: runtimeDirectories.map(directory => join(directory, 'bus')) };
+  return { directories, busSockets: runtimeDirectories.map(directory => join(directory, 'bus')), secretsBus: secretsBusPath(uid, env) };
 };
 
 /**
