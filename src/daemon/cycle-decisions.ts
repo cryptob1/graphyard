@@ -8,11 +8,12 @@ import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approve
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, observationWakeDue, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
+import { wakeObservationJob } from './cycle-delivery.js';
 
 /** The launcher key of the approver launch for a decision (GY-616). */
 const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
@@ -592,11 +593,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // The refusal wakes the item's observation job at once (GY-710), and the rework is decided
       // on the first cycle after that observation lands, not whenever the cadence reaches it. The
       // wake is stamped on the snapshot's clock, the one the observation's time is on.
-      const wakeKey = `wake:observation:${item.id}`;
-      if (effects.wakeObservation && observationWakeDue(item, state.actions[wakeKey]?.at, clock, pause)) {
-        try { await effects.wakeObservation(item); await note(wakeKey, item, 'refresh', 'done', `Woke the observation job of ${item.key}: its rework waits for an observation newer than ${item.observation?.at ?? 'none'}`, clock); }
-        catch (error) { await note(wakeKey, item, 'refresh', 'failed', `Could not wake the observation job of ${item.key}: ${message(error)}`, clock); }
-      }
+      await wakeObservationJob(cycle, item, 'rework');
       return;
     }
     // A settled watch is supervised no more, but a registry session its close could not end still

@@ -292,7 +292,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; staleRework?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -975,6 +975,17 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     restarts.set(requested.candidate!.sha, now); loopDownUntil = now + 3 * minute;
     return true;
   };
+  // A stale merge (GY-710): the same restart just as an item reaches the merge stage, for the
+  // first `staleMerge` items to get there. When the loop is back the merge gate refuses its
+  // observation as stale; the loop wakes the job and merges once that observation lands.
+  const staleMerges: string[] = [];
+  const restartOnMerge = async (now: number) => {
+    if (staleMerges.length >= (options.staleMerge ?? 0)) return false;
+    const merging = (await store.list()).find(item => item.stage === 'merge' && item.candidate && !restarts.has(item.candidate.sha) && item.gates.every(gate => gate.passed));
+    if (!merging) return false;
+    restarts.set(merging.candidate!.sha, now); staleMerges.push(merging.key); loopDownUntil = now + 3 * minute;
+    return true;
+  };
   const busyFleet = async (now: number) => {
     for (const item of (await store.list()).filter(entry => entry.candidate && restarts.has(entry.candidate.sha))) {
       const since = restarts.get(item.candidate!.sha)!, readAt = since + plan.slowObservationMs;
@@ -1170,6 +1181,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
       }
       if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
+      if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       master.cycleOf = cycles;
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
@@ -1245,7 +1257,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { wakes, reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
+  return { wakes, staleMerges, reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, restoreLines, master, lanesSeen, laneApplications, approverWorks };
 }
@@ -1715,6 +1727,22 @@ test('unit:soak-invariants-hold — stale rework wakes observation jobs without 
   // the rework rounds above still came to pass: no wake storm, and no growth of state.actions.
   assert.deepEqual(wakes.map(wake => wake.key), [...basePlan.rework].map(n => items[n - 1].key), `one observation wake per stale rework: ${JSON.stringify(wakes)}`);
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('wake:observation:')).length <= basePlan.rework.size, 'one wake entry per item woken');
+});
+
+test('unit:soak-invariants-hold — a guarded merge refused for a stale observation wakes the observation job once and merges after it lands, without storms or cursor growth', { timeout: 300_000 }, async () => {
+  const day = await simulateDay({ hours: 8, staleMerge: 3 });
+  const { final, wakes, staleMerges, state, violations, failures, lost, observed } = day;
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => item.key), [], 'all fifteen items are delivered after the restarts');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed');
+  assert.equal(staleMerges.length, 3, 'three merges were left on a stale observation');
+  // Each merge the restart left on a stale observation woke its item's observation job once, and
+  // was still delivered: no wake storm, and no growth of state.actions.
+  for (const key of staleMerges) assert.equal(wakes.filter(wake => wake.key === key).length, 1, `${key}: one observation wake for its stale merge: ${JSON.stringify(wakes)}`);
+  assert.ok(wakes.length <= 2 * staleMerges.length, `wakes stay bounded: ${JSON.stringify(wakes)}`);
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('wake:observation:')).length <= wakes.length, 'one wake entry per item woken');
 });
 
 test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is acted on, never retried for good: a stuck candidate is re-reviewed and then reworked while the queue moves, a lost carried review is re-reviewed at once, and every invariant holds', { timeout: 300_000 }, async () => {
