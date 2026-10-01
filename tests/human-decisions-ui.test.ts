@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -21,6 +20,7 @@ import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/i
 import { principalSchema } from '../src/server/principals.js';
 import { previewPrincipalRotation, readProposedRoster } from '../src/master/autonomy.js';
 import { harness } from './install-harness.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-738: the decisions only a human may make are the easiest thing in the product. The operator
@@ -41,16 +41,16 @@ let serial = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_HUMAN_DECISIONS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 738);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-human-decisions-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('human-decisions'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('human_decisions_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/human_decisions_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  sealHome = await mkdtemp(join(tmpdir(), 'graphyard-seal-'));
+  sealHome = await temporaryDirectory('seal');
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (sealHome) await rm(sealHome, { recursive: true, force: true }); });
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
 const call = async (credential: string | null, path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { ...(credential ? { Authorization: `Bearer ${credential}` } : {}), 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
