@@ -15,11 +15,11 @@ A criterion is `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `
 
 ## Review gate: verdicts, not threads
 
-The gate is reviewer approval of the exact head plus required CI; an approval marks each thread resolved, follow-up (backlog) or overridden. Ten identical 4xx failures stop retries with one attention item. Bot threads turn advisory after two rework rounds. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds the candidate's diff: at `complete`, each new head and landing, a pre-existing out-of-scope file must match the bound base byte-for-byte or is refused, naming files and shipping items. Carried (another item's unlanded) commits never eject. Only a scope request or audited revision widens it; asks over 20 files in a directory, or 100 entries, collapse to the deepest common directory; pending asks merge into one decision.
+`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items; carried files (another item's unlanded commits) are no ejection (GY-871). A worker cannot widen `plannedFiles`; a scope request or audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
 
 `evaluateLandability` (`src/model/landability.ts`) is the single authority on whether a candidate can land: build and acceptance gates are its refusals, and the queue ejects only for its reasons. Recomputed live, never stored; a newly landable head re-enters the queue.
 
