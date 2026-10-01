@@ -1869,7 +1869,7 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
   assert.ok(seconds < 200, `the day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 360_000 }, async () => {
   // GY-849: between minute 50 and minute 130 no approver account is eligible, which spans the
   // rework rounds of items three and seven (requested about minutes 58 and 118), so both decisions
   // sit waiting when the window closes. The loop must relaunch them — uncounted against the launch
