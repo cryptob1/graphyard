@@ -1383,15 +1383,18 @@ export function blamedTipFailure(work: Work, all: Work[]): { reason: string; att
 /** The reason `ejectionReason` gives a required CI check that failed on the tip, with the check named. */
 export const tipCheckFailureReason = /^Required CI check (\S+) did not pass on speculative tip [0-9a-f]+/;
 /**
- * The required check an ejection reason says failed on the entry's tip, when nothing has attributed
- * that failure yet, or null. A failure the tip window already pinned on the entry (the tip ahead
- * passed) or the docs budget's per-entry counts named it for is not attributed again.
+ * The required check an ejection reason says failed on the entry's tip, or null. A docs-budget
+ * overflow the per-entry word counts already attributed (GY-574) is not attributed again. A failure
+ * the tip window gave the entry because the tip ahead passed still is: the predecessors' change can
+ * pass alone and still be what breaks — the named file is theirs alone.
  */
 export function unattributedTipFailure(reason: string): string | null {
   const failed = tipCheckFailureReason.exec(reason);
-  if (!failed || reason.includes(', attributed to this entry:') || reason.includes(`: ${docsBudgetProof} failed: `)) return null;
+  if (!failed || reason.includes(`: ${docsBudgetProof} failed: `)) return null;
   return failed[1];
 }
+/** The window's clause pinning a failure on the entry because the tip ahead passed, dropped once a predecessor is shown to explain it. */
+export const windowAttributionClause = /, attributed to this entry: speculative tip \S+ ahead of it passed \S+$/;
 
 /** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
 /**

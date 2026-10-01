@@ -1293,7 +1293,7 @@ export class GitHub {
    * are read once, and an unreadable list is not retried: the run's own output is then the only
    * record. Only tips are read, so a head that holds nobody else's work costs nothing.
    */
-  private async checkFailures(work: Work, checks: any[], publishedTip: boolean): Promise<CheckFailure[]> {
+  async checkFailures(work: Work, checks: any[], publishedTip: boolean): Promise<CheckFailure[]> {
     if (!publishedTip) return [];
     const ciAppIds = work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [];
     const failures: CheckFailure[] = [];

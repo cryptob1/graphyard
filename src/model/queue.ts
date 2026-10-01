@@ -1,4 +1,4 @@
-import { attributeTipFailure, baseRefreshConflict, blamedTipFailure, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, unattributedTipFailure, windowBatchView } from '../merge-queue.js';
+import { attributeTipFailure, baseRefreshConflict, blamedTipFailure, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, unattributedTipFailure, windowAttributionClause, windowBatchView } from '../merge-queue.js';
 import type { FailureAttribution, QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
@@ -55,7 +55,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const attribution: FailureAttribution | null = failedCheck ? attributeTipFailure(probe, all, failedCheck, ciAppIds) : null;
   const blamed = queue && !ejected ? blamedTipFailure(probe, all) : null;
   const culprits = attribution?.verdict === 'predecessor' ? attribution.culprits.map(entry => entry.key) : null;
-  const reason = blamed ? blamed.reason : ejected && culprits ? `${ejected}; attributed to predecessor${culprits.length === 1 ? '' : 's'} ${culprits.join(', ')} (${attribution!.culprits.map(entry => entry.evidence).join('; ')}), so ${work.key} waits for ${culprits.length === 1 ? 'it' : 'them'} and asks no rework` : ejected;
+  const reason = blamed ? blamed.reason : ejected && culprits ? `${ejected.replace(windowAttributionClause, '')}; attributed to predecessor${culprits.length === 1 ? '' : 's'} ${culprits.join(', ')} (${attribution!.culprits.map(entry => entry.evidence).join('; ')}), so ${work.key} waits for ${culprits.length === 1 ? 'it' : 'them'} and asks no rework` : ejected;
   const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
   if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
   if (queue && reason) {
