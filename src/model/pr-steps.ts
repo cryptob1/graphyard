@@ -3,6 +3,7 @@ import { latestCheck, tipValidationPrefix, type TipView } from '../merge-queue.j
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
+import { ciCheckName } from './ci-refusal.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
 
@@ -71,7 +72,7 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
   // A queued entry's CI on its own speculative tip is refused by the merge gate instead (GY-292,
   // `tipValidation`), with the test gate's own wording after the queue's prefix.
   const reasons = [...gate?.reasons ?? [], ...tipChecks(work)];
-  const named = (name: string) => !gate || reasons.includes(`Required CI check ${name} has not passed on the current candidate`);
+  const named = (name: string) => !gate || reasons.some(reason => ciCheckName(reason) === name);
   return (work.policy.checks ?? []).map(name => {
     if (!named(name)) return { name, state: 'passed' };
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name && !!ciAppIds?.includes(check.appId));

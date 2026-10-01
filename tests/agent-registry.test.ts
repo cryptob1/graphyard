@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -14,16 +13,17 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { apiRoutes } from '../src/server/index.js';
 import { ledgerTables } from '../src/store/schema.js';
-import { AgentRegistry } from '../src/agent-registry.js';
-import { discoverHostLogins, proposeFleet } from '../src/fleet.js';
+import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
+import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
-import { FleetOverview } from '../web/pages/fleet.js';
+import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
@@ -41,7 +41,7 @@ let http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_REGISTRY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 45);
-  scratch = await mkdtemp(join(tmpdir(), 'graphyard-registry-'));
+  scratch = await temporaryDirectory('registry');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('registry_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/registry_test`); await store.init();
@@ -86,7 +86,7 @@ function network(byToken: Record<string, { five: number; seven: number }>): Envi
 }
 /** A master installation bound to the test control plane; its master.json names no runtime account at all. */
 async function master(workers: { name: string; principal: string; kind: string; agentArgs?: string[] }[] = []) {
-  const root = await mkdtemp(join(scratch, 'repo-')), credentialDirectory = await mkdtemp(join(scratch, 'credentials-'));
+  const root = await temporaryDirectory('repo', scratch), credentialDirectory = await temporaryDirectory('credentials', scratch);
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const bound = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url, token: tokens.get('master')!, cliPath: launcher, credentialDirectory, hostId: HOST, herdrWorkspace: 'workspace-graphyard' }, bound as typeof fetch);
@@ -146,7 +146,7 @@ async function dispatch(root: string, config: any, profile: string, probe: Envir
 // ---------------------------------------------------------------------------
 test('integration:agent-registry-model — the control plane stores runtimes with launch contracts, accounts that reference a credential, models with cost and capability, and ordered roles with a concurrency limit, configured through the API, the CLI and the dashboard', async () => {
   await reset();
-  const homes = await mkdtemp(join(scratch, 'homes-'));
+  const homes = await temporaryDirectory('homes', scratch);
   const claudeHome = await login(homes, 'claude-a', 'claude', 'claude-a-very-secret-oauth-token');
   const empty: FleetView = await ok('agent-registry', auditor);
   assert.equal(empty.configured, false); assert.deepEqual([empty.runtimes, empty.accounts, empty.roles], [[], [], []]);
@@ -196,7 +196,11 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   const posted = [...page.matchAll(/=> [`']agent-registry\/([^`']+)[`']/g)].map(match => `/api/agent-registry/${match[1].replace(/\$\{field\(form, 'collection'\)\}/, 'accounts').replace(/\$\{[^}]+\}/g, 'name')}`);
   assert.ok(posted.length >= 6, 'runtime, model, account, role, quota and remove forms');
   // GY-397: the browser's credential check reads the launch data only; the audit reason is prose that may name a token prefix.
-  assert.match(page, /form\.entries\(\)\]\.some\(\(\[name, value\]\) => name !== 'reason' && typeof value === 'string' && value\.split\([^)]*\)\.some\(looksLikeSecret\)/);
+  const formOf = (fields: Record<string, string>) => { const form = new FormData(); for (const [name, value] of Object.entries(fields)) form.append(name, value); return form; };
+  assert.equal(pastesCredential(formOf({ tools: 'Read, sk-ant-api03-abcdefghijklmnop', reason: 'Pasting a key by mistake' })), true, 'a secret in launch data is refused');
+  assert.equal(pastesCredential(formOf({ home: 'sk-ant-api03-abcdefghijklmnop', reason: 'r' })), true);
+  assert.equal(pastesCredential(formOf({ tools: 'Read, Grep', reason: 'Rotated sk-ant-api03-abcdefghijklmnop out of the old home' })), false, 'a secret-shaped audit reason is still accepted');
+  assert.equal(pastesCredential(formOf({ tools: 'Read, Grep', reason: 'Plain reason' })), false);
   for (const path of posted) assert.ok(served.some(route => typeof route === 'string' ? route === path : route.test(path)), `${path} is served`);
   assert.ok(visibleViews({ status: { actor: { role: 'admin' } }, features: {} } as any).some(view => view.id === 'agents') && !visibleViews({ status: { actor: { role: 'worker' } }, features: {} } as any).some(view => view.id === 'agents'));
   assert.ok(views.some(view => view.id === 'agents'));
@@ -206,7 +210,11 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   await registryCommand({ hostId: HOST }, ['role', 'set', 'reviewer', '--concurrency', '2', '--reason', 'One more reviewer at a time'], cli);
   assert.deepEqual((await ok('agent-registry/document', coordinator) as Registry).roles.find(role => role.name === 'reviewer'), { name: 'reviewer', accounts: ['codex-a', 'claude-a'], concurrency: 2 }, 'the CLI changed the limit and kept the order');
   for (const name of ['producer', 'approver', 'escalation-handler']) await ok('agent-registry/roles', operator, { role: { name, accounts: ['claude-a'], concurrency: 1 }, reason: `Configure ${name}` });
-  assert.equal((await call('agent-registry/roles', operator, { role: { name: 'janitor', accounts: ['claude-a'], concurrency: 1 }, reason: 'r' })).status, 400, 'the roles are the five the control plane launches');
+  // The master role (GY-898) is a capacity role like any other, but never more than one live session:
+  // whatever the mutation asks, the stored concurrency is 1 (two masters break single-coordinator).
+  await ok('agent-registry/roles', operator, { role: { name: 'master', accounts: ['claude-a'], concurrency: 4 }, reason: 'Configure the loop-launched master session' });
+  assert.equal((await ok('agent-registry/document', coordinator) as Registry).roles.find(role => role.name === 'master')!.concurrency, 1, 'the master role is pinned to one live session');
+  assert.equal((await call('agent-registry/roles', operator, { role: { name: 'janitor', accounts: ['claude-a'], concurrency: 1 }, reason: 'r' })).status, 400, 'an unknown role is refused');
   assert.equal((await call('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-a', 'claude-a'], concurrency: 1 }, reason: 'r' })).status, 400);
 
   // Observed quota state and reset time: marked by an operator here, observed by an executor's probe in the selection test.
@@ -218,7 +226,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   assert.deepEqual(fleetRoles.filter(name => view.roles.some(role => role.role === name)), [...fleetRoles]);
   const claude = view.accounts.find(account => account.name === 'claude-a')!;
   assert.deepEqual([claude.runtime, claude.model, claude.modelId, claude.cost, claude.capability?.tier, claude.host, claude.home, claude.maxSessions], ['claude', 'opus', 'claude-opus-5', { inputPerMTok: 15, outputPerMTok: 75 }, 'frontier', HOST, claudeHome, 2]);
-  assert.deepEqual(claude.roles.map(entry => `${entry.role}:${entry.preference}/${entry.of}`), ['worker:1/3', 'reviewer:2/2', 'producer:1/1', 'approver:1/1', 'escalation-handler:1/1']);
+  assert.deepEqual(claude.roles.map(entry => `${entry.role}:${entry.preference}/${entry.of}`), ['worker:1/3', 'reviewer:2/2', 'producer:1/1', 'approver:1/1', 'escalation-handler:1/1', 'master:1/1']);
   const aider = view.accounts.find(account => account.name === 'aider-a')!;
   assert.deepEqual([aider.quota, aider.resetsAt, aider.quotaSource, aider.eligible], ['exhausted', resetsAt, 'operator', false]); assert.match(aider.ineligible!, /aider-a quota is exhausted until/);
   assert.equal(view.runtimes.find(runtime => runtime.name === 'aider')!.launch.homeVariable, 'AIDER_HOME');
@@ -245,7 +253,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
 // ---------------------------------------------------------------------------
 test('integration:registry-driven-selection — an executor\'s action runs on the first account of its role that is placed on its host, logged in, within quota and under its limits; the choice and its reason are recorded; no runtime or account comes from code or a profile', async () => {
   await reset();
-  const homes = await mkdtemp(join(scratch, 'homes-'));
+  const homes = await temporaryDirectory('homes', scratch);
   const spent = await login(homes, 'claude-spent', 'claude'), out = await login(homes, 'claude-out', null), fresh = await login(homes, 'claude-fresh', 'claude');
   const probe = network({ 'claude-spent-oauth-token': { five: 20, seven: 100 }, 'claude-fresh-oauth-token': { five: 5, seven: 10 } });
   for (const runtime of proposedRuntimes) await ok('agent-registry/runtimes', operator, { runtime, reason: 'register' });
@@ -388,7 +396,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 // ---------------------------------------------------------------------------
 test('integration:registry-live-capacity — capacity is a registry change with no restart and no file edit: an account added mid-run takes the next action, an exhausted one is skipped, and a removed runtime\'s roles fall back in order', async () => {
   await reset();
-  const homes = await mkdtemp(join(scratch, 'homes-'));
+  const homes = await temporaryDirectory('homes', scratch);
   const homeA = await login(homes, 'claude-a', 'claude'), homeB = await login(homes, 'claude-b', 'claude'), codexHome = await login(homes, 'codex-a', 'codex');
   const probe = network({ 'claude-a-oauth-token': { five: 1, seven: 1 }, 'claude-b-oauth-token': { five: 1, seven: 1 } });
   await ok('agent-registry/apply', operator, { runtimes: [runtimeNamed('claude')], models: [{ name: 'opus', id: 'claude-opus-5' }], accounts: [{ name: 'claude-a', runtime: 'claude', model: 'opus', credential: { host: HOST, home: homeA } }],
@@ -476,6 +484,8 @@ test('unit:registry-visibility — master status and the dashboard show each acc
   assert.match(sessionEnded(session({ role: 'reviewer' }), { key: 'GY-5', stage: 'review', lease: null, autoDispatch: { review: null, producers: [], history: [] } } as any, later)!, /no standing review request/);
   assert.equal(sessionEnded(session({ role: 'reviewer' }), { key: 'GY-5', stage: 'review', lease: null, autoDispatch: { review: { state: 'requested' }, producers: [], history: [] } } as any, later), null);
   assert.match(sessionEnded(session({ role: 'approver', work: null }), undefined, now + 31 * 60_000)!, /decision window passed/);
+  assert.equal(sessionEnded(session({ role: 'master', work: null }), undefined, now + 12 * hour), null, 'the master session holds its slot until the loop ends it');
+  assert.match(sessionEnded(session({ role: 'master', work: null }), undefined, now + 49 * hour)!, /older than any session runs/);
   const settled = structuredClone(registry); settled.sessions.push(session({ id: 'newer', selectedAt: new Date(now + 1000).toISOString() }));
   assert.deepEqual(settleSessions(settled, [], new Date(now + 2000).toISOString()).map(entry => entry.endReason), ['superseded by the claude-a session launched for GY-5']);
 
@@ -502,9 +512,14 @@ test('unit:registry-visibility — master status and the dashboard show each acc
 // ---------------------------------------------------------------------------
 // AC-5 — setup discovers the host and proposes a registry (the onboarding review is manual:registry-onboarding-review)
 // ---------------------------------------------------------------------------
-test('integration:registry-setup-proposal — setup discovers the logged-in CLIs and their accounts, proposes a registry, and a new installation reaches a working fleet with no hand-written profile; the onboarding guide adds a runtime, an account and a role in that order', async () => {
+test('integration:registry-setup-proposal — setup discovers the logged-in CLIs and their accounts, proposes a registry, and a new installation reaches a working fleet with no hand-written profile; the onboarding guide adds a runtime, an account and a role in that order', async t => {
   await reset();
-  const directory = await mkdtemp(join(scratch, 'environments-')), home = await mkdtemp(join(scratch, 'home-'));
+  const directory = await temporaryDirectory('environments', scratch), home = await temporaryDirectory('home', scratch);
+  // opencode keeps its login under XDG_DATA_HOME, which a host may set outside `home`; pin it to
+  // the isolated home so discovery sees only the logins this test created.
+  const hostDataHome = process.env.XDG_DATA_HOME;
+  t.after(() => { if (hostDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = hostDataHome; });
+  process.env.XDG_DATA_HOME = join(home, '.local/share');
   const isolated = await login(directory, 'claude-b', 'claude'); await login(directory, 'claude-c', null); const codexHome = await login(directory, 'codex-a', 'codex');
   await login(home, '.claude', 'claude');
   const logins = await discoverHostLogins({ directory, home, executables: name => name === 'muse' });
@@ -516,7 +531,8 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   assert.equal(preview.applied, false); assert.match(preview.next, /--apply/);
   assert.deepEqual(preview.proposal.runtimes.map((runtime: any) => runtime.name), ['claude', 'codex', 'muse']);
   assert.deepEqual(preview.proposal.accounts.map((account: any) => [account.name, account.runtime, account.model, account.credential.home]), [['claude-b', 'claude', 'claude-default', isolated], ['codex-a', 'codex', 'codex-default', codexHome], ['claude', 'claude', 'claude-default', join(home, '.claude')], ['muse', 'muse', 'muse-default', null]]);
-  assert.deepEqual(preview.proposal.roles.map((role: any) => role.name), [...fleetRoles]); assert.ok(preview.proposal.roles.every((role: any) => role.accounts.join() === 'claude-b,codex-a,claude,muse' && role.concurrency >= 1));
+  // The master role is never proposed (GY-898): the operator names its accounts themselves.
+  assert.deepEqual(preview.proposal.roles.map((role: any) => role.name), fleetRoles.filter(name => name !== 'master')); assert.ok(preview.proposal.roles.every((role: any) => role.accounts.join() === 'claude-b,codex-a,claude,muse' && role.concurrency >= 1));
   assert.equal((await ok('agent-registry', auditor) as FleetView).configured, false, 'a proposal stores nothing');
 
   const applied = await registryCommand({ hostId: HOST }, ['propose', '--directory', directory, '--apply'], cli, { home, executables: name => name === 'muse' }) as any;
@@ -541,7 +557,7 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   // Every command the guide prints is run as written: a documented form the CLI cannot parse — a
   // value starting with a dash written apart from its flag, say — is a broken onboarding, and an
   // onboarding review is the only thing that ever found it.
-  const empty = await mkdtemp(join(scratch, 'no-logins-'));
+  const empty = await temporaryDirectory('no-logins', scratch);
   const written: { path: string; data: any }[] = [];
   const recording = { read: async () => emptyRegistry(), write: async (path: string, data: unknown) => { written.push({ path, data }); return { revision: 1, registry: {} }; } };
   const documented = documentedCommands(guide);
@@ -552,4 +568,75 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   assert.deepEqual([runtime.data.runtime.name, runtime.data.runtime.launch.args, runtime.data.runtime.launch.modelFlag, runtime.data.runtime.launch.homeVariable], ['aider', ['--yes-always'], '--model', 'AIDER_HOME']);
   assert.deepEqual(written.filter(entry => entry.path === 'agent-registry/roles').map(entry => entry.data.role.name), ['worker', 'reviewer']);
   assert.deepEqual(written.find(entry => entry.data.role?.name === 'reviewer')!.data.role.policy, { args: [], tools: ['Read'], model: 'opus' });
+});
+
+// ---------------------------------------------------------------------------
+// GY-974 — a role's concurrency is counted from settled registry sessions
+// ---------------------------------------------------------------------------
+/**
+ * A stored registry holding the worker role's full concurrency: two worker sessions, past their
+ * launch grace, each launched for a work item leased to its principal. `lapse` expires those leases,
+ * as when their workers die without anyone ending the sessions.
+ */
+async function fullWorkerRole() {
+  await reset();
+  const homes = await temporaryDirectory('homes', scratch);
+  const home = await login(homes, 'claude-w', 'claude');
+  await ok('agent-registry/runtimes', operator, { runtime: runtimeNamed('claude'), reason: 'register' });
+  await ok('agent-registry/models', operator, { model: { name: 'opus', id: 'claude-opus-5', capability: { tier: 'frontier' } }, reason: 'model' });
+  await ok('agent-registry/accounts', operator, { account: { name: 'claude-w', runtime: 'claude', model: 'opus', credential: { host: HOST, home } }, reason: 'account' });
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-w'], concurrency: 2 }, reason: 'role' });
+  const keys = [`GY-${++items + 900}`, `GY-${++items + 900}`];
+  for (const key of keys)
+    await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [randomUUID(), JSON.stringify({ ...readyWork(key), stage: 'build', epoch: 1, lease: { owner: 'implementer', epoch: 1, expiresAt: future() } })]);
+  for (const key of keys) assert.equal((await ok('agent-registry/select', coordinator, { role: 'worker', host: HOST, work: key, principal: 'implementer', observations: [] })).selected, true);
+  // Past their launch grace, so only the leases keep them live.
+  const stored = await readRegistry(store.pool), launched = new Date(Date.now() - launchGraceMs - 60_000).toISOString();
+  for (const session of stored.sessions.filter(entry => !entry.endedAt && keys.includes(entry.work!))) session.selectedAt = launched;
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['operator', 'agent-registry.fixture', JSON.stringify({ change: {}, registry: stored })]);
+  const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'claude' }]);
+  const probe = network({ 'claude-w-oauth-token': { five: 1, seven: 1 } });
+  const lapse = async () => { for (const key of keys) await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{lease,expiresAt}', to_jsonb($2::text)) WHERE document->>'key' = $1`, [key, new Date(Date.now() - 60_000).toISOString()]); };
+  const cleanup = () => store.pool.query("DELETE FROM work_items WHERE document->>'key' = ANY($1::text[])", [keys]);
+  return { keys, root, config, probe, lapse, cleanup };
+}
+
+test('unit:role-health-counts-settled-sessions — with a role\'s full concurrency of live worker sessions whose work items hold no live lease, fleetRoleHealth reports the role available (running 0) and the next dispatch selects an account; with live leases the role is still full', async () => {
+  const fleet = await fullWorkerRole();
+  try {
+    const full = (await fleetRoleHealth(fleet.config, 'worker', fleet.probe))!;
+    assert.deepEqual([full.available, full.running], [false, 2], 'two leased workers fill the role');
+    assert.match(full.reason!, /role worker is at its concurrency limit \(2 of 2 live\)/);
+    await fleet.lapse();
+    const health = (await fleetRoleHealth(fleet.config, 'worker', fleet.probe))!;
+    assert.deepEqual([health.available, health.running, health.reason], [true, 0, null], 'sessions whose leases lapsed hold no slot, with no launch in between');
+    const dispatched = await dispatch(fleet.root, fleet.config, 'worker-a', fleet.probe);
+    assert.equal(dispatched.account!.environment, 'claude-w');
+    assert.match((await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!.reason, /claude-w is the first eligible account for worker .*1 of 2 concurrent/);
+  } finally { await fleet.cleanup(); }
+});
+
+test('unit:settled-sessions-end-without-a-launch — the loop\'s registry read records the end of every session settleSessions ends, with its reason, in registry history, without any launch having been requested', async () => {
+  const fleet = await fullWorkerRole();
+  try {
+    const before = (await ok('agent-registry/history?limit=500', auditor)).length;
+    await fleetRoleHealth(fleet.config, 'worker', fleet.probe);
+    assert.equal((await ok('agent-registry/history?limit=500', auditor)).length, before, 'a read that ends nothing appends nothing');
+    await fleet.lapse();
+    // The read the loop makes each cycle, and nothing else: no select, no end, no dispatch.
+    await fleetRoleHealth(fleet.config, 'worker', fleet.probe);
+    const history = await ok('agent-registry/history?limit=500', auditor);
+    assert.deepEqual(history.slice(0, history.length - before).map((entry: any) => entry.kind), ['sessions-settled'], 'one settlement, and no selection or refusal');
+    const settled = history[0];
+    assert.equal(settled.actor, 'graphyard');
+    assert.deepEqual(settled.change.ended.map((entry: any) => [entry.role, entry.account, entry.work, entry.reason]).sort(),
+      fleet.keys.map(key => ['worker', 'claude-w', key, `${key} holds no live lease`]));
+    const stored = await readRegistry(store.pool);
+    for (const key of fleet.keys) {
+      const session = stored.sessions.find(entry => entry.work === key)!;
+      assert.ok(session.endedAt); assert.equal(session.endReason, `${key} holds no live lease`);
+    }
+    await fleetRoleHealth(fleet.config, 'worker', fleet.probe);
+    assert.equal((await ok('agent-registry/history?limit=500', auditor)).length, history.length, 'an ended session is recorded once');
+  } finally { await fleet.cleanup(); }
 });

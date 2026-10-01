@@ -13,8 +13,9 @@ Start with the numbered path; the other pages are references to open when a task
 ## Operate Graphyard
 
 - [Deployment](deployment.md) — variables, observation, backups.
-- [GitHub enforcement](github.md) — App, protection, merge queue, CI proofs.
+- [GitHub enforcement](github.md) — App, protection, queue, proofs.
 - [Reading the dashboard](dashboard.md) — pages and markers.
+- [Review follow-ups](followups.md) — review follow-ups: recorded on the item, retrieved, promoted on demand.
 - [Master-agent operating mode](master-agent.md) — loop, dispatch, merges.
 - [Master-agent sessions](master-agent-sessions.md) — profiles, accounts, launches.
 - [Master-agent reference](master-agent-reference.md) — scheduling, executors, GitHub administration.
@@ -26,7 +27,7 @@ Start with the numbered path; the other pages are references to open when a task
 ## Build integrations
 
 - [Agent protocol and HTTP API](protocol.md) — the HTTP API, one topic per page.
-- [E2E validation](validation.md) — test cases, runner protocol.
+- [E2E validation](validation.md) — test cases, runners.
 - [Playwright runner and collector](runner-setup.md) — host setup.
 - [Releases and observed delivery](delivery.md) — the release API.
 - [Runner capacity, artifacts and rollback](recovery.md) — diagnostics, storage, rollback.
