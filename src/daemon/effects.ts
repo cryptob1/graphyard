@@ -20,6 +20,7 @@ import { defaultAwaitReviewers, launchedSessionHandle, readDispatchCursor } from
 import type { DispatchRequest } from '../model/dispatch.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
+import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, type ControlPlaneStatus } from '../master.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
@@ -194,10 +195,7 @@ export interface DaemonEffects {
    * Returns what it ended. A loop wired without it leaves the registry to its own time windows.
    */
   reconcileSessions?: (runtime: { agents: HerdrAgent[]; available: boolean }, finished: ReadonlyMap<string, string>) => Promise<{ session: string; role: string; work: string | null; account: string; reason: string }[]>;
-  /**
-   * One item's decision history: the approved merge decision automatic merging asks for, and what
-   * became of every decision this loop requested.
-   */
+  /** One item's decision history: the approved merge decision automatic merging asks for, and what became of every decision this loop requested. */
   decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; requestedBy?: string; requestedAt?: string; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
@@ -310,11 +308,8 @@ export interface DaemonEffects {
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  /**
-   * Files the one backlog item a recurring fault class gets (GY-173), as the master's own
-   * operator-agent identity, under an idempotency key naming the class and its instances. Absent
-   * while no such identity is provisioned: the classes are still recorded and reported.
-   */
+  /** Files the one backlog item a recurring fault class gets (GY-173), as the operator-agent identity, keyed by the class and its instances. */
+  // Absent while no such identity is provisioned: the classes are still recorded and reported.
   fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
   /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
   doctor?: DoctorEffects;
@@ -344,6 +339,7 @@ export interface DaemonEffects {
    * it causes, a resource at its bound named in place of its symptom — so one cause is tracked as the report shows it, once.
    */
   reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
+  masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 
 /** Put an action on the cursor, through storeAction, which bounds it and notes it against the fault record (GY-173). */
@@ -796,6 +792,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
+    masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
   };
 }
