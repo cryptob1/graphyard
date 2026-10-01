@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { spawn, type SpawnOptions } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
@@ -13,28 +12,19 @@ import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSc
 import { runRecord, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
 
 /**
- * A child-process spawner that starts every headless run inside the coordinator confinement
- * (GY-888): the launcher's headless roles (a `pi` approver or producer run) spawn their runtime
- * directly, with no pane command line to carry the wrapper, so the spawn itself is wrapped — the
- * bubblewrap words go before the runtime's command and arguments, and the run keeps its own
- * working directory, environment and streams. A spawn that cannot be confined fails the run
- * instead of starting it unconfined. The runner that takes this spawner always calls the
- * three-argument form, so the wrapper is honest at every call site.
+ * The coordinator confinement of every headless run (GY-888), as the runner's `confine` option:
+ * the launcher's headless roles (a `pi` approver or producer run) start their runtime with no pane
+ * command line to carry the wrapper, so the runner puts the bubblewrap words before Pi's command
+ * itself, inside the run's shell (GY-453). The shell stays outside, because it writes the run's
+ * output and exit to its directory under the coordinator checkout, which the confinement binds
+ * read-only; and a run's transient scope stays outermost, because the confinement masks the user
+ * bus a `systemd-run` needs. A run that cannot be confined throws here, so it fails instead of
+ * starting unconfined.
  */
-export function confiningSpawn(base: typeof spawn = spawn, options: { coordinatorRoot?: string | null; bwrap?: string | null } = {}): typeof spawn {
+export function runConfinement(options: { coordinatorRoot?: string | null; bwrap?: string | null } = {}): ((cwd: string | undefined) => readonly string[]) | undefined {
   const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
-  if (!root) return base;
-  const confined = ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
-    const wrapper = headlessConfinementWrapper(root, typeof spawnOptions?.cwd === 'string' ? spawnOptions.cwd : undefined, options.bwrap !== undefined ? options.bwrap : bwrapOnPath());
-    // A run in its own transient scope (GY-453) starts `systemd-run … -- SHELL`: the scope stays
-    // outermost and only the run's shell is confined, because the confinement masks the user bus
-    // and systemd runtime directory (GY-888), so a `systemd-run` inside it could never reach the
-    // user manager and every run from a systemd-supervised loop or executor would fail at spawn.
-    const separator = command === 'systemd-run' ? args.indexOf('--') : -1;
-    if (separator >= 0) return base(command, [...args.slice(0, separator + 1), ...wrapper, ...args.slice(separator + 1)], spawnOptions);
-    return base(wrapper[0], [...wrapper.slice(1), command, ...args], spawnOptions);
-  }) as typeof spawn;
-  return confined;
+  if (!root) return undefined;
+  return cwd => headlessConfinementWrapper(root, cwd, options.bwrap !== undefined ? options.bwrap : bwrapOnPath());
 }
 
 /**
@@ -50,7 +40,7 @@ export function narrowRunner(pi: unknown): Runner {
   const configured = piRuntimeSchema.parse(pi ?? {});
   // Every headless run is confined at its spawn (GY-888): the checkout the launcher runs from is
   // unwritable to the run, shell commands included, exactly as for a pane session.
-  return piRunner({ command: configured.command, model: configured.model, spawn: confiningSpawn() });
+  return piRunner({ command: configured.command, model: configured.model, confine: runConfinement() });
 }
 
 /**
@@ -87,7 +77,7 @@ export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' |
 /** A registry account's headless runner: every run reads the account's key afresh, into its own environment only, and every run is confined at its spawn (GY-888). */
 export function registryRunner(account: FleetLaunchAccount): Runner {
   const launch = registryHeadlessLaunch(account);
-  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, spawn: confiningSpawn() }).start(prompt, options) };
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement() }).start(prompt, options) };
 }
 /**
  * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,

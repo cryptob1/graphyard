@@ -2,7 +2,7 @@ import { closeSync, existsSync, openSync, readdirSync, readFileSync, rmSync, sta
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import { piRunner, processIdentity, readRunMeta, runAlive } from './pi.js';
+import { cancelScratchRuns, piRunner, processIdentity, readRunMeta, runAlive } from './pi.js';
 import { runRecord, runRecordSchema, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
 
 /**
@@ -77,8 +77,11 @@ export function clearRuns() { for (const entry of runs.values()) if (entry.ended
 /**
  * What this process's exit does to its runs, and a test's simulated restart: stop watching every
  * run and forget it, without a signal to any of them. They keep running, and `adoptRuns` finds them.
+ * A run outside the run registry (triage, diagnosis) has nothing to adopt it, so it is cancelled
+ * instead: it ends with this process, as it did before runs were detached.
  */
 export function detachRuns() {
+  cancelScratchRuns();
   const left = [...watched];
   for (const run of left) { run.detach?.(); if (run.directory) releaseRunWatch(run.directory); }
   watched.clear(); runs.clear();

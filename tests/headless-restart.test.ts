@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type DecidePayload } from '../src/runner/payloads.js';
-import { detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
+import { cancelScratchRuns, detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
 import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, liveRunCheckouts, runsDirectory, unendedRunOnDisk, type Applied } from '../src/runner/registry.js';
-import { approverRunAdopter, approverRunContext, approverRunOptions, confiningSpawn, startNarrowRun } from '../src/runner/roles.js';
+import { approverRunAdopter, approverRunContext, approverRunOptions, runConfinement, startNarrowRun } from '../src/runner/roles.js';
+import { sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
 import { approvalStep, approvalWatchSchema, emptyDaemonState, maxApproverLaunches, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { maxLostApproverRuns } from '../src/daemon/decisions.js';
@@ -275,19 +276,22 @@ test('unit:restart-leaves-runs a run launched from a systemd service gets its ow
   assert.match(plain.args[1], /'\/runs\/r1\/exit'/, 'the shell records Pi\'s exit in the run directory');
 });
 
-test('unit:restart-leaves-runs a confined run from a systemd service starts its scope outside the confinement, which masks the user bus', async () => {
-  // Production spawns every headless run through confiningSpawn (GY-888), whose bubblewrap masks
-  // the user bus and systemd runtime directory: a systemd-run inside it could never start a scope.
+const capturingSpawn = (spawned: { command: string; args: readonly string[]; detached?: boolean }[]) => ((command: string, args: readonly string[], options: { detached?: boolean }) => {
+  spawned.push({ command, args, detached: options?.detached });
+  return Object.assign(new EventEmitter(), { pid: undefined, unref() {} });
+}) as unknown as typeof import('node:child_process').spawn;
+
+test('unit:restart-leaves-runs a confined run keeps its scope and its shell outside the confinement, which binds the run directory read-only and masks the user bus', async () => {
+  // Every production headless run is confined (GY-888). The confinement masks the user bus and
+  // systemd runtime directory, so a systemd-run inside it could never start a scope; and it binds
+  // the coordinator checkout read-only, so a shell inside it could not write the run's output and
+  // exit to `.graphyard/runs/`. Only Pi is confined, inside the run's shell.
   const base = await temporaryDirectory('headless-scope');
   try {
-    const root = join(base, 'coordinator'), cwd = join(root, '.graphyard', 'worktrees', 'GY-1-1'), runs = join(base, 'runs');
+    const root = join(base, 'coordinator'), cwd = join(root, '.graphyard', 'worktrees', 'GY-1-1'), runs = runsDirectory(root);
     await mkdir(cwd, { recursive: true });
     const spawned: { command: string; args: readonly string[] }[] = [];
-    const capture = ((command: string, args: readonly string[]) => {
-      spawned.push({ command, args });
-      return Object.assign(new EventEmitter(), { pid: undefined, unref() {} });
-    }) as unknown as typeof import('node:child_process').spawn;
-    const runner = piRunner({ command: 'pi', containment: 'systemd', spawn: confiningSpawn(capture, { coordinatorRoot: root, bwrap: 'bwrap' }), pollMs: 20 });
+    const runner = piRunner({ command: 'pi', containment: 'systemd', spawn: capturingSpawn(spawned), confine: runConfinement({ coordinatorRoot: root, bwrap: 'bwrap' }), pollMs: 20 });
     const run = runner.start('Judge it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd, runs });
     run.cancel('the test only inspects the launch');
     await run.result();
@@ -296,21 +300,75 @@ test('unit:restart-leaves-runs a confined run from a systemd service starts its 
     assert.equal(command, 'systemd-run', 'the transient scope is the outermost command, reachable to the user manager');
     const separator = args.indexOf('--');
     assert.deepEqual(args.slice(0, separator), ['--user', '--scope', '--quiet', '--collect', `--unit=graphyard-run-${run.id}.scope`]);
-    assert.equal(args[separator + 1], 'bwrap', 'the confinement wraps what the scope runs');
-    const inner = args.slice(separator + 1);
-    assert.ok(inner.includes('--unshare-pid') && inner.includes(root) && inner.includes(cwd), 'the run is still confined: the coordinator read-only, its own checkout re-exposed');
-    const shell = inner.indexOf('/bin/sh');
-    assert.ok(shell > 0 && inner[shell - 1] === '--' && inner[shell + 1] === '-c', 'the run\'s shell follows the confinement');
-    assert.ok(!inner.includes('systemd-run'), 'systemd-run never runs inside the confinement');
-    // A run without its own scope is confined whole, as before.
+    assert.deepEqual(args.slice(separator + 1, separator + 3), ['/bin/sh', '-c'], 'the run\'s shell follows the scope, outside the confinement');
+    const script = args[separator + 3];
+    assert.match(script, /'bwrap' '--unshare-pid' .*'--ro-bind' '[^']*coordinator' .*'--' "\$0" "\$@"/, 'the confinement wraps Pi alone, the coordinator read-only');
+    assert.ok(script.includes(`'${cwd}'`), 'the run\'s own checkout is re-exposed');
+    assert.match(script, /"\$@" <\/dev\/null >'[^']*\.graphyard\/runs\/[^']*\/stdout\.jsonl'/, 'the shell, outside the confinement, writes the output under the coordinator checkout');
+    // A run without its own scope is its shell, with the same confinement inside it.
     spawned.length = 0;
-    const plain = piRunner({ command: 'pi', containment: 'setsid', spawn: confiningSpawn(capture, { coordinatorRoot: root, bwrap: 'bwrap' }), pollMs: 20 })
+    const plain = piRunner({ command: 'pi', containment: 'setsid', spawn: capturingSpawn(spawned), confine: runConfinement({ coordinatorRoot: root, bwrap: 'bwrap' }), pollMs: 20 })
       .start('Judge it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd, runs });
     plain.cancel('the test only inspects the launch');
     await plain.result();
-    assert.equal(spawned[0].command, 'bwrap');
-    assert.equal(spawned[0].args[spawned[0].args.indexOf('/bin/sh') - 1], '--');
+    assert.equal(spawned[0].command, '/bin/sh');
+    assert.match(spawned[0].args[1], /'bwrap' .*"\$0" "\$@"/);
+    // A run that cannot be confined fails instead of starting unconfined.
+    spawned.length = 0;
+    const refused = await piRunner({ command: 'pi', containment: 'setsid', spawn: capturingSpawn(spawned), confine: runConfinement({ coordinatorRoot: root, bwrap: null }), pollMs: 20 })
+      .start('Judge it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd, runs }).result();
+    assert.equal(refused.ok === false && refused.failure.reason, 'spawn');
+    assert.equal(spawned.length, 0, 'nothing was started');
   } finally { await rm(base, { recursive: true, force: true }); }
+});
+
+test('unit:headless-run-survives-restart a confined run whose directory lies under the coordinator checkout writes its output and exit, and its result is applied', { skip: process.platform !== 'linux' }, async t => {
+  if (!(await sessionMountNamespaceWorks('bwrap'))) return t.skip('bubblewrap cannot build a mount namespace on this host');
+  const { root, cleanup } = await fixture();
+  try {
+    // The loop's real layout: the coordinator checkout, a managed worktree and the run registry inside it.
+    const cwd = join(root, '.graphyard', 'worktrees', 'GY-1-1'), release = join(root, 'release');
+    await mkdir(cwd, { recursive: true });
+    const verdict: DecidePayload = { decision: 'decision-c', approve: true, reason: 'the criteria are met' };
+    await writeFile(join(root, 'scenario-c.json'), JSON.stringify({ release, verdict }));
+    const runner = piRunner({ command: process.execPath, commandArgs: [join(root, 'fake-pi.mjs'), join(root, 'scenario-c.json')], containment: 'setsid', pollMs: 50, exitGraceMs: 500,
+      confine: runConfinement({ coordinatorRoot: root, bwrap: 'bwrap' }) });
+    const run = runner.start<DecidePayload>('Judge it', { tool: graphyardTools.decide, validate: value => value as DecidePayload, timeoutMs: 60_000, cwd, runs: runsDirectory(root) });
+    await writeFile(release, '');
+    const result = await run.result();
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(result.ok && result.payload, verdict);
+    assert.ok(run.directory!.startsWith(runsDirectory(root)));
+    assert.equal((await readFile(join(run.directory!, 'exit'), 'utf8')).trim(), '0', 'the shell recorded Pi\'s exit beside its output');
+  } finally { await cleanup(); }
+});
+
+test('unit:restart-leaves-runs a run outside the run registry gets no scope of its own and ends with the process that started it', async () => {
+  // Triage and diagnosis runs start without a run registry directory: no owner on disk says what
+  // their result is for, so nothing could adopt them after a restart.
+  const spawned: { command: string; args: readonly string[]; detached?: boolean }[] = [];
+  const scoped = piRunner({ command: 'pi', containment: 'systemd', spawn: capturingSpawn(spawned), pollMs: 20 }).start('Triage it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd: '/' });
+  scoped.cancel('the test only inspects the launch');
+  await scoped.result();
+  assert.equal(spawned[0].command, '/bin/sh', 'no transient scope: a service stop still ends it with the service');
+
+  const { root, cleanup } = await fixture();
+  try {
+    const release = join(root, 'release-scratch');
+    await writeFile(join(root, 'scenario-s.json'), JSON.stringify({ release, verdict: { decision: 'd', approve: true, reason: 'r' } }));
+    const run = piRunner({ command: process.execPath, commandArgs: [join(root, 'fake-pi.mjs'), join(root, 'scenario-s.json')], containment: 'setsid', pollMs: 50 })
+      .start('Triage it', { tool: graphyardTools.decide, validate: value => value, timeoutMs: 60_000, cwd: root });
+    await new Promise<void>(resolve => { const off = run.onEvent(event => { if (event.kind === 'tool-start') { off(); resolve(); } }); });
+    const pid = (run.events.find(event => event.kind === 'start') as { pid: number | null }).pid!;
+    assert.ok(runAlive({ pid, identity: null }), 'the triage run is live');
+    // The loop stops: its registry runs are left to the next loop, this one is cancelled with it.
+    detachRuns();
+    const result = await run.result();
+    assert.equal(result.ok === false && result.failure.reason, 'cancelled');
+    for (let waited = 0; runAlive({ pid, identity: null }) && waited < 5_000; waited += 50) await delay(50);
+    assert.equal(runAlive({ pid, identity: null }), false, 'no unwatched, unbounded run outlives the process that started it');
+    assert.equal(cancelScratchRuns(), 0, 'nothing is left to cancel');
+  } finally { await cleanup(); }
 });
 
 test('unit:headless-run-survives-restart a lost approver run is relaunched without spending a launch only a bounded number of times, then counts, so the decision still escalates', () => {

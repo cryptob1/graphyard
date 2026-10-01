@@ -80,6 +80,13 @@ export interface PiRunnerOptions {
   containment?: RunContainment;
   /** How often a run's output and exit are read from disk. */
   pollMs?: number;
+  /**
+   * The words that confine Pi for a run working in `cwd` (GY-888), or a throw when it cannot be
+   * confined. They wrap Pi alone inside the run's shell: the shell itself stays outside, so it can
+   * write the run's output and exit to its directory under the coordinator checkout, which the
+   * confinement binds read-only.
+   */
+  confine?: (cwd: string | undefined) => readonly string[];
 }
 
 /**
@@ -121,11 +128,14 @@ const quoted = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 /**
  * The detached launch: a shell that leads the run's session, runs Pi with its output in the run's
  * directory, and records Pi's exit there — `spawn` when the command cannot be found. The shell
- * handles TERM, INT and HUP so that a stop sent to the run's group still records Pi's exit.
+ * handles TERM, INT and HUP so that a stop sent to the run's group still records Pi's exit. The
+ * `confinement` words wrap Pi alone, never the shell: the run's directory lies under the
+ * coordinator checkout the confinement makes read-only, so only the shell outside it can write there.
  */
-export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment) {
+export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = []) {
   const files = runFiles(directory), pending = `${files.exit}.tmp`;
-  const script = `trap : TERM INT HUP; if command -v "$0" >/dev/null 2>&1; then "$0" "$@" <${'/dev/null'} >${quoted(files.stdout)} 2>${quoted(files.stderr)}; code=$?; `
+  const confined = confinement.map(word => `${quoted(word)} `).join('');
+  const script = `trap : TERM INT HUP; if command -v "$0" >/dev/null 2>&1; then ${confined}"$0" "$@" <${'/dev/null'} >${quoted(files.stdout)} 2>${quoted(files.stderr)}; code=$?; `
     + `else printf '%s: command not found\\n' "$0" >${quoted(files.stderr)}; code=spawn; fi; printf '%s\\n' "$code" >${quoted(pending)} && mv -f ${quoted(pending)} ${quoted(files.exit)}`;
   const shell = ['/bin/sh', '-c', script, command, ...args];
   const unit = containment === 'systemd' ? `graphyard-run-${id}.scope` : null;
@@ -162,6 +172,8 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
   return {
     name: 'pi',
     start<T>(prompt: string, options: RunOptions<T>): Run<T> {
+      // A run without a run registry directory (triage, diagnosis) has no owner on disk, so nothing
+      // could adopt it after a restart: it gets no scope of its own and ends with this process.
       const id = randomUUID(), scratch = !options.runs;
       const directory = resolve(options.runs ?? join(tmpdir(), 'graphyard-runs'), id);
       const startedAt = new Date().toISOString();
@@ -169,8 +181,9 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
       let failure: string | null = null, child: ChildProcess | null = null;
       try {
         mkdirSync(directory, { recursive: true, mode: 0o700 });
-        const containment = configured.containment ?? runContainment();
-        const launch = detachedLaunch(directory, id, command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], containment);
+        const containment = scratch ? 'setsid' : configured.containment ?? runContainment();
+        const confinement = configured.confine?.(options.cwd) ?? [];
+        const launch = detachedLaunch(directory, id, command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], containment, confinement);
         // Detached: the run leads its own session and process group, holds no pipe to this process
         // (stdin is closed, so nothing can wait on a person), and is not waited on by it.
         child = (configured.spawn ?? spawn)(launch.file, launch.args, { cwd: options.cwd, env: runEnvironment(process.env, { ...configured.environment, ...options.env }), stdio: ['ignore', 'ignore', 'ignore'], detached: true });
@@ -193,6 +206,29 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
       return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null });
     },
   };
+}
+
+/**
+ * The live runs this process started without a run registry directory (GY-453). Nothing can adopt
+ * them after a restart — no owner names what their result is for — so they end with this process:
+ * a shutdown cancels them (`cancelScratchRuns`), and an exit that comes first kills them, so a
+ * restarted loop never finds an unwatched, unbounded run beside the one it starts afresh.
+ */
+const scratchRuns = new Map<string, { meta: RunMeta; directory: string; cancel: (reason: string) => void }>();
+let scratchExitHook = false;
+const hookScratchExit = () => {
+  if (scratchExitHook) return;
+  scratchExitHook = true;
+  process.on('exit', () => {
+    for (const { meta, directory } of scratchRuns.values()) { signalRun(meta, 'SIGKILL'); rmSync(directory, { recursive: true, force: true }); }
+    scratchRuns.clear();
+  });
+};
+/** Cancels every live run of this process that is outside the run registry; how many there were. */
+export function cancelScratchRuns(reason = 'the process that started it is stopping, and a run outside the run registry cannot be adopted after a restart') {
+  const live = [...scratchRuns.values()];
+  for (const entry of live) entry.cancel(reason);
+  return live.length;
 }
 
 /**
@@ -222,7 +258,7 @@ function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<
   const finish = (outcome: RunResult<T>) => {
     if (done) return;
     done = true; clearInterval(timer);
-    if (watch.scratch) rmSync(directory, { recursive: true, force: true });
+    if (watch.scratch) { scratchRuns.delete(meta.id); rmSync(directory, { recursive: true, force: true }); }
     resolveResult(outcome);
   };
   const fail = (failure: RunFailure) => finish({ ok: false, failure, payloads: [...accepted] });
@@ -305,14 +341,16 @@ function watchRun<T>(directory: string, meta: RunMeta, options: Pick<RunOptions<
   const timer = setInterval(tick, watch.pollMs ?? 200);
   watch.child?.on('exit', code => { launcherExit = code; setImmediate(tick); });
   queueMicrotask(tick);
+  const cancel = (reason = 'the run was cancelled') => {
+    if (done || cancelled !== null) return;
+    cancelled = reason;
+    if (meta.pid && !watch.failure()) stop({ reason: 'cancelled', detail: reason }); else fail({ reason: 'cancelled', detail: reason });
+  };
+  if (watch.scratch) { hookScratchExit(); scratchRuns.set(meta.id, { meta, directory, cancel }); }
   return {
     id: meta.id, directory: watch.scratch ? undefined : directory, events,
     onEvent(listener) { for (const event of [...events]) listener(event); listeners.add(listener); return () => { listeners.delete(listener); }; },
-    cancel(reason = 'the run was cancelled') {
-      if (done || cancelled !== null) return;
-      cancelled = reason;
-      if (meta.pid && !watch.failure()) stop({ reason: 'cancelled', detail: reason }); else fail({ reason: 'cancelled', detail: reason });
-    },
+    cancel,
     detach() { if (done) return; detached = true; clearInterval(timer); listeners.clear(); },
     result: () => result,
   };
