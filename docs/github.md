@@ -52,6 +52,10 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 `mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), so an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
 
+### Pre-merge gate and release-candidate validation
+
+The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): the build, the docs check and the Node and browser suites, every job bounded so the set finishes in under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA, dispatched with its `sha` input or on a pushed `rc-*` tag.
+
 ### Proofs in CI
 
 A protected `pull_request_target` workflow runs on every `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs, **exercise** runs one secret-free job on the base-merged candidate, **publish** reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer), queue tips cached. Manual proofs stay producer sessions.
