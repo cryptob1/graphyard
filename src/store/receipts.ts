@@ -4,11 +4,12 @@ import type { Work } from '../model.js';
 /**
  * Idempotency receipts answer a client's retry of a command it already sent. No client retries
  * for longer than minutes (the CLI times a request out after 30 s and every renewal uses a new
- * key), so a receipt is kept for a week and then pruned: the table had no timestamp and nothing
- * pruned it, and every lease renewal stored a whole work document under a fresh key.
+ * key), so a receipt is kept for one day and then pruned: the table had no timestamp and nothing
+ * pruned it, and every lease renewal stored a whole work document under a fresh key. A week of
+ * receipts reached 4 GB in production (GY-979); a day still outlasts any retry by hours.
  * The event ledger, not this table, is the history; pruning never touches it.
  */
-export const receiptReplayWindowMs = 7 * 24 * 60 * 60 * 1000;
+export const receiptReplayWindowMs = 24 * 60 * 60 * 1000;
 /** Rows one prune run deletes at most, so a backlog drains across runs instead of in one statement. */
 export const receiptPruneBatch = 5_000;
 /** How often the server's reconciliation tick runs the prune. */

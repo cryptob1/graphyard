@@ -287,13 +287,14 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
   const plan = { ...basePlan, ...options.plan };
   const config: MasterConfig = options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
+    : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
     : soakConfig;
   if (options.stale) config.reviewer = { slug: 'graphyard-reviewer', appId: 77_001, installationId: 77_002, credentialFile: '/outside/reviewer.json', boundAt: new Date(dayStart).toISOString() };
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
@@ -793,6 +794,37 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       },
     } : {}),
   };
+  // ---- The loop's own master session (GY-898): launched on the registry's master role, woken on
+  // ---- material events, killed mid-day while the registry refuses to end sessions, rotated at its
+  // ---- budget. Every launch, wake, registry end and refused end is recorded against the day's
+  // ---- schedule (`at`, one minute per cycle). The budget and the heartbeat are measured on the
+  // ---- loop's own clock, which also runs real time forward, so those are recorded on it too
+  // ---- (`startedAt`, `clock`, `before`/`after`, as offsets from the day's start): on a slow host the
+  // ---- schedule falls behind that clock by however long the cycles took.
+  const master = {
+    launches: [] as { at: number; pane: string; session: string; startedAt?: number }[],
+    wakes: [] as { at: number; cycle: number; text: string; clock?: number }[],
+    ended: [] as string[], refusedEnds: [] as string[], killed: null as string | null,
+    maxLive: 0, cycleOf: 0, rotations: [] as { at: number; detail: string; before: number; after: number }[],
+  };
+  if (options.master) {
+    const plan = options.master, name = config.masterAgentName!;
+    // Timed on the day's schedule position, as every other fault of the day is.
+    const refusing = () => elapsed >= plan.refuseRelease.from && elapsed < plan.refuseRelease.to;
+    effects.masterSession = { launch: async () => {
+      const pane = herdr.open(name, 'idle'), session = `master-registry-${master.launches.length + 1}`;
+      master.launches.push({ at: elapsed, pane, session });
+      return { agentName: name, pane, runtime: 'claude', account: 'claude-master', session };
+    } };
+    effects.endRegistrySession = async session => {
+      if (refusing()) { master.refusedEnds.push(session); throw new Error('the agent registry is unreachable: timeout'); }
+      master.ended.push(session);
+    };
+    effects.holdAccount = async () => {};
+    const workerPrompt = effects.promptSession!;
+    // A wake leaves the master idle, as a session that read master status and found nothing to do.
+    effects.promptSession = async (agent, text) => agent.name === name ? void master.wakes.push({ at: elapsed, cycle: master.cycleOf, text }) : workerPrompt(agent, text);
+  }
   // The loop publishes the master's merge-queue settings each cycle they change (GY-330, GY-498,
   // GY-500, GY-516), exactly as daemonEffects wires it; the day records what was published, when.
   let publishedMergeQueue: string | null = null;
@@ -1063,12 +1095,24 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // GY-849: what still waited for capacity when the window closed, each with its request's age.
       if (options.capacityWait && !capacityWaiters && elapsed >= options.capacityWait.to)
         capacityWaiters = Object.values(state.approvals).filter(watch => watch.capacity).map(watch => ({ decision: watch.decision, key: watch.work, requestedAt: watch.requestedAt }));
+      // GY-898: the master session is killed mid-day, inside the window the registry refuses to end sessions.
+      if (options.master && !master.killed && elapsed >= options.master.exitAt) {
+        const live = herdr.byName(config.masterAgentName!);
+        if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
+      }
+      master.cycleOf = cycles;
       // GY-923: the items the cycle's resume sweep counts open, and the instant before it runs.
       const openBefore = new Set((await store.list()).filter(item => item.stage !== 'done').map(item => item.id)), cycleStart = clock.now();
       try {
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
+        if (options.master) {
+          const after = clock.now() - dayStart;
+          master.rotations.push(...result.actions.filter(action => action.kind === 'failover' && action.detail.startsWith('Ended master session')).map(action => ({ at: elapsed, detail: action.detail, before: now - dayStart, after })));
+          // The wake this cycle delivered carries the loop's clock reading the heartbeat is spaced by.
+          for (const wake of master.wakes) if (wake.cycle === master.cycleOf && wake.clock === undefined && state.master.lastWake) wake.clock = Date.parse(state.master.lastWake.at) - dayStart;
+        }
         if (docs) for (const action of result.actions) if (action.kind === 'fault' && /documentation headroom/.test(action.detail)) docsActions.push({ state: action.state, detail: action.detail });
         for (const watch of Object.values(state.approvals)) if (hand.has(watch.decision) && watch.exhaustedAt) spent.add(watch.decision);
         if (process.env.SOAK_TRACE) for (const action of result.actions) console.error(`+${Math.round(elapsed / minute)} ${action.kind} ${action.state} ${action.work ?? ''}: ${action.detail.slice(0, 300)}`);
@@ -1078,6 +1122,15 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
+      // GY-898: at most one master session, whatever the cycle did.
+      if (options.master) {
+        // A settled launch carries the start the loop recorded: the budget is measured from it.
+        const last = master.launches.at(-1);
+        if (last && last.startedAt === undefined && state.master.session === last.session && state.master.startedAt) last.startedAt = Date.parse(state.master.startedAt) - dayStart;
+        const live = herdr.list().filter(agent => agent.name === config.masterAgentName).length;
+        master.maxLive = Math.max(master.maxLive, live);
+        if (live > 1) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${live} master sessions are live at once`);
+      }
       // GY-544: the loop's exited-session sightings stay bounded by the implementation handles still running here.
       const exitedRows = Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:'));
       const listed = await store.list();
@@ -1129,7 +1182,7 @@ async function simulateDay(options: { hours: number; regression?: 'approvers-lef
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, promptRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, master };
 }
 
 /**
@@ -1657,6 +1710,51 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   for (const n of [3, 7]) assert.equal(final.find(item => item.key === items[n - 1].key)!.pipeline?.reworkRounds ?? 0, 1, `item ${n}'s rework round ran after its capacity wait`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 150, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 300_000 }, async () => {
+  // GY-898: the master-session step runs every cycle of the real loop here. The session dies at
+  // minute 70, inside a window (minutes 60–100) in which the registry refuses every end, so the
+  // rotation's release is owed and retried; the relaunched session passes its 90-minute budget.
+  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30 };
+  const day = await simulateDay({ hours: 6, master: plan });
+  const { final, violations, failures, state, master, cycles } = day;
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered with the master session in the loop');
+  assert.deepEqual(violations, [], 'every system invariant holds, and never two master sessions at once');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.equal(master.maxLive, 1, 'exactly one master session ran at a time');
+  assert.equal(master.launches[0].at, 0, 'the first cycle launches the master session');
+  assert.ok(master.killed, 'the scenario killed the live master session');
+  // AC-1: the dead session is relaunched within three cycles, and its refused release stays owed until the registry answers.
+  assert.ok(master.launches[1] && master.launches[1].at > plan.exitAt && master.launches[1].at <= plan.exitAt + 3 * minute,
+    `the dead master was relaunched within three cycles: ${JSON.stringify(master.launches.slice(0, 2))}`);
+  assert.match(master.rotations[0]?.detail ?? '', /\(exited\)/);
+  assert.ok(master.refusedEnds.includes(master.launches[0].session), 'the rotation\'s registry end was refused inside the window');
+  assert.ok(master.ended.includes(master.launches[0].session), 'the owed registry session was ended once the registry answered');
+  assert.deepEqual(state.master.unreleased, [], 'nothing is owed to the registry at the end of the day');
+  // AC-1: a budget rotation, one budget after the relaunch (deferred at most 30 minutes while a
+  // guarded merge on an open item runs), on the clock the loop measures the budget by: the cycle
+  // that rotated read it between `before` and `after`.
+  const budget = master.rotations.find(rotation => /\(budget\)/.test(rotation.detail));
+  const relaunched = master.launches[1]?.startedAt;
+  assert.ok(relaunched !== undefined, 'the relaunch recorded its start');
+  assert.ok(budget && budget.after >= relaunched + plan.sessionMinutes * minute && budget.before <= relaunched + (plan.sessionMinutes + 32) * minute,
+    `the relaunched session rotated at its ${plan.sessionMinutes}-minute budget: ${JSON.stringify({ relaunched, rotations: master.rotations })}`);
+  assert.equal(master.launches.length, master.rotations.length + 1, 'every rotation relaunched exactly one session');
+  // AC-2: at most one wake per cycle, every event wake names its causes, heartbeats are spaced by
+  // the configured window, and no cycle repeats the previous cycle's causes (a wake storm).
+  const perCycle = new Map<number, number>();
+  for (const wake of master.wakes) perCycle.set(wake.cycle, (perCycle.get(wake.cycle) ?? 0) + 1);
+  assert.ok([...perCycle.values()].every(count => count === 1), 'never more than one wake in a cycle');
+  const events = master.wakes.filter(wake => !/heartbeat fallback/.test(wake.text));
+  assert.ok(events.length > 0, 'the day\'s material events woke the master');
+  assert.ok(events.every(wake => /Changed subjects, by key: (?!none)\S/.test(wake.text)), 'every event wake names the subjects that changed');
+  const causes = (text: string) => /Changed subjects, by key: ([^.]*)\./.exec(text)?.[1] ?? '';
+  const repeats = events.filter((wake, index) => index > 0 && events[index - 1].cycle === wake.cycle - 1 && causes(events[index - 1].text) === causes(wake.text));
+  assert.deepEqual(repeats.map(wake => `+${Math.round(wake.at / minute)} min: ${causes(wake.text)}`), [], 'no wake repeats the previous cycle\'s causes');
+  const heartbeats = master.wakes.filter(wake => /heartbeat fallback/.test(wake.text));
+  for (let index = 1; index < heartbeats.length; index++) assert.ok(heartbeats[index].clock! - heartbeats[index - 1].clock! >= plan.heartbeatMinutes * minute, `heartbeats are spaced by the quiet window: ${JSON.stringify(heartbeats.map(wake => wake.clock))}`);
+  assert.ok(master.wakes.length < cycles / 2, `wakes are events, not every cycle: ${master.wakes.length} wakes in ${cycles} cycles`);
 });
 
 // GY-475's citation day runs before the regression day: the days share one control plane, and
