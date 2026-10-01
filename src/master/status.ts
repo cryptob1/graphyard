@@ -267,6 +267,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     if (cause) causes.set(work.key, cause);
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
+      // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
+      // and shown per row: the lane names the ceremony the item's change is asked for.
+      lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
       // Set only for an item GitHub merged with no valid execution: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,

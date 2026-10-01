@@ -364,6 +364,12 @@ async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
   try {
     const reason = fitDecisionReason(`${item.key}: `, `${held}. Only a fresh attempt can move it, and whether it gets one is the approver's judgment, not the loop's. `, 'The previous worker is stopped: the loop ended the attempt on the record itself.');
     const requested = await decide!(item, 'rework', reason, { binding });
+    // A low- or medium-lane rework is applied as it is requested (GY-883): no approver to launch.
+    const settledState = (requested as { state?: string }).state;
+    if (settledState === 'applied' || settledState === 'failed') {
+      performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: settledState === 'applied' ? 'done' : 'failed', detail: `Requested decision ${requested.id} (rework) for ${item.key}; its risk lane needs no approver, and the control plane ${settledState === 'applied' ? 'applied it' : 'could not apply it'} at once: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     // The request alone changes nothing; the independent approver session is what applies it.
     // The launch runs on the launcher beside the cycle (GY-616) and is reported next cycle.
     const launchKey = `attempt-cap:approver:${item.id}`;
