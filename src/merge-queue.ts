@@ -636,9 +636,36 @@ export interface BranchRestore {
   requested: { by: string; at: string; reason: string } | null;
   reason: string;
   performedAt: string | null;
-  /** `restored`: the branch holds `own` merged onto the base; `conflict`: it holds `own`, and the merge is the worker's; `unrepairable`: no own head could be found under the foreign commits. */
-  outcome: 'restored' | 'conflict' | 'unrepairable' | null;
+  /**
+   * `restored`: GitHub shows the branch at `own` merged onto the base tip read at the restore;
+   * `conflict`: it holds `own`, and the merge is the worker's; `unrepairable`: no own head could be
+   * found under the foreign commits; `unpublished`: GitHub does not show the branch at the commit
+   * the restore produced, and `failure` says what it shows or what refused the write (GY-854).
+   */
+  outcome: 'restored' | 'conflict' | 'unrepairable' | 'unpublished' | null;
+  /**
+   * Why the restore is not recorded done, on a `conflict` or `unpublished` one (GY-854): the
+   * conflict itself, or what GitHub showed (or refused) instead of the restored commit. Absent on
+   * records that predate the field and on every other outcome.
+   */
+  failure?: string | null;
+  /**
+   * The stable category of `failure` (GY-854): what a repeat is judged by, never the diagnostic
+   * string, whose commits move with the base tip and the produced head between attempts. Absent
+   * on records that predate the field and on every other outcome.
+   */
+  failureKind?: RestoreFailureKind | null;
+  /** How many times the restore has run for this contaminated head; absent on records that predate the count. */
+  attempts?: number;
+  /**
+   * Set when a restore failed twice without the item's candidate changing (GY-854), whatever
+   * the kinds of the two failures: the reason it stops repeating, which `master status` names.
+   * Null while the first failure stands or a retry published its result.
+   */
+  escalated?: string | null;
 }
+/** What kind of refusal or shortfall a restore's `failure` records, stable across attempts. */
+export type RestoreFailureKind = 'branch reset refused' | 'merge refused' | 'read-back failed' | 'read-back mismatch' | 'conflict';
 
 /**
  * The base a candidate stays bound to while Graphyard has not yet brought it onto a moved branch
@@ -688,9 +715,11 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   // A head found carrying another item's unlanded commits is not brought onto a moved base: a
   // repair requested for it runs first and replaces it, and a head found unrepairable would only
   // carry the foreign commits along, with the record that names the remedy (rework) replaced by
-  // a refresh that says nothing of them (GY-127).
+  // a refresh that says nothing of them (GY-127). A restore that could not publish its result is
+  // likewise held: its retry rebuilds the reviewed head onto the tip read afresh, and a refresh
+  // of the contaminated head would only build a new tip on the foreign commits (GY-854).
   const restore = currentRestore(work)?.restore;
-  if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable')) return null;
+  if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable' || restore.outcome === 'unpublished')) return null;
   return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
 }
 
@@ -1179,14 +1208,20 @@ export function branchContamination(work: Work, all: Work[]): Contamination | nu
 }
 /**
  * The restore an ejection owes: the ejected tip is still the branch head and carries entries that
- * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed.
+ * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed
+ * — except a restore that could not publish its result (GY-854): that one is retried once, with
+ * the record of the first attempt carried so a second failure escalates, whatever its kind,
+ * instead of a third attempt running. An escalated restore, or one already attempted twice, is
+ * never retried by the loop.
  */
-export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string } | null {
+export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string; previous: BranchRestore | null } | null {
   const ejection = work.queueEjection;
-  if (!ejection || ejection.sha !== work.candidate?.sha || currentRestore(work)) return null;
+  if (!ejection || ejection.sha !== work.candidate?.sha) return null;
+  const current = currentRestore(work);
+  if (current && (current.restore!.outcome !== 'unpublished' || current.restore!.escalated || (current.restore!.attempts ?? 1) >= 2)) return null;
   const contamination = branchContamination(work, all);
   if (!contamination) return null;
-  return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
+  return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}`, previous: current?.restore ?? null };
 }
 
 /**
@@ -1226,6 +1261,8 @@ export function restoringAfterEjection(work: Work, all: Work[]): string | null {
   if (!stale) return null;
   const refresh = currentRestore(work), restore = refresh?.restore;
   if (restore?.outcome === 'unrepairable') return null;
+  if (restore?.outcome === 'unpublished' && restore.escalated)
+    return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing; Graphyard's restore of the branch failed twice and stopped repeating: ${restore.failure ?? restore.escalated}. The escalation stands until what GitHub refuses is fixed or the master decides`;
   const restored = restore?.performedAt && refresh!.head && refresh!.head !== stale.tip ? refresh!.head : null;
   const own = stale.own ? `its own reviewed head ${stale.own.slice(0, 12)}` : 'its own reviewed head';
   return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing, so its tree holds their unlanded work; ${restored
