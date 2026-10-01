@@ -5,7 +5,8 @@ import { closeSync, existsSync, mkdirSync, openSync, realpathSync, rmSync, statS
 import { dirname, join } from 'node:path';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, secretsBusPath, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { createServer } from 'node:net';
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -85,6 +86,7 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
         const gitDir = join(root, '.git');
         assert.ok(confinement.wrapper.includes(join(gitDir, 'worktrees', 'session')), `${kind} binds its own worktree admin directory`);
         assert.ok(!confinement.wrapper.includes(join(gitDir, 'worktrees')), `${kind} does not unprotect every assignment's admin directory`);
+        assert.ok(confinement.wrapper.includes(join(gitDir, 'logs', 'refs', 'remotes')), `${kind} keeps remote-tracking reflogs writable, so git fetch can record a new remote branch`);
       }
     }
     // A codex runtime without its workspace-write sandbox carries the mount namespace instead: it is never launched unconfined.
@@ -133,7 +135,9 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
     }
     for (const socket of launchTargets.busSockets.filter(path => existsSync(path) && !isDirectory(path))) {
       const socketIdx = confinement.wrapper.indexOf(realpathSync(socket));
-      assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && confinement.wrapper[socketIdx - 1] === '/dev/null', `the namespace replaces the bus socket ${socket} with an unconnectable device`);
+      const replacement = confinement.wrapper[socketIdx - 1];
+      assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && (replacement === '/dev/null' || (!!launchTargets.secretsBus && replacement === realpathSync(launchTargets.secretsBus))),
+        `the namespace replaces the bus socket ${socket} with an unconnectable device or the keyring-only proxy`);
     }
     assert.ok(processLaunchMaskWords({ directories: ['/run/user/4242/systemd', '/run/dbus', '/run/dbus'], busSockets: ['/run/user/4242/bus', '/run/user/4242/nested'] }, [root]).length > 0, 'the mask words are built for channels that exist');
     if (isDirectory('/run/dbus')) {
@@ -238,6 +242,27 @@ test('unit:linked-worktree-coordinator-confined — a coordinator that is itself
   }
 });
 
+test('unit:sandbox-keyring-proxy — the session bus is replaced by the keyring-only proxy when its socket is live, and by an unconnectable device otherwise', async () => {
+  const base = await temporaryDirectory('confinement-secrets-bus');
+  const server = createServer();
+  try {
+    const bus = join(base, 'bus'), proxy = join(base, 'graphyard-secrets-bus'), stale = join(base, 'stale-file');
+    writeFileSync(bus, ''); writeFileSync(stale, '');
+    await new Promise<void>(done => server.listen(proxy, done));
+    const canonicalBus = realpathSync(bus);
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: proxy }, []), ['--ro-bind', realpathSync(proxy), canonicalBus], 'a live proxy socket stands in for the session bus');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: join(base, 'missing') }, []), ['--ro-bind', '/dev/null', canonicalBus], 'no proxy socket keeps the bus unconnectable');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: stale }, []), ['--ro-bind', '/dev/null', canonicalBus], 'a regular file is never taken for the proxy');
+    assert.deepEqual(processLaunchMaskWords({ busSockets: [bus], secretsBus: 'relative/socket' }, []), ['--ro-bind', '/dev/null', canonicalBus], 'a relative proxy path is ignored');
+    assert.equal(secretsBusPath(1000, { GRAPHYARD_SECRETS_BUS: proxy }), proxy, 'the environment names the proxy socket');
+    assert.equal(secretsBusPath(1000, { XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/graphyard-secrets-bus', 'the default lives in the runtime directory');
+    assert.equal(secretsBusPath(4242, {}), '/run/user/4242/graphyard-secrets-bus', 'without XDG_RUNTIME_DIR the default is the uid runtime directory');
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('unit:linked-worktree-coordinator-reviewer-confined — a reviewer or producer of a linked-worktree coordinator pins its own checkout\'s Git admin and cannot switch the coordinator', async () => {
   // GY-957, review finding: a reviewer or producer starts from the coordinator root and is allocated
   // a managed checkout outside every worktree, holding its linked worktree as the `checkout` child
@@ -317,7 +342,7 @@ test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer
   }
 });
 
-test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
+test('unit:allocated-checkout-re-exposed —a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
   const base = await temporaryDirectory('confinement-session');
   try {
     const { root } = coordinatorFixture(base);
@@ -422,6 +447,8 @@ test('unit:launcher-knows-its-checkout — the launcher derives its coordinator 
   // only the first, so every launcher-started session ran unconfined in production (review finding).
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/bin/graphyard.mjs', false), '/srv/graphyard');
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/src/cli.ts', false), '/srv/graphyard');
+  assert.equal(launcherCoordinatorRoot('/srv/graphyard/scripts/graphyard-executor.mjs', false), '/srv/graphyard', 'an executor slot launches workers in-process, so it confines them too');
+  assert.equal(launcherRootUndetermined('/graphyard-executor.mjs', false) !== null, true, 'an executor that cannot name its checkout refuses instead of launching unconfined');
   assert.equal(launcherCoordinatorRoot('/srv/graphyard/src/cli.ts', true), null, 'nothing is confined under the test runner');
   assert.equal(launcherCoordinatorRoot('/usr/bin/node', false), null, 'a foreign entry is not a launcher');
   assert.equal(launcherCoordinatorRoot(undefined, false), null);
