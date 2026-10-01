@@ -92,13 +92,42 @@ export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: r
   }
   return null;
 }
+
+/**
+ * The same judgment as `workerConfinementRefusal`, made on the launch a worker would actually run
+ * (GY-865). A registry-selected account replaces the profile's own arguments and environment with
+ * its runtime contract (GY-170), so the profile-level judgment at the harness install never sees
+ * what actually runs; the dispatcher judges this against the effective launch instead, and a
+ * contract that would start the worker outside its assigned worktree is refused, naming the
+ * registry as the source. `--permission-mode` pairs are deliberately not judged: they select an
+ * approval mode, and a mode that asks is refused at the plan, while write confinement for those
+ * runtimes comes from the harness rules and the granted directories, not the mode.
+ */
+export function effectiveConfinementRefusal(kind: string | undefined, args: string[], environment: Record<string, string>): string | null {
+  const bypassArgs = ['--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox'];
+  if (kind !== 'gemini' && kind !== 'qwen') bypassArgs.push('--yolo');
+  const bypass = args.find(arg => bypassArgs.includes(arg));
+  if (bypass) return `The effective launch for worker carries ${bypass}: it turns the runtime's approval and write confinement off, and every worker is launched with writes confined to its assigned worktree. This comes from the registry account or its contract; verify the registry configuration does not override worker confinement.`;
+  if (kind === 'codex') {
+    for (let index = 0; index < args.length; index++) {
+      const [flag, inline] = args[index].split(/=(.*)/s);
+      if (flag !== '--sandbox' && flag !== '-s') continue;
+      const value = inline ?? args[index + 1] ?? '';
+      if (value !== 'workspace-write') return `The effective launch for codex worker sets ${flag} ${value}: only the workspace-write sandbox confines the session's writes to its assigned worktree and the Git directories granted beside it. This comes from the registry account or its contract; verify the registry does not override worker confinement.`;
+    }
+  }
+  if (kind === 'opencode' && !openCodeExternalDenied(environment.OPENCODE_PERMISSION)) {
+    return `The effective launch for opencode worker allows external_directory access: Graphyard requires that OPENCODE_PERMISSION deny all external directories to confine the session to its assigned worktree. This comes from the registry account or its contract; verify the registry does not override worker confinement.`;
+  }
+  return null;
+}
 /** Whether an OPENCODE_PERMISSION document denies every external directory: absent, unparseable, `allow`, or an `ask` leaf all count as not denied. */
 function openCodeExternalDenied(raw: string | undefined): boolean {
   if (raw === undefined) return false;
   let document: unknown;
   try { document = JSON.parse(raw); } catch { return false; }
   const external = (document && typeof document === 'object' && !Array.isArray(document) ? (document as Record<string, unknown>).external_directory : undefined);
-  const denied = (node: unknown): boolean => node === 'deny' || (!!node && typeof node === 'object' && !Array.isArray(node) && Object.values(node).every(denied));
+  const denied = (node: unknown): boolean => node === 'deny' || (!!node && typeof node === 'object' && !Array.isArray(node) && Object.values(node).length > 0 && Object.values(node).every(denied));
   return denied(external);
 }
 
@@ -446,14 +475,19 @@ export function parseCoordinatorCheckout(root: string, commitRead: string, statu
   return { root, commit, modified, untracked };
 }
 const checkoutGitRun: CheckoutRun = (command, args) => defaultChildRun(command, args).then(output => String(output));
-/** Reads how the checkout at `root` stands, through the asynchronous runner. An unreadable checkout (no git, no commit) is never dirty: it cannot be read as code either. */
+/** Reads how the checkout at `root` stands, through the asynchronous runner. A checkout with no readable commit is never dirty: it cannot be read as code either; a commit whose status cannot be read fails closed (GY-865), holding a path no clean checkout has. */
 export async function readCoordinatorCheckout(root: string, run: CheckoutRun = checkoutGitRun): Promise<CoordinatorCheckout> {
   const git = async (args: string[]) => String(await run('git', ['-C', root, ...args]));
   let commitRead: string;
   try { commitRead = await git(['rev-parse', 'HEAD']); }
   catch { return { root, commit: null, modified: [], untracked: [] }; }
   try { return parseCoordinatorCheckout(root, commitRead, await git(['status', '--porcelain', '-z', '--untracked-files=normal'])); }
-  catch { return { root, commit: commitRead.trim() || null, modified: [], untracked: [] }; }
+  catch {
+    // GY-865: an unreadable status is not a clean checkout — the guard exists so unverified
+    // working-tree contents never run — so it is refused rather than read as empty.
+    const commit = commitRead.trim() || null;
+    return { root, commit, modified: commit ? ['<unreadable>'] : [], untracked: [] };
+  }
 }
 /** Every path that makes the checkout dirty: what a refusal names and what a lease match is judged on. */
 export const dirtyCheckoutPaths = (checkout: CoordinatorCheckout) => checkout.commit ? [...checkout.modified, ...checkout.untracked] : [];

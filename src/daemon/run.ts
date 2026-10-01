@@ -181,15 +181,20 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   try {
     const startRefusal = await escalate(await checkoutOf());
     if (startRefusal) {
-      // The refused loop keeps its process for its supervisor — a crash would only be restarted
-      // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
-      log(`[graphyard-master] the loop cycles nothing from a dirty coordinator checkout; clean or stash the paths it names, then restart it`);
-      while (!stopping && !options.once) {
-        if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-        try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
-      }
+      // GY-865: the refusal settles this loop so the half of the master process beside it stops
+      // too — `graphyard master run` aborts its dispatcher only when the daemon promise settles,
+      // and a loop that pended forever left that dispatcher launching reviewer and producer
+      // sessions from the dirty checkout. Under a supervisor the restart re-reads the checkout;
+      // once it is cleaned the loop starts on committed code.
+      log(`[graphyard-master] the loop cycles nothing from a dirty coordinator checkout: ${startRefusal} it stops instead, so nothing beside it launches either; clean or stash the paths it names, then restart it`);
     } else do {
       let phase: 'reload' | 'cycle' = 'reload', wait: number;
+      // GY-865: recheck the checkout before every cycle, since it may have become dirty during the idle delay.
+      const cycleRefusal = await escalate(await checkoutOf());
+      if (cycleRefusal) {
+        log(`[graphyard-master] the checkout became dirty during the idle delay; the loop cycles nothing until it is cleaned`);
+        break;
+      }
       try {
         if (options.reload) {
           for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
