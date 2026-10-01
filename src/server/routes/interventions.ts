@@ -3,7 +3,7 @@ import { demand, stages } from '../../model.js';
 import { plannedFilesMax } from '../../model/scope.js';
 import { interventionKinds, interventionRecordSchema, interventionWindows, judgementSchema, type InterventionWindow } from '../../model/interventions.js';
 import { judgementToWork, openPatternItems, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
-import { retroJudgementSchema, retroStanding } from '../../model/retro-synthesis.js';
+import { classifyIntervention, retroJudgementSchema, retroStanding, type RetroClassification } from '../../model/retro-synthesis.js';
 import { judgeRetroArtefact, readRetroArtefacts, readRetroReport, synthesizeRetro } from '../../retro-synthesis.js';
 import { defineRoutes, parseJson } from '../routes.js';
 
@@ -33,7 +33,21 @@ export const interventionRoutes = defineRoutes('interventions', [
     async handle({ url, actor, services }) {
       demand(actor.role !== 'operator-agent', 'Route is not available to operator agents', 403);
       const query = reportQuerySchema.parse(Object.fromEntries([...url.searchParams].filter(([, value]) => value !== '')));
-      return readInterventionReport(services.engine.store, services.interventionPolicy, { days: query.window as InterventionWindow, kind: query.kind, stage: query.stage, work: query.work });
+      const [report, artefacts] = await Promise.all([
+        readInterventionReport(services.engine.store, services.interventionPolicy, { days: query.window as InterventionWindow, kind: query.kind, stage: query.stage, work: query.work }),
+        readRetroArtefacts(services.engine.store.reportPool),
+      ]);
+      // The fault catalogue the approved retro entries extend (GY-970): a refusal or rework whose
+      // cause an applied entry recognises is filed under that entry and its fault class.
+      const catalogued = new Map<string, RetroClassification & { count: number }>();
+      const interventions = report.interventions.map(entry => {
+        const filed = classifyIntervention(entry, artefacts);
+        if (!filed) return entry;
+        const tally = catalogued.get(filed.entry) ?? { ...filed, count: 0 };
+        tally.count++; catalogued.set(filed.entry, tally);
+        return { ...entry, catalogue: filed };
+      });
+      return { ...report, interventions, catalogued: [...catalogued.values()].sort((a, b) => b.count - a.count || a.entry.localeCompare(b.entry)) };
     },
   },
   {
@@ -76,7 +90,8 @@ export const interventionRoutes = defineRoutes('interventions', [
     method: 'POST', path: '/api/retro/synthesize',
     async handle({ actor, services }) {
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      const { drafted, truncated } = await synthesizeRetro(services.engine.store, services.interventionPolicy);
+      // Drafted under the requesting identity, so the same identity cannot then approve its own drafts.
+      const { drafted, truncated } = await synthesizeRetro(services.engine.store, services.interventionPolicy, { actor });
       return { drafted, truncated, policy: services.interventionPolicy };
     },
   },

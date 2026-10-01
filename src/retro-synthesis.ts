@@ -20,11 +20,19 @@ import { boundedSnapshot } from './store/bounded-snapshot.js';
  * named, so its instances never produce another draft.
  */
 type Db = { query: pg.Pool['query'] };
-/** The newest retro rows a reading folds; a registry holds tens of entries, not thousands. */
+/** The newest unjudged drafts a reading folds; a registry holds tens of entries, not thousands. */
 export const retroLedgerLimit = 5_000;
 
+/**
+ * Every judged artefact — its judgement and the draft it judged, however old — and the newest
+ * drafts, so an applied requirement, check or catalogue entry never drops out of its registry and
+ * a registry's revision never falls back as the ledger grows.
+ */
 export async function readRetroArtefacts(db: Db): Promise<RetroArtefact[]> {
-  const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM (SELECT * FROM events WHERE kind = ANY($1) ORDER BY seq DESC LIMIT $2) newest ORDER BY seq`, [[...retroLedgerKinds], retroLedgerLimit]);
+  const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM events WHERE kind = ANY($1) AND (kind <> 'retro.drafted'
+      OR seq >= COALESCE((SELECT min(seq) FROM (SELECT seq FROM events WHERE kind = 'retro.drafted' ORDER BY seq DESC LIMIT $2) newest), 0)
+      OR payload->>'id' IN (SELECT payload->>'id' FROM events WHERE kind IN ('retro.applied', 'retro.refused')))
+    ORDER BY seq`, [[...retroLedgerKinds], retroLedgerLimit]);
   return foldRetroArtefacts(result.rows.map((row): RetroLedgerRow => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), payload: row.payload })));
 }
 
@@ -58,7 +66,8 @@ export async function synthesizeRetro(store: Store, policy: InterventionPolicy, 
 /**
  * An independent judgement of one drafted artefact. Approval applies it through its governed path
  * at the registry's next revision and records the pattern it closes; refusal records why. Only an
- * agent identity (or admin) holding `decision:approve` judges, and never the identity that drafted it.
+ * agent session (an AI admin or an operator agent) holding `decision:approve` judges — never a human
+ * session, the identity that drafted it, or one that recorded the instances it was drafted from.
  */
 export async function judgeRetroArtefact(store: Store, actor: Principal, repository: string, id: string, verdict: 'approve' | 'refuse', reason: string) {
   demand(actor.role === 'admin' || actor.role === 'operator-agent', `Retro artefacts are judged by agent identities holding ${approveCapability}; ${actor.id} is a ${actor.role}`, 403);
@@ -70,6 +79,10 @@ export async function judgeRetroArtefact(store: Store, actor: Principal, reposit
     demand(artefact.state === 'drafted', `Retro artefact ${id} is already ${artefact.state}`, 409);
     const conflict = retroApprovalConflict(artefact, actor);
     demand(!conflict, conflict ?? '', 403);
+    // Whoever wrote the recurring feedback the draft was synthesised from does not judge it either.
+    const sources = artefact.pattern.instances.flatMap(instance => instance.sources.map(source => source.seq));
+    const authored = sources.length ? (await db.query('SELECT 1 FROM events WHERE seq = ANY($1::bigint[]) AND actor = $2 LIMIT 1', [sources, actor.id])).rowCount : 0;
+    demand(!authored, `${actor.id} recorded instances of the pattern retro artefact ${id} was drafted from; an independent agent identity must judge it`, 403);
     const at = now.toISOString();
     if (verdict === 'refuse') {
       const refusal = { by: actor.id, at, reason };

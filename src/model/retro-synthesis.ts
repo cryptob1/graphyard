@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { gateRefusalCatalogue } from './refusal-catalogue.js';
 import { faultClasses, type FaultClass } from './fault-classes.js';
 import type { Intervention, InterventionPolicy } from './interventions.js';
+import type { Observation, Work } from './work.js';
 
 // ---------------------------------------------------------------------------
 // Retro synthesis (GY-970).
@@ -21,6 +22,13 @@ import type { Intervention, InterventionPolicy } from './interventions.js';
 // only when an independent agent identity approves it; the approval applies it through its governed
 // path — a revision of the standing requirements, a check registration, or a catalogue update — and
 // records the recurring pattern it closes, so the instances it names never produce a second draft.
+//
+// Applied artefacts take effect where their registry is read: requirements travel with the item a
+// session reads (`graphyard status GY-N`); a registered check runs against every submission's
+// observed candidate and refuses one that fails it (`retroCheckRefusals`, read by the submit
+// command); a catalogue entry is how later refusals and reworks of its cause are classified — in the
+// intervention report, on the item's own gate refusals, and in detection, where a recurrence is
+// counted against the entry instead of being catalogued afresh (`cataloguedCause`).
 // ---------------------------------------------------------------------------
 
 export const retroArtefactKinds = ['standards-update', 'mechanical-check', 'producer-method', 'fault-catalogue-entry'] as const;
@@ -96,6 +104,8 @@ export interface RetroPattern {
   instances: RetroInstance[];
   /** Applied artefacts for this cause that it recurred after: the prevention did not hold. */
   recurredAfter: string[];
+  /** The applied catalogue entry that recognises this cause: the recurrence is counted against it rather than catalogued afresh. */
+  catalogued?: RetroClassification | null;
 }
 export const retroPatternSchema = z.object({
   cause: z.string().min(1).max(200), family: z.enum(['refusal', 'rework']), gate: z.string().nullable(), shape: z.string().nullable(), label: z.string().max(400),
@@ -103,20 +113,29 @@ export const retroPatternSchema = z.object({
   fingerprint: z.string().regex(/^[0-9a-f]{32}$/),
   instances: z.array(z.object({ id: z.string(), work: z.string().nullable(), requestedAt: z.string(), reason: z.string().max(2000), sources: z.array(z.object({ seq: z.number(), kind: z.string() }).strict()).max(20) }).strict()).max(500),
   recurredAfter: z.array(z.string()).max(50),
+  catalogued: z.object({ cause: z.string(), entry: z.string(), artefact: z.string(), faultClass: z.enum(faultClasses), meaning: z.string() }).strict().nullable().optional(),
 }).strict();
+
+/**
+ * What a registered check evaluates on a submission's observed candidate: that it changes only
+ * planned or documentation files, that it merges onto the base without conflict, or that no check
+ * reported on its head failed.
+ */
+export const retroCheckRules = ['planned-files', 'merges-onto-base', 'checks-passed'] as const;
+export type RetroCheckRule = typeof retroCheckRules[number];
 
 /** A drafted prevention artefact, before anybody has judged it. */
 export interface RetroDraft {
   kind: RetroArtefactKind; registry: RetroRegistry; target: RetroTarget; title: string; proposal: string;
-  /** A mechanical check's registration: its id and what it verifies before a submission. */
-  check?: { id: string; verifies: string };
+  /** A mechanical check's registration: its id, the rule it runs and what it verifies before a submission. */
+  check?: { id: string; rule: RetroCheckRule; verifies: string };
   /** A catalogue entry: the cause it recognises and the fault class it files instances under. */
   entry?: { id: string; cause: string; faultClass: FaultClass; meaning: string };
 }
 export const retroDraftSchema = z.object({
   kind: z.enum(retroArtefactKinds), registry: z.enum(retroRegistries), target: z.enum(['coding-standards', 'criteria-wording', 'producer-method', 'checks', 'fault-catalogue']),
   title: z.string().min(1).max(200), proposal: z.string().min(1).max(4000),
-  check: z.object({ id: z.string().min(1).max(120), verifies: z.string().min(1).max(1000) }).strict().optional(),
+  check: z.object({ id: z.string().min(1).max(120), rule: z.enum(retroCheckRules), verifies: z.string().min(1).max(1000) }).strict().optional(),
   entry: z.object({ id: z.string().min(1).max(120), cause: z.string().min(1).max(200), faultClass: z.enum(faultClasses), meaning: z.string().min(1).max(1000) }).strict().optional(),
 }).strict();
 
@@ -171,6 +190,62 @@ export function cataloguedCause(cause: string, artefacts: readonly RetroArtefact
   return artefacts.find(artefact => artefact.state === 'applied' && artefact.kind === 'fault-catalogue-entry' && artefact.entry?.cause === cause) ?? null;
 }
 
+/** How a refusal or rework is filed once the catalogue recognises its cause: the entry, and the fault class it files it under. */
+export interface RetroClassification { cause: string; entry: string; artefact: string; faultClass: FaultClass; meaning: string }
+const classification = (cause: string, artefact: RetroArtefact | null): RetroClassification | null =>
+  artefact?.entry ? { cause, entry: artefact.entry.id, artefact: artefact.id, faultClass: artefact.entry.faultClass, meaning: artefact.entry.meaning } : null;
+
+/** The applied catalogue entry an intervention's cause is filed under, or null when none recognises it. */
+export function classifyIntervention(entry: Pick<Intervention, 'kind' | 'blocked' | 'resolution' | 'trigger'>, artefacts: readonly RetroArtefact[]) {
+  const cause = retroCause(entry);
+  return cause ? classification(cause.cause, cataloguedCause(cause.cause, artefacts)) : null;
+}
+
+/** The applied catalogue entries recognising an item's current gate refusals, one per refusal they recognise. */
+export function classifyGateRefusals(gates: readonly { name: string; passed: boolean; reasons: string[] }[], artefacts: readonly RetroArtefact[]) {
+  const classified: (RetroClassification & { gate: string; reason: string })[] = [];
+  for (const gate of gates) {
+    if (gate.passed) continue;
+    for (const reason of gate.reasons) {
+      const shape = declaredShape(reason);
+      if (!shape || shape.gate !== gate.name) continue;
+      const found = classification(`${shape.gate}/${shape.id}`, cataloguedCause(`${shape.gate}/${shape.id}`, artefacts));
+      if (found) classified.push({ ...found, gate: gate.name, reason: reason.slice(0, 500) });
+    }
+  }
+  return classified;
+}
+
+/** Whether a changed path is one the item plans or one of its documentation paths (a trailing `/` is a directory). */
+const pathAllowed = (path: string, allowed: readonly string[]) => allowed.some(entry => entry.endsWith('/') ? path.startsWith(entry) : path === entry);
+
+/** One applied check run against a submission's observed candidate: null when it passes, else why it refuses. */
+export function runRetroCheck(rule: RetroCheckRule, work: Pick<Work, 'plannedFiles'> & { documentation?: { paths?: string[] } | null }, observation: Pick<Observation, 'files' | 'conflicting' | 'checks'>): string | null {
+  if (rule === 'planned-files') {
+    const outside = observation.files.filter(path => !pathAllowed(path, [...work.plannedFiles, ...(work.documentation?.paths ?? [])]));
+    return outside.length ? `changes ${outside.length} file(s) outside plannedFiles: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ', …' : ''}` : null;
+  }
+  if (rule === 'merges-onto-base') return observation.conflicting ? 'does not merge onto the current base without a conflict; run graphyard sync first' : null;
+  const failed = observation.checks.filter(check => check.result === 'failure');
+  return failed.length ? `has failed checks on its head: ${failed.map(check => check.name).join(', ')}` : null;
+}
+
+/**
+ * The applied retro checks a submission fails. Every check registered by an approved
+ * `mechanical-check` artefact runs against the candidate the control plane observed for the
+ * submission; the submit command refuses one that fails any of them, so the refusal the check was
+ * drafted to prevent is met by the worker at submission rather than by a gate later.
+ */
+export function retroCheckRefusals(work: Parameters<typeof runRetroCheck>[1], observation: Parameters<typeof runRetroCheck>[2], artefacts: readonly RetroArtefact[]) {
+  const refusals: string[] = [];
+  for (const artefact of artefacts) {
+    if (artefact.state !== 'applied' || artefact.kind !== 'mechanical-check' || !artefact.check?.rule) continue;
+    const refusal = runRetroCheck(artefact.check.rule, work, observation);
+    if (refusal) refusals.push(`retro check ${artefact.check.id} (closing ${artefact.pattern.label}): the candidate ${refusal}`);
+  }
+  return refusals;
+}
+
 const day = 86_400_000;
 /**
  * The recurring causes the synthesis drafts for. Instances are the refusal and rework
@@ -202,6 +277,7 @@ export function detectRecurringCauses(interventions: readonly Intervention[], ar
       fingerprint: fingerprint(`${cause.cause}|${sorted.map(entry => entry.id).sort().join(',')}`, 32),
       instances: sorted.map(entry => ({ id: entry.id, work: entry.work?.key ?? null, requestedAt: entry.requestedAt, reason: (entry.resolution ?? entry.blocked ?? '').slice(0, 2000), sources: entry.sources.slice(0, 20) })),
       recurredAfter: artefacts.filter(artefact => artefact.state === 'applied' && artefact.pattern.cause === cause.cause).map(artefact => artefact.id),
+      catalogued: classification(cause.cause, cataloguedCause(cause.cause, artefacts)),
     });
   }
   return patterns.sort((a, b) => b.count - a.count || a.cause.localeCompare(b.cause));
@@ -234,23 +310,26 @@ export function draftPrevention(pattern: RetroPattern): RetroDraft[] {
   const slug = pattern.cause.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase().slice(0, 80);
   const drafts: RetroDraft[] = [];
   const standards = (target: 'coding-standards' | 'criteria-wording', text: string) => drafts.push({ kind: 'standards-update', registry: 'requirements', target, title: `${target === 'criteria-wording' ? 'Criteria wording' : 'Coding standard'}: prevent ${pattern.label}`.slice(0, 200), proposal: `${text} ${evidence}`.slice(0, 4000) });
-  const check = (verifies: string) => drafts.push({ kind: 'mechanical-check', registry: 'checks', target: 'checks', title: `Check before submit: ${pattern.label}`.slice(0, 200), proposal: `Register a mechanical check that ${verifies}, run before a worker submits, so the refusal is met by the worker instead of the gate. ${evidence}`.slice(0, 4000), check: { id: `retro-${slug}`.slice(0, 120), verifies: verifies.slice(0, 1000) } });
+  // A check id names the cause and the instances it was drafted from, so a redraft after a recurrence registers a distinct check.
+  const check = (rule: RetroCheckRule, verifies: string) => drafts.push({ kind: 'mechanical-check', registry: 'checks', target: 'checks', title: `Check before submit: ${pattern.label}`.slice(0, 200), proposal: `Register a mechanical check that ${verifies}, run against every submission's observed candidate, so the refusal is met by the worker at submission instead of by the gate. ${evidence}`.slice(0, 4000), check: { id: `retro-${slug.slice(0, 100)}-${pattern.fingerprint.slice(0, 8)}`, rule, verifies: verifies.slice(0, 1000) } });
   const method = (text: string) => drafts.push({ kind: 'producer-method', registry: 'requirements', target: 'producer-method', title: `Producer method: prevent ${pattern.label}`.slice(0, 200), proposal: `${text} ${evidence}`.slice(0, 4000) });
   const shape = pattern.shape ?? '';
   if (pattern.cause.startsWith('trigger/') || /out-of-scope|landing|carried/.test(shape)) {
     standards('criteria-wording', 'Word each criterion so the files it implies are named in plannedFiles, and state in the criteria when a test, doc or registry file outside the obvious module must change.');
-    check('compares the candidate diff with plannedFiles and names every path outside them');
+    check('planned-files', 'compares the candidate diff with plannedFiles and the documentation paths and names every path outside them');
   } else if (shape === 'base-conflict' || shape === 'not-mergeable' || shape === 'ejected') {
     standards('coding-standards', 'Bring the branch onto the current base with graphyard sync immediately before complete, and resolve conflicts keeping both sides of every edit that belongs to another item.');
-    check('confirms the head merges cleanly onto the current base tip');
+    check('merges-onto-base', 'confirms the head merges cleanly onto the current base tip');
   } else if (shape === 'mechanical-proof-failed' || shape === 'check-not-passed') {
     standards('coding-standards', 'Run the required CI checks and every test file an item\'s unit or integration proofs name, on the final head, before complete.');
-    check('runs the required checks and the proof-named test files against the head');
+    check('checks-passed', 'confirms no check reported on the head has failed');
   } else if (pattern.gate === 'acceptance') {
     method('Producers exercise the criterion against the exact candidate head and base, report executed and skipped cases honestly, and name the probe that would fail if the behaviour were absent.');
   } else if (pattern.gate === 'review' || pattern.family === 'rework') {
     standards('coding-standards', `Address this recurring review finding before submitting: “${sample.slice(0, 600)}”.`);
   }
+  // A cause the catalogue already recognises is counted against its entry; it is not catalogued twice.
+  if (pattern.catalogued) return drafts;
   const faultClass = faultClassOfCause(pattern);
   drafts.push({ kind: 'fault-catalogue-entry', registry: 'catalogue', target: 'fault-catalogue', title: `Catalogue ${pattern.label} as a ${faultClass} fault`.slice(0, 200),
     proposal: `Add a fault-catalogue entry that recognises ${pattern.label} (cause ${pattern.cause}) and files later instances under ${faultClass}, so they are counted against this pattern rather than diagnosed afresh. ${evidence}`.slice(0, 4000),
@@ -260,8 +339,9 @@ export function draftPrevention(pattern: RetroPattern): RetroDraft[] {
 
 export const retroJudgementSchema = z.object({ reason: z.string().trim().min(1).max(2000) }).strict();
 
-/** Separation of duties for a retro approval: null when the approver is independent of the draft. */
-export function retroApprovalConflict(artefact: Pick<RetroArtefact, 'id' | 'draftedBy'>, approver: { id: string }): string | null {
+/** Separation of duties for a retro approval: null when the approver is an agent identity independent of the draft. */
+export function retroApprovalConflict(artefact: Pick<RetroArtefact, 'id' | 'draftedBy'>, approver: { id: string; sessionKind?: string }): string | null {
+  if (approver.sessionKind === 'human') return `Retro artefacts are judged by an independent agent identity; ${approver.id} is a human session`;
   if (approver.id === artefact.draftedBy) return `Self-approval refused: ${approver.id} drafted retro artefact ${artefact.id}; a second, independent agent identity must approve it`;
   return null;
 }
