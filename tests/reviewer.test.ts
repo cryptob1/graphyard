@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { execFile as execFileCallback, execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -18,6 +17,7 @@ import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, o
 import { nativeReviewRequired, type Work } from '../src/model.js';
 import { parseResolvedThreads, readUnresolvedThreads } from '../src/review-threads.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const execFile = promisify(execFileCallback);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -26,13 +26,13 @@ const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, private
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-reviewer-'));
+  const root = await temporaryDirectory('reviewer');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
 }
 async function master() {
-  const root = await repository(), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-reviewer-credentials-'));
+  const root = await repository(), credentialDirectory = await temporaryDirectory('reviewer-credentials');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
   return { root, credentialDirectory, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
@@ -313,7 +313,7 @@ test('dispatch starts a supervised worker with its runtime approval contract, an
     const dispatched = await dispatchWork(root, ready(), profile, [], run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }));
     assert.equal(dispatched.launch.applied, true);
     // GY-93: the instruction follows the flags as the runtime's positional prompt.
-    assert.match(calls[1][3], / -- cursor --force --trust "\$\(cat "\$GY\.request"\)"$/, 'the supervised command carries the runtime non-interactive flags, then the request');
+    assert.match(calls[1][3], / -- agent --force --trust "\$\(cat "\$GY\.request"\)"$/, 'the supervised command carries the runtime non-interactive flags, then the request');
     assert.ok(expandTypedCommand(calls[1][3]).args.at(-1)!.startsWith(`${autonomyContract} Implement GY-42: `), 'Cursor loads no role file, so the autonomy contract leads the request (GY-184)');
     // GY-184: a session that would wait at its runtime's approval prompts is never started.
     const optOutCalls: string[][] = [];
@@ -486,7 +486,7 @@ test('unit:protection-no-conversation-resolution — master protection plans con
 });
 
 test('the master CLI installs its harness rules and reconciles protection against a live snapshot', async () => {
-  const root = await repository(), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-cli-master-')), binary = join(credentialDirectory, 'bin');
+  const root = await repository(), credentialDirectory = await temporaryDirectory('cli-master'), binary = join(credentialDirectory, 'bin');
   const item = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');

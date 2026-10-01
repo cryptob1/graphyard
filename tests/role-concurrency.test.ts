@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +14,7 @@ import { buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfil
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reconcileProducers, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-107: one review and one proof run at a time fleet-wide, because each role had a single fixed
 // session name. Each test is named for the proof it produces: integration:concurrent-reviews,
@@ -30,8 +30,9 @@ const clock = Date.parse(at);
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 
 function observation(candidate: { sha: string; baseSha: string; pr: number; branch: string }, extra: Partial<Observation> = {}): Observation {
+  // GY-883: the observed scope rides the public API path, the high lane, whose full path demands all three proof groups this file dispatches.
   return { candidate: { ...candidate, author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-    files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
+    files: ['src/server/routes/a.ts'], scopeFiles: [{ path: 'src/server/routes/a.ts', status: 'modified' as const, sha: sha40('s'), additions: 1, deletions: 1, binary: false }], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
 }
 /**
  * The first eight characters of a request id: the tag a session derived for it is named with. The
@@ -75,7 +76,7 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
  * count against a profile's limit is exactly what they started.
  */
 async function fleet(profiles: { reviewers: unknown[]; producers: { name: string; principal: string; agentName: string; concurrency?: number }[] }) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-concurrency-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-concurrency-credentials-'));
+  const root = await temporaryDirectory('concurrency'), credentialDirectory = await temporaryDirectory('concurrency-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
@@ -221,7 +222,7 @@ const runnerB: Principal = { id: 'proof-runner-b', role: 'producer', proofs: ['u
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_ROLE_CONCURRENCY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 29);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-role-concurrency-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('role-concurrency'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, runner, runnerB];

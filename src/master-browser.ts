@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { atomicPrivateWrite, privateFile, type MasterBrowser, type MasterConfig } from './master.js';
 import { protectionPlan, readProtection, type ProtectionRun } from './protection.js';
 import type { Work } from './model.js';
+import type { InstallationState } from './github.js';
 
 /**
  * GitHub administration the master performs itself, through the operator's own authenticated
@@ -241,29 +242,35 @@ export function summarizeAdministration(entries: AdministrationEntry[], sudo: Su
 
 export interface FlowDependencies {
   page?: BrowserPage; api?: ProtectionRun; work?: Work[]; coordinator?: string | null;
+  /** The control plane's App-credential read of the installation (`GET /api/github/installation`). */
+  installation?: () => Promise<InstallationState>;
   now?: () => Date; sleep?: (ms: number) => Promise<void>; sudo?: Partial<Pick<SudoOptions, 'timeoutMs' | 'pollMs' | 'maxAttempts'>>;
   dryRun?: boolean;
 }
-type Observed = { installation: { id: number; slug: string; account: string; accountType: string; permissions: Record<string, string> } };
+type Observed = { installation: { id: number; slug: string; account: string; accountType: string; installationUrl: string; permissions: Record<string, string>; app: Record<string, string> } };
 const apiRun: ProtectionRun = (command, args, input) => execFileSync(command, args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
 
 function githubLogin(api: ProtectionRun) {
   try { const user = JSON.parse(api('gh', ['api', 'user'])); return typeof user?.login === 'string' ? user.login : null; } catch { return null; }
 }
-/** The control-plane App's installation as the operator's own token sees it. */
-export function observeInstallation(api: ProtectionRun, appId: number): Observed['installation'] {
-  const listed = JSON.parse(api('gh', ['api', 'user/installations?per_page=100']));
-  const installation = (listed?.installations ?? []).find((candidate: any) => candidate?.app_id === appId);
-  if (!installation) throw new Error(`The operator's GitHub identity sees no installation of App ${appId}; install the control-plane App on the managed repository first`);
-  return { id: Number(installation.id), slug: String(installation.app_slug), account: String(installation.account?.login ?? ''), accountType: String(installation.account?.type ?? installation.target_type ?? 'User'), permissions: installation.permissions && typeof installation.permissions === 'object' ? installation.permissions : {} };
+/**
+ * The control-plane App's installation and the permissions the App requests, as the App's own
+ * installation credential reads them through the control plane (GY-964). The operator's gh token
+ * is never asked: a token without the scopes `user/installations` needs saw no installation and
+ * refused a flow the App could complete.
+ */
+export async function observeInstallation(read: FlowDependencies['installation'], appId: number): Promise<Observed['installation']> {
+  if (!read) throw new Error('This flow reads the installation through the control plane\'s App credential; run it as graphyard master browser');
+  let state: InstallationState;
+  try { state = await read(); } catch (error) { throw new Error(`The control plane could not read App ${appId}'s installation with the App's own credential: ${error instanceof Error ? error.message : String(error)}`); }
+  if (Number(state?.appId) !== appId) throw new Error(`The control plane reports App ${state?.appId}, not App ${appId} this master is bound to; rerun master init against the right control plane`);
+  if (state.suspended) throw new Error(`App ${state.slug}'s installation ${state.installationId} is suspended; restore it at ${state.installationUrl}`);
+  return { id: Number(state.installationId), slug: String(state.slug), account: String(state.account ?? ''), accountType: String(state.accountType ?? 'User'), installationUrl: String(state.installationUrl ?? ''), permissions: state.permissions ?? {}, app: state.app ?? {} };
 }
-function observeApp(api: ProtectionRun, slug: string): Record<string, string> {
-  const app = JSON.parse(api('gh', ['api', `apps/${encodeURIComponent(slug)}`]));
-  return app?.permissions && typeof app.permissions === 'object' ? app.permissions : {};
-}
-const installationSettingsUrl = (installation: Observed['installation']) => installation.accountType === 'Organization'
-  ? `https://github.com/organizations/${encodeURIComponent(installation.account)}/settings/installations/${installation.id}`
-  : `https://github.com/settings/installations/${installation.id}`;
+const installationSettingsUrl = (installation: Observed['installation']) => /^https:\/\/github\.com\//.test(installation.installationUrl) ? installation.installationUrl
+  : installation.accountType === 'Organization'
+    ? `https://github.com/organizations/${encodeURIComponent(installation.account)}/settings/installations/${installation.id}`
+    : `https://github.com/settings/installations/${installation.id}`;
 
 function required<T>(value: T | null, what: string, flow: BrowserFlow): T {
   if (!value) throw new Error(`Could not find ${what} on the page; the recorded steps and screenshots under .graphyard/master-actions show what the ${flow} flow saw`);
@@ -302,8 +309,8 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
   let before: unknown = null, after: unknown = null, outcome: AdministrationEntry['outcome'] = 'refused', verified = false, reason: string | undefined;
   try {
     if (flow === 'app-permissions') {
-      const installation = observeInstallation(api, config.githubAppId);
-      before = { app: observeApp(api, installation.slug), installation: installation.permissions };
+      const installation = await observeInstallation(dependencies.installation, config.githubAppId);
+      before = { app: installation.app, installation: installation.permissions };
       entry.target = { ...entry.target, slug: installation.slug, installationId: installation.id };
       const missing = missingPermissions((before as any).app);
       if (!missing.length) { outcome = 'unchanged'; verified = true; reason = 'The App already requests every permission the control plane needs'; }
@@ -317,14 +324,15 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
         }
         page.click(required(page.locate('button', 'Save changes'), 'the Save changes button', flow).selector);
         page.wait(1_500);
-        after = { app: observeApp(api, installation.slug), installation: observeInstallation(api, config.githubAppId).permissions };
+        const updated = await observeInstallation(dependencies.installation, config.githubAppId);
+        after = { app: updated.app, installation: updated.permissions };
         const still = missingPermissions((after as any).app);
         verified = !still.length; outcome = verified ? 'applied' : 'refused';
         reason = verified ? `App now requests ${missing.length} raised permission(s); run master browser installation-accept so the installation grants them` : `GitHub still reports ${still.join(', ')} after saving`;
       }
     } else if (flow === 'installation-accept') {
-      const installation = observeInstallation(api, config.githubAppId);
-      before = { installation: installation.permissions, app: observeApp(api, installation.slug) };
+      const installation = await observeInstallation(dependencies.installation, config.githubAppId);
+      before = { installation: installation.permissions, app: installation.app };
       entry.target = { ...entry.target, slug: installation.slug, installationId: installation.id, account: installation.account };
       const missing = missingPermissions(installation.permissions);
       if (!missing.length) { outcome = 'unchanged'; verified = true; reason = 'The installation already grants every permission the control plane needs'; }
@@ -336,7 +344,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
         if (!accept) { outcome = 'refused'; reason = 'GitHub shows no pending permission request for this installation; the recorded page shows what it offered instead'; }
         else {
           page.click(accept.selector); page.wait(1_500);
-          const updated = observeInstallation(api, config.githubAppId);
+          const updated = await observeInstallation(dependencies.installation, config.githubAppId);
           after = { installation: updated.permissions };
           const still = missingPermissions(updated.permissions);
           verified = !still.length; outcome = verified ? 'applied' : 'refused';

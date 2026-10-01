@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
@@ -16,6 +15,7 @@ import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/p
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-130: a runtime that stops on a first-run consent prompt is not a started session. The
 // launcher reads the prompt off the pane, answers only the prompts on its allow-list with their
@@ -97,7 +97,7 @@ function work(overrides: Partial<Work> = {}): Work {
 }
 
 async function installed() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-consent-')), credentials = await mkdtemp(join(tmpdir(), 'graphyard-consent-credentials-'));
+  const root = await temporaryDirectory('consent'), credentials = await temporaryDirectory('consent-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
@@ -121,7 +121,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
   assert.equal(detectConsentPrompt([' Sign in support is complete.', '1. Update the docs', '2. Run the tests', '', '∙ Reading src/master.ts… (esc to interrupt)', 'x', 'y', '❯ '].join('\n')), null, 'a menu scrolled up under later output');
   assert.equal(detectConsentPrompt(`${hooksDialog}\n● Continued without trusting.\n● Reading src/master.ts\n∙ Working… (esc to interrupt)\n`), null, 'an answered dialog with the session at work below it');
 
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-consent-unit-'));
+  const directory = await temporaryDirectory('consent-unit');
   try {
     // A stub runtime that draws a sign-in dialog and waits: Herdr reports it idle, which alone would
     // count as started. The launch is reported awaiting consent instead, with the prompt's text, and
@@ -276,7 +276,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
 
 test('integration:unconsented-session-releases-its-slot — the watch supervisor stops renewing the lease of a session still awaiting consent past the hold bound, releases the assignment, and the item is dispatchable again', async () => {
   assert.equal(consentHoldMs, 15 * 60_000);
-  const checkout = await mkdtemp(join(tmpdir(), 'graphyard-consent-slot-'));
+  const checkout = await temporaryDirectory('consent-slot');
   try {
     await mkdir(join(checkout, '.graphyard/launch'), { recursive: true });
     // The control plane as far as this assignment goes: the lease the supervisor renews, and the

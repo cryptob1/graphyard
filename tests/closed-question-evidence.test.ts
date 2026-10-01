@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -12,6 +10,7 @@ import { currentEvidence, type Observation, type Principal, type Work } from '..
 import { configuredResponder, responderConfigSchema, type Responder, type ResponderRequest } from '../src/closed-question.js';
 import { accuracyStudy, type StudyCase } from '../src/model/closed-question.js';
 import { httpClosedQuestionJudge, judgeClosedQuestions } from '../src/producer.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-109: a mechanical criterion is judged by a calibrated typed answer instead of a producer
 // session. The control plane binds the declared state to the exact candidate, asks the configured
@@ -27,7 +26,7 @@ const token = (principal: Principal) => credentials.find(credential => credentia
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'decision:attest'] };
 const approver = { id: 'approver-agent', token: `approver-agent-${'a'.repeat(32)}`, capabilities: ['decision:approve'] };
 const head = 'e'.repeat(40), base = 'f'.repeat(40);
-const flagFile = 'src/cli/flags.ts', flagSource = "export const flags = ['--dry-run', '--json'];\n";
+const flagFile = 'src/server/routes/flags.ts', flagSource = "export const flags = ['--dry-run', '--json'];\n";
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let pr = 700;
 
@@ -74,7 +73,9 @@ function observation(work: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'independent-reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
-    merged: false, mergeSha: null, files: [flagFile], scopeFiles: [], at: new Date().toISOString() };
+    merged: false, mergeSha: null,
+    // GY-883: the public API path keeps the item in the high lane, whose full path still demands the proofs the answers are judged against.
+    files: [flagFile], scopeFiles: [{ path: flagFile, status: 'modified' as const, sha: 'f'.repeat(40), additions: 1, deletions: 1, binary: false }], at: new Date().toISOString() };
 }
 async function claimed(title: string, extra: Record<string, unknown> = {}) {
   let work = await engine.execute(operator, 'create', null, input(title, extra), randomUUID());
@@ -91,7 +92,7 @@ const judge = (principal: Principal, work: Work, proof: string) => call(token(pr
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_CLOSED_QUESTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 109);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-closed-question-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('closed-question'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('closed_question_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/closed_question_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;

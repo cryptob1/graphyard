@@ -1,8 +1,8 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -27,7 +27,7 @@ const clock = Date.parse('2030-01-01T00:00:00Z');
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-reblocked-'));
+  const directory = await temporaryDirectory('reblocked');
   const credentialFile = join(directory, 'coordinator.token'), worker = join(directory, 'worker.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await writeFile(worker, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -186,7 +186,7 @@ async function blockedAttempt(title: string) {
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 881;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-reblocked-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reblocked-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('reblocked_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reblocked_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;

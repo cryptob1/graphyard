@@ -2,8 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +13,7 @@ import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { mechanicalHold, reviewNeed } from '../src/model/dispatch.js';
 import { nextAction } from '../src/model/next-action.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-115: mechanical verification precedes review. Each test is named for the proof it produces:
 // integration:proofs-precede-review (AC-1) and integration:worker-self-verifies (AC-2).
@@ -30,7 +30,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 1150;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_VERIFY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 115);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-verify-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('verify'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, implementer, producer];
@@ -48,7 +48,8 @@ async function submitted(title: string, criteria: Work['criteria']) {
 }
 const observed = (item: Work, sha: string, extra: Partial<Observation> = {}): Observation => ({
   candidate: { sha, baseSha: B, pr: item.submission!.pr, branch: item.workspaces[0].branch, author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-  files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true, ...extra });
+  // GY-883: a public API path keeps the item in the high lane, which still demands the proofs review must wait for.
+  files: ['src/server/routes/a.ts'], scopeFiles: [{ path: 'src/server/routes/a.ts', status: 'added' as const, sha: 'f'.repeat(40), baseSha: null, additions: 1, deletions: 0, binary: false }], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true, ...extra });
 const prove = (item: Work, proof: string, sha: string, result: 'pass' | 'fail') =>
   engine.execute(producer, 'evidence', item.id, { proof, sha, baseSha: B, policyRevision: item.policyRevision, result, executed: 3, skipped: 0, ...(result === 'pass' ? { exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } } : {}) }, randomUUID());
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)!;
@@ -98,7 +99,7 @@ test('integration:proofs-precede-review — no review request is raised before t
 // ---- The worker's own check: the real launcher against a stub control plane ----------------------
 
 async function fixtureRepository(files: Record<string, string>) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-verify-repo-'));
+  const root = await temporaryDirectory('verify-repo');
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main'); git('config', 'user.email', 'worker@example.test'); git('config', 'user.name', 'Worker'); git('config', 'commit.gpgsign', 'false');
   const commit = async (next: Record<string, string>, message: string) => {

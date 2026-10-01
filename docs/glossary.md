@@ -63,9 +63,13 @@ The supervisor that launches sessions and reports their liveness.
 | `producer` | CI, runner, observer | Evidence for granted proofs | Prove its own work |
 | `reader` | Dashboards | Read | Mutate |
 
+## Risk lane
+
+Every item rides one — `low`, `medium` or `high` — decided by the shipped path policy (`src/model/policy.ts`) from the paths its change touches; the landability verdict takes it, decides from it which facts it requires, and reports it with its speed target. Low lands on its required CI checks and one approving review: its criteria's producer-run and `manual:` proofs are not required, and its reworks need no approver. Medium adds its producer-run proofs; high keeps the full path, attestations and rework approval included. An `e2e:` proof and an inherited obligation hold in every lane. See [risk lanes](how-graphyard-works.md#risk-lanes).
+
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until the human answers.
+The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework (a [high-lane](#risk-lane) one; a low or medium rework applies as it is requested), recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until the human answers.
 
 ## Diagram legend
 

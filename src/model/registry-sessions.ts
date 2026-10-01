@@ -24,6 +24,10 @@ export function sessionEnded(session: FleetSession, work: SessionWork | undefine
   if (age < launchGraceMs) return null;
   if (age > sessionCapMs) return 'older than any session runs';
   if (session.role === 'approver' || session.role === 'escalation-handler') return age > decisionSessionMs ? 'the decision window passed' : null;
+  // The master session (GY-898) names no work item by design: it holds its slot until the loop
+  // that supervises it ends it (rotation), bounded only by the outer cap above — its own budget is
+  // at most 12 hours — so a second host never reads the role as free while the pane still runs.
+  if (session.role === 'master') return null;
   if (!work) return session.work ? `${session.work} is no longer an open work item` : 'the launch grace passed and the session names no work item';
   if (session.role === 'worker') {
     const lease = work.lease;
@@ -77,19 +81,38 @@ export function supersededByRequest(registry: Pick<AgentRegistry, 'sessions'>, r
     && (request.role !== 'producer' || (!!request.group && (session.group ?? null) === request.group)));
 }
 
+/**
+ * How long after a failed smoke test the account's executor tests it again (GY-515): a provider
+ * outage during the one prompt would otherwise keep a sound account out until an operator changed it.
+ */
+export const smokeRetestMs = 3_600_000;
+/**
+ * Whether an account's failed smoke test is due for the retest its executor runs (GY-515): the age
+ * rule `needsSmoke` applies. A due failure no longer bars a launch — the launch is what tests the
+ * account again — but no session is chosen on it until a fresh pass is folded.
+ */
+export const smokeFailureDue = (account: FleetAccount, now: number) =>
+  account.smoke?.result === 'fail' && now - Date.parse(account.smoke.at) >= smokeRetestMs;
 const until = (iso: string | null) => iso ? ` until ${iso}` : '';
 /**
  * Why an account cannot take a session right now, whatever role asks — null when it can. `host`
  * is the executor asking: an account is placed where its login lives, so every other host is
  * refused it. Without a host the placement is not judged (a report has no single asking host).
+ *
+ * `expiredSmokeRetestable` is the launch preflight's reading (fleetRoleHealth, GY-515): a Pi
+ * account whose only fault is a smoke failure that has aged past `smokeRetestMs` may be launched
+ * at, because that launch runs the retest. The session choice itself never passes the flag — it
+ * refuses until the retest's fresh result is folded.
  */
-export function accountIneligibility(registry: AgentRegistry, account: FleetAccount, now: number, host?: string | null): string | null {
+export function accountIneligibility(registry: AgentRegistry, account: FleetAccount, now: number, host?: string | null,
+  options: { expiredSmokeRetestable?: boolean } = {}): string | null {
   if (!account.enabled) return `${account.name} is disabled`;
   if (!registry.runtimes.some(runtime => runtime.name === account.runtime)) return `${account.name} runs ${account.runtime}, which is not a registered runtime`;
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
   if (host && account.credential.host !== host) return `${account.name} is placed on ${account.credential.host}; this executor is ${host}`;
   if (account.quota.loggedIn === false) return `${account.name} is not logged in`;
-  if (account.smoke?.result === 'fail') return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; change the account (master registry account set) once it is fixed, and it is tested again`;
+  const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && runtime.launch.kind === 'pi');
+  if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   if (account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
@@ -236,7 +259,9 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
   });
   const unassigned = accounts.filter(account => !account.roles.length).map(account => `${account.name} serves no role; name it in a role or remove it`);
-  const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
+  const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => name === 'master'
+    ? 'role master is not configured; the durable loop launches no master session until graphyard master registry role set master ACCOUNT[,ACCOUNT…] --reason REASON names its accounts'
+    : `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
   return { revision: registry.revision, updatedAt: registry.updatedAt, configured: registry.roles.length > 0, host, runtimes: registry.runtimes, models: registry.models, accounts, roles,
     sessions: registry.sessions.slice(-30), refusals: registry.refusals, lastMutation: registry.lastMutation,
     attention: [...roles.filter(role => role.blocked).map(role => role.blocked!), ...unassigned, ...missing] };
