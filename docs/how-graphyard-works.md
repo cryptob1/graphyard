@@ -43,5 +43,5 @@ Text equivalent: sessions, the dashboard and producers call the API; the engine 
 - Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
 - Every claim increments the epoch; commands from an old epoch or expired lease are refused.
 - Evidence is attributed to its authenticated producer; the latest trusted record per proof and candidate wins, even a failure.
-- History is append-only, and a retried command replays its original result.
+- History is append-only (routine rows are compacted after a retention window), and a command retried within a day replays its original result.
 - Graphyard merges only the exact authorized candidate, once; any other merge is a permanent violation. Merge is not [delivery](delivery.md).
