@@ -7,7 +7,7 @@ import type { HerdrAgent } from '../master/herdr.js';
 import { defaultChildRun } from '../child-runner.js';
 import { allocateManagedCheckout, settleCheckout } from '../master/worktrees.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
-import { acquireDaemonLock, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
+import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { diagnosisReport } from './diagnosis.js';
@@ -59,6 +59,9 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     reclaim: state.reclaim,
     // Every decision the loop has put to an approver and not yet seen applied and retired.
     approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
+    // The master session the loop launches, adopts, wakes and rotates (GY-898): the live handle,
+    // its age against the configured budget, why the last one ended, and the last wake's causes.
+    master: masterSummary(state.master, now),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
     faults: faultRecurrenceReport(state, faultPolicy, now),
     // Each diagnosis the diagnostician returned, and the fix item or covering item answering it (GY-439).
