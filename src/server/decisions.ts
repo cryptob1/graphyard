@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
+import { Refusal, demand, itemLane, resolveEscalation, reworkNeedsApprover, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
@@ -56,6 +56,48 @@ export async function requestDecision(services: Services, caller: Principal, id:
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
+  // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): once recorded,
+  // it is applied at once with the lane as its ground. A replayed request whose application was
+  // interrupted resumes it; a high-lane rework waits for its independent approver as ever.
+  const requested = await recordRequest(services, caller, id, data, input, key, fingerprint);
+  return requested.action === 'rework' && (requested.state === 'requested' || (requested.state === 'approved' && requested.approvedBy === laneApprover))
+    ? applyLaneRework(services, requested) : requested;
+}
+
+/** The ledger's approver of a rework its lane applied without an approver decision (GY-883). */
+export const laneApprover = 'graphyard-risk-lane';
+
+async function applyLaneRework(services: Services, requested: DecisionRecord): Promise<DecisionRecord> {
+  let applying: { decision: DecisionRecord; work: Work; reason: string } | null = null;
+  const settled = await services.engine.store.transaction(async db => {
+    const work = await findWork(db, requested.workId); demand(work, 'Work item not found', 404);
+    const decision = (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
+    const resuming = decision.state === 'approved' && decision.approvedBy === laneApprover;
+    if (!resuming && (decision.state !== 'requested' || reworkNeedsApprover(work!))) return decision;
+    const lane = itemLane(work!), reason = `the ${lane} risk lane applies a rework without an approver decision (GY-883)`;
+    if (!resuming) {
+      const precondition = decisionPrecondition(decision.action, decision.input, work!);
+      if (precondition) return decision;
+      await record(db, work!, laneApprover, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver: { id: laneApprover, role: 'risk-lane' }, lane });
+    }
+    applying = { decision, work: work!, reason };
+    return null;
+  });
+  if (settled) return settled;
+  const { decision, work, reason } = applying!;
+  let outcome: { kind: string; details: object };
+  try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, { id: laneApprover, role: 'admin' } as Principal, reason) } }; }
+  catch (error) {
+    if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
+    outcome = { kind: 'decision.failed', details: { error: error.message } };
+  }
+  return services.engine.store.transaction(async db => {
+    await record(db, work, laneApprover, outcome.kind, { id: decision.id, ...outcome.details });
+    return (await readDecisions(db, work)).find(entry => entry.id === decision.id)!;
+  });
+}
+
+async function recordRequest(services: Services, caller: Principal, id: string, data: z.infer<typeof decisionRequestSchema>, input: any, key: string, fingerprint: string): Promise<DecisionRecord> {
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
