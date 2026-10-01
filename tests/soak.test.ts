@@ -1951,12 +1951,13 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
-test('unit:soak-invariants-hold — blocked work unblocks itself: every routine blocker is re-checked each cycle and cleared only once its cause is gone, the scope and decision blockers reach their approver, a repeating blocker is left to the master, and no approver session or cursor row outlives its blocker', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — blocked work unblocks itself: every routine blocker is re-checked each cycle and cleared only once its cause is gone, the scope and decision blockers reach their approver, a repeating blocker is left to the master, and no approver session or cursor row outlives its blocker', { timeout: 600_000 }, async () => {
   // GY-1008: the blocker step runs per item, every cycle, so it lives in this world. Seven of nine
   // items' first attempts record a blocker from the 2026-09-30 incidents; nothing outside the loop
   // touches them. Each must hold no lease from the moment it is recorded, clear without the master
   // only once its probe passes (never while it fails), and be delivered by its next attempt.
-  const began = performance.now();
+  // No wall-clock budget: about ten seconds alone, this day ran 214 s on the CI shard that also
+  // holds the confinement soak, so a budget would measure the runner; the test timeout bounds it.
   const day = await simulateDay({
     hours: 4, blockers: true,
     plan: { items: blockerPlan.items, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 9, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 9 } },
@@ -2016,6 +2017,4 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
   assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), 'the launched approver\'s watch went with its judged decision');
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('blocker:')), [], 'no blocker row outlives its item');
   assert.ok(blockerKeysPeak <= 2 * 7, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
-  const seconds = (performance.now() - began) / 1000;
-  assert.ok(seconds < 150, `the blocked day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
