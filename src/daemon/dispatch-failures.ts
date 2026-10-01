@@ -1,0 +1,43 @@
+// Concern: an item whose dispatch keeps failing for one unchanged cause (GY-1078).
+import type { Work } from '../model.js';
+import type { DaemonState, DispatchFailureRun } from './state.js';
+
+/**
+ * How many consecutive dispatch failures of one item with the same cause stop its redispatch.
+ *
+ * Each failed launch claims the item, spends an epoch and releases it, so the next cycle sees a
+ * fresh epoch and dispatches again on whichever profile is free. On 2026-10-01 GY-859 was
+ * dispatched about forty times over 5.4 hours, every attempt failing on the same worktree that
+ * held its branch. Two failures may be a transient fault; a third identical one is a condition
+ * that redispatching will not change, so the cause is recorded as the item's blocker instead.
+ */
+export const dispatchFailureBlockAfter = 3;
+
+/**
+ * A dispatch failure's cause, with what differs between attempts of one cause taken out: the
+ * epoch each attempt claimed, the assignment path and branch named for it, commit ids and the
+ * command line that ran. Two failures with the same cause read the same here; any other change
+ * in the text is a different cause and starts a new run.
+ */
+export function dispatchFailureCause(item: Pick<Work, 'key'>, failure: string): string {
+  const key = item.key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return failure
+    .replace(/^Command failed: [^\n]*\n?/gm, '')
+    .replace(new RegExp(`(\\.graphyard/worktrees/${key})-\\d+`, 'g'), '$1-N')
+    .replace(new RegExp(`(graphyard/${key.toLowerCase()})-\\d+`, 'g'), '$1-N')
+    .replace(/\bepoch \d+/g, 'epoch N')
+    .replace(/\b[0-9a-f]{40}\b/g, '<sha>')
+    .trim().slice(0, 2000);
+}
+
+/** Adds one failure to the item's run, starting a new run when the cause changed. */
+export function noteDispatchFailure(state: DaemonState, item: Pick<Work, 'id' | 'key'>, failure: string, at: string): DispatchFailureRun {
+  const cause = dispatchFailureCause(item, failure), previous = state.dispatchFailures[item.id];
+  const run = previous && previous.cause === cause ? { ...previous, count: previous.count + 1, lastAt: at } : { key: item.key, cause, count: 1, firstAt: at, lastAt: at };
+  state.dispatchFailures[item.id] = run;
+  return run;
+}
+
+/** The blocker a run at the bound records: the count, since when, and the cause in git's words. */
+export const dispatchFailureBlocker = (run: DispatchFailureRun) =>
+  `Dispatch failed ${run.count} consecutive times with the same cause since ${run.firstAt}, so the master loop stopped redispatching ${run.key}: ${run.cause}`.slice(0, 2000);

@@ -230,6 +230,8 @@ export interface DaemonEffects {
   answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
+  /** Records the cause of an item's repeated dispatch failures as its blocker (GY-1078); absent, the loop holds the item itself. */
+  blockDispatch?: (work: Work, reason: string) => Promise<unknown>;
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
@@ -763,6 +765,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
       () => herdrJson(['status', 'server', '--json'], run)) }),
+    blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
     // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present

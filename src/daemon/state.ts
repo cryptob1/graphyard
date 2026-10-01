@@ -366,6 +366,8 @@ export function masterSummary(master: MasterSessionState, now: number) {
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
 }
 
+export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), firstAt: z.string(), lastAt: z.string() }).strict();
+export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -420,6 +422,12 @@ export const daemonStateSchema = z.object({
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
+  /**
+   * Per work item id, the run of consecutive dispatch failures with one unchanged cause (GY-1078),
+   * across epochs: each failed launch spends an epoch, so no per-epoch record could see the run.
+   * Cleared by a launch that lands and once the blocker naming the cause is recorded.
+   */
+  dispatchFailures: z.record(z.string(), dispatchFailureRunSchema).default(() => ({})),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -484,6 +492,9 @@ export function pruneDaemonState(state: DaemonState) {
   const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
   const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
   if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
+  // A run is retired when its item dispatches or is blocked; this bound only catches items the loop stopped seeing.
+  const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));
+  if (runs.length > retainedClocks) for (const [id] of runs.slice(0, runs.length - retainedClocks)) delete state.dispatchFailures[id];
   return state;
 }
 

@@ -287,6 +287,15 @@ export async function mintWorkerCredential(root: string, input: { key: string; e
   catch (error) { throw new Error(`Worker launch failed: no push credential could be minted for ${input.key} epoch ${input.epoch} (${failureText(error).slice(0, 300)}); the item is launched again once one can be`); }
 }
 
+/**
+ * A failed `worktree` command as the launch failure: the item, the epoch, and what the command
+ * wrote to stderr — the CLI's error, which carries git's — never only the command line (GY-1078).
+ */
+export function worktreeFailure(key: string, epoch: number, error: unknown) {
+  const stderr = typeof (error as { stderr?: unknown } | null)?.stderr === 'string' ? (error as { stderr: string }).stderr.trim() : '';
+  return `Worker launch failed: the worktree for ${key} epoch ${epoch} could not be created: ${stderr || failureText(error)}`;
+}
+
 export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
@@ -315,7 +324,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   const claimedEpoch = Number.isSafeInteger(claim.epoch) && claim.epoch > 0 ? claim.epoch as number : null;
   try {
     if (claim.lease?.owner !== profile.principal || claimedEpoch === null) throw new Error('Worker launcher acquired an unexpected assignment identity');
-    const workspace = JSON.parse(String(await run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'inherit'] })));
+    // The worktree command's stderr is captured rather than inherited, so the failure the loop
+    // records names git's own error instead of only the command line that failed (GY-1078).
+    const workspace = JSON.parse(String(await Promise.resolve(run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] }))
+      .catch(error => { throw new Error(worktreeFailure(key, claimedEpoch, error)); })));
     if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
     // The checkout is the attempt's; the dependency tree does not have to be. Sharing is a
     // convenience for the session that follows, so a refusal is reported, never fatal.
