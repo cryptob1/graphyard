@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { BaseRefresh, LandingCheck, MergeRefusal, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
-import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
+import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
@@ -122,7 +122,7 @@ export interface Observation {
   // The head contains that base tip: by ancestry, or as a published queue tip whose bound base
   // is tree-identical to it. A review is only requested for a head that does.
   baseTipContained?: boolean;
-  protected: boolean; files: string[]; at: string;
+  protected: boolean; files: string[]; at: string; requiredChecks?: { name: string; appId: number | null }[]; // base protection's and rulesets' required checks bar `Graphyard / merge` (GY-430); appId null = any source
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
   /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see merge-queue.ts LandingCheck. */
@@ -226,7 +226,7 @@ export interface Work extends Create {
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
-  gates: Gate[]; violations: string[];
+  gates: Gate[]; violations: string[]; lane?: Lane; speedTarget?: number; // risk lane and its speed target (GY-883, model/policy.ts), stamped by the last evaluation
 }
 // One scope rule for every scoped read and mutation, so a route cannot answer
 // with data its own authorization would have refused.

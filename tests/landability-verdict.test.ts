@@ -39,7 +39,9 @@ interface Shape {
 
 function item(shape: Shape, extra: Partial<Work> = {}): Work {
   const head = shape.head ?? sha('7');
-  const files = shape.files ?? ['src/own.ts'];
+  // GY-883: the item's own change is on the public API, the high lane, whose full path requires
+  // every proof these verdicts judge.
+  const files = shape.files ?? ['src/server/routes/own.ts'];
   const candidate = { sha: head, baseSha: sha('9'), pr: 40 + shape.key.charCodeAt(3), branch: `graphyard/${shape.key.toLowerCase()}-1`, author: 'worker' };
   const proofs = shape.proofs ?? ['unit:own-proof'];
   const observation: Observation = {
@@ -52,7 +54,7 @@ function item(shape: Shape, extra: Partial<Work> = {}): Work {
   return {
     id: shape.key.toLowerCase(), key: shape.key, title: shape.key, description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: proofs.map((proof, index) => ({ id: `AC-${index + 1}`, text: 'proven', proofs: [proof] })),
-    policy: { checks: [], review: false }, plannedFiles: shape.planned ?? ['src/own.ts'], stage: 'merge', revision: 4, policyRevision: 1,
+    policy: { checks: [], review: false }, plannedFiles: shape.planned ?? ['src/server/routes/own.ts'], stage: 'merge', revision: 4, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, candidate,
     workspaces: shape.workspace === false ? [] : [{ host: 'machine-a', path: `/tmp/${shape.key}`, epoch: 1, owner: 'worker', branch: candidate.branch }],
     submission: shape.submitted === false ? null : { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [],
@@ -80,8 +82,8 @@ test('unit:landability-verdict-single-function — evaluateLandability returns l
   const cases: { name: string; work: Work; gate: 'build' | 'acceptance'; reason: RegExp }[] = [
     { name: 'unsubmitted', work: item({ key: 'GY-B', submitted: false }), gate: 'build', reason: /^Worker has not submitted implementation for this attempt$/ },
     { name: 'no workspace', work: item({ key: 'GY-C', workspace: false }), gate: 'build', reason: /^No workspace registered$/ },
-    { name: 'out-of-scope regression', work: item({ key: 'GY-D', files: ['src/own.ts', 'src/stranger.ts'] }), gate: 'build', reason: /^Out-of-scope regression: src\/stranger\.ts: differs from the base branch tip/ },
-    { name: 'landing regression', work: item({ key: 'GY-E', scopeFiles: [changed('src/own.ts')], landing: { base: main, files: [changed('src/own.ts'), changed('src/landed.ts')] } }), gate: 'build', reason: /^Landing regression: src\/landed\.ts: / },
+    { name: 'out-of-scope regression', work: item({ key: 'GY-D', files: ['src/server/routes/own.ts', 'src/stranger.ts'] }), gate: 'build', reason: /^Out-of-scope regression: src\/stranger\.ts: differs from the base branch tip/ },
+    { name: 'landing regression', work: item({ key: 'GY-E', scopeFiles: [changed('src/server/routes/own.ts')], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/landed.ts')] } }), gate: 'build', reason: /^Landing regression: src\/landed\.ts: / },
     { name: 'uncompared diff', work: item({ key: 'GY-F' }, {}), gate: 'build', reason: /^Candidate diff has not been compared against the base branch tip/ },
     { name: 'mechanical failure', work: item({ key: 'GY-G', evidence: [evidence('unit:own-proof', sha('7'), { result: 'fail' })] }), gate: 'build', reason: /^AC-1: unit:own-proof failed on 777777777777 \(trusted evidence from independent-producer\); the head returns to its worker before review$/ },
     { name: 'unproven proof', work: item({ key: 'GY-H', evidence: [] }), gate: 'acceptance', reason: /^AC-1: unit:own-proof needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy$/ },
@@ -125,14 +127,14 @@ test('unit:queue-and-gates-share-verdict — ejectionReason and the landing guar
   // GY-871: a head carrying another item's speculative-tip commits. The build gate names the file as
   // carried and sends no worker; the queue must not eject the entry over the same file.
   const predecessor = item({ key: 'GY-P', head: sha('4'), planned: ['src/pred.ts'], files: ['src/pred.ts'], queued: 1 });
-  const carried = item({ key: 'GY-Q', files: ['src/own.ts', 'src/pred.ts'], queued: 2,
-    landing: { base: main, files: [changed('src/own.ts'), changed('src/pred.ts')], foreign: [{ key: 'GY-P', pr: predecessor.candidate!.pr, head: sha('4') }] } });
+  const carried = item({ key: 'GY-Q', files: ['src/server/routes/own.ts', 'src/pred.ts'], queued: 2,
+    landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/pred.ts')], foreign: [{ key: 'GY-P', pr: predecessor.candidate!.pr, head: sha('4') }] } });
   const gy871 = queueAgrees(carried, [predecessor, carried]);
   assert.match(landabilityRefusals(gy871.verdict, 'build')[0], /^Carried from another item's tip: 1 file .* belongs to GY-P/);
   assert.equal(gy871.reason, null, 'a carried file ejects nothing');
   assert.equal(landabilityEjection(gy871.verdict, 'landing'), null);
   // An uncarried out-of-plan file is this change's own: the verdict gives the ejection, the queue takes it.
-  const stranger = item({ key: 'GY-U', files: ['src/own.ts', 'src/stranger.ts'], queued: 2 });
+  const stranger = item({ key: 'GY-U', files: ['src/server/routes/own.ts', 'src/stranger.ts'], queued: 2 });
   const own = queueAgrees(stranger, [predecessor, stranger]);
   assert.match(own.reason!, /^Landing speculative tip 777777777777 on 999999999999 would revert work outside its planned files: src\/stranger\.ts: differs from the base branch tip/);
 
@@ -163,13 +165,13 @@ test('unit:queue-and-gates-share-verdict — ejectionReason and the landing guar
 
   // GY-863: the landing guard recorded a file whose three-way merge onto the landing commit is
   // exactly what that commit holds (mergeSha = baseSha): not a revert. Gate and queue agree it lands.
-  const merged = item({ key: 'GY-W', scopeFiles: [changed('src/own.ts')], landing: { base: main, files: [changed('src/own.ts'), changed('src/state.ts', { mergeSha: sha('e') })] } });
+  const merged = item({ key: 'GY-W', scopeFiles: [changed('src/server/routes/own.ts')], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/state.ts', { mergeSha: sha('e') })] } });
   const gy863 = queueAgrees(merged, [merged]);
   assert.equal(gy863.verdict.verdict, 'landable', JSON.stringify(gy863.verdict));
   assert.equal(gy863.reason, null);
   assert.equal(gatesOf(merged, [merged]).build.passed, true);
   // Without the merge result the same file is a landing regression, refused and ejected by the same verdict.
-  const unmerged = item({ key: 'GY-X', scopeFiles: [changed('src/own.ts')], landing: { base: main, files: [changed('src/own.ts'), changed('src/state.ts')] } });
+  const unmerged = item({ key: 'GY-X', scopeFiles: [changed('src/server/routes/own.ts')], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/state.ts')] } });
   const revert = queueAgrees(unmerged, [unmerged]);
   assert.match(revert.reason!, /^Landing speculative tip 777777777777 on bbbbbbbbbbbb would revert work outside its planned files: src\/state\.ts: /);
   assert.equal(gatesOf(unmerged, [unmerged]).build.passed, false);
@@ -194,12 +196,12 @@ function generated(round: number, random: () => number): { work: Work; all: Work
   const carrier = item({ key: 'GY-C', head: sha('4'), planned: ['src/pred.ts'], files: ['src/pred.ts'], queued: 1 });
   const path = `src/file-${round}.ts`;
   const shape: Shape = { key: 'GY-Q', proofs, evidence: records[proof], queued: random() < 0.8 ? 2 : null, submitted: random() > 0.1, workspace: random() > 0.1 };
-  if (scope === 'stranger') shape.files = ['src/own.ts', path];
-  if (scope === 'carried') Object.assign(shape, { files: ['src/own.ts', 'src/pred.ts'], landing: { base: main, files: [changed('src/own.ts'), changed('src/pred.ts')], foreign: [{ key: 'GY-C', pr: carrier.candidate!.pr, head: sha('4') }] } });
-  if (scope === 'unverified') Object.assign(shape, { files: ['src/own.ts', path], scopeFiles: [changed('src/own.ts'), changed(path, { baseSha: undefined })] });
-  if (scope === 'landing') Object.assign(shape, { scopeFiles: [changed('src/own.ts')], landing: { base: main, files: [changed('src/own.ts'), changed(path, pick([{}, { status: 'removed', sha: null }, { additions: 0, deletions: 4 }] as Partial<ScopeFile>[]))] } });
-  if (scope === 'merge-result') Object.assign(shape, { scopeFiles: [changed('src/own.ts')], landing: { base: main, files: [changed('src/own.ts'), changed(path, { mergeSha: sha('e') })] } });
-  if (scope === 'generated') shape.files = ['src/own.ts', 'docs/protocol.md'];
+  if (scope === 'stranger') shape.files = ['src/server/routes/own.ts', path];
+  if (scope === 'carried') Object.assign(shape, { files: ['src/server/routes/own.ts', 'src/pred.ts'], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/pred.ts')], foreign: [{ key: 'GY-C', pr: carrier.candidate!.pr, head: sha('4') }] } });
+  if (scope === 'unverified') Object.assign(shape, { files: ['src/server/routes/own.ts', path], scopeFiles: [changed('src/server/routes/own.ts'), changed(path, { baseSha: undefined })] });
+  if (scope === 'landing') Object.assign(shape, { scopeFiles: [changed('src/server/routes/own.ts')], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed(path, pick([{}, { status: 'removed', sha: null }, { additions: 0, deletions: 4 }] as Partial<ScopeFile>[]))] } });
+  if (scope === 'merge-result') Object.assign(shape, { scopeFiles: [changed('src/server/routes/own.ts')], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed(path, { mergeSha: sha('e') })] } });
+  if (scope === 'generated') shape.files = ['src/server/routes/own.ts', 'docs/protocol.md'];
   const work = item(shape);
   return { work, all: [carrier, work] };
 }
@@ -281,7 +283,7 @@ test('unit:landability-pure-on-demand — the verdict is deterministic, recomput
 
   // The audit: a refusal records the verdict version and the inputs it was computed from, keyed by
   // candidate SHA and policy revision, on the gate it refuses and on any ejection it causes.
-  const stranger = item({ key: 'GY-U', files: ['src/own.ts', 'src/stranger.ts'], evidence: [evidence('unit:own-proof', sha('7'))] });
+  const stranger = item({ key: 'GY-U', files: ['src/server/routes/own.ts', 'src/stranger.ts'], evidence: [evidence('unit:own-proof', sha('7'))] });
   const verdict = evaluateLandability(stranger, [stranger], now);
   assert.deepEqual({ version: verdict.version, inputs: verdict.inputs }, {
     version: LANDABILITY_VERSION,
@@ -304,8 +306,8 @@ test('unit:ejection-not-sticky — an entry ejected on landability grounds re-en
   const head = `${tip}${'0'.repeat(28)}`;
   const gy509 = item({ key: 'GY-509', head: sha('4'), planned: ['src/state.ts'], files: ['src/state.ts'], queued: 1 });
   const ejection = { at, sequence: 3, reason: `Landing speculative tip ${tip} on ${main.slice(0, 12)} would revert work outside its planned files: src/state.ts: differs from that commit (+3 −1) (owned by GY-509, ahead of it and not yet landed)`, sha: head, policyRevision: 1, conflict: null };
-  const gy472 = item({ key: 'GY-472', head, files: ['src/own.ts', 'src/state.ts'], queued: null, evidence: [evidence('unit:own-proof', head)],
-    landing: { base: main, files: [changed('src/own.ts'), changed('src/state.ts')], foreign: [{ key: 'GY-509', pr: gy509.candidate!.pr, head: sha('4') }] } },
+  const gy472 = item({ key: 'GY-472', head, files: ['src/server/routes/own.ts', 'src/state.ts'], queued: null, evidence: [evidence('unit:own-proof', head)],
+    landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/state.ts')], foreign: [{ key: 'GY-509', pr: gy509.candidate!.pr, head: sha('4') }] } },
   { queueEjection: ejection, queueSequence: 3, queueHistory: [{ at, event: 'ejected', sequence: 3, reason: ejection.reason, tip: head }] });
   const all = [gy509, gy472];
   assert.equal(landabilityFamily(ejection), true, 'a legacy landing ejection reads as a landability one');
@@ -317,7 +319,7 @@ test('unit:ejection-not-sticky — an entry ejected on landability grounds re-en
   // GY-509 lands, the landing check no longer names it foreign: the same head is landable, and it
   // re-enters the queue without a new head.
   const landed = { ...gy509, stage: 'done', queue: null, observation: { ...gy509.observation!, merged: true } } as Work;
-  const cleared = { ...gy472, observation: { ...gy472.observation!, scopeFiles: [changed('src/own.ts'), changed('src/state.ts', { sha: sha('e') })], landing: { base: main, files: [changed('src/own.ts')] } } } as Work;
+  const cleared = { ...gy472, observation: { ...gy472.observation!, scopeFiles: [changed('src/server/routes/own.ts'), changed('src/state.ts', { sha: sha('e') })], landing: { base: main, files: [changed('src/server/routes/own.ts')] } } } as Work;
   const after = [landed, cleared];
   assert.equal(evaluateLandability(cleared, after, now).verdict, 'landable');
   const result = evaluate(cleared, after, now, CI);

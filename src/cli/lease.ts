@@ -1,4 +1,7 @@
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { isAbsolute } from 'node:path';
+import { writeWorkerCredential, type MintedPushCredential } from '../worker-credential.js';
 import { spawnSync } from 'node:child_process';
 import { defineCommands, workMutation } from './registry.js';
 import { verifyCommand } from './verify.js';
@@ -98,5 +101,17 @@ export const leaseCommands = defineCommands([
     scope: 'work',
     help: ['  revoke GY-N file.json         Withdraw trusted evidence for a candidate (producer/operator)'],
     run: async (context, work) => context.print(await workMutation(context, work)('revoke', JSON.parse(await readFile(context.args[0], 'utf8')))),
+  },
+  {
+    name: 'push-credential',
+    scope: 'work',
+    help: ['  push-credential GY-N EPOCH DIR  Mint the attempt\'s short-lived push credential into DIR (the worker launcher runs it)'],
+    async run(context, work) {
+      const epoch = Number(context.args[0]), directory = context.args[1];
+      if (!Number.isSafeInteger(epoch) || epoch <= 0 || !directory || !isAbsolute(directory)) throw new Error('Usage: push-credential GY-N EPOCH DIR, with DIR an absolute path');
+      const minted = await context.api(`work/${work.id}/push-credential`, { epoch }, randomUUID()) as MintedPushCredential;
+      // The token goes into the directory only; what is printed is its record.
+      context.print({ directory, ...await writeWorkerCredential(directory, minted) });
+    },
   },
 ]);
