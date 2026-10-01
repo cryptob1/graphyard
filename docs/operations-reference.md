@@ -70,7 +70,13 @@ After an hour without deliveries `master status` points to `https://github.com/s
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers (`graphyard master run --once`), `agent-names:PROFILE` (`herdr pane close PANE`), `session-slots:ROLE` (raise `concurrency`), `database-capacity` (grow volume, `GRAPHYARD_DATABASE_MAX_BYTES`).
+Per `resources` entry: ledgers (`graphyard master run --once`), `agent-names:PROFILE` (`herdr pane close PANE`), `session-slots:ROLE` (raise `concurrency`), `database-capacity` (grow volume, `GRAPHYARD_DATABASE_MAX_BYTES`). The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else the size of the volume holding the database's data directory when the plane can read it (same host, role allowed to read `data_directory`), else an advisory 10 GiB that only warns.
+
+## Storage retention
+
+- **Receipts** answer a retried command for one day, then the server prunes them every 10 minutes, 5,000 rows a run.
+- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of at most 2,000 rows per phase and five batches a run. It never deletes another kind, a row a delta extends, an item's newest save, a delivery event or the revision a delivery cites, a row of an item merged but not done, or a row the flow projection has not read. Each batch appends a `ledger.compacted` event with counts per kind. Postgres reuses the space; only `VACUUM FULL` returns it to the volume.
 
 ## Bootstrap mode for a self-proving change
 
