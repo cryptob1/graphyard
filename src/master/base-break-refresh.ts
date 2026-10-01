@@ -233,3 +233,21 @@ export async function wakeOwnObservation(resync: (body: { since: string; wake?: 
   }
   return answer?.observed === true && answer.work ? answer.work : null;
 }
+
+/** When the decision step last woke each item's observation, so a job that does not answer is not woken every cycle. */
+const lastWake = new Map<string, number>();
+/**
+ * The decision step's waker (GY-793 AC-2): one per step, it wakes an item's observation at most
+ * once per `decisionRewakeMs` and spends at most `decisionObservationWaitMs` across the step
+ * waiting for the readings. Returns the fresh reading, or null.
+ */
+export function observationWaker(observe: (work: Work, waitMs: number) => Promise<Work | null>) {
+  let budget = decisionObservationWaitMs;
+  return async (item: Work, clock: number): Promise<Work | null> => {
+    if (clock - (lastWake.get(item.id) ?? -Infinity) < decisionRewakeMs) return null;
+    lastWake.set(item.id, clock);
+    const started = Date.now(), fresh = await observe(item, Math.max(0, budget)).catch(() => null);
+    budget -= Date.now() - started;
+    return fresh;
+  };
+}
