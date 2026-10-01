@@ -911,7 +911,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   let outside: { key: string; sha: string; at: number } | null = null;
   // GY-839: every false landing refusal the fault window produces, first seen per candidate head.
   const landingRefusals: { key: string; sha: string; elapsed: number }[] = [];
-  // GY-430: every merge-stalled line master status would show, read after each cycle.
+  // GY-430: every merge-stalled line master status would show, read after each cycle of the day
+  // that sets `plan.blockedMerge`.
   const mergeStallSightings: { subject: string; text: string; at: number }[] = [];
   // GY-498: the parallel-tip window as the day saw it — how many entries held a published tip at
   // once, which successor tips were chained onto a predecessor's, and every tip per entry, so the
@@ -1138,7 +1139,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
       for (const key of Object.keys(state.actions)) actionKeys.add(key);
-      mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
+      // Only the day that holds a merge BLOCKED pays for the extra snapshot read each cycle.
+      if (plan.blockedMerge) mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
