@@ -184,30 +184,54 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
 export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[] }
 export interface SessionRefusal { account: null; reason: string; skipped: SessionSkip[] }
 /**
- * The session an action runs on: the first account of the role, in the role's own order, that is
- * placed on the asking host, logged in, within quota and under its session limit, provided the
- * role itself is under its concurrency limit. Pure: the registry passed in already carries the
- * executor's fresh observations and only sessions that are still live.
+ * When the role last ran a session on `account`, as spreading reads it (GY-961): the time of its
+ * newest session, live or ended. Most sessions end with no outcome at all — a worker whose lease
+ * went, a reviewer whose request was answered, anything superseded — and each still spent the
+ * account's quota, so each counts. Only a headless run reported as ending without a result is left
+ * out: GY-446 retries such a run on the same account, so it must not move the role away.
+ */
+const lastRoleUse = (registry: Pick<AgentRegistry, 'sessions'>, role: FleetRoleName, account: string): number => {
+  let last = Number.NEGATIVE_INFINITY;
+  for (const session of registry.sessions) {
+    if (session.role !== role || session.account !== account || session.outcome === 'no-result') continue;
+    last = Math.max(last, Date.parse(session.selectedAt));
+  }
+  return last;
+};
+/**
+ * The session an action runs on: an account of the role that is placed on the asking host, logged
+ * in, within quota and under its session limit, while the role itself is under its concurrency
+ * limit. Which of the eligible accounts serves is spread (GY-961): first-fit in the role's own
+ * order piled every launch onto the first account until its quota spent, then the next, so a
+ * role's whole account pool drained in lockstep and every capacity fault paused the role until a
+ * reset. The role's least recently used eligible account serves instead — its own order breaks
+ * ties, so a fresh registry and a single-account role choose exactly as before. Pure: the registry
+ * passed in already carries the executor's fresh observations and only sessions that are still
+ * live.
  */
 export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'>, now: number): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role);
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
-  if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
+  if (!role.accounts.length) return { account: null, reason: `role ${role.name} names no account`, skipped: [] };
   const running = liveSessions(registry).filter(session => session.role === role.name);
   if (running.length >= role.concurrency) return { account: null, skipped: [],
     reason: role.concurrency === 0 ? `role ${role.name} is paused (concurrency 0)` : `role ${role.name} is at its concurrency limit (${running.length} of ${role.concurrency} live: ${running.map(session => `${session.account}${session.work ? ` on ${session.work}` : ''}`).join(', ')})` };
   const skipped: SessionSkip[] = [];
+  let chosen: { account: FleetAccount; index: number; last: number } | null = null;
   for (const [index, name] of role.accounts.entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
     const refusal = account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
     if (refusal) { skipped.push({ account: name, reason: refusal }); continue; }
-    // The role's policy names the model its sessions run, where it names one; else the account's own.
-    const policy = rolePolicy(role), runtime = registry.runtimes.find(entry => entry.name === account!.runtime)!;
-    const model = registry.models.find(entry => entry.name === (policy.model ?? account!.model)) ?? registry.models.find(entry => entry.name === account!.model)!;
-    return { account: account!, runtime, model, policy, skipped,
-      reason: `${name} is the first eligible account for ${role.name} (preference ${index + 1} of ${role.accounts.length}; ${running.length + 1} of ${role.concurrency} concurrent)${skipped.length ? ` — passed over ${skipped.map(entry => entry.reason).join('; ')}` : ''}` };
+    const last = lastRoleUse(registry, role.name, name);
+    if (!chosen || last < chosen.last) chosen = { account: account!, index, last };
   }
-  return { account: null, skipped, reason: `no eligible account for ${role.name}: ${skipped.map(entry => entry.reason).join('; ')}` };
+  if (!chosen) return { account: null, skipped, reason: `no eligible account for ${role.name}: ${skipped.map(entry => entry.reason).join('; ')}` };
+  const account = chosen.account;
+  // The role's policy names the model its sessions run, where it names one; else the account's own.
+  const policy = rolePolicy(role), runtime = registry.runtimes.find(entry => entry.name === account.runtime)!;
+  const model = registry.models.find(entry => entry.name === (policy.model ?? account.model)) ?? registry.models.find(entry => entry.name === account.model)!;
+  return { account, runtime, model, policy, skipped,
+    reason: `${account.name} is the eligible account of ${role.name} used least recently (preference ${chosen.index + 1} of ${role.accounts.length}; last used ${Number.isFinite(chosen.last) ? new Date(chosen.last).toISOString() : 'never'}; ${running.length + 1} of ${role.concurrency} concurrent)${skipped.length ? ` — passed over ${skipped.map(entry => entry.reason).join('; ')}` : ''}` };
 }
 
 export interface FleetAccountView {

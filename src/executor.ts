@@ -16,7 +16,7 @@ import type { ExecutorRelease } from './executor-fleet.js';
 import { dispatchReserved, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
-import { processConnectAccounts } from './master/environments.js';
+import { processConnectAccounts } from './master/connect-accounts.js';
 import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
 import { loopUnitName } from './supervisor.js';
 import { executorUnitDirectory } from './repository-setup.js';

@@ -110,7 +110,8 @@ export class AgentRegistry {
   /**
    * Choose the session an executor's action runs on, and record the choice. The executor reports
    * what it just observed about the accounts on its own host; the registry folds that in, closes
-   * sessions whose work has moved on, and picks the first eligible account of the role. A choice
+   * sessions whose work has moved on, and picks the eligible account of the role used least
+   * recently (GY-961). A choice
    * appends `agent-registry.selected` with its reason; a refusal is recorded too, once per distinct
    * reason, so a loop that asks every few seconds does not flood the ledger with the same answer.
    */

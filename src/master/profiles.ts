@@ -31,8 +31,9 @@ const approvalMode = z.enum(['auto', 'prompt']).default('auto');
 
 // An agent environment is one isolated config and login home for one agent CLI account, such as
 // ~/.coding_agents/claude-b. The Graphyard principal a profile claims under is independent of the
-// provider account its session runs on: a profile names the accounts it may use, in failover order,
-// and every launch runs on the first of them that is logged in and has provider quota left.
+// provider account its session runs on: a profile names the accounts it may use, in preference
+// order, and every launch runs on one of them that is logged in with provider quota left, spread
+// across the healthy ones so no single account drains first (GY-961).
 export const environmentKinds = ['claude', 'codex', 'opencode', 'cursor'] as const;
 export type EnvironmentKind = typeof environmentKinds[number];
 export const environmentVariable: Record<EnvironmentKind, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', opencode: 'XDG_DATA_HOME', cursor: 'CURSOR_CONFIG_DIR' };

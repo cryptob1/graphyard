@@ -9,7 +9,7 @@ import { accountKeySchema, notSecret, secretPaths, smokeObservationSchema, type 
  * home directory) and never holds the credential, runs one *model*, and carries the quota state
  * executors last observed for it. A *role* names the accounts that may serve it, in preference
  * order, and how many sessions of the role may run at once. Executors ask the control plane for a
- * session when they run an action; the choice — the first eligible account — is made here, inside
+ * session when they run an action; the choice — the least recently used eligible one — is made here, inside
  * the coordination transaction, and recorded with its reason. Nothing in this file names a
  * particular runtime or account: the built-in contracts below are what setup *proposes*, and only
  * what the registry stores is ever launched.

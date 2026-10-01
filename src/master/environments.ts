@@ -268,6 +268,9 @@ const environmentLogSchema = z.object({
   // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
+  // When each account last served a launch of each role, by `role:account` (GY-961), so the next one
+  // spreads across the healthy accounts instead of draining the first in lockstep. Older logs carry none.
+  picks: z.record(z.string(), z.string()).default({}),
   exhausted: z.record(z.string(), z.object({ at: z.string(), until: z.string(), resetsAt: z.string().nullable(), reason: z.string().max(500), role: z.enum(quotaRoles), profile: z.string(), work: z.string().nullable() }).strict()).default({}),
 }).strict();
 /**
@@ -279,7 +282,7 @@ const environmentLogSchema = z.object({
 export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null }
 export const unknownResetHoldMs = 3_600_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
-export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion> };
+export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion>; picks: Record<string, string> };
 /** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
 export const profileAccount = (profile: string) => `profile:${profile}`;
 /**
@@ -305,7 +308,7 @@ export function environmentLogPath(config: Pick<MasterConfig, 'credentialFile'>)
 }
 export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>): Promise<EnvironmentLog> {
   try { return environmentLogSchema.parse(JSON.parse(await readFile(environmentLogPath(config), 'utf8'))) as EnvironmentLog; }
-  catch { return { version: 1, environments: {}, skipped: [], selected: {}, exhausted: {} }; }
+  catch { return { version: 1, environments: {}, skipped: [], selected: {}, exhausted: {}, picks: {} }; }
 }
 /** Record that a session exhausted `environment` mid-work, so no launch selects it before it resets. */
 export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now()) {
@@ -323,25 +326,33 @@ export async function observedExhaustions(config: Pick<MasterConfig, 'credential
 }
 export const describeObservedExhaustion = (environment: string, held: ObservedExhaustion) =>
   `${environment} exhausted its quota mid-session at ${held.at} (${held.reason}); ${held.resetsAt ? `it resets ${held.resetsAt}` : `its reset time is unknown, so it is tried again after ${held.until}`}`;
-export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string } & AccountSelection) {
+export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentialFile'>, health: EnvironmentHealth[], skipped: AccountSkip[] = [], selection?: { key: string; /** Also stamps the account's spread time, so the next launch rotates past it (GY-961). */ picked?: string } & AccountSelection) {
   if (!health.length && !skipped.length && !selection) return;
   const log = await readEnvironmentLog(config);
-  if (selection) { const { key, ...selected } = selection; log.selected = { ...log.selected, [key]: selected }; }
+  if (selection) { const { key, picked, ...selected } = selection; log.selected = { ...log.selected, [key]: selected }; if (picked) log.picks = { ...log.picks, [picked]: selected.at }; }
   for (const entry of health) log.environments[entry.name] = entry;
   log.skipped = [...log.skipped, ...skipped.map(entry => ({ ...entry, reason: entry.reason.slice(0, 500) }))].slice(-50);
   await atomicPrivateWrite(environmentLogPath(config), log);
 }
 
 /**
- * The account a launch runs on: the first of the profile's accounts that is logged in with quota
- * left. Every account passed over is recorded with its reason. A profile that names no accounts
- * launches exactly as configured, on whatever its environment variables select.
+ * The account a launch runs on: one of the profile's accounts that is logged in with quota left.
+ * Every account passed over is recorded with its reason. A profile that names no accounts launches
+ * exactly as configured, on whatever its environment variables select.
+ *
+ * Which of the healthy accounts serves is spread (GY-961): the first healthy account in the
+ * profile's order took every launch until its quota spent, then the next, so a profile's whole
+ * account pool drained in lockstep and every capacity fault paused the role until a reset. The
+ * healthy account used least recently serves instead — the profile's own order breaks ties, so a
+ * profile that has never launched, a single-account profile and a pool of one healthy account all
+ * choose exactly as before. The times come from this host's environment log, per role.
  *
  * When the control plane's agent registry defines the role, the registry decides instead: the
- * control plane chooses the first eligible account of the role — placed on this host, logged in,
- * within quota, under its session and concurrency limits — and records the choice and its reason
- * (see fleet.ts). The profile then supplies only the Graphyard identity the session acts under.
- * A role the registry does not define yet launches from the profile's own accounts, as before.
+ * control plane chooses the eligible account of the role used least recently — placed on this
+ * host, logged in, within quota, under its session and concurrency limits — and records the
+ * choice and its reason (see fleet.ts). The profile then supplies only the Graphyard identity the
+ * session acts under. A role the registry does not define yet launches from the profile's own
+ * accounts, as before.
  */
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
 /** The agent registry session a launch was chosen under, or undefined when no registry chose it. */
@@ -384,6 +395,11 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
     await recordEnvironmentLog(config, [], [], { key: selectionKey(role, profile.name), environment: null, kind: null, at, work: probe.work ?? null }).catch(() => {});
     return { account: null, health: null, skipped: [] as AccountSkip[] };
   }
+  const log = await readEnvironmentLog(config).catch(() => null);
+  // An account's spread time: when it last served this role here, or never — which sorts oldest, so
+  // an unused account is the first a fresh rotation reaches.
+  const lastPick = (name: string) => { const at = Date.parse(log?.picks?.[`${role}:${name}`] ?? ''); return Number.isFinite(at) ? at : Number.NEGATIVE_INFINITY; };
+  let chosen: { environment: AgentEnvironment; health: EnvironmentHealth } | null = null;
   for (const name of profile.accounts) {
     const environment = (config.environments ?? []).find(candidate => candidate.name === name);
     if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null, cause: 'unconfigured' }); continue; }
@@ -391,12 +407,14 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
     if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
     checked.push(health);
-    if (health.healthy) {
-      await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), environment: environment.name, kind: environment.kind, at, work: probe.work ?? null }).catch(() => {});
-      return { account: environment, health, skipped };
-    }
     // `checkAgentEnvironment` reports exactly two faults: not logged in, or quota spent.
-    skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null, cause: health.loggedIn ? 'exhausted' : 'logged-out' });
+    if (!health.healthy) { skipped.push({ at, role, profile: profile.name, environment: name, reason: health.reason!, work: probe.work ?? null, cause: health.loggedIn ? 'exhausted' : 'logged-out' }); continue; }
+    const prior = lastPick(name);
+    if (!chosen || prior < lastPick(chosen.environment.name)) chosen = { environment, health };
+  }
+  if (chosen) {
+    await recordEnvironmentLog(config, checked, skipped, { key: selectionKey(role, profile.name), picked: `${role}:${chosen.environment.name}`, environment: chosen.environment.name, kind: chosen.environment.kind, at, work: probe.work ?? null }).catch(() => {});
+    return { account: chosen.environment, health: chosen.health, skipped };
   }
   await recordEnvironmentLog(config, checked, skipped).catch(() => {});
   throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);

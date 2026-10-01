@@ -286,7 +286,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   const recorded: Registry = await ok('agent-registry/document', coordinator);
   const session = recorded.sessions.at(-1)!;
   assert.deepEqual([session.role, session.account, session.runtime, session.model, session.host, session.work, session.principal, session.selectedBy, session.endedAt], ['worker', 'claude-fresh', 'claude', 'opus', HOST, dispatched.work, 'implementer', 'master', null]);
-  assert.match(session.reason, /claude-fresh is the first eligible account for worker \(preference 5 of 5; 1 of 2 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
+  assert.match(session.reason, /claude-fresh is the eligible account of worker used least recently \(preference 5 of 5; last used never; 1 of 2 concurrent\) — passed over claude-off is disabled; claude-spent quota is exhausted/);
   assert.deepEqual(session.skipped.map(entry => entry.account), ['claude-off', 'claude-spent', 'claude-out', 'claude-remote']);
   const observed = Object.fromEntries(recorded.accounts.map(account => [account.name, account.quota]));
   assert.deepEqual([observed['claude-spent'].state, observed['claude-spent'].source, observed['claude-spent'].observedBy, observed['claude-out'].loggedIn, observed['claude-fresh'].state], ['exhausted', 'probe', 'master', false, 'available']);
@@ -537,11 +537,15 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
 
   const applied = await registryCommand({ hostId: HOST }, ['propose', '--directory', directory, '--apply'], cli, { home, executables: name => name === 'muse' }) as any;
   assert.equal(applied.applied, true); assert.equal(applied.registry.configured, true);
-  // A working fleet, with no profile account written by hand: the first dispatch runs on a discovered login.
+  // A working fleet, with no profile account written by hand: the first dispatch runs on a discovered
+  // login, with that login's own home. Which one is the role's least recently used (GY-961), and this
+  // file's earlier tests leave sessions on claude-b in the shared registry, so the order alone does not name it.
   const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex' }]);
   const calls: string[][] = [];
-  const first = await dispatch(root, config, 'worker-a', network({ 'claude-b-oauth-token': { five: 1, seven: 1 } }), calls);
-  assert.equal(first.account!.environment, 'claude-b'); assert.equal(tabEnvironment(calls[0]).CLAUDE_CONFIG_DIR, isolated);
+  const first = await dispatch(root, config, 'worker-a', network({ 'claude-b-oauth-token': { five: 1, seven: 1 }, 'claude-oauth-token': { five: 1, seven: 1 } }), calls);
+  const discovered: Record<string, [string, string]> = { 'claude-b': ['CLAUDE_CONFIG_DIR', isolated], 'codex-a': ['CODEX_HOME', codexHome], claude: ['CLAUDE_CONFIG_DIR', join(home, '.claude')] };
+  const [variable, expectedHome] = discovered[first.account!.environment!] ?? assert.fail(`the first dispatch ran on ${first.account!.environment}, not a discovered login`);
+  assert.equal(tabEnvironment(calls[0])[variable], expectedHome);
   // Running it again proposes only what is new, and never reorders what an operator arranged.
   await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['codex-a', 'claude-b'], concurrency: 7 }, reason: 'An operator\'s own order' });
   await writeFile(join(directory, 'claude-c', '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'claude-c-token', refreshToken: 'r', expiresAt: Date.now() + hour } }));
