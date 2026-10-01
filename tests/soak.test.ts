@@ -229,12 +229,15 @@ function soakSessionDirectory(): string {
 }
 
 let pgServer: EmbeddedPostgres, pgPort: number, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
-const planes: { store: Store; http: ReturnType<typeof server> }[] = [];
+// Every control plane the file started, each closed before the shared Postgres server stops.
+const stores: Store[] = [];
+const listeners: ReturnType<typeof server>[] = [];
 /**
  * A control plane on its own database of the shared Postgres server, which every later day then
  * runs against. Days share one by default; a day that needs none of the earlier days' items starts
  * a fresh one, since the loop's reconciliation and job passes read every item the database holds,
- * so each earlier day's items make every cycle of a later day slower (GY-971).
+ * so each earlier day's items make every cycle of a later day slower: the days late in the file ran
+ * past their bounds on a slow CI runner (GY-971).
  */
 async function controlPlane(database: string) {
   await pgServer.createDatabase(database);
@@ -244,7 +247,7 @@ async function controlPlane(database: string) {
   await setup.connect();
   for (const statement of clockSql) await setup.query(statement);
   // A later plane starts at the simulated time the earlier days reached.
-  if (planes.length) await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
+  if (stores.length) await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
   await setup.query(`ALTER DATABASE ${database} SET search_path = public, pg_catalog`);
   await setup.end();
   store = new Store(connection); await store.init();
@@ -253,7 +256,7 @@ async function controlPlane(database: string) {
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  planes.push({ store, http });
+  stores.push(store); listeners.push(http);
 }
 before(async () => {
   // An offset no other test file takes: two files sharing a port fail in their `before` hook.
@@ -276,7 +279,8 @@ before(async () => {
 });
 after(async () => {
   clock.uninstall();
-  for (const plane of planes) { await new Promise<void>(resolve => plane.http.close(() => resolve())); await plane.store.close(); }
+  for (const listener of listeners) await new Promise<void>(resolve => listener.close(() => resolve()));
+  for (const store of stores) await store.close();
   if (pgServer) await pgServer.stop();
 });
 
@@ -764,9 +768,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
 
   // ---- Production: two deploys, each a new control-plane build serving the base tip it was cut from. ----
   const production = { build: sha('build', 0), sha: github.tip, deploys: [] as { at: number; build: string; sha: string }[] };
-  // GY-852: the reassigned day runs on a control plane the earlier days share, so its loop reads
-  // only its own items: an earlier day's half-finished item (a rework decision nobody adopted)
-  // would otherwise be dispatched, pushed and refused here for its linked pull request.
+  // GY-852: the reassigned day's loop reads only its own items: on a control plane an earlier day
+  // shared, that day's half-finished item (a rework decision nobody adopted) would be dispatched,
+  // pushed and refused here for its linked pull request. It and the mechanical day now start planes
+  // of their own (GY-971), and keep the filter so neither depends on where it falls in the file.
   const ownItems = options.reassigned || options.mechanical ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
@@ -1753,6 +1758,9 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   // sit waiting when the window closes. The loop must relaunch them — uncounted against the launch
   // bound, one at a time on the launcher, the older request taking the freed capacity first, each
   // within a couple of cycles of the window closing — with no hand action, and both items delivered.
+  // The day needs none of the earlier days' items, so it runs on a control plane of its own and its
+  // cycles, and the wall-clock budget below, do not grow with every day the file ran before it.
+  await controlPlane('soak_capacity');
   const began = performance.now();
   const window = { from: 50 * minute, to: 130 * minute };
   const day = await simulateDay({ hours: 6, capacityWait: window });
@@ -1941,6 +1949,9 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   // into it, nothing closes it, and the item is handed to a new attempt that delivers it. The
   // routing repeats per cycle here, which is why it lives in this world.
   const n = basePlan.reassigned;
+  // Its loop reads only its own items, so it runs on a control plane of its own, whose cycles do not
+  // grow with every earlier day's items.
+  await controlPlane('soak_reassigned');
   const { items, final, violations, failures, lost, herdrClosed, prompts, state, reassign } = await simulateDay({
     hours: 6, reassigned: n,
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
