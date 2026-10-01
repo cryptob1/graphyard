@@ -37,6 +37,7 @@ import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMer
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
+import { isSettledSummary, lockedRows, lockedWork, workIdByRef } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -527,7 +528,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
@@ -557,7 +558,7 @@ export class Engine {
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const all: Work[] = (await this.store.leasePool.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all = await lockedWork(this.store.leasePool, [id]);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
@@ -672,7 +673,7 @@ export class Engine {
     const write = async () => (await this.store.pool.query(`WITH live AS (
         SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
           ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
-        FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
+        FROM work_items WHERE id = ${workIdByRef('$1')} AND document->'lease'->>'owner'=$2
           AND (document->'lease'->>'epoch')::int=$5 AND (document->'lease'->>'expiresAt')::timestamptz>=$6::timestamptz LIMIT 1),
       recorded AS (INSERT INTO events(work_id,actor,kind,payload) SELECT id, $2, $3, $4::jsonb FROM live RETURNING work_id)
       SELECT live.grace_until, clock_timestamp() AS now FROM live JOIN recorded ON recorded.work_id=live.id`,
@@ -727,7 +728,7 @@ export class Engine {
         if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, receipt.result as Work, this.repository);
         return receipt.result as Work;
       }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
       // Set by the requirements command: the revision was a purely additive planned-files
@@ -1364,7 +1365,7 @@ export class Engine {
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
   private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string): Promise<Work | undefined> {
-    return (await db.query(`SELECT document FROM work_items WHERE document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
+    return (await db.query(`SELECT document FROM work_items w WHERE w.id IN (SELECT id FROM work_index WHERE NOT settled) AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
   }
   /**
    * Claim the next action for a stateless executor.
@@ -1423,7 +1424,7 @@ export class Engine {
       const transition = settleAction(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, data.result, data.reason, now);
       // A row settled on a delivered item was the last claim holding it open: it is retired with
       // the rest of what the delivery no longer needs, rather than offered again (GY-185).
-      if (work!.stage === 'done') settleDelivered(work!, (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document.id === work!.id ? work! : r.document as Work), now);
+      if (work!.stage === 'done') settleDelivered(work!, (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item), now);
       await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
       if (work!.submission) await wakeJob(db, work!.id);
       const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
@@ -1559,7 +1560,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
       demand(data.expectedRevision <= work.revision, 'Task changed before the merge was requested; retry');
@@ -1610,7 +1611,7 @@ export class Engine {
       const delivered = work.stage === 'done';
       if (!applyRevert(work, mergeSha, revert, now)) return work;
       if (delivered && work.stage !== 'done') {
-        const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+        const all = await lockedWork(db, [work.id]);
         this.evaluate(work, all.map(item => item.id === work.id ? work : item), now);
         await this.recordDispatch(db, work, now);
       }
@@ -1656,7 +1657,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
       const provider = reviewProviderOf(work.policy);
@@ -1684,7 +1685,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
@@ -1805,7 +1806,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
       requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
@@ -1863,7 +1864,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the branch was restored');
       const restore = refresh.restore;
@@ -1945,7 +1946,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done', 'Task changed before the queue ejection');
       requireCurrent(work.queue, 'Queue entry already left the merge queue');
@@ -1971,7 +1972,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
       const request = work.reviewRequest;
@@ -2063,29 +2064,28 @@ export class Engine {
    * finished. Between batches the lock is released and the event loop runs, so a renewal waits
    * at most one batch however long the whole pass takes. One item always completes per batch.
    *
-   * A pass therefore reads every document once per batch, O(batches x items) (GY-392), and that
-   * is kept deliberately: every item is evaluated against `all`, the whole fleet as it stands
-   * (dependencies, the merge queue, fleet capacity), so each batch needs the full snapshot, not
-   * just the rows it reconciles. A keyset read of the batch's own rows saves nothing while `all`
-   * must still be read, and a snapshot carried across batches would evaluate items against state
-   * that the heartbeats and requests admitted between batches have already changed. The number
-   * of batches is bounded by the pass's duration over reconcileBatchMs, not by the backlog.
+   * Every item is evaluated against `all`, the whole fleet as it stands (dependencies, the merge
+   * queue, fleet capacity), so each batch re-reads it rather than carrying a snapshot across
+   * batches that the heartbeats and requests admitted between them have already changed (GY-392).
+   * That read is `lockedWork` (GY-1027): the unsettled items whole and each settled delivery as its
+   * work-index summary from the in-process cache, so it does not grow with the history — on
+   * 2026-10-01 re-reading ~1000 whole documents cost each batch 15-19 s for 1 s of work. A settled
+   * delivery needs nothing reconciled (it holds no queue entry, action or lease) and is skipped. The
+   * batch budget counts from before the read, so a batch's whole lock hold stays within it.
    */
   async reconcile() {
     let cursor = 0, first = true;
     for (;;) {
       const finished = await this.store.transaction(async (db, now) => {
-        const rows = (await db.query('SELECT number, document FROM work_items ORDER BY number')).rows;
-        const all: Work[] = rows.map(row => row.document);
+        const started = performance.now();
+        const rows = await lockedRows(db), all = rows.map(row => row.document);
         // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
         if (first) { await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now); first = false; }
-        const started = performance.now();
         let reconciled = 0;
-        for (const [index, row] of rows.entries()) {
-          const number = Number(row.number);
-          if (number <= cursor) continue;
+        for (const { number, document: work } of rows) {
+          if (number <= cursor || isSettledSummary(work)) continue;
           if (reconciled && performance.now() - started >= this.reconcileBatchMs) return false;
-          await this.reconcileItem(db, all[index], all, now);
+          await this.reconcileItem(db, work, all, now);
           cursor = number; reconciled++;
         }
         return true;
@@ -2181,7 +2181,7 @@ export class Engine {
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
         requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
       }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');

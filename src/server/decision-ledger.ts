@@ -2,6 +2,7 @@ import type pg from 'pg';
 import { demand, operatorScopeIncludes, standingEscalations, type Principal, type Work } from '../model.js';
 import { foldDecisions, type Decision, type DecisionState } from '../model/approval.js';
 import type { Services } from './routes.js';
+import { workIdByRef } from '../store/locked-read.js';
 
 /**
  * The read half of two-party decisions: what the append-only ledger says a decision is.
@@ -90,7 +91,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 /** One work document by its id (the primary key) or its key, read alone. */
 export async function findDecisionSubject(db: { query: Db['query'] }, id: string): Promise<Work | undefined> {
   const { rows } = uuidPattern.test(id) ? await db.query('SELECT document FROM work_items WHERE id=$1', [id])
-    : await db.query("SELECT document FROM work_items WHERE document->>'key'=$1", [id]);
+    : await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id]);
   return rows[0]?.document;
 }
 

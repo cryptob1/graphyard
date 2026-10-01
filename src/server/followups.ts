@@ -3,6 +3,7 @@ import { demand, operatorCapability, type Principal, type Work } from '../model.
 import { isDelivered } from '../model/closure.js';
 import { appendedDescription, followUpAppendSchema, followUpEntries, followUpParent, mergeDuplicateFollowUps, mergeFollowUpEntries, triageRecordSchema, untriaged, type FollowUpEntry } from '../model/machine-backlog.js';
 import { save } from '../store.js';
+import { lockedWork } from '../store/locked-read.js';
 import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
 import type { Services } from './routes.js';
@@ -13,7 +14,8 @@ import type { Services } from './routes.js';
 // an approver agreed. See model/machine-backlog.ts.
 
 type Db = pg.PoolClient;
-const readAll = async (db: Db): Promise<Work[]> => (await db.query('SELECT document FROM work_items ORDER BY number FOR UPDATE')).rows.map(row => row.document);
+// Every open item and the named ones whole, locked; settled deliveries as their summaries (GY-1027).
+const readAll = (db: Db, focus: string[] = []): Promise<Work[]> => lockedWork(db, focus, { forUpdate: true });
 const recordDispatch = (services: Services, db: Db, work: Work, now: Date) =>
   (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
 /** The master's identities: its coordinator, its operator agent (holding `intent:create`), or an admin. */
@@ -34,7 +36,7 @@ export async function appendFollowUps(services: Services, caller: Principal, id:
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as { key: string; added: number };
-    const all = await readAll(db);
+    const all = await readAll(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     masterOnly(actor, work, services, 'append review follow-ups');
     const parent = followUpParent(work!);
@@ -102,7 +104,7 @@ export async function recordTriage(services: Services, caller: Principal, id: st
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const all = await readAll(db);
+    const all = await readAll(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(untriaged(work!), `${work!.key} is not a machine-filed item awaiting triage`, 409);
     const judgement = data.judgement;

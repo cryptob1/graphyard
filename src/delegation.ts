@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, standingEscalations, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
 import { save, wakeJob, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
+import { workIdByRef } from './store/locked-read.js';
 
 export interface DelegationLimits { maxLeads: number; maxEngineersPerLead: number; minReviewers: number; maxReviewers: number }
 export const defaultDelegationLimits: DelegationLimits = { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 };
@@ -211,7 +212,7 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
   demand(actor.role === 'slice-lead' && actor.slice, 'Slice lead permission required', 403);
   const data = rulingSchema.parse(input);
   return once(store, actor, key, { command: 'lead.ruling', id, data }, async (db, now) => {
-    const work = (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document as Work | undefined;
+    const work = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document as Work | undefined;
     demand(work, 'Work item not found', 404); demand(work.slice === actor.slice, 'Slice leads may coordinate only their own slice', 403);
     // Delivery is an immutable snapshot. A ruling must never bump a delivered
     // item's revision or attach new escalation state to it; use a follow-up task.
@@ -254,7 +255,7 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
 // still written: a forbidden request must never be silent history.
 async function recordRefusal(store: Store, actor: Principal, id: string | null, kind: string, payload: (work?: Work) => Record<string, unknown>, scoped: (work: Work) => boolean = () => true) {
   await store.transaction(async (db, now) => {
-    const work = id ? (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document as Work | undefined : undefined;
+    const work = id ? (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document as Work | undefined : undefined;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work && scoped(work) ? work.id : null, actor.id, kind, JSON.stringify({ ...payload(work), at: now.toISOString() })]);
   });
 }
