@@ -67,6 +67,15 @@ export interface ControlPlaneClock { clockOffset: { min: number; max: number }; 
 /** The control-plane time and clock bounds a containment assessment is judged with, and the read that measured them. */
 export interface ContainmentObservation { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source'] }
 /** How long the timed clock read may take before the loop falls back to the snapshot's bounds. */
+/** The loop's containment effects, part of DaemonEffects. */
+export interface ContainmentEffects {
+  /** Verifies on this host which quarantined supervisors are demonstrably gone, against clock bounds `controlPlaneClock` measures with a light timed read, not the slow snapshot read (GY-795). */
+  containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
+  controlPlaneClock?: () => Promise<ControlPlaneClock>;
+  /** Settles one quarantine this host verified dead, so the item can be claimed again. */
+  settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
+}
+
 export const controlPlaneClockTimeoutMs = 10_000;
 /**
  * Bound the local clock against the control plane with a light timed read (GY-795): a `HEAD /`

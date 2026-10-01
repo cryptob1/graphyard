@@ -22,7 +22,7 @@ import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
-import { readControlPlaneClock, type ControlPlaneClock, type ContainmentObservation } from '../master/containment.js';
+import { readControlPlaneClock, type ContainmentEffects } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
@@ -68,7 +68,8 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects {
+/** The containment effects (verify, clock, settle) live with the containment clock in src/master/containment.ts. */
+export interface DaemonEffects extends ContainmentEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -209,11 +210,6 @@ export interface DaemonEffects {
    * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
-  /** Verifies on this host which quarantined supervisors are demonstrably gone, against clock bounds `controlPlaneClock` measures with a light timed read, not the slow snapshot read (GY-795). */
-  containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
-  controlPlaneClock?: () => Promise<ControlPlaneClock>;
-  /** Settles one quarantine this host verified dead, so the item can be claimed again. */
-  settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
   /**
