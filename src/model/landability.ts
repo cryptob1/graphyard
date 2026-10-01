@@ -6,6 +6,7 @@ import { inheritedObligations, requiredProofs } from './bootstrap.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
 import { queuedRegressions, regressionRefusals, staleTipRegressions } from '../regression-guard.js';
+import { itemLane, laneRequiresProof } from './policy.js';
 
 /**
  * GY-878. One landability verdict. Whether a candidate can land was answered twice — by the build
@@ -119,8 +120,12 @@ function acceptanceFamily(work: Work, all: Work[], now: Date): (LandabilityReaso
   const reasons: (LandabilityReason & { proof?: string })[] = [];
   // A bootstrap criterion's proofs are deferred here and required of the next change that
   // touches the same contract; review, CI and every other criterion still gate this one.
+  // The item's risk lane is an input to this verdict (GY-883): it decides which of the criteria's
+  // proofs are required — low none of their producer-run or manual ones, medium no manual one,
+  // high all — while an e2e proof and an inherited obligation are required in every lane.
+  const lane = itemLane(work);
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
-    if (unproven(proof)) reasons.push({ gate: 'acceptance', reason: `${ac.id}: ${demanded(proof)}`, proof });
+    if (laneRequiresProof(lane, proof) && unproven(proof)) reasons.push({ gate: 'acceptance', reason: `${ac.id}: ${demanded(proof)}`, proof });
   }
   for (const obligation of inheritedObligations(work, all)) {
     if (unproven(obligation.proof)) reasons.push({ gate: 'acceptance', reason: `Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`, proof: obligation.proof });
