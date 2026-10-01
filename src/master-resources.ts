@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
+import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import type { Work } from './model.js';
 
 /**
@@ -228,9 +229,9 @@ export const resourceRegistry: ResourceDefinition[] = [
   },
   {
     id: 'database-capacity', title: 'Control-plane database', unit: 'bytes',
-    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane (default ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured bound also fails health): set it to the database volume's size`,
+    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane, else the database volume's size when the plane can read it, else ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured or measured bound also fails health`,
     usage: '/healthz resources.database: pg_database_size of the plane\'s database', owner: 'the control plane (src/store)',
-    reclaim: 'none automatic: the ledger is append-only history; grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
+    reclaim: 'receipts past one day are pruned and routine ledger rows past the retention window compacted (store/compaction.ts); space returns to Postgres for reuse, to the volume only after VACUUM FULL; otherwise grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
     remedy: 'grow the database volume and raise GRAPHYARD_DATABASE_MAX_BYTES to match before writes fail',
     warnBelow: tenthOf, symptoms: [/could not extend file|No space left on device|disk full/i],
     read: input => [{ id: '', used: input.plane?.database?.used ?? null, bound: input.plane?.database?.bound ?? null, detail: input.plane?.database?.detail ?? (input.plane ? null : 'the plane\'s /healthz could not be read'), reclaimable: 0 }],
@@ -418,6 +419,8 @@ export interface ResourceReclaimReport {
   reaped: { review: number; producer: number };
   closed: { name: string; pane: string; reason: string }[];
   released: { name: string; ledger: 'review' | 'producer'; reason: string }[];
+  /** The stale /tmp directories the pass removed and the bytes they freed (GY-421). */
+  tmp: { removed: number; bytes: number };
   errors: string[];
 }
 export const resourceReportFile = (root: string) => resolve(root, '.graphyard/resource-reclaims.json');
@@ -444,10 +447,37 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * or a running session needs, and it never touches a worker's pane: the loop's first step closes
  * those once their lease ends.
  */
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void> } = {}): Promise<ResourceReclaimReport> {
+/**
+ * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
+ * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoot`, the host's temporary directory unless the
+ * caller names another (a test's scratch root, so it never sweeps the developer's real /tmp).
+ */
+export const loopTmpReclaimOptions = (tmpRoot?: string): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, ...(tmpRoot ? { tmpRoot } : {}) });
+/** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
+let tmpPass: Promise<void> | null = null;
+let tmpFinished: TmpReclaimReport | null = null;
+/**
+ * Hand over the last finished /tmp pass's report, if one is waiting, and start the next pass when
+ * none is running. The pass is never awaited here: its bounded work runs beside the cycle.
+ */
+export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => reclaimTmpDirectories(loopTmpReclaimOptions())): TmpReclaimReport | null {
+  const finished = tmpFinished;
+  tmpFinished = null;
+  if (!tmpPass) {
+    tmpPass = run()
+      .then(report => { tmpFinished = report; })
+      .catch(error => { tmpFinished = { at: new Date().toISOString(), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [error instanceof Error ? error.message : String(error)] }; })
+      .finally(() => { tmpPass = null; });
+  }
+  return finished;
+}
+/** Wait for the /tmp pass in flight, if any: for a caller that must see it finish. */
+export const settleTmpReclaim = async () => { await tmpPass; };
+
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport> } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
-  const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], errors: [] };
+  const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [] };
   // A pane is closed only once it has been seen finished and unowned by an earlier pass at least
   // the grace ago: a session launched a moment ago holds its name before its record is written.
   // A pending session is failed as absent only once every pass for `stuckSessionMs` missed it: one
@@ -523,7 +553,21 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
     }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
-  const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.errors.length);
+  // The host's own temporary directories (GY-421): a bounded pass removes what earlier runs left —
+  // a live owner keeps its directory, a dead owner's goes whatever its age, and an ownerless one
+  // goes once it is older than `tmpReclaimMinAgeMs` and no live process holds it open. Both bounds
+  // (count and wall-clock work) hold per pass, and the pass runs beside the cycle rather than in
+  // it: a host with thousands of leftovers never stalls a cycle, and each cycle records what the
+  // last finished pass freed. Ages are judged on the host's real clock, never the cycle's `now`,
+  // which a caller may set anywhere: a directory is old only when it truly is.
+  // `tmpRoot` names the directory scanned and `tmpPass` the pass itself, for a caller that must
+  // keep the sweep off the host's /tmp or watch it run; the loop passes neither.
+  const tmp = takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoot)));
+  if (tmp) {
+    report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
+    report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
+  }
+  const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
   if (took || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
     try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen }); }
     catch (error) { report.errors.push(`Recording the reclaim: ${error instanceof Error ? error.message : String(error)}`); }
@@ -537,6 +581,7 @@ export function describeReclaim(report: ResourceReclaimReport) {
     report.reaped.review || report.reaped.producer ? `reaped ${report.reaped.review} review and ${report.reaped.producer} producer ledger record(s)` : '',
     report.closed.length ? `closed ${report.closed.length} finished session(s) and released their names (${report.closed.map(entry => entry.name).join(', ')})` : '',
     report.released.length ? `released ${report.released.length} stuck session slot(s) (${report.released.map(entry => entry.name).join(', ')})` : '',
+    describeTmpReclaim(report.tmp.removed, report.tmp.bytes),
     report.errors.length ? `${report.errors.length} could not be reclaimed: ${report.errors[0]}` : '',
   ].filter(Boolean);
   return parts.length ? `Resource reclaim: ${parts.join('; ')}` : null;
@@ -618,20 +663,42 @@ export async function probeWrites(pool: { connect(): Promise<{ query(sql: string
 }
 
 /**
- * The plane's database size against its declared bound. The default bound is a guess at a volume
- * nobody sized, so it is advisory: `master status` warns on it, but only a configured bound fails health.
+ * The size of the volume holding the database's data directory, when the plane can see it: the
+ * directory is readable to the database role (`data_directory` needs pg_read_all_settings) and the
+ * same path exists on this host — an embedded, compose or same-machine database. A database on its
+ * own host (a managed service) answers null and the default bound stands.
+ */
+export async function readDatabaseVolumeBytes(pool: { query(sql: string): Promise<{ rows: any[] }> }): Promise<{ bytes: number; path: string } | null> {
+  try {
+    const path = String((await pool.query("SELECT current_setting('data_directory') AS path")).rows[0]?.path ?? '');
+    if (!path) return null;
+    const volume = await statfs(path);
+    const bytes = Number(volume.blocks) * Number(volume.bsize);
+    return Number.isFinite(bytes) && bytes > 0 ? { bytes, path } : null;
+  } catch { return null; }
+}
+
+/**
+ * The plane's database size against its bound: GRAPHYARD_DATABASE_MAX_BYTES when set, else the
+ * size of the database's own volume when the plane can read it (GY-979: the fixed 10 GiB default
+ * reported headroom a 19 GB volume did not have, or lacked), else the default. Only the default is
+ * a guess at a volume nobody sized, so it alone is advisory: `master status` warns on it, but a
+ * configured or measured bound fails health.
  */
 export async function readDatabaseCapacity(pool: { query(sql: string): Promise<{ rows: any[] }> }, env: NodeJS.ProcessEnv = process.env): Promise<PlaneReading> {
   const configured = Number(env.GRAPHYARD_DATABASE_MAX_BYTES);
   const set = Number.isFinite(configured) && configured > 0;
-  const bound = set ? configured : defaultDatabaseMaxBytes;
+  const volume = set ? null : await readDatabaseVolumeBytes(pool);
+  const bound = set ? configured : volume?.bytes ?? defaultDatabaseMaxBytes;
+  const advisory = !set && !volume;
+  const against = set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : volume ? `the size of the database volume at ${volume.path}` : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset and the database volume not readable from the plane; it warns but does not fail health)';
   try {
     const used = Number((await pool.query('SELECT pg_database_size(current_database()) AS size')).rows[0].size);
     // The largest tables, so growth is attributed from outside the database (a catalogue read, no scan).
     const tables = await pool.query(`SELECT relname AS table, pg_total_relation_size(c.oid) AS bytes FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relkind = 'r' AND n.nspname = 'public' ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 6`).then(r => r.rows.map(row => ({ table: String(row.table), bytes: Number(row.bytes) })), () => undefined);
-    return { used, bound, advisory: !set, ...(tables ? { tables } : {}), detail: `pg_database_size against ${set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset; it warns but does not fail health)'}` };
-  } catch (error) { return { used: null, bound, advisory: !set, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
+    return { used, bound, advisory, ...(tables ? { tables } : {}), detail: `pg_database_size against ${against}` };
+  } catch (error) { return { used: null, bound, advisory, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
 }
 
 const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>();

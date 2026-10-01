@@ -1,7 +1,6 @@
 import { before, after, test } from 'node:test';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -18,7 +17,7 @@ const url = (database: string) => `postgres://graphyard:testing-only@127.0.0.1:$
 
 before(async () => {
   port = Number(process.env.GRAPHYARD_MIGRATION_LOAD_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 182);
-  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-migration-load-'));
+  const scratch = await temporaryDirectory('migration-load');
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
   for (const name of ['skips', 'upgrade', 'load']) await postgres.createDatabase(name);

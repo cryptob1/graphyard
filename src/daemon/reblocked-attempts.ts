@@ -3,6 +3,7 @@
 import type { Work } from '../model.js';
 import type { ExhaustionRecord } from '../model/capacity.js';
 import type { DaemonState } from './state.js';
+import { credentialBlockedMarker } from '../worker-credential.js';
 
 /**
  * GY-867. Unblocking an attempt only re-prompts the same session (cycle-sessions 1e). When what
@@ -52,10 +53,17 @@ export function preferOtherRuntime<T extends { profile: { kind?: string | null; 
 }
 
 /**
+ * Whether a worker end counts on the retry ladder: an attempt ended past its role's time box
+ * (GY-885), or ended on a GitHub credential failure (GY-999) — both relaunched fresh, and both
+ * able to recur on every relaunch, so both are bounded by the same backoff and cap.
+ */
+export const countsOnRetryLadder = (end: Pick<ExhaustionRecord, 'reason'>) => end.reason.startsWith(overlongMarker) || end.reason.startsWith(credentialBlockedMarker);
+
+/**
  * GY-885: the consecutive attempts of this item that ended without submitting, each past its
- * role's time box — the trailing run of worker ends whose cause is an interruption and whose
- * reason carries the overlong marker. The run stops at the first end that is not an overlong
- * ending (a reblocked or idle hand-over breaks the row), at any attempt at or before the one
+ * role's time box or on a GitHub credential failure (GY-999) — the trailing run of worker ends
+ * whose cause is an interruption and whose reason carries either marker. The run stops at the
+ * first end that carries neither (a reblocked or idle hand-over breaks the row), at any attempt at or before the one
  * that submitted (a submission is what "in a row" is counted from), and at ends the item's
  * applied cap decision already approved through (older than `resumeApprovedAt`): those belong
  * to the round the approver let start, not to this one. Every one of these facts is read from
@@ -68,7 +76,7 @@ export function attemptEndsNeedingRetry(item: Pick<Work, 'capacity' | 'submissio
   for (const end of [...(item.capacity?.exhaustions ?? [])].reverse()) {
     if (end.role !== 'worker' || end.cause !== 'interrupted') break;
     if ((end.epoch ?? 0) <= submitted) break;
-    if (!end.reason.startsWith(overlongMarker)) break;
+    if (!countsOnRetryLadder(end)) break;
     if (Date.parse(end.at) <= resumeApprovedAt) break;
     run.unshift(end);
   }

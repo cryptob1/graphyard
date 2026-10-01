@@ -1,10 +1,10 @@
 import { test } from 'node:test';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dispatchOrder } from '../src/coordination.js';
+import { dispatchOrder, dispatchStarvationMs } from '../src/coordination.js';
 import { hotBeside, hotFileSet, hotspots } from '../src/daemon/hotspots.js';
 import { dispatchKey } from '../src/daemon/reconcile.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -85,7 +85,7 @@ function daemonConfig(credentialFile: string, workers: WorkerProfile[]): MasterC
 }
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 async function daemon(profiles: string[]) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-hotspot-scheduling-'));
+  const directory = await temporaryDirectory('hotspot-scheduling');
   const token = join(directory, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
   const credential = join(directory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
   const master = daemonConfig(token, profiles.map(name => launchProfile(name, credential)));
@@ -98,7 +98,7 @@ async function daemon(profiles: string[]) {
     requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
-  return { master, effects, log, state: emptyDaemonState(master), set: (items: Work[], atMs = 0) => { snapshotWork = items; offsetMs = atMs; }, cleanup: () => rm(directory, { recursive: true, force: true }) };
+  return { master, effects, log, state: emptyDaemonState(master), set: (items: Work[], atMs = 0) => { snapshotWork = items; offsetMs = atMs; }, cleanup: () => Promise.resolve() };
 }
 
 test('unit:dispatch-prefers-non-overlapping — the durable loop offers the cold item first and still dispatches every ready item in one cycle; when only hot items are ready they all dispatch too', async () => {
@@ -136,4 +136,21 @@ test('unit:hotspot-overlap-recorded — the dispatch record names the hot file a
     assert.equal(coldRecord?.state, 'done');
     assert.ok(!coldRecord.detail.includes('hot spot'), 'a cold dispatch records no contention');
   } finally { await loop.cleanup(); }
+});
+
+test('unit:dispatch-ages-starving-items — a same-priority item waiting past the starvation bound is offered first, whatever its scope or heat', () => {
+  const now = Date.parse('2026-10-01T04:00:00Z');
+  const item = (key: string, plannedFiles: string[], enteredMinutesAgo: number, priority = 0) => ({ key, priority, plannedFiles, createdAt: new Date(now - enteredMinutesAgo * 60_000).toISOString(), stageEnteredAt: new Date(now - enteredMinutesAgo * 60_000).toISOString() } as unknown as Work);
+  const broadStarving = item('GY-1023', ['src/', 'tests/', 'docs/'], 200);
+  const smallFresh = item('GY-2001', ['src/one.ts'], 5);
+  const hot = new Set(['docs/master-agent.md']);
+  // Without a clock the old order holds: the smaller, cold item first.
+  assert.deepEqual([broadStarving, smallFresh].sort((a, b) => dispatchOrder(a, b, hot)).map(w => w.key), ['GY-2001', 'GY-1023']);
+  // With the clock, the item past the bound goes first even though it is broader and hot.
+  assert.deepEqual([smallFresh, broadStarving].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key), ['GY-1023', 'GY-2001']);
+  // Among starving items the usual order decides (the narrower GY-0900 first); priority still outranks starvation.
+  const olderStarving = item('GY-0900', ['src/two.ts'], 300);
+  const urgentFresh = item('GY-3000', ['src/three.ts'], 1, -1);
+  assert.deepEqual([broadStarving, olderStarving, urgentFresh, smallFresh].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key), ['GY-3000', 'GY-0900', 'GY-1023', 'GY-2001']);
+  assert.equal(dispatchStarvationMs, 60 * 60_000);
 });

@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fakeTransport, type Transport } from '../src/install/transport.js';
 import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 export const REPOSITORY = 'owner/project';
 export const GRAPHYARD_APP_ID = 200_001;
@@ -13,7 +13,7 @@ export const CI_APP_ID = 15_368;
 export const HEAD_SHA = 'a'.repeat(40);
 
 export async function temporaryRepository(repository = REPOSITORY) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-install-'));
+  const root = await temporaryDirectory('install');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', `git@github.com:${repository}.git`], { cwd: root });
   await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'project', scripts: { test: 'node --test', typecheck: 'tsc --noEmit' } }));
@@ -121,7 +121,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   const repository = options.repository ?? REPOSITORY;
   const reused = !!(options.root && options.configHome);
   const root = options.root ?? await temporaryRepository(repository);
-  const configHome = options.configHome ?? await mkdtemp(join(tmpdir(), 'graphyard-config-'));
+  const configHome = options.configHome ?? await temporaryDirectory('config');
   const installId = repository.replace('/', '-');
   const service = options.service ?? `graphyard-${installId}`;
   const workdir = options.workdir ?? (options.provider === 'compose' ? `${configHome}/${installId}/compose` : `/opt/graphyard/${installId}`);

@@ -1,6 +1,7 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { pathScopeContains } from '../model/scope.js';
@@ -12,6 +13,7 @@ import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema }
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
+import { runtimeSandboxes } from '../worker-sandbox.js';
 
 const safeEnvironment = z.record(
   z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
@@ -246,10 +248,19 @@ export const masterRunSchema = z.object({
    */
   awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
   awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
+  // How long a candidate's push-triggered acceptance run has before the loop dispatches the proof
+  // workflow as a fallback, so a busy CI queue does not get a duplicate run per head; unset, 0.
+  proofDispatchGraceMinutes: z.number().int().min(0).max(1440).optional(),
   // How long a launched reviewer or producer session may show no activity before the loop
   // re-prompts it once, and how long after that re-prompt a still-quiet session is recorded as
   // never started (see acknowledgeLaunch); default 90.
   acknowledgementSeconds: z.number().int().min(30).max(900).optional(),
+  // The loop-launched master session (GY-898): how long one master session may run before the
+  // loop rotates it (default 240 minutes; the 12h coordination maximum stays as the surfaced-only
+  // safety bound, and a rotation defers while a guarded merge is in flight), and how long the
+  // heartbeat fallback waits before it wakes a master that has had no material event (default 30).
+  masterSessionMinutes: z.number().int().min(30).max(720).optional(),
+  masterHeartbeatMinutes: z.number().int().min(5).max(240).optional(),
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),
@@ -484,3 +495,246 @@ export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subjec
 export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLease[]) => leases.length
   ? `${refusal}. The paths match the planned files of ${leases.length === 1 ? 'one live lease' : `${leases.length} live leases`}: ${leases.map(lease => `${lease.key} epoch ${lease.epoch} (${lease.owner}): ${lease.paths.join(', ')}`).join('; ')}`
   : refusal;
+
+// ---- OS-level confinement of the coordinator checkout (GY-888) -----------------------------------
+//
+// GY-857's harness rules are a prompt policy, and shell commands (`cp`, `sed`, `git commit`,
+// `git checkout`) never matched them: workers moved the coordinator checkout four times in one
+// day through plain Bash. GY-888 makes the checkout unwritable at the OS level for every session
+// the launcher starts — worker, reviewer, producer and approver — by carrying the confinement on
+// the launch itself, in whatever the runtime supports:
+//
+// - a runtime whose filesystem sandbox leaves every ungranted path read-only (codex under
+//   `workspace-write`, enforced by workerConfinementRefusal) IS the confinement: the checkout's
+//   working tree is never among the granted paths;
+// - every other runtime runs inside a bubblewrap mount namespace in which the coordinator checkout
+//   is bind-mounted read-only, and only what the session's own work needs is re-exposed writable
+//   on top: its own directory (the assigned worktree or allocated checkout) and the shared Git
+//   areas a linked worktree writes — the object store, the session's own per-worktree admin (only
+//   the whole `.git/worktrees` when the session creates worktrees of its own), the `graphyard/`
+//   branch namespace with its reflogs, remote-tracking refs and FETCH_HEAD — never the checkout's
+//   source tree, its index, or the refs of branches only the guarded merge moves. The namespace
+//   unshares PIDs and mounts a fresh /proc, so another process's /proc/<pid>/root is not a route
+//   back to the writable checkout;
+//
+// A launch that cannot apply the confinement is refused with the reason named, never started
+// unconfined, exactly like a contained install (GY-174): install bubblewrap, or let the runtime
+// carry a workspace-write sandbox. The master session is not among the confined roles — it runs
+// the loop's own configuration and administration commands from the coordinator root, and is
+// bound by its own harness rules instead.
+
+/** How a launch keeps the coordinator checkout unwritable for the session it starts. */
+export interface CoordinatorConfinement {
+  /** Which mechanism applies: the runtime's own filesystem sandbox, or a read-only mount namespace. */
+  mechanism: 'runtime-sandbox' | 'read-only-mount';
+  /** Words placed before the runtime command to apply the confinement; empty for the runtime's own sandbox. */
+  wrapper: readonly string[];
+  /** What the confinement holds, for the launch record. */
+  detail: string;
+}
+
+export interface ConfinementInput {
+  kind: string;
+  args: readonly string[];
+  coordinatorRoot: string;
+  /** The directory the runtime starts in — also the workspace root its own sandbox would grant (GY-888). */
+  sessionDirectory: string;
+  /** The directory the launch allocates for the session's own writes, re-exposed by the read-only mount; defaults to `sessionDirectory`. A terminal reviewer or producer starts from the coordinator root (`sessionDirectory`) while its allocated checkout is a directory beside it (GY-888, review finding): the mount re-exposes the allocated checkout, never the root it starts in. */
+  allocatedDirectory?: string;
+  /** Defaults to this host's platform. */
+  platform?: string;
+  /** The bubblewrap executable; null when it is known absent, the PATH lookup when unset. */
+  bwrap?: string | null;
+  /** Overrides the availability probe (tests); when absent, the probe runs once and is cached. */
+  mountNamespaceWorks?: boolean;
+}
+const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
+/** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
+const isDirectoryPath = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
+/** The bubblewrap executable on this PATH, or null: the synchronous lookup a spawn wrapper needs. */
+export const bwrapOnPath = (env: NodeJS.ProcessEnv = process.env): string | null => {
+  for (const directory of (env.PATH ?? '').split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, 'bwrap');
+    try { if (existsSync(candidate)) return candidate; } catch { /* an unreadable PATH entry is skipped */ }
+  }
+  return null;
+};
+
+/** The writable scope a launch's own runtime sandbox grants: the session's working directory (the sandbox's workspace root) and every `--add-dir`, resolved against it. */
+const sandboxWritableScope = (args: readonly string[], sessionDirectory: string): string[] => {
+  const scope: string[] = [resolve(sessionDirectory)];
+  for (let index = 0; index < args.length; index++) {
+    const [flag, inline] = args[index].split(/=(.*)/s);
+    if (flag !== '--add-dir') continue;
+    const value = inline ?? args[index + 1];
+    if (value) scope.push(resolve(sessionDirectory, value));
+  }
+  return scope;
+};
+/**
+ * Whether the runtime's own workspace-write sandbox IS the confinement (GY-888): the sandbox
+ * leaves every ungranted path read-only, which confines the checkout only while the checkout lies
+ * outside every path the sandbox grants. A session whose working directory or an `--add-dir` would
+ * hold the checkout — a terminal reviewer or producer runs from the coordinator root — cannot
+ * claim it, and carries the read-only mount instead.
+ */
+const runtimeSandboxConfines = (input: ConfinementInput): boolean => {
+  if (runtimeSandboxes[input.kind]?.mode([...input.args]) !== 'workspace-write') return false;
+  const root = resolve(input.coordinatorRoot), git = join(root, '.git');
+  const own = resolve(input.sessionDirectory);
+  const admin = sessionGitAdminDirectory(own, root);
+  // What the sandbox may grant inside the checkout: the session's own worktree and its own worktree
+  // admin directory — never the checkout itself. A session whose workspace IS the checkout root
+  // therefore has no exemption at all.
+  const exempt = [...(own !== root ? [own] : []), ...(admin && admin !== root ? [admin] : [])];
+  const inside = (path: string, directory: string) => path === directory || withinCheckout(path, directory);
+  const overlaps = (path: string, directory: string) => path === directory || withinCheckout(directory, path) || withinCheckout(path, directory);
+  // A grant disqualifies when it touches the checkout or its Git administrative state outside the
+  // exemption — a worker launch grants the common `.git` so the runtime can commit, and that grant
+  // would leave coordinator refs, index and reflogs writable; such a launch carries the mount
+  // wrapper, which re-exposes only the session's own Git paths (GY-888, review finding).
+  return !sandboxWritableScope(input.args, input.sessionDirectory).some(path =>
+    (overlaps(path, root) || overlaps(path, git)) && !exempt.some(zone => inside(path, zone)));
+};
+
+/** The linked-worktree administrative directory the session's own directory writes through, or null when it is not a linked worktree of the coordinator checkout. A linked worktree points at its admin through its `.git` file, so this reads the pointer rather than asking git. Pinning one session's Git admin, instead of the whole `.git/worktrees`, keeps concurrent assignments' worktree metadata unwritable to each other (GY-888). */
+export const sessionGitAdminDirectory = (sessionDirectory: string, root: string): string | null => {
+  const directory = resolve(sessionDirectory), checkout = resolve(root);
+  if (!withinCheckout(directory, checkout)) return null;
+  let pointer: string;
+  try { pointer = readFileSync(join(directory, '.git'), 'utf8'); } catch { return null; }
+  const match = /^gitdir: (\S+)\s*$/.exec(pointer);
+  if (!match) return null;
+  const gitDir = resolve(directory, match[1]);
+  const shared = join(checkout, '.git', 'worktrees');
+  return gitDir.startsWith(`${shared}${sep}`) && isDirectoryPath(gitDir) ? gitDir : null;
+};
+
+/**
+ * The bubblewrap words that hide the host's process-launch channels under paths that exist: each
+ * named directory is replaced by an empty one, and each bus socket by a device that no client can
+ * connect to. Through the session bus a confined process could otherwise ask the user's systemd
+ * manager (`systemd-run --user`) — or the system one over `/run/dbus` (`systemd-run --system`) — to
+ * start a helper outside this mount namespace and write the underlying, writable coordinator
+ * checkout, which a fresh `/proc` alone does not close (GY-888, review finding). Candidates that
+ * would hide a protected path are dropped. Each candidate is named by its canonical real path
+ * before deduplication: bubblewrap (up to 0.11) builds a mount point only where every path
+ * component resolves inside the namespace, and a destination reached through an absolute symlink —
+ * `/var/run` → `/run` on Debian-family hosts — resolves against its own staging root, where the
+ * target does not exist, so the launch dies with "Can't mkdir". The canonical path also aliases
+ * that pair to one mask, and hiding the real directory hides every symlink to it.
+ *
+ * When `secretsBus` names a live socket, each session-bus socket is replaced by it instead of by
+ * `/dev/null`. That socket is an `xdg-dbus-proxy --filter --talk=org.freedesktop.secrets` proxy
+ * (`graphyard-secrets-bus.service`): a session reaches the keyring that holds the operator's
+ * GitHub login, so `git push` through `gh auth git-credential` works, while systemd1 and every
+ * other bus name stay unreachable, so `systemd-run --user` is still refused.
+ */
+export const processLaunchMaskWords = (
+  targets: { directories?: readonly string[]; busSockets?: readonly string[]; secretsBus?: string | null },
+  protect: readonly string[],
+): readonly string[] => {
+  const hides = (path: string) => !protect.some(p => p === path || withinCheckout(p, path));
+  const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+  const directories = [...new Set((targets.directories ?? []).filter(path => isAbsolute(path) && isDirectoryPath(path) && hides(path)).map(canonical))];
+  const sockets = [...new Set((targets.busSockets ?? []).filter(path => isAbsolute(path) && existsSync(path) && !isDirectoryPath(path) && hides(path)).map(canonical))];
+  const proxy = targets.secretsBus && isAbsolute(targets.secretsBus) && isSocketPath(targets.secretsBus) ? canonical(targets.secretsBus) : '/dev/null';
+  return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
+};
+const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
+/** Where `graphyard-secrets-bus.service` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
+export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
+  env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
+/**
+ * The host's own process-launch channels that exist here: the systemd manager directories and
+ * session-bus sockets of the user's runtime directory (`/run/user/<uid>`, `$XDG_RUNTIME_DIR`) and
+ * the system bus directory. Whether a candidate may be hidden is `processLaunchMaskWords`'s call.
+ */
+export const hostProcessLaunchTargets = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): { directories: string[]; busSockets: string[]; secretsBus: string | null } => {
+  const runtimeDirectories = [...new Set([uid === undefined ? null : `/run/user/${uid}`, env.XDG_RUNTIME_DIR || null]
+    .filter((path): path is string => !!path && isAbsolute(path)).map(path => { try { return realpathSync(path); } catch { return path; } }))];
+  const directories = [...runtimeDirectories.map(directory => join(directory, 'systemd')), '/run/dbus', '/var/run/dbus'];
+  return { directories, busSockets: runtimeDirectories.map(directory => join(directory, 'bus')), secretsBus: secretsBusPath(uid, env) };
+};
+
+/**
+ * The bubblewrap words that run a session with the coordinator checkout unwritable (GY-888): the
+ * whole host exactly as it is, the checkout bind-mounted read-only over it, and only what the
+ * session's own work needs re-exposed writable on top — bubblewrap applies each bind in order, so
+ * the later ones shadow the read-only one. The namespace also unshares PIDs and mounts a fresh
+ * `/proc`, so another process's `/proc/<pid>/root` is not a route back to the writable checkout
+ * (the escape `containedInstall` closes for installs), and the host's process-launch channels are
+ * hidden so no command can start the write outside the namespace; a session keeps the network and
+ * its own process tree. The wrapper ends with `--`, so the runtime command follows it.
+ */
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null }): readonly string[] {
+  const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
+  const gitDir = join(root, '.git');
+  const adminDirectory = sessionGitAdminDirectory(directory, root);
+  const sharedDirectories = [
+    join(gitDir, 'objects'), ...(adminDirectory ? [adminDirectory] : [join(gitDir, 'worktrees')]), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes'),
+    join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'),
+  ].filter(isDirectoryPath);
+  const fetchHead = join(gitDir, 'FETCH_HEAD');
+  const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
+  const own = withinCheckout(directory, root) ? [directory] : [];
+  const bwrap = input.bwrap ?? 'bwrap';
+  const masks = processLaunchMaskWords(hostProcessLaunchTargets(), [root, directory]);
+  return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
+    ...[...shared, ...own].flatMap(path => ['--bind', path, path]), '--'];
+}
+
+/** The one refusal text for a launch whose coordinator confinement cannot be applied (GY-888): the head names the runtime and the checkout, `problem` says what is missing. */
+export const confinementRefusalText = (kind: string, coordinatorRoot: string, problem: { platform?: string; bwrapMissing?: boolean; namespaces?: boolean; undetermined?: string }): string => {
+  const head = `A ${kind} session cannot be launched with the coordinator checkout at ${coordinatorRoot} unwritable at the OS level`;
+  if (problem.undetermined) return `${head}: ${problem.undetermined} Graphyard never starts a session unconfined; run the launcher through its own bin/graphyard.mjs from the checkout it serves, so every launch carries the confinement.`;
+  const own = 'and the runtime carries no filesystem sandbox of its own';
+  if (problem.platform) return `${head}: the read-only mount namespace it would run in needs Linux, this host is ${problem.platform}, ${own}. Graphyard never starts a session unconfined; run sessions on a Linux host or grant the runtime a workspace-write sandbox.`;
+  if (problem.bwrapMissing) return `${head}: bubblewrap (bwrap) is not installed ${own}. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap) or grant the runtime a workspace-write sandbox.`;
+  return `${head}: this host refuses the unprivileged namespaces bubblewrap needs, ${own}. Graphyard never starts a session unconfined; allow unprivileged user namespaces on this host or grant the runtime a workspace-write sandbox.`;
+};
+
+/** Whether bubblewrap can build the mount namespace here; a host may refuse unprivileged namespaces. Probed through the asynchronous runner once per executable and cached; the probe asks for the pid namespace and a fresh /proc too, because that is what the wrapper itself requires. */
+export async function sessionMountNamespaceWorks(bwrap = 'bwrap'): Promise<boolean> {
+  if (!mountNamespaceProbes.has(bwrap)) {
+    const probe = defaultChildRun(bwrap, ['--unshare-pid', '--dev-bind', '/', '/', '--proc', '/proc', '--', 'true'], { timeoutMs: 20_000 })
+      .then(value => { mountNamespaceAnswers.set(bwrap, true); return true; }, () => { mountNamespaceAnswers.set(bwrap, false); return false; });
+    mountNamespaceProbes.set(bwrap, probe);
+  }
+  return mountNamespaceProbes.get(bwrap)!;
+}
+const mountNamespaceProbes = new Map<string, Promise<boolean>>();
+const mountNamespaceAnswers = new Map<string, boolean>();
+/** The last probed answer for `bwrap`, or undefined while none is known: the synchronous spawn wrapper refuses on false and lets bubblewrap itself fail on unknown. */
+export const mountNamespaceProbeResult = (bwrap = 'bwrap'): boolean | undefined => mountNamespaceAnswers.get(bwrap);
+
+/** Why a launch of `kind` cannot keep the coordinator checkout unwritable at the OS level, or null. A runtime sandbox of its own needs neither Linux nor bubblewrap — but only while the checkout lies outside every path the sandbox grants. */
+export async function coordinatorConfinementRefusal(input: ConfinementInput): Promise<string | null> {
+  if (runtimeSandboxConfines(input)) return null;
+  const bwrap = input.bwrap !== undefined ? input.bwrap : bwrapOnPath();
+  const platform = input.platform ?? process.platform;
+  if (platform !== 'linux') return confinementRefusalText(input.kind, input.coordinatorRoot, { platform });
+  if (!bwrap) return confinementRefusalText(input.kind, input.coordinatorRoot, { bwrapMissing: true });
+  if (!(input.mountNamespaceWorks ?? await sessionMountNamespaceWorks(bwrap))) return confinementRefusalText(input.kind, input.coordinatorRoot, { namespaces: true });
+  return null;
+}
+
+/**
+ * The confinement a launch of `kind` carries, or null when there is no coordinator checkout to
+ * confine (the launcher does not run from one). Throws the coordinatorConfinementRefusal reason
+ * when the kind can carry none: a launch is never started unconfined. The shared Git paths are
+ * re-exposed only where they already exist — the launcher prepares the missing ones
+ * (launch.ts prepareConfinedGitPaths) before building the launch.
+ */
+export async function coordinatorConfinement(input: ConfinementInput): Promise<CoordinatorConfinement | null> {
+  if (runtimeSandboxConfines(input))
+    return { mechanism: 'runtime-sandbox', wrapper: [], detail: `the ${input.kind} workspace-write sandbox keeps every path but its granted workspace directories read-only, and the coordinator checkout at ${input.coordinatorRoot} lies outside every one of them` };
+  const refusal = await coordinatorConfinementRefusal(input);
+  if (refusal) throw new Error(refusal);
+  const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined });
+  const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
+  return { mechanism: 'read-only-mount', wrapper,
+    detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };
+}

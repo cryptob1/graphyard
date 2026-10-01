@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -10,6 +9,7 @@ import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-524: a worker whose blocker or scope request is resolved is told to resume, a worker idle
@@ -22,7 +22,7 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const minutes = (count: number) => count * 60_000;
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-resume-'));
+  const directory = await temporaryDirectory('resume');
   const credentialFile = join(directory, 'coordinator.token'), worker = join(directory, 'worker.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await writeFile(worker, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });

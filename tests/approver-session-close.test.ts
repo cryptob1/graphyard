@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { approverSessionName, atomicPrivateWrite, loadMasterConfig, runAutonomyCommand, setupMaster, type HerdrAgent, type MasterConfig } from '../src/master.js';
@@ -10,6 +9,7 @@ import { readApproverLaunches } from '../src/master/autonomy.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-403: an approver session a master launched by hand with `master approver` had no approval
 // watch, so nothing closed it once its decision settled: it held an approver slot for hours. One
@@ -51,8 +51,8 @@ function effects(work: Work[], agents: HerdrAgent[], decisions: Record<string, {
 }
 
 test('unit:hand-approver-closed — an approver launched with master approver is registered in the loop\'s approval watch and closed, with why, on the cycle after its decision settles', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-hand-approver-'));
-  const credentials = await mkdtemp(join(tmpdir(), 'graphyard-hand-approver-credentials-'));
+  const root = await temporaryDirectory('hand-approver');
+  const credentials = await temporaryDirectory('hand-approver-credentials');
   try {
     execFileSync('git', ['init', '-q', root]);
     execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });

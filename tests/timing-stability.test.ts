@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildMasterStatus } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { parseTimingAnnotations, qualifyTimingFailures, timingFailureReason } from '../src/cli/timing-failures.js';
-import { TimingAssertionError, assertTiming, measureTiming, minimumSamples, observationsAbove, parseTimingRecord, percentile, percentileRank, steadyState, timingFailureMarker } from './helpers/timing.js';
+import { TimingAssertionError, assertTiming, measureTiming, minimumSamples, observationsAbove, parseTimingRecord, percentile, percentileRank, steadyState, timingFailureMarker, timingSlack, withinSlack } from './helpers/timing.js';
 import { annotationCommand, failedTestCount, readBaseline, timingFailures, timingSpread, timingSummary } from './helpers/timing-report.js';
 import { baselineRecordingVariable, requiredCheckEnvironment, requiredRuns, stabilityRecord, testFilePorts, testPortBase, type StabilityRecord } from './helpers/timing-stability.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const source = (path: string) => readFile(new URL(path, import.meta.url), 'utf8');
 
@@ -62,7 +62,7 @@ function heldOnTest(overrides: Partial<Work> = {}) {
 const published = (command: string) => ({ annotation_level: 'failure', title: 'Timing-dependent assertion over budget', message: command.slice(command.indexOf('::', 2) + 2).replace(/%0A/g, '\n').replace(/%0D/g, '\r').replace(/%25/g, '%') });
 
 test('unit:timing-failure-reported — a failed timing-dependent assertion is recorded with what it measured, and master status reports it with the measured value against the budget instead of an unqualified red check', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-timing-record-'));
+  const directory = await temporaryDirectory('timing-record');
   try {
     // The run records every timing-dependent assertion, passed or failed, with what it measured.
     const file = join(directory, 'timing.jsonl');
@@ -181,4 +181,16 @@ test('the recorded baseline holds twenty consecutive passing runs of the require
     assert.equal(entry.runs, baseline.runs.length, `${entry.name} was measured in every run`); assert.equal(entry.failures, 0);
     assert.ok(entry.minMs <= entry.medianMs && entry.medianMs <= entry.maxMs && entry.spreadMs >= 0 && entry.headroomMs > 0, `${entry.name} spread ${entry.minMs}–${entry.maxMs}ms against ${entry.budgetMs}ms`);
   }
+});
+
+test('unit:timing-slack-tolerates-loaded-runners — GRAPHYARD_TIMING_SLACK lets an upper-bound timing pass up to budget × slack, defaults to exact, and never loosens other comparisons', () => {
+  assert.equal(timingSlack({}), 1, 'no variable keeps the exact budget');
+  assert.equal(timingSlack({ GRAPHYARD_TIMING_SLACK: '1.5' }), 1.5);
+  assert.equal(timingSlack({ GRAPHYARD_TIMING_SLACK: '0.5' }), 1, 'slack never tightens below the budget');
+  assert.equal(timingSlack({ GRAPHYARD_TIMING_SLACK: 'fast' }), 1, 'an unreadable value is ignored');
+  // 2026-10-01: main's CI failed a 100-item cycle at 20 072 ms against a 20 000 ms budget.
+  assert.equal(withinSlack({ measuredMs: 20_072, budgetMs: 20_000, comparison: '<=' }, 1.5), true);
+  assert.equal(withinSlack({ measuredMs: 30_001, budgetMs: 20_000, comparison: '<=' }, 1.5), false, 'past budget × slack still fails');
+  assert.equal(withinSlack({ measuredMs: 20_072, budgetMs: 20_000, comparison: '<=' }, 1), false, 'exact by default');
+  assert.equal(withinSlack({ measuredMs: 20_072, budgetMs: 20_000, comparison: '<' }, 1.5), false, 'a strict comparison is never loosened');
 });
