@@ -54,7 +54,7 @@ export async function baseFailureStep(cycle: Cycle): Promise<Map<string, Set<str
       if (judged.kind === 'own') continue;
       hold();
       if (judged.kind === 'pending') {
-        const waitKey = `wait:base-failure:${item.id}`, detail = `${item.key}: required check ${name} failed on ${short(item.candidate!.sha)}; rework waits for the base head ${short(base!.baseSha)} to complete its own ${name} run, which decides whether the failure is the candidate's`;
+        const waitKey = `wait:base-failure:${item.id}`, detail = `${item.key}: required check ${name} failed on ${short(item.candidate!.sha)}; rework waits for the base head ${short(base!.baseSha)}'s own ${name} run to complete with a readable log, which decides whether the failure is the candidate's`;
         if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'refresh', 'done', detail);
         continue;
       }

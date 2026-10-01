@@ -913,7 +913,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const chainedTips = new Set<string>();
   let peakWindow = 0;
   const seenTips = new Set<string>();
-  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0, broken = false, repaired = false;
+  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0, broken = false, repaired = false, repairClosed = false;
   // GY-574: the documentation day records the trim filings, the loop's trim actions, and when the
   // trim item was closed with the documentation still saturated, so the once-only filing and the
   // bounded action count are what the day itself observed.
@@ -966,6 +966,14 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // base under a queued tip and reads as churn beside the remedy refresh itself.
     if (mainDay && options.hours >= 24 && !broken && elapsed >= plan.baseFailure.breaks) { broken = true; github.baseFailure.broken = github.commit('Add a test holding a fixed date against the clock', github.files).sha; }
     if (mainDay && options.hours >= 24 && !repaired && elapsed >= plan.baseFailure.repaired) { repaired = true; github.baseFailure.repaired = github.commit('Repair the fixed-date test', github.files).sha; }
+    // Once the repair has landed and the loop has retired the base failure, the person who repaired
+    // main closes the P0 item filed for it as obsolete, naming the repair commit: an open item would keep
+    // the day stepping one minute at a time to its end, and leave work for the next day's loop.
+    const repairItem = baseFailure.filed[0];
+    if (repaired && !repairClosed && repairItem && !Object.keys(state.baseFailures).length) {
+      repairClosed = true;
+      await api(principals.operator, 'POST', `work/${repairItem.key}/close`, { kind: 'obsolete', reason: `soak: main was repaired outside Graphyard by ${github.baseFailure.repaired}` });
+    }
     // GY-574: an hour in, the filed trim item is closed and its trim lands on the base branch —
     // the README gives back the words, as the trim item's own criterion delivers — with the set
     // still inside the 3% warning, so the filing episode stays open and files nothing more. The

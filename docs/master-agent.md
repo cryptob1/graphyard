@@ -27,7 +27,7 @@ The loop launches, wakes and rotates the [master session](master-agent-sessions.
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
-A check the base head fails too is no candidate's: no rework or approver; one attention and P0 item per test and head; a green base reruns and refreshes the blocked.
+A check the base head fails too is no candidate's: no rework or approver (an unreadable base log waits); one attention and P0 item per test and head; a green base reruns and refreshes the blocked.
 
 ### Session liveness is reconciled, not trusted
 

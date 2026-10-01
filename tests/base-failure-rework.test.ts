@@ -96,6 +96,7 @@ test('unit:base-failure-no-rework — a failing test the base head fails too req
   assert.equal(judgeFailedCheck([timeBomb], passedBase).kind, 'own');
   assert.equal(judgeFailedCheck(null, failedBase([timeBomb])).kind, 'own', 'a failure whose tests cannot be read is reworked as before');
   assert.equal(judgeFailedCheck([timeBomb], { ...failedBase([]), state: 'pending' }).kind, 'pending');
+  assert.equal(judgeFailedCheck([timeBomb], { ...failedBase([]), tests: null }).kind, 'pending', 'a failed base run whose log cannot be read is waited for, never reworked');
 
   // GY-1 fails only the time bomb, which the base head fails too; GY-2 fails a test of its own.
   const w = world([candidate(1, 101), candidate(2, 102)], failedBase([timeBomb]), { 101: [timeBomb], 102: ['unit:own-regression — breaks'] });
@@ -115,7 +116,7 @@ test('unit:base-failure-no-rework — a failing test the base head fails too req
   const waiting = emptyDaemonState(config());
   await runCycle(config(), waiting, effects(pending), () => pending.now);
   assert.deepEqual([pending.decided, pending.approvers], [[], []]);
-  assert.match(waiting.actions['wait:base-failure:work-1'].detail, /rework waits for the base head .* to complete its own test run/);
+  assert.match(waiting.actions['wait:base-failure:work-1'].detail, /rework waits for the base head .*'s own test run to complete with a readable log/);
 });
 
 /** Run the loop with the base failing the time bomb, then with the base repaired and the candidates observed on it. */

@@ -64,17 +64,21 @@ export interface BaseCheck {
 export type CheckJudgement =
   /** Every test failing on the candidate fails on the base head too: nothing of the candidate's to fix. */
   | { kind: 'base'; tests: string[] }
-  /** The base head's run of the check is still going: the comparison waits for it. */
+  /** The base head's run of the check is still going, or failed with a log not yet read: the comparison waits for it. */
   | { kind: 'pending' }
   /** A failure of the candidate's own, or one that cannot be compared: rework, as before GY-528. */
   | { kind: 'own'; tests: string[] | null };
 /**
  * Compare the failing tests of a candidate's check with the base head's latest completed run of the
  * same check. A failure present on the base too is a base failure; one only the candidate has, or
- * a failure whose tests cannot be read on either side, is the candidate's own.
+ * a failure whose tests cannot be read on the candidate, is the candidate's own. A failed base run
+ * whose log cannot be read is waited for, like one still running.
  */
 export function judgeFailedCheck(candidateTests: string[] | null, base: BaseCheck | null | undefined): CheckJudgement {
   if (base?.state === 'pending') return { kind: 'pending' };
+  // A failed base run whose log could not be read (yet) decides nothing: waiting for a readable log
+  // never requests the very rework a shared failure must not get.
+  if (base?.state === 'failed' && base.tests === null && candidateTests?.length) return { kind: 'pending' };
   if (!base || base.state !== 'failed' || !candidateTests?.length || !base.tests?.length) return { kind: 'own', tests: candidateTests };
   const onBase = new Set(base.tests);
   const own = candidateTests.filter(test => !onBase.has(test));

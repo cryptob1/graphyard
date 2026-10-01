@@ -40,9 +40,13 @@ export function baseFailureEffects(run: ChildRun, current: () => MasterConfig, a
   };
   const baseCheck = async (check: string): Promise<BaseCheck> => {
     const config = current();
-    const read = JSON.parse(String(await run('gh', ['api', `repos/${config.repository}/commits/${encodeURIComponent(config.baseBranch)}/check-runs?check_name=${encodeURIComponent(check)}&per_page=100`])));
-    const runs: any[] = Array.isArray(read?.check_runs) ? read.check_runs : [];
-    const baseSha = String(runs[0]?.head_sha ?? JSON.parse(String(await run('gh', ['api', `repos/${config.repository}/commits/${encodeURIComponent(config.baseBranch)}`, '--jq', '{sha: .sha}']))).sha);
+    // Every page, one JSON array per line: past a hundred runs of the check the latest completed one
+    // is still seen, so a repaired base is never read as failing. Runs are of the newest run's commit.
+    const pages = String(await run('gh', ['api', '--paginate', `repos/${config.repository}/commits/${encodeURIComponent(config.baseBranch)}/check-runs?check_name=${encodeURIComponent(check)}&per_page=100`, '--jq', '[.check_runs[] | {id, head_sha, status, conclusion, html_url}] | @json']));
+    const listed: any[] = pages.split('\n').filter(line => line.trim()).flatMap(line => JSON.parse(line));
+    const newest = listed.reduce<any>((latest, entry) => !latest || entry.id > latest.id ? entry : latest, null);
+    const runs = newest ? listed.filter(entry => entry.head_sha === newest.head_sha) : [];
+    const baseSha = String(newest?.head_sha ?? JSON.parse(String(await run('gh', ['api', `repos/${config.repository}/commits/${encodeURIComponent(config.baseBranch)}`, '--jq', '{sha: .sha}']))).sha);
     const completed = runs.filter(entry => entry.status === 'completed').sort((a, b) => b.id - a.id)[0];
     if (!completed) return { check, baseSha, state: runs.length ? 'pending' : 'none', jobId: null, url: null, tests: null };
     const state = completed.conclusion === 'success' ? 'passed' : ['failure', 'timed_out'].includes(completed.conclusion) ? 'failed' : 'none';
