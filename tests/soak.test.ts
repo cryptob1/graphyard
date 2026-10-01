@@ -298,7 +298,10 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; blamed?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+// GY-471: the queued day's predecessor whose change explains the failing tip's `test` failure; a test
+// sets it around its own day.
+let blamedPredecessor: number | undefined;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -445,12 +448,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     github.slowMergeable.set(items[options.queued.failTip - 2].key, 45 * minute);
     github.refusedBranches.add(items[options.queued.failTip - 1].key);
   }
-  // GY-471: the failing tip's `test` failure names a file only the `blamed` predecessor's change
+  // GY-471: the failing tip's `test` failure names a file only the `blamedPredecessor`'s change
   // holds, and that predecessor's own tip passed but GitHub is slow to make it mergeable, so it is
   // still queued, unlanded, when the failure is attributed to it.
-  if (options.queued?.failTip && options.queued.blamed) {
-    github.failureNames.set(items[options.queued.failTip - 1].key, file(options.queued.blamed));
-    github.slowMergeable.set(items[options.queued.blamed - 1].key, 45 * minute);
+  if (options.queued?.failTip && blamedPredecessor) {
+    github.failureNames.set(items[options.queued.failTip - 1].key, file(blamedPredecessor));
+    github.slowMergeable.set(items[blamedPredecessor - 1].key, 45 * minute);
   }
   // GY-854: GitHub refuses every write of every restore of the failing entry's branch.
   // GY-831: the lostCarry item's reviews are the bound reviewer App's own, whose approval a
@@ -1671,8 +1674,9 @@ test('unit:soak-invariants-hold — a speculative tip failure a predecessor\'s c
   // of its own, re-enters on its own head and lands. This runs per cycle, head and entry over the
   // whole day, so a repeated attribution, a second rework or an eject/re-enter churn fails here.
   const failTip = 3, blamed = 2;
-  const day = await simulateDay({ hours: 3, queued: { window: 4, failTip, blamed, releaseEveryMs: 3 * minute },
-    plan: { items: 4, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
+  blamedPredecessor = blamed;
+  const day = await simulateDay({ hours: 3, queued: { window: 4, failTip, releaseEveryMs: 3 * minute },
+    plan: { items: 4, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } }).finally(() => { blamedPredecessor = undefined; });
   const { items, final, github, violations, failures, lost } = day;
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');

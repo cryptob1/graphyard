@@ -475,7 +475,6 @@
     "tests/shipping-pulse-coverage.test.ts": 2083,
     "tests/shipping-pulse.test.ts": 4213,
     "tests/soak.test.ts": 46674,
-    "tests/speculative-failure-attribution.test.ts": 359,
     "tests/stable-json.test.ts": 281,
     "tests/stale-dismissal.test.ts": 1994,
     "tests/stale-rework-requests.test.ts": 1177,
