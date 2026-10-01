@@ -261,6 +261,24 @@ export function attestDecisions(work: Work, all: Work[], now: number): RoutineDe
   });
 }
 /**
+ * The withdrawal reason for a merge or attest decision standing on `work` that can never apply to
+ * the one now needed, or null when it is this decision (or another action). Only a merge decision
+ * and an attest decision (GY-521) name what they bind: one for an earlier head is taken back if it
+ * is still requested; one for another proof on this head is judged first, one attest at a time.
+ */
+export function overtakenDecision(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any }, canWithdraw: boolean): string | null {
+  if (decision.action !== 'merge' && decision.action !== 'attest') return null;
+  const head = standing.input?.sha === work.candidate?.sha && standing.input?.baseSha === work.candidate?.baseSha && standing.input?.policyRevision === work.policyRevision;
+  if (head && (decision.action === 'merge' || standing.input?.proof === decision.input?.proof)) return null;
+  const merge = decision.action === 'merge', sha = merge ? decision.binding : work.candidate?.sha ?? '';
+  const other = merge
+    ? `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${sha.slice(0, 12)}`
+    : `attest decision ${standing.id} is ${standing.state} for ${String(standing.input?.proof)} on ${String(standing.input?.sha).slice(0, 12)}, not ${String(decision.input?.proof)} on ${sha.slice(0, 12)}`;
+  if (head) throw new Error(`${other}; the control plane holds one attest decision at a time, so this one is requested once it settles: graphyard master decisions ${work.key}`);
+  if (standing.state !== 'requested' || !canWithdraw) throw new Error(`${other}, and ${canWithdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${work.key}`);
+  return `The candidate moved to ${sha.slice(0, 12)}; ${other}, so it can never apply and is withdrawn for a request that names the current ${merge ? 'candidate' : 'head'}`;
+}
+/**
  * The rework a required CI check that failed on exactly the current head calls for, or null. The
  * next action for such a head is already `request-rework` (refusal-mapping.ts), but nothing asked
  * for the round: on 2026-09-25 GY-245's worker had completed, a base refresh produced

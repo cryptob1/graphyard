@@ -8,7 +8,7 @@ import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approve
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
@@ -302,26 +302,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A request whose response was lost is already standing on the item, and the server refuses a
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
-      // Only a merge decision names what it binds. One standing for an earlier candidate can never
+      // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
-      if (standing && decision.action === 'merge' && !(standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision)) {
-        const stale = `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${decision.binding.slice(0, 12)}`;
-        if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
-        await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
-        standing = undefined;
-      }
-      // Nor more than one attest decision (GY-521): one for an earlier head can never apply and is
-      // taken back, as a merge is; one for another proof on this head is judged first.
-      if (standing && decision.action === 'attest') {
-        const head = standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision;
-        if (!head || standing.input?.proof !== decision.input?.proof) {
-          const other = `attest decision ${standing.id} is ${standing.state} for ${String(standing.input?.proof)} on ${String(standing.input?.sha).slice(0, 12)}, not ${String(decision.input?.proof)} on ${item.candidate?.sha.slice(0, 12)}`;
-          if (head) throw new Error(`${other}; the control plane holds one attest decision at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
-          if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${other}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
-          await effects.withdraw(item, standing.id, `The candidate moved to ${item.candidate?.sha.slice(0, 12)}; ${other}, so it can never apply and is withdrawn for a request that names the current head`);
-          standing = undefined;
-        }
-      }
+      const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
+      if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
       // it would settle this watch while the lease-loss still stands, and the binding would never
