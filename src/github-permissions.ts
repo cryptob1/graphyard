@@ -12,7 +12,7 @@ export interface PermissionShortfall { permission: string; required: PermissionL
 const levels: PermissionLevel[] = ['read', 'write', 'admin'];
 export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration' };
 export const featureLabels: Record<PermissionFeature, string> = {
-  repository: 'repository access', observation: 'pull request observation', check: 'the required check',
+  repository: 'repository access', observation: 'pull request observation', check: 'the required checks',
   'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue',
 };
 
@@ -26,7 +26,7 @@ export const controlPlanePermissions: readonly PermissionRequirement[] = [
   { permission: 'pull_requests', level: 'write', feature: 'review-dispatch', reason: 'post review request comments' },
   { permission: 'issues', level: 'read', feature: 'comment-events', reason: 'receive `issue_comment` webhooks carrying review results' },
   { permission: 'checks', level: 'read', feature: 'observation', reason: 'read CI check runs' },
-  { permission: 'checks', level: 'write', feature: 'check', reason: 'publish `Graphyard / merge` on the exact candidate commit' },
+  { permission: 'checks', level: 'write', feature: 'check', reason: 'publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit' },
   { permission: 'administration', level: 'read', feature: 'observation', reason: 'inspect branch protection' },
 ];
 /**
