@@ -22,8 +22,8 @@ import { z } from 'zod';
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
 /** The roles that judge or request decisions; their sessions hold no slot, but spend quota the same way. */
 export const decisionRoles = ['approver', 'escalation-handler'] as const;
-/** Every role whose session can run out of provider quota: each fails over, and each skips an account any of them saw spent. */
-export const quotaRoles = [...capacityRoles, ...decisionRoles] as const;
+/** Every role whose session can run out of provider quota: each fails over, and each skips an account any of them saw spent. The master role rides the same holds (GY-898). */
+export const quotaRoles = [...capacityRoles, ...decisionRoles, 'master'] as const;
 export type CapacityRole = typeof quotaRoles[number];
 
 /** What a session's own output says about its provider quota. */
