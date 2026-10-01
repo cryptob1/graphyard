@@ -627,9 +627,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const agentName = approverSessionName(work, decision), pane = herdr.open(agentName);
     approverPanes.push(pane);
     const standing = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.find((entry: { id: string }) => entry.id === decision);
-    if (standing?.action === 'attest' && !attestations.length) {
+    // Only a reworked item's worker is still there to resubmit the head that overtakes the request;
+    // on any other day the attestation is judged as asked.
+    const overtaker = standing?.action === 'attest' && !attestations.length && plan.rework.has(numberOf(work)) ? sessions.find(entry => entry.key === work.key) : undefined;
+    if (overtaker) {
       attestations.push({ decision, sha: standing.input.sha, judged: 'overtaken' });
-      pending.push(async () => { const session = sessions.find(entry => entry.key === work.key)!; github.push(work.key, session.branch, session.profile.principal, sha('head', work.key, 'moved'), [file(numberOf(work))]); });
+      pending.push(async () => { github.push(work.key, overtaker.branch, overtaker.profile.principal, sha('head', work.key, 'moved'), [file(numberOf(work))]); });
       return { agentName, pane };
     }
     if (standing?.action === 'attest') attestations.push({ decision, sha: standing.input.sha, judged: 'approved' });
