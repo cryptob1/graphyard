@@ -292,6 +292,7 @@
     "tests/docs-budget.test.ts": 267,
     "tests/docs-glossary.test.ts": 271,
     "tests/docs-obligation.test.ts": 2397,
+    "tests/ejection-restore.test.ts": 1500,
     "tests/ejection-successor-restore.test.ts": 560,
     "tests/escalation-context.test.ts": 5516,
     "tests/event-ledger-delta.test.ts": 2309,
