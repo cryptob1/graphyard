@@ -133,7 +133,7 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       };
       if (await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
-        context.actor = await authenticate(services, req.headers.authorization, services.repository);
+        context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname);
         if (await dispatch(apiRoutes)) return;
         return send(404, { error: 'Route not found' });
       }

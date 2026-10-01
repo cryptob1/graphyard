@@ -7,13 +7,17 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
-import { ensureWorktreeDependencies, managedInstructions, npmCi, type DependencyInstaller } from '../repository-setup.js';
+import { managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
+import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
+import { installUnderLease } from './install-under-lease.js';
 import { defineCommands, workMutation } from './registry.js';
+
+export { installUnderLease };
 
 /**
  * The generated files a repository declares for sync: `scripts/check-docs.mjs --manifest` names
@@ -98,9 +102,16 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
   conflicts = unmerged();
   if (conflicts.length) {
     const landed = new Set(git('rev-list', `${mergeBase}..${baseTip}`).split('\n').filter(Boolean));
-    // Attribution is a courtesy: an unreadable snapshot never hides the conflict list.
-    const all: Work[] = await api('work-snapshot').then((snapshot: any) => Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => []);
-    const remaining = attributeConflicts(conflicts, all, sha => landed.has(sha), generated?.files ?? []);
+    // Attribution is a courtesy: an unreadable snapshot never hides the conflict list. A busy
+    // runner can retire the keep-alive socket while the merge runs, so a failed read retries
+    // twice on a fresh connection before the conflicts are reported unattributed (GY-864); an
+    // answer, even an empty one, is taken as it is.
+    let all: Work[] | null = null;
+    for (let attempt = 0; attempt < 3 && all === null; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 250));
+      all = await api('work-snapshot?view=coordination').then((snapshot: any) => Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => null);
+    }
+    const remaining = attributeConflicts(conflicts, all ?? [], sha => landed.has(sha), generated?.files ?? []);
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
       next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
     process.exitCode = 1; return;
@@ -120,30 +131,6 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
     next: refused.length ? `Restore each listed file to origin/${baseBranch} (git checkout ${baseTip.slice(0, 12)} -- PATH; for a rename, restore the original path), commit, and rerun sync ${work.key}. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
       : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
   if (refused.length) process.exitCode = 1;
-}
-
-/**
- * Bring a new worktree's dependencies in line with its lockfile while renewing the lease every
- * `intervalMs`. When an install is needed the lease is renewed first, so npm never starts under a
- * lease about to lapse. Renewals run one at a time, and the install is reported only after the last
- * one has answered: the first refused renewal stops the install, or fails a finished one, with the
- * refusal. The epoch that asked for the worktree is no longer held, so nothing more is done in it.
- */
-export async function installUnderLease(worktree: string, renew: () => Promise<unknown>, subject: string,
-  options: { install?: DependencyInstaller; intervalMs?: number } = {}) {
-  const stop = new AbortController();
-  let renewal: Promise<void> | null = null, keepalive: ReturnType<typeof setInterval> | undefined;
-  const beat = () => renewal = renew().then(() => {}, error => {
-    stop.abort(new Error(`The lease heartbeat for ${subject} was refused while installing dependencies, so the install was stopped: ${error instanceof Error ? error.message : String(error)}`));
-  }).finally(() => { renewal = null; });
-  const install: DependencyInstaller = async (cwd, signal) => {
-    await beat(); signal?.throwIfAborted();
-    keepalive = setInterval(() => { if (!renewal && !stop.signal.aborted) beat(); }, options.intervalMs ?? 30_000);
-    await (options.install ?? npmCi)(cwd, signal);
-  };
-  const result = await ensureWorktreeDependencies(worktree, install, stop.signal).finally(async () => { clearInterval(keepalive); await renewal; });
-  if (stop.signal.aborted) throw stop.signal.reason;
-  return result;
 }
 
 /** Local worktrees and the supervised worker launch. */
@@ -290,7 +277,11 @@ export const workspaceCommands = defineCommands([
           throw error;
         }
       };
-      process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
+      // The session's own push credential (GY-999), when the launcher minted one for this attempt:
+      // refreshed after each renewal before GitHub's expiry, and withdrawn when the session ends.
+      const mintPush = () => api(`work/${work.id}/push-credential`, { epoch }, randomUUID()) as Promise<MintedPushCredential>;
+      process.exitCode = await superviseSessionCredential(process.env.GH_CONFIG_DIR, work.key, epoch, mintPush, refresh =>
+        supervise(args[separator + 1], args.slice(separator + 2), epoch, async () => { const renewed = await renew(); await refresh(); return renewed; }, {
           detached: !foreground,
           ...(scoped ? { containment: scoped } : {}),
           quarantine: foreground ? {
@@ -300,7 +291,7 @@ export const workspaceCommands = defineCommands([
               requestId => api(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash, ...(scope ? { scope } : {}) }, requestId),
               { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId, ...(scope ? { scope } : {}) },
             ),
-            revalidate: async () => revalidateContainment(await api('work-snapshot'), {
+            revalidate: async () => revalidateContainment(await api('work-snapshot?view=coordination'), {
               workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,
               exclusiveResources, workspace,
             }),
@@ -313,7 +304,7 @@ export const workspaceCommands = defineCommands([
               { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
             ),
           } : undefined,
-        });
+        }));
     },
   },
 ]);

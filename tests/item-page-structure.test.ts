@@ -13,7 +13,7 @@ import { activityLabel, historyLabel, historyPage, overlapLine, plainLines, what
 import { eventHistoryLimits } from '../src/events-history.js';
 import type { Command } from '../src/engine.js';
 import { nextActor, groupWithin } from '../web/groups.js';
-import { prSteps } from '../web/pr-steps.js';
+import { prSteps } from '../src/model/pr-steps.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
 
 // GY-171: the item page below its first screen. Each section answers one question, in plain words,
@@ -181,7 +181,7 @@ test('the Activity section reads the kinds the ledger records — command names 
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
   const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true,
     heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, scope: true, autoscope: true, evidence: true,
-    deployment: true, revoke: true, session: true, request: true, repair: true };
+    deployment: true, revoke: true, session: true, request: true, repair: true, mergerefused: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
     ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);

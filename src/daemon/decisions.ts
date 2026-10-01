@@ -1,12 +1,13 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, speculativeConflictReason, tipPredecessors, type ReviewThread, describeThread } from '../merge-queue.js';
-import { mechanicalFailure, mechanicalVerdicts } from '../model/mechanical-proofs.js';
+import { baseRefreshConflict, checkRerunHeld, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, tipPredecessors, type ReviewThread, describeThread } from '../merge-queue.js';
+import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 
 // ---- Routine decisions ---------------------------------------------------------------------
@@ -95,7 +96,7 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   return null;
 }
 
-export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'attest'] as const;
+export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
 /** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
@@ -130,11 +131,11 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
   if (!judged || work.stage === 'done') return null;
   const routable = routableScopeRequest(work, now);
   if (!routable) return null;
-  const { request, paths, plannedFiles } = routable;
+  const { request, paths, plannedFiles, collapsed } = routable;
   let broad: string | null = null;
   try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
   catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad),
+  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: { epoch: request.epoch, at: request.at } }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad, undefined, collapsed),
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
@@ -143,11 +144,12 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): RoutineDecision | null {
-  const needed = neededDecision(work, config);
+export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, exhausted);
   if (!needed) return null;
-  // An attestation, like a merge, attests nothing about the worker: its approver judges the proof.
-  if (needed.action === 'merge' || needed.action === 'attest') return needed;
+  // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
+  // and an attestation's approver judges the proof.
+  if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
@@ -157,12 +159,31 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   // the same head, base and grounds (GY-407) — not of every request the item ever carried.
   return stopped.stopped ? { ...needed, input: situatedInput(needed), reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
-/** What the item calls for, before asking whether the loop may attest that its worker is stopped. */
-export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>): RoutineDecision | null {
+/**
+ * GY-568. Whether the evaluated build gate holds the head for the control plane's restore after a
+ * predecessor's ejection. Nothing read from such a head is the worker's: no rework is asked for it.
+ */
+export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
+  return (work.gates ?? []).some(gate => gate.name === 'build' && gate.reasons.some(reason => reason.startsWith(restoringAfterEjectionPrefix)));
+}
+/**
+ * What the item calls for, before asking whether the loop may attest that its worker is stopped.
+ * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
+ */
+export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
   }
+  // A triage closure the triage agent proposed for a machine-filed item (GY-402) is applied only
+  // once the independent approver agrees; the decision binds the judgement it applies.
+  const closure = work.triage?.state === 'proposed' ? triageClosure(work.triage.judgement) : null;
+  if (closure) return { action: 'close', reason: `${work.key} is a machine-filed backlog item the triage agent judged should be closed (${closure.kind}${closure.ref ? ` of ${closure.ref}` : ''}): ${closure.reason}`.slice(0, 2000),
+    binding: `triage:${work.triage!.at}`, input: { ...closure, triageAt: work.triage!.at } };
+  // A stale speculative tip waits for the control plane's restore (GY-568): a conflict, a verdict,
+  // a failed check or proof, or a thread on it judged a tree that holds another item's unlanded
+  // work, so none of them is grounds to send it to a worker. Only a lease-loss is still settled.
+  if (awaitingEjectionRestore(work)) return leaseLossDecision(work);
   // Like a verdict, a conflict keeps matching the head it was found on until a new one is pushed,
   // and the engine's `rework` does not clear it: once the round is requested the item needs a
   // worker, not a second decision, even when that round's worker dies before pushing.
@@ -187,10 +208,17 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   if (proofs) return { action: 'rework', ...proofs };
   const ci = failedCheckRework(work) ?? attributedFailureRework(work);
   if (ci) return { action: 'rework', ...ci };
+  const spent = exhaustedProofRework(work, exhausted);
+  if (spent) return { action: 'rework', ...spent };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
   if (research) return { action: 'rework', ...research };
+  // The guarded merge refused this very candidate for the same reason past the loop's bound, and
+  // no carried approval was there to re-require (GY-831): nothing the control plane holds re-binds
+  // it, so the candidate returns to a worker rather than holding the queue head.
+  const refused = work.reworkRequested ? null : repeatedMergeRefusal(work);
+  if (refused) return { action: 'rework', reason: `${work.key}: the guarded merge refused candidate ${refused.sha.slice(0, 12)} on every attempt since ${refused.since} with the same reason: ${refused.reason.slice(0, 1200)}. Nothing the control plane holds re-binds it, so the candidate returns to a worker.`, binding: `${refused.sha}:merge-refused` };
   // An unexercised `manual:` proof is answered by an attestation carrying its exercise record
   // (GY-523), never by rework: nothing in the change is wrong, only the record of the attestation.
   const attestation = attestationDecision(work);
@@ -209,9 +237,8 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // settling it is a routine two-party decision, not a wait on a human master session (GY-161,
   // 2026-09-24: its first worker exited five minutes in, a new attempt took the item, and the
   // standing escalation would have refused the merge until somebody asked for the resolution).
-  const lost = supersededLeaseLoss(work);
-  if (lost) return { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
-    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` };
+  const lost = leaseLossDecision(work);
+  if (lost) return lost;
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
 }
@@ -238,11 +265,16 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   const ejection = work.queueEjection?.sha === candidate.sha && work.queueEjection.policyRevision === work.policyRevision ? work.queueEjection : null;
   const attribution = ejection?.attribution?.tip === candidate.sha ? ejection.attribution : null;
   if (attribution?.verdict === 'predecessor') return null;
-  const failed = work.policy.checks.filter(name => {
-    const runs = observation.checks.filter(check => check.name === name);
-    const latest = runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result);
-  }).sort();
+  // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
+  // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
+  // check's run is read through the test gate's trust boundary (GY-731); a protection-only
+  // check's through the app protection binds it to, or any app.
+  const failed = requiredChecksOf(work).filter(required => {
+    const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, null);
+    // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
+    // new head and lose the queue position, approval and proofs the rerun keeps.
+    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
+  }).map(required => required.name).sort();
   if (!failed.length) return null;
   const predecessors = attribution?.predecessors ?? tipPredecessors(work);
   const tip = predecessors === null ? ''
@@ -266,23 +298,55 @@ export function attributedFailureRework(work: Work): { reason: string; binding: 
     binding: `${candidate.sha}:ci-attributed:${attribution.entry}:${attribution.tip}` };
 }
 /**
+ * GY-496. A producer request the loop stopped attempting: every automatic session it launched for
+ * the head's proof group ended without trusted evidence (auto-dispatch.ts `abandon`). Before this,
+ * nothing followed: GY-421 waited over seventy minutes in review with its proofs missing, no
+ * producer would be launched for the head again, and the master had to ask for a rework by hand.
+ */
+export interface ExhaustedProof { requestId: string; work: string; sha: string; group: string | null; proofs: string[]; attempts: string[]; reason: string }
+/** The escalation that raises an exhausted request; the rework is requested only on a later cycle. */
+export const exhaustedProofKey = (entry: Pick<ExhaustedProof, 'work' | 'requestId'>) => `escalation:proof-exhausted:${entry.work}:${entry.requestId}`;
+const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} proof group${entry.proofs.length ? ` (${entry.proofs.join(', ')})` : ''}`;
+const quoteAttempts = (entry: ExhaustedProof, limit = 1600) => { const text = entry.attempts.map(attempt => `"${attempt}"`).join('; '); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text || 'no attempt recorded'; };
+/** The attention the loop raises the cycle it first sees the request spent: group, every attempt's outcome, and the next step's owner. */
+export function exhaustedProofEscalation(entry: ExhaustedProof) {
+  return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head again. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: on its next cycle it requests a rework decision for ${entry.work} quoting these attempts, and the independent approver judges it; the master fixes a launcher fault (a producer profile or its credential) if the attempts name one`);
+}
+/** The rework an item whose proof requests are spent calls for, once the escalation has stood a cycle, or null. */
+export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedProof[]): { reason: string; binding: string } | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const spent = exhausted.filter(entry => entry.work === work.key && entry.sha === candidate.sha);
+  if (!spent.length) return null;
+  const each = Math.max(200, Math.floor(1600 / spent.length));
+  return { reason: `${work.key}: the producer attempts for ${spent.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
+    // Keyed on the head alone: a second group spent on the same head asks for no second rework.
+    binding: `${candidate.sha}:proof-exhausted` };
+}
+/**
  * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head
  * (the build gate returns it to its worker before review) and evidence the producer recorded as not
  * exercising its criterion (the proof also passed with the change removed) both leave a head no
  * review will ever judge, so the rework is asked for now, whatever threads stand open on it: the
  * rule that waits for a review to judge the threads first would wait for a review that never comes.
+ * GY-868: a manual: proof a producer session may run and recorded as failed with cases executed is
+ * a trusted proof failed like any other — the producer judged the change and found it inadequate —
+ * so it returns the head to its worker too. A manual record with executed = 0 judged nothing and
+ * goes to attestationDecision instead, and a manual proof no producer may run is never the
+ * worker's: both stay out of this rework.
  * The reason quotes each finding and names the open threads, so the worker takes both in one round.
  */
 export function proofRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
-  const failed = mechanicalVerdicts(work, [work], new Date()).filter(verdict => verdict.outcome === 'failed');
+  const now = new Date();
+  const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
   // An unexercised `manual:` proof is not the worker's to fix: see attestationDecision.
   const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));
   if (!failed.length && !unexercised.length) return null;
   const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
   const findings = [
-    ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalFailure(verdict, candidate.sha)).join('; ')}`] : []),
+    ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalProof(verdict.proof) ? mechanicalFailure(verdict, candidate.sha) : producerManualFailure(verdict, candidate.sha)).join('; ')}`] : []),
     ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}"`).join('; ')}`] : []),
   ];
   const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
@@ -299,6 +363,9 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
  * remedy, which the GY-393 approver refused. The change was never at fault, only the record, so the
  * loop asks for the attestation again, carrying the exercise record (`attestationExercise`) its
  * approver confirms by running the proof against the candidate base.
+ * GY-868: a trusted manual record with executed = 0 is an unexercised finding too — no case ran, so
+ * the criterion was never judged — and is answered here as well, never through rework or an
+ * operator escalation.
  */
 export function attestationDecision(work: Work): RoutineDecision | null {
   const candidate = work.candidate;
@@ -319,7 +386,8 @@ export function attestationDecision(work: Work): RoutineDecision | null {
  * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
  * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
  * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
- * The binding names the head and the base tip, so a base that moves on is a fresh ground.
+ * The binding names the head and the base tip, so a base that moves on is a fresh ground; for a
+ * queue ejection that tip is the base the conflicting merge was attempted onto, as recorded.
  * An ejection whose speculative base held predecessors is no conflict with the base (GY-321): merging
  * the base resolves nothing, so no round is asked; the entry waits for those predecessors
  * and re-enters with the same head (model/queue.ts, `predecessorWait`).
@@ -332,9 +400,20 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (observation.conflicting && !work.queue)
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflictReason.test(ejection.reason) && !ejection.predecessors?.length && !pendingBaseRefresh(work))
-    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${tip.slice(0, 12)})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${tip}` };
+  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
+    // The base the speculative merge was actually attempted onto, as the ejection recorded it
+    // (GY-252); the observed tip only for a record that named none (GY-583).
+    const base = ejection.conflict?.base ?? tip;
+    const moved = base === tip ? '' : `; the base branch tip is now ${tip.slice(0, 12)}`;
+    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${base.slice(0, 12)}${moved})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${base}` };
+  }
   return null;
+}
+/** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */
+function leaseLossDecision(work: Work): RoutineDecision | null {
+  const lost = supersededLeaseLoss(work);
+  return lost ? { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
+    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` } : null;
 }
 /**
  * The standing control-plane lease-loss the loop may ask to settle, and why. `superseded` when a
@@ -545,3 +624,9 @@ export function approvalStep(watch: ApprovalWatch, decision: { state: string; ou
 }
 /** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
 export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);
+/** GY-831. The repeated merge refusal the control plane recorded for exactly the current candidate that calls for a rework decision, or null. */
+export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidate' | 'policyRevision'>) {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
+}
+

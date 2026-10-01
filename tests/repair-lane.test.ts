@@ -133,6 +133,7 @@ test('unit:repair-lane-audited — a repair-lane merge appends its audit entry b
       if (text.startsWith('INSERT INTO events')) { events.push({ kind: values[2] as string, payload: JSON.parse(values[3] as string) }); return { rows: [] }; }
       if (text.includes("kind LIKE 'decision.%'")) return { rows: ledger };
       if (text.includes("kind='repair.refused'")) return { rows: [] };
+      if (text.includes("payload->'details'->>'decision'=$4")) return { rows: events.filter(event => event.kind === values[1] && event.payload.details.head === values[2] && event.payload.details.decision === values[3]).map(event => ({ audit: event.payload.details })).slice(-1) };
       throw new Error(`unexpected query ${text}`);
     } } } } as any;
   const merges: { work: string; audit: RepairAudit; recorded: number }[] = [];
@@ -159,6 +160,17 @@ test('unit:repair-lane-audited — a repair-lane merge appends its audit entry b
   events.length = 0;
   await assert.rejects(repairLaneStep(engine, { repairMerge: async () => { throw new Error('head moved'); } }, repairItem(), new Date(stalled)), /head moved/);
   assert.deepEqual(events.map(event => event.kind), ['repair.merged', 'repair.failed']);
+
+  // GY-428: the retry reuses the audit entry already appended for this head and decision.
+  merges.length = 0;
+  await repairLaneStep(engine, github, repairItem(), new Date(stalled + 60_000));
+  assert.deepEqual(events.map(event => event.kind), ['repair.merged', 'repair.failed'], 'no second repair.merged for the same head');
+  assert.equal(merges.length, 1); assert.deepEqual(merges[0].audit, events[0].payload.details, 'the merge is attributed to the first audit entry');
+
+  // GY-428: the bypass merge runs behind the job's fencing guard; a fenced-out job writes nothing.
+  events.length = 0; merges.length = 0;
+  await assert.rejects(repairLaneStep(engine, github, repairItem(), new Date(stalled), async () => { throw new Error('Work or job ownership changed before publication; retry'); }), /ownership changed/);
+  assert.deepEqual(events, [], 'no audit entry is appended'); assert.equal(merges.length, 0, 'GitHub is not asked to merge');
 
   // Master status: the delivered repair raises an attention item until the next normal merge.
   const delivered = (key: string, mergedAt: string, repairLane: RepairAudit | null) => ({ key, stage: 'done', delivery: { mergedAt, mergeSha: head, authorizationRevision: 1 }, repairLane }) as Work;

@@ -1,5 +1,5 @@
-import type { Work } from '../src/model';
-import { defaultProductionEnvironment, flowExitAt, noProductionHold, productionHold, servedAt, type ProductionHold } from '../src/flow-analytics';
+import type { Work } from '../model.js';
+import { defaultProductionEnvironment, flowExitAt, noProductionHold, productionHold, servedAt, type ProductionHold } from '../flow-analytics.js';
 
 /**
  * What the control plane knows about production, as every page reads it (GY-161): the

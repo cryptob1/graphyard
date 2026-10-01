@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -18,6 +16,7 @@ import { actionSettleMs } from '../src/model/action-progress.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit, coordinationSnapshot as trimInProcess, coordinationViewHeader, coordinationWork, deliverySettled, type CoordinationOmissions } from '../src/server/work-view.js';
 import { coordinationRecords, coordinationSessions, coordinationTail } from '../src/store/coordination-sql.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-203: migrations and backups take their own advisory locks, and the coordination snapshot is
@@ -35,9 +34,9 @@ const open = async (database: string) => { const store = new Store(url(database)
 before(async () => {
   // An offset no other test file takes (see tests/stalled-actions.test.ts).
   port = Number(process.env.GRAPHYARD_STORE_LOCKS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 203);
-  postgres = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-store-locks-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  postgres = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('store-locks'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['locks', 'restored', 'lifecycle', 'board']) await postgres.createDatabase(name);
+  for (const name of ['locks', 'restored', 'contended', 'deadlocked', 'lifecycle', 'board']) await postgres.createDatabase(name);
 });
 after(async () => {
   for (const store of stores) await store.close().catch(() => {});
@@ -116,6 +115,59 @@ test('integration:migration-backup-locks-separate — a migration and a backup p
     await within(10_000, waiting, 'the queued migration');
     assert.equal(await blocked.schema(), schemaVersion);
   } finally { await migrating.release().catch(() => {}); }
+});
+
+test('GY-257 — a restore excludes a write in flight on the target: it waits for it, then refuses a ledger that is no longer empty', async () => {
+  const live = await open('locks');
+  const backup = await createBackup(live.pool);
+  const target = await open('contended'), id = randomUUID();
+  // A writer that took no coordination lock opens its write before the restore starts and commits
+  // only once the restore is waiting: without the table locks the restore saw an empty ledger,
+  // wrote beside it, and both committed.
+  const writer = await session('contended', async db => { await db.query('LOCK TABLE work_items IN ROW EXCLUSIVE MODE'); });
+  let committed = false;
+  try {
+    const restoring = restoreBackup(target.pool, backup).then(() => null, (error: Error) => error);
+    let waiting = false;
+    for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
+      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='work_items'::regclass")).rows[0].n) === 1;
+      if (!waiting) await delay(20);
+    }
+    assert.ok(waiting, 'the restore waits for the write in flight');
+    await writer.db.query("INSERT INTO work_items(id, document) VALUES($1, jsonb_build_object('id', $2::text, 'key', 'GY-9', 'stage', 'build'))", [id, id]);
+    await writer.db.query('COMMIT'); committed = true; await writer.db.end();
+    const refused = await within(5_000, restoring, 'the restore');
+    assert.ok(refused, 'the restore does not interleave with the write');
+    assert.match(refused.message, /Restore requires an empty database: work_items already holds 1 row/);
+    assert.deepEqual((await target.pool.query('SELECT id FROM work_items')).rows.map(row => row.id), [id]);
+  } finally { if (!committed) await writer.release().catch(() => {}); }
+});
+
+test('GY-443 — a restore that deadlocks with a writer holding a later ledger table runs again, then refuses the ledger that writer left', async () => {
+  const live = await open('locks');
+  const backup = await createBackup(live.pool);
+  const target = await open('deadlocked'), id = randomUUID();
+  // The writer holds events, which the restore locks after work_items, and then asks for work_items,
+  // which the restore already holds. The writer waits out a longer deadlock timeout, so the restore is
+  // the transaction Postgres aborts.
+  const writer = await session('deadlocked', async db => { await db.query("SET LOCAL deadlock_timeout = '30s'"); await db.query('LOCK TABLE events IN ROW EXCLUSIVE MODE'); });
+  let committed = false;
+  try {
+    const restoring = restoreBackup(target.pool, backup).then(() => null, (error: Error & { code?: string }) => error);
+    let waiting = false;
+    for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
+      waiting = Number((await target.pool.query("SELECT count(*) AS n FROM pg_locks WHERE locktype='relation' AND mode='ExclusiveLock' AND NOT granted AND relation='events'::regclass")).rows[0].n) === 1;
+      if (!waiting) await delay(20);
+    }
+    assert.ok(waiting, 'the restore holds work_items and waits for events');
+    await within(10_000, writer.db.query("INSERT INTO work_items(id, document) VALUES($1, jsonb_build_object('id', $2::text, 'key', 'GY-9', 'stage', 'build'))", [id, id]), 'the writer');
+    await writer.db.query('COMMIT'); committed = true; await writer.db.end();
+    const refused = await within(10_000, restoring, 'the restore');
+    assert.ok(refused, 'the restore does not interleave with the write');
+    assert.notEqual(refused.code, '40P01', 'the deadlock is not what the operator sees');
+    assert.match(refused.message, /Restore requires an empty database: work_items already holds 1 row/);
+    assert.deepEqual((await target.pool.query('SELECT id FROM work_items')).rows.map(row => row.id), [id]);
+  } finally { if (!committed) await writer.release().catch(() => {}); }
 });
 
 // ---- AC-2: the index ------------------------------------------------------------------------
@@ -217,6 +269,18 @@ test('integration:index-matches-documents — the index equals the documents aft
   assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, false, 'a running session unsettles it');
   await store.pool.query("UPDATE work_items SET document = jsonb_set(document, '{sessions}', $2::jsonb) WHERE id=$1", [w.id, JSON.stringify([{ ...handle, state: 'finished', endedAt: new Date().toISOString() }])]);
   await check('session finished');
+  // GY-257: a delivered item still under containment quarantine is not settled, so the coordination
+  // view keeps the finished implementation session containment recovery finds its pane from.
+  const worked = { id: 'agent-a:1', kind: 'implementation', principal: 'agent-a', epoch: 1, pane: 'w1:p1', state: 'finished', agentName: 'agent-a', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), endedAt: new Date().toISOString(), outcome: null };
+  const quarantine = { owner: 'agent-a', epoch: 1, at: new Date().toISOString(), settlementHash: 'f'.repeat(64) };
+  await store.pool.query("UPDATE work_items SET document = jsonb_set(jsonb_set(document, '{sessions}', $2::jsonb), '{containmentQuarantine}', $3::jsonb) WHERE id=$1", [w.id, JSON.stringify([worked]), JSON.stringify(quarantine)]);
+  await check('quarantined delivery');
+  assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, false, 'a containment quarantine unsettles it');
+  const quarantined = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [w.id])).rows[0].document as Work;
+  assert.deepEqual(coordinationWork(quarantined, noOmissions()).sessions?.map(entry => entry.id), ['agent-a:1'], 'the view keeps the quarantined epoch\'s session');
+  await store.pool.query("UPDATE work_items SET document = document || '{\"containmentQuarantine\": null}' WHERE id=$1", [w.id]);
+  await check('quarantine settled');
+  assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, true, 'settling the quarantine settles the delivery');
   await engine.execute(operator, 'ready', other.id, {}, randomUUID()); await check('bystander released');
   // A rollback leaves the index as it was: it is written in the document's own transaction.
   const before = (await store.pool.query('SELECT revision FROM work_index WHERE id=$1', [other.id])).rows[0].revision;

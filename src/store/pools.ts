@@ -53,3 +53,12 @@ export async function closePool(pool: pg.Pool, name: string, boundMs = poolClose
     if (outcome === 'bounded') log(`[store] ${name} pool: ${[...open].length} connection(s) still open ${boundMs} ms after end(); continuing shutdown`);
   } finally { clearTimeout(timer); }
 }
+
+/**
+ * The lease pool (GY-558): the connections the commands that keep or take a worker's lease —
+ * renewal (`heartbeat`), `claim`, `complete` (`submit`) and `blocked` — run on, and nothing else.
+ * No report, observation, reconciliation or status read ever takes one, so a lease command still
+ * gets a connection while every other pool is exhausted behind slow queries.
+ */
+export const leasePoolConnections = 4;
+export const leaseCommands: ReadonlySet<string> = new Set(['heartbeat', 'claim', 'submit', 'blocked']);

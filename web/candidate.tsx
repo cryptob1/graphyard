@@ -1,6 +1,6 @@
 import { candidateCommitUrl, candidatePrUrl } from './links';
 import Term from './components/term';
-import { shaChars, shortShas } from './format';
+import { shaChars, shortShas } from '../src/model/format';
 
 /** External GitHub destinations open in a new, sandboxed-safe tab. */
 const external = { target: '_blank', rel: 'noopener noreferrer' } as const;

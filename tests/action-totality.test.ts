@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
@@ -16,10 +14,11 @@ import { actionAccount, actionJudgment, gateRefusalCatalogue, nextAction, refusa
 import { accountOutcome, actionlessItems, stallBoundMs, stalledItems, type AccountOutcome } from '../src/model/action-account.js';
 import { stalledItemAttention } from '../src/cli/master-status.js';
 import { actionableSubjects } from '../src/master-daemon.js';
-import { actionlessCards, stalledCards } from '../web/pages/actionless.js';
+import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-106: an item may not hold a failing gate with no action computed and nobody told.
@@ -50,7 +49,7 @@ before(async () => {
   // An offset no other test file takes: two files sharing a port fail whichever starts its
   // Postgres second, in its `before` hook, with no reason given.
   const port = Number(process.env.GRAPHYARD_ACTION_TOTALITY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 106);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-action-totality-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-totality'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [CI_APP], 120, 'owner/project');
@@ -199,6 +198,12 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'diff never compared', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: undefined } } as Work },
     { name: 'out of scope against the bound base', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [scopeFile] } } as Work },
     { name: 'would revert work on the commit it lands on', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile] } } } as Work },
+    // GY-568: a speculative tip built behind an entry that left the queue unlanded waits for its restore,
+    // and files another open candidate's commits put on the head are that candidate's, not rework.
+    { name: 'stale speculative tip after its predecessor left the queue', work: { ...unproven, key: 'GY-STALE', queueHistory: [{ at: now.toISOString(), event: 'predicted', sequence: 5, tip: head, predecessors: ['GY-GONE'], from: sha40('0e') }] } as Work,
+      all: [{ ...other, id: randomUUID(), key: 'GY-GONE', queue: null } as Work, { ...unproven, key: 'GY-STALE' } as Work] },
+    { name: 'files another candidate\'s commits carried', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile], foreign: [{ key: 'GY-FOREIGN', pr: 9, head: sha40('0f') }] } } } as Work,
+      all: [{ ...other, id: randomUUID(), key: 'GY-FOREIGN', plannedFiles: ['src/a.ts'] } as Work, unproven] },
     // A unit or integration proof that failed on the head returns it to its worker before review (GY-115).
     { name: 'mechanical proof failed', work: { ...unproven, evidence: [{ ...proven.evidence[0], id: randomUUID(), result: 'fail' as const }] } as Work },
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },
@@ -211,6 +216,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'reviewer roster spent', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'agent', reviewerProfiles: profiles }, observation: { ...unproven.observation!, reviews: [] },
       reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'timeout', reason: 'the reviewer session timed out', at: now.toISOString(), sha: head, baseSha: base, policyRevision: unproven.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work },
     { name: 'a required check failed', work: { ...unproven, observation: { ...unproven.observation!, checks: [{ name: 'test', result: 'failure', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }] } } as Work },
+    { name: 'a check only branch protection requires failed', work: { ...unproven, observation: { ...unproven.observation!, requiredChecks: [{ name: 'secrets', appId: null }], checks: [...unproven.observation!.checks, { name: 'secrets', result: 'failure', appId: CI_APP }] } } as Work },
     { name: 'a required check has not answered', work: { ...unproven, observation: { ...unproven.observation!, checks: [] } } as Work },
     { name: 'no trusted evidence', work: unproven },
     { name: 'an inherited bootstrap obligation', work: unproven, all: [deferrer, unproven] },

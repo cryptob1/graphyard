@@ -1,8 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
@@ -14,6 +13,7 @@ import { registryHeadlessLaunch } from '../src/runner/roles.js';
 import { clearRuns } from '../src/runner/registry.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-170 AC-2: each registry role carries its launch policy — flags such as a permission mode or
@@ -30,7 +30,7 @@ const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x'), approverToken = '
 const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
 const decision = '0e3b2c1a-7f00-4a70-8170-000000000170';
-const scratch = await realpath(await mkdtemp(join(tmpdir(), 'graphyard-registry-launch-')));
+const scratch = await realpath(await temporaryDirectory('registry-launch'));
 after(async () => { clearRuns(); await rm(scratch, { recursive: true, force: true }); });
 
 /** The control plane's registry, in memory: mutations and choices through the same functions the server runs. */
@@ -178,8 +178,9 @@ test('integration:registry-drives-launch — a registry role on a pi account run
   await writeFile(join(bin, 'pi'), `#!/bin/sh\nexec '${process.execPath}' '${join(bin, 'fake-pi.mjs')}' "$@"\n`); await chmod(join(bin, 'pi'), 0o755);
   const path = process.env.PATH; process.env.PATH = `${bin}${delimiter}${path}`;
   try {
-    const probe = { registry: registry.client, quota: false as const, cacheMs: 0 };
-    const first = await launchApprover(root, item('GY-711'), decision, undefined, { agents: [], available: true }, herdr([]), probe);
+    // The account's smoke test (GY-446) is its own proof's concern: here it passes without a run.
+    const probe = { registry: registry.client, quota: false as const, cacheMs: 0, smoke: async () => ({ ok: true, error: null }) };
+    const first = await launchApprover(root, item('GY-711'), decision, undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable });
     assert.equal(first.runtime, 'pi'); assert.equal(first.pane, null);
     assert.equal(first.account?.environment, 'pi-a');
     await first.settled;
@@ -193,7 +194,7 @@ test('integration:registry-drives-launch — a registry role on a pi account run
     assert.ok(registry.current().sessions.at(-1)!.endedAt, 'the run\'s registry session ends with the run');
 
     registry.mutate('role.set', { role: { name: 'approver', accounts: ['pi-a'], concurrency: 4, policy: { args: [], tools: ['read'], model: 'glm-flash' } }, reason: 'Read-only approvers on the flash model' });
-    await (await launchApprover(root, item('GY-712'), decision.replace('0170', '0173'), undefined, { agents: [], available: true }, herdr([]), probe)).settled;
+    await (await launchApprover(root, item('GY-712'), decision.replace('0170', '0173'), undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable })).settled;
     const [, two] = await runs();
     assert.equal(valueOf(two.args, '--model'), 'zai/glm-5.3-flash');
     assert.equal(valueOf(two.args, '--tools'), 'read');

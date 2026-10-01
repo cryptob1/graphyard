@@ -68,9 +68,11 @@ export const actionRoutes = defineRoutes('actions', [
   },
   {
     // What the `resync` and `reclaim` actions run: a fresh provider reading and a reconciliation
-    // pass for one item. It carries no verdict of its own — see Engine.resyncWork.
+    // pass for one item. It carries no verdict of its own — see Engine.resyncWork. The body may name
+    // the instant the executor's claim was made (`since`), and the answer says whether an
+    // observation newer than it has been saved; `wake: false` only reads (GY-607).
     method: 'POST', path: /^\/api\/work\/([^/]+)\/resync$/,
-    handle: (context, [id]) => context.services.engine.resyncWork(context.actor, decodeURIComponent(id)),
+    handle: async (context, [id]) => context.services.engine.resyncWork(context.actor, decodeURIComponent(id), await parseJson(context, undefined, '{}')),
   },
   {
     method: 'POST', path: '/api/assignments/claim',

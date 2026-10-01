@@ -2,13 +2,13 @@ import type { Work } from './work.js';
 import { isClosed } from './closure.js';
 import { deliveryState } from './delivery.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
-import { scopeRefusalBlocker } from './scope.js';
-import { shortShas } from '../../web/format.js';
-import { OVERDUE_MINUTES, statusDuration } from '../../web/duration.js';
-import { phaseOf, plainReason, plainStatus, statusSince } from '../../web/plain-status.js';
-import { prSteps, stepSince } from '../../web/pr-steps.js';
-import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from '../../web/release.js';
-import { stalledCards } from '../../web/pages/actionless.js';
+import { scopeRefusalBlocker, terminalScopeRefusal } from './scope.js';
+import { shortShas } from './format.js';
+import { OVERDUE_MINUTES, statusDuration } from './duration.js';
+import { phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
+import { prSteps, stepSince } from './pr-steps.js';
+import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
+import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
 
 /**
@@ -21,7 +21,7 @@ import { resourceConflicts } from '../coordination.js';
  * (`leftFlowAt`): a per-item deployment record is written only for policies that ask for a
  * post-deployment check, so its absence never holds work back. Merged work is moving at Deploy
  * while its check is outstanding or while the production watch observes that production does not
- * serve it yet (web/release.ts), and blocked when the check or the deployment failed. Within
+ * serve it yet (src/model/release.ts), and blocked when the check or the deployment failed. Within
  * Shipped, an item is live only once the release is observed serving it (`servedAt`, under the
  * configured production environment); until then it reads "Merged" and is not counted as shipped
  * this week. Closed work is in none.
@@ -177,13 +177,18 @@ function heldMeaning(total: number, held: string[]): string {
   return `${total - held.length} waiting for a worker · ${held.length} held`;
 }
 
-/** The role whose step is next, in the vocabulary an agent reads (`actor` on a board item). */
-export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only'] as const;
+/**
+ * The role whose step is next, in the vocabulary an agent reads (`actor` on a board item).
+ * `held` is no role at all: the item waits behind a dependency or an exclusive resource another
+ * item holds, so nobody can act on it until that clears — never the control plane's pending step.
+ */
+export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only', 'held'] as const;
 export type ActorRole = typeof actorRoles[number];
 const roleOf: Record<string, ActorRole> = {
   You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
   // The control plane's own steps: the dispatcher, the CI run, the merge queue, the production watch.
-  'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor', 'Nobody yet': 'executor',
+  'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor',
+  'Nobody yet': 'held',
 };
 
 /**
@@ -203,11 +208,13 @@ const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.
 
 /**
  * The exact command that takes the next step, when there is one to run: a scope refusal is
- * `master scope`, a recorded blocker `master unblock`, an escalation `master decide … resolve`, a
- * merged item production does not serve `master verify-deployment`, a candidate every other gate
- * passed (merging, or stranded there) `master merge`, a review `master review`, backlog
- * `master release`, and a human-only decision the answer its row names. Null where the next step
- * is a session already running or a turn nobody can take early.
+ * `master scope` — or `master requirements` where no fold represents the ask under the cap, which
+ * the plain union `master scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`,
+ * an escalation `master decide … resolve`, a merged item production does not serve
+ * `master verify-deployment`, a candidate every other gate passed (merging, or stranded there)
+ * `master merge`, a review `master review`, backlog `master release`, and a human-only decision the
+ * answer its row names. Null where the next step is a session already running or a turn nobody can
+ * take early.
  */
 export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow): string | null {
   const key = work.key;
@@ -215,7 +222,8 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (actor === 'approver') return `graphyard master decisions ${key}`;
   if (actor === 'reviewer') return `graphyard master review ${key}`;
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
-  if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker)) return `graphyard master scope ${key}`;
+  if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker))
+    return terminalScopeRefusal(work) ? `graphyard master requirements ${key} FILE REASON` : `graphyard master scope ${key}`;
   if (work.blocker) return `graphyard master unblock ${key} REASON`;
   if (work.stage === 'done') return actor === 'master' ? `graphyard master verify-deployment ${key}` : null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
@@ -278,15 +286,27 @@ export const boardFromStatus = (work: Work[], now: number, status: any) => build
 /** True for a response shaped as a board. */
 export const isBoard = (value: any): value is Board => !!value && typeof value === 'object' && !!value.groups && groups.every(group => Array.isArray(value.groups[group]));
 
+/** True for the refusal of a server that predates `GET /api/board`: the route is not there (404). */
+export const boardRouteMissing = (error: unknown) => (error as { status?: unknown } | null)?.status === 404;
+
 /**
  * The `board` section of `master status`: every item whose next step is the master's, first and
  * with its command — blocked on scope, a decision no approver answered, a stranded merge — then
  * every other open item, with the group counts. Read from `GET /api/board`; built from the same
- * module over the snapshot and status already in hand when that read is unavailable.
+ * module over the snapshot and status already in hand only when the server predates the route
+ * (404). Any other failure — a 500, an auth refusal, a timeout, a body that is not a board — is
+ * reported as the section's `error` rather than papered over, so a failing route is seen.
  */
 export async function masterBoard(api: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, status: any, unanswered: { work: string; id: string }[] = []) {
-  const served = await api('board').catch(() => null);
-  const board = isBoard(served) ? served : boardFromStatus(snapshot.work, Date.parse(snapshot.now), status);
+  let board: Board;
+  try {
+    const served = await api('board');
+    if (!isBoard(served)) return { error: `GET /api/board answered something that is not a board: ${JSON.stringify(served)?.slice(0, 200)}` };
+    board = served;
+  } catch (error) {
+    if (!boardRouteMissing(error)) return { error: `GET /api/board failed: ${error instanceof Error ? error.message : String(error)}` };
+    board = boardFromStatus(snapshot.work, Date.parse(snapshot.now), status);
+  }
   const items = groups.flatMap(group => board.groups[group]).map(entry => {
     const decision = unanswered.find(row => row.work === entry.key);
     return decision ? { ...entry, actor: 'master' as const, command: `graphyard master approver ${entry.key} ${decision.id}` } : entry;

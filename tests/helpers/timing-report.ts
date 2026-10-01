@@ -92,13 +92,16 @@ export function timingSummary(record: TimingMeasurement[], failures: TimingFailu
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const [recordFile, logFile] = process.argv.slice(2);
-  if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log]');
+  // One log per shard in CI (GY-499): the failed tests beside the timing-dependent ones are counted
+  // across every shard, and unknown when any shard's log is missing or has no summary.
+  const [recordFile, ...logFiles] = process.argv.slice(2);
+  if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log...]');
   const record = existsSync(recordFile) ? parseTimingRecord(readFileSync(recordFile, 'utf8')) : [];
-  const log = logFile && existsSync(logFile) ? readFileSync(logFile, 'utf8') : null;
-  const failures = timingFailures(record, log === null ? null : failedTestCount(log));
+  const logs = logFiles.map(file => existsSync(file) ? readFileSync(file, 'utf8') : null);
+  const counts = logs.map(log => log === null ? null : failedTestCount(log));
+  const failures = timingFailures(record, counts.length && counts.every(count => count !== null) ? counts.reduce<number>((sum, count) => sum + count!, 0) : null);
   for (const failure of failures) console.log(annotationCommand(failure));
-  for (const failure of log === null ? [] : failingTests(log).slice(0, failingTestAnnotationsMax)) console.log(failingTestCommand(failure));
+  for (const failure of logs.flatMap(log => log === null ? [] : failingTests(log)).slice(0, failingTestAnnotationsMax)) console.log(failingTestCommand(failure));
   const summary = timingSummary(record, failures, readBaseline());
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary); else console.log(summary);
 }

@@ -1,5 +1,6 @@
-import { appendOnly, defineTable } from '../tables.js';
+import { defineTable } from '../tables.js';
 import { eventWorkFunctions } from '../snapshot-delta.js';
+import { eventsImmutableDdl } from '../compaction.js';
 
 /** Work aggregates, their immutable history, and the durable integration jobs behind them. */
 export const workItems = defineTable({
@@ -21,6 +22,10 @@ CREATE INDEX IF NOT EXISTS events_created ON events(created_at);
 -- The intervention report reads a window of a few kinds (GY-422): by kind and time, never the
 -- whole ledger newest-first.
 CREATE INDEX IF NOT EXISTS events_kind_created ON events(kind,created_at);
+-- An item's newest row carrying a whole document before a point in the ledger, in one probe: the
+-- snapshot a save's delta extends, and the stage an item held before the intervention report's
+-- window (GY-491).
+CREATE INDEX IF NOT EXISTS events_work_whole ON events(work_id,seq) WHERE payload ? 'work';
 -- The production watch restores its containment answers before the server listens, on every
 -- restart (and every deploy restarts): newest record per item, and the newest pending set.
 -- Partial on kind, so each read touches only its own records instead of the window's events.
@@ -29,7 +34,8 @@ CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DES
 CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)
   WHERE kind='production.deployment-pending';
 ${eventWorkFunctions}
-${appendOnly('events')}`,
+-- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
+${eventsImmutableDdl}`,
 });
 export const receipts = defineTable({
   name: 'receipts', orderBy: 'actor,key',
@@ -52,7 +58,12 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS claimed_generation bigint NOT NULL DEF
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_until timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_reason text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refusals int NOT NULL DEFAULT 0;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;`,
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;
+-- Consecutive finishes that saved no observation (GY-506): the starvation count an attention
+-- item is raised at, reset by the next observation that is saved.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS unobserved int NOT NULL DEFAULT 0;
+-- Why an observation job was deferred rather than spent, recorded beside the deferral itself (GY-506).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deferred_reason text;`,
 });
 export const webhookReceipts = defineTable({
   name: 'webhook_receipts', orderBy: 'id',

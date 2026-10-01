@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
@@ -11,11 +10,12 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { predictQueue } from '../src/merge-queue.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-import { OVERDUE_MINUTES, formatDuration, statusDuration } from '../web/duration.js';
-import { phaseOf, phaseLabel, statusHeld, statusSince } from '../web/plain-status.js';
+import { OVERDUE_MINUTES, formatDuration, statusDuration } from '../src/model/duration.js';
+import { phaseOf, phaseLabel, statusHeld, statusSince } from '../src/model/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
@@ -137,17 +137,17 @@ test('unit:overdue-threshold-applied — twenty-nine minutes is not red, thirty-
 
   // And the value is configured once rather than repeated per view: no other source carries a
   // threshold of its own, and each view reaches the verdict through the one call.
-  const sources = ['web/duration.ts', 'web/plain-status.ts', 'web/components/status-age.tsx', 'web/components/work-card.tsx', 'web/pages/work-details.tsx', 'web/pages/overview.tsx'];
+  const sources = ['src/model/duration.ts', 'src/model/plain-status.ts', 'web/components/status-age.tsx', 'web/components/work-card.tsx', 'web/pages/work-details.tsx', 'web/pages/overview.tsx'];
   const definitions: string[] = [];
   for (const path of sources) {
     const source = await read(path);
     if (/OVERDUE_MINUTES\s*=/.test(source)) definitions.push(path);
-    if (path === 'web/duration.ts') continue;
+    if (path === 'src/model/duration.ts') continue;
     // Outside the one definition, nothing compares a duration with a number of its own.
     assert.doesNotMatch(source.replace(/^\s*(\/\/|\*|\/\*).*$/gm, ''), /\bminutes\s*[<>]=?\s*\d/, `${path} judges nothing against its own number`);
     assert.doesNotMatch(source, /overdue\s*[:=]\s*(?!false\b)[^;,)]*\d/, `${path} derives overdue rather than computing it`);
   }
-  assert.deepEqual(definitions, ['web/duration.ts'], 'the threshold has one home');
+  assert.deepEqual(definitions, ['src/model/duration.ts'], 'the threshold has one home');
   // Every view reaches the verdict through the one call.
   for (const path of ['web/components/work-card.tsx', 'web/pages/work-details.tsx']) assert.match(await read(path), /stepHeld\(item, now, stepMoves(, release)?\)/);
   assert.match(await read('web/components/status-age.tsx'), /held\.overdue/);
@@ -196,7 +196,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_CARD_TIMING_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 52);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-card-timing-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('card-timing'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   // A generous claim lease: this case reads the same recorded item at synthetic observation

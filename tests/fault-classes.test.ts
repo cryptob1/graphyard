@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -11,7 +10,7 @@ import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultCla
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
 import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
+import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
@@ -21,6 +20,7 @@ import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-173: recurring faults were fixed one instance at a time, and noticing that several symptoms
 // share a cause was a coordinator's memory. Every fault the loop records now carries a class from
@@ -96,6 +96,15 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   ]);
   assert.deepEqual(worded.map(entry => entry.faultClass), ['scope', 'review-convergence', 'observation', 'stalled-gate', 'stalled-gate', 'unclassified']);
   assert.equal(worded[4].kind, 'actorless');
+  // GY-729: GY-185 reworded the stalled-action line and the signature still named the old wording, so
+  // every stalled action since read as unclassified. These are the three recorded instances verbatim.
+  const stalledLines = classifyAttention([
+    { subject: 'GY-646', text: "GY-646's request-review action is stalled, retried only on a widening backoff: 3 attempts in a row failed for one unchanged reason — GY-646 GitHub observation is missing or older than two minutes — and it has been open 12m over 4 attempt(s); next attempt at 2026-09-26T16:04:33.888Z. Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-446', text: "GY-446's resync action is stalled, retried only on a widening backoff: 4 attempts in a row failed for one unchanged reason — The operation was aborted due to timeout — and it has been open 29m over 4 attempt(s). Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-551', text: "GY-551's resync action is stalled, retried only on a widening backoff: 4 attempts in a row failed for one unchanged reason — The operation was aborted due to timeout — and it has been open 29m over 4 attempt(s); next attempt at 2026-09-26T16:58:11.374Z. Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-131', text: "GY-131's request-review action is stalled, not retrying: 3 attempts in a row failed for one unchanged reason — reviewer busy" },
+  ]);
+  assert.deepEqual(stalledLines.map(entry => [entry.kind, entry.faultClass]), Array(4).fill(['stalled-action', 'stalled-gate']), 'a stalled action is classified in its current wording and its pre-GY-185 one');
   // Escalations on an item, one class per trigger.
   const escalated = item('GY-7', { escalations: escalationTriggers.map(trigger => ({ trigger, reason: `${trigger} raised`, actor: 'graphyard', at: iso(0) })) } as Partial<Work>);
   assert.deepEqual(workFaults(escalated, clock).map(entry => entry.faultClass), ['session-liveness', 'proof', 'review-convergence', 'scope']);
@@ -260,7 +269,7 @@ test('unit:recurring-class-item — a class past the threshold files one item as
 });
 
 test('unit:recurring-class-item — the loop files through the master operator-agent identity', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-fault-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const root = await temporaryDirectory('fault-root'), secrets = await temporaryDirectory('fault-secrets');
   try {
     execFileSync('git', ['init', '-q', root]);
     const token = join(secrets, 'operator.token');
@@ -517,7 +526,7 @@ test('unit:recurring-class-item — a failing run ends when its action is retire
 });
 
 test('unit:recurring-class-item — the loop reads status-level faults with coordinator visibility, so held jobs and production recur', async () => {
-  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const secrets = await temporaryDirectory('fault-secrets');
   try {
     const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
     await writeFile(coordinatorToken, 'coordinator-token-'.padEnd(48, 'c'), { mode: 0o600 });
@@ -632,7 +641,7 @@ test('unit:recurring-class-item — distinct faults of one kind on one subject a
 });
 
 test('unit:recurring-class-item — the loop reads the attention master status adds with the coordinator credential, so intervention patterns recur', async () => {
-  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const secrets = await temporaryDirectory('fault-secrets');
   try {
     const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
     const coordinator = 'coordinator-token-'.padEnd(48, 'c'), operator = 'operator-token-'.padEnd(48, 'o');
@@ -652,7 +661,7 @@ test('unit:recurring-class-item — the loop reads the attention master status a
     }) as typeof fetch;
     const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' }, fetcher };
     const source = { ...config(), credentialFile: coordinatorToken, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operatorToken } } as MasterConfig;
-    const effects = daemonEffects(await mkdtemp(join(secrets, 'root-')), source, deps);
+    const effects = daemonEffects(await temporaryDirectory('root', secrets), source, deps);
     const { items: reported } = await effects.reportedAttention!([], { github: true } as any, { agents: [], approvals: [], loop: {} as any, now: iso(0) });
     const interventionReads = reads.filter(entry => entry.path.startsWith('interventions'));
     assert.ok(interventionReads.length > 0, `the intervention report is read: ${reads.map(entry => entry.path).join(', ')}`);
@@ -838,4 +847,52 @@ test('unit:recurring-class-item — a Herdr outage opens no session faults and e
   const flapping = { ...effects, herdr: async () => ({ agents: [], available: up }), snapshot: async () => ({ work: [work[0]], now: iso(0) }) } as unknown as DaemonEffects;
   for (const [round, available] of [true, false, true].entries()) { up = available; await runCycle(one, standing, flapping, () => clock + round * 60_000); }
   assert.equal(standing.faults.instances.filter(entry => entry.kind === 'session').length, 1, `the outage cycle ended nothing: ${JSON.stringify(standing.faults.instances)}`);
+});
+
+// GY-368: follow-ups from the approved review of GY-173.
+test('unit:recurring-class-item — a fault reworded while it stands alone on its subject keeps its instance', () => {
+  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
+  const blocker = (text: string) => ({ kind: 'blocker' as const, faultClass: 'stalled-gate' as const, subject: 'GY-1', text });
+  assert.equal(trackFaults(record, [blocker('npm test fails on a missing fixture')], iso(0)).length, 1);
+  assert.deepEqual(trackFaults(record, [blocker('Still blocked: the fixture the tests read was never committed')], iso(60_000)), [], 'the same blocker restated is the same instance');
+  assert.deepEqual(trackFaults(record, [blocker('Waiting on the fixture upload')], iso(120_000)), []);
+  assert.equal(record.instances.length, 1, 'one cause counts once toward its class');
+  assert.equal(record.instances[0].text, 'Waiting on the fixture upload');
+  assert.equal(record.instances[0].lastSeenAt, iso(120_000));
+  // Rewording carries only a lone fault: two of a kind on the subject stay told apart by their wording (see the fixed-while-another-appears test).
+  trackFaults(record, [], iso(180_000));
+  assert.equal(trackFaults(record, [blocker('Waiting on the fixture upload')], iso(240_000)).length, 1, 'cleared and back is still a new instance');
+});
+
+test('unit:recurring-class-item — standing faults are observed on a slower cadence than the loop cycles', async () => {
+  let reads = 0;
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {},
+    controlPlane: async () => { reads++; return { github: true, heldJobs: 1, jobs: [] }; },
+    reportedAttention: async () => { reads++; return { items: [] }; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  const interval = config().run.intervalSeconds * 1000;
+  for (let at = 0; at < faultObservationIntervalMs; at += interval) await runCycle(config(), state, effects, () => clock + at);
+  assert.equal(reads, 2, 'cycles inside the interval reuse the last observation: one control-plane read and one attention read');
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1);
+  await runCycle(config(), state, effects, () => clock + faultObservationIntervalMs);
+  assert.equal(reads, 4, 'the next interval reads again');
+  assert.equal(state.faults.observedAt, iso(faultObservationIntervalMs));
+  assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1, 'the fault standing across the interval is still one instance');
+});
+
+test('unit:recurring-class-item — daemonSummary reports faults under the policy the loop files by', () => {
+  const state = emptyDaemonState(config());
+  const injected = { threshold: 7, windowHours: 2 };
+  assert.deepEqual(daemonSummary(state, clock, 20_000, 'machine-a', injected).faults.policy, injected);
+  const previous = { threshold: process.env.GRAPHYARD_FAULT_CLASS_THRESHOLD, windowHours: process.env.GRAPHYARD_FAULT_CLASS_WINDOW_HOURS };
+  process.env.GRAPHYARD_FAULT_CLASS_THRESHOLD = '5'; process.env.GRAPHYARD_FAULT_CLASS_WINDOW_HOURS = '6';
+  try { assert.deepEqual(daemonSummary(state, clock, 20_000, 'machine-a').faults.policy, { threshold: 5, windowHours: 6 }, 'absent, the environment\'s'); }
+  finally {
+    for (const [name, value] of [['GRAPHYARD_FAULT_CLASS_THRESHOLD', previous.threshold], ['GRAPHYARD_FAULT_CLASS_WINDOW_HOURS', previous.windowHours]] as const)
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });

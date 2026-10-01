@@ -1,6 +1,7 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy } from './registry.js';
-import type { AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, SelectionRequest, SessionSkip } from './registry.js';
+import { foldObservation } from './registry.js';
+import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 
 /**
  * Which sessions of the agent registry are live, which accounts may take another, the choice an
@@ -23,6 +24,10 @@ export function sessionEnded(session: FleetSession, work: SessionWork | undefine
   if (age < launchGraceMs) return null;
   if (age > sessionCapMs) return 'older than any session runs';
   if (session.role === 'approver' || session.role === 'escalation-handler') return age > decisionSessionMs ? 'the decision window passed' : null;
+  // The master session (GY-898) names no work item by design: it holds its slot until the loop
+  // that supervises it ends it (rotation), bounded only by the outer cap above — its own budget is
+  // at most 12 hours — so a second host never reads the role as free while the pane still runs.
+  if (session.role === 'master') return null;
   if (!work) return session.work ? `${session.work} is no longer an open work item` : 'the launch grace passed and the session names no work item';
   if (session.role === 'worker') {
     const lease = work.lease;
@@ -76,22 +81,104 @@ export function supersededByRequest(registry: Pick<AgentRegistry, 'sessions'>, r
     && (request.role !== 'producer' || (!!request.group && (session.group ?? null) === request.group)));
 }
 
+/**
+ * How long after a failed smoke test the account's executor tests it again (GY-515): a provider
+ * outage during the one prompt would otherwise keep a sound account out until an operator changed it.
+ */
+export const smokeRetestMs = 3_600_000;
+/**
+ * Whether an account's failed smoke test is due for the retest its executor runs (GY-515): the age
+ * rule `needsSmoke` applies. A due failure no longer bars a launch — the launch is what tests the
+ * account again — but no session is chosen on it until a fresh pass is folded.
+ */
+export const smokeFailureDue = (account: FleetAccount, now: number) =>
+  account.smoke?.result === 'fail' && now - Date.parse(account.smoke.at) >= smokeRetestMs;
 const until = (iso: string | null) => iso ? ` until ${iso}` : '';
 /**
  * Why an account cannot take a session right now, whatever role asks — null when it can. `host`
  * is the executor asking: an account is placed where its login lives, so every other host is
  * refused it. Without a host the placement is not judged (a report has no single asking host).
+ *
+ * `expiredSmokeRetestable` is the launch preflight's reading (fleetRoleHealth, GY-515): a Pi
+ * account whose only fault is a smoke failure that has aged past `smokeRetestMs` may be launched
+ * at, because that launch runs the retest. The session choice itself never passes the flag — it
+ * refuses until the retest's fresh result is folded.
  */
-export function accountIneligibility(registry: AgentRegistry, account: FleetAccount, now: number, host?: string | null): string | null {
+export function accountIneligibility(registry: AgentRegistry, account: FleetAccount, now: number, host?: string | null,
+  options: { expiredSmokeRetestable?: boolean } = {}): string | null {
   if (!account.enabled) return `${account.name} is disabled`;
   if (!registry.runtimes.some(runtime => runtime.name === account.runtime)) return `${account.name} runs ${account.runtime}, which is not a registered runtime`;
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
   if (host && account.credential.host !== host) return `${account.name} is placed on ${account.credential.host}; this executor is ${host}`;
   if (account.quota.loggedIn === false) return `${account.name} is not logged in`;
+  const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && runtime.launch.kind === 'pi');
+  if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   if (account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
   return null;
+}
+
+/**
+ * How long an account is kept from a role after `unjudgedRunLimit` consecutive headless runs of
+ * that role on it ended without a result (GY-446): a run that dies unjudged twice in a row is the
+ * account failing, not the item, so the loop falls through to the role's next account.
+ */
+export const unjudgedRunLimit = 2, unjudgedHoldMs = 3_600_000;
+/** Why an account is kept from one role right now, or null. */
+export function roleIneligibility(account: FleetAccount, role: FleetRoleName, now: number): string | null {
+  const held = account.unjudged?.[role];
+  if (!held?.until || Date.parse(held.until) <= now) return null;
+  return `${account.name} is held from ${role} until ${held.until}: ${unjudgedRunLimit} consecutive ${role} runs on it ended without a result${held.reason ? ` (last: ${held.reason})` : ''}`;
+}
+/**
+ * Record how one headless run of a session ended. A run with a result clears its account's count
+ * for the role; one without adds to it, and the `unjudgedRunLimit`th in a row holds the account
+ * from the role for `unjudgedHoldMs`. Returns whether anything changed.
+ */
+export function recordRunOutcome(registry: AgentRegistry, session: Pick<FleetSession, 'account' | 'role'>, outcome: RunOutcome, reason: string, at: string) {
+  const account = registry.accounts.find(entry => entry.name === session.account);
+  if (!account) return false;
+  const held = account.unjudged?.[session.role];
+  if (outcome === 'result') {
+    if (!held) return false;
+    delete account.unjudged![session.role]; return true;
+  }
+  // A run that started before the hold and ends unjudged during it leaves the hold as it is: the
+  // account stays barred from the role for the whole hour, however many overlapping runs end.
+  if (held?.until && Date.parse(held.until) > Date.parse(at)) return false;
+  const runs = (held?.until ? 0 : held?.runs ?? 0) + 1;
+  (account.unjudged ??= {})[session.role] = runs >= unjudgedRunLimit
+    ? { runs: 0, until: new Date(Date.parse(at) + unjudgedHoldMs).toISOString(), reason: reason.slice(0, 300) }
+    : { runs, until: null, reason: reason.slice(0, 300) };
+  return true;
+}
+/**
+ * End one session with the reason its executor gave, and record its run's outcome when it names
+ * one. A session something else ended first (its runtime session gone, a relaunch) still takes its
+ * run's outcome, once. Returns whether anything changed.
+ */
+export function endRegistrySession(registry: AgentRegistry, session: FleetSession, reason: string, outcome: RunOutcome | undefined, at: string) {
+  const late = !!session.endedAt;
+  if (late && (!outcome || session.outcome)) return false;
+  if (!late) { session.endedAt = at; session.endReason = reason; }
+  if (outcome) { session.outcome = outcome; recordRunOutcome(registry, session, outcome, reason, at); }
+  return true;
+}
+/**
+ * Fold what an executor observed about the accounts on its own host into the registry: each quota,
+ * and each smoke test it ran. Returns whether anything an eligibility decision reads has changed.
+ */
+export function foldObservations(registry: AgentRegistry, request: Pick<SelectionRequest, 'host' | 'observations'>, context: { actor: string; at: string }) {
+  let changed = false;
+  for (const observed of request.observations) {
+    const account = registry.accounts.find(entry => entry.name === observed.account);
+    // An executor only vouches for the logins on its own host.
+    if (!account || account.credential.host !== request.host) continue;
+    if (foldObservation(account, observed.quota, context)) changed = true;
+    if (observed.smoke) { account.smoke = { result: observed.smoke.result, reason: observed.smoke.reason, at: context.at, by: context.actor }; changed = true; }
+  }
+  return changed;
 }
 
 export interface SessionChoice { account: FleetAccount; runtime: FleetRuntime; model: FleetModel; policy: RolePolicy; reason: string; skipped: SessionSkip[] }
@@ -112,7 +199,7 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
   const skipped: SessionSkip[] = [];
   for (const [index, name] of role.accounts.entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
-    const refusal = account ? accountIneligibility(registry, account, now, request.host) : `${name} is not a registered account`;
+    const refusal = account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) : `${name} is not a registered account`;
     if (refusal) { skipped.push({ account: name, reason: refusal }); continue; }
     // The role's policy names the model its sessions run, where it names one; else the account's own.
     const policy = rolePolicy(role), runtime = registry.runtimes.find(entry => entry.name === account!.runtime)!;
@@ -133,6 +220,10 @@ export interface FleetAccountView {
   eligible: boolean;
   /** Why the account cannot take a session now; null when it can. */
   ineligible: string | null;
+  /** Its last smoke test (GY-446); null until an executor has run one since the account last changed. */
+  smoke: AccountSmoke | null;
+  /** The roles it is held from after runs that ended without a result, and why. */
+  held: { role: FleetRoleName; reason: string }[];
 }
 export interface FleetRoleView { role: FleetRoleName; accounts: string[]; concurrency: number; live: number; next: string | null; blocked: string | null; policy: RolePolicy }
 export interface FleetView {
@@ -157,7 +248,8 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
       roles: registry.roles.filter(role => role.accounts.includes(account.name)).map(role => ({ role: role.name, preference: role.accounts.indexOf(account.name) + 1, of: role.accounts.length })),
       liveSessions: live.filter(session => session.account === account.name).map(session => ({ id: session.id, role: session.role, work: session.work, host: session.host, since: session.selectedAt })),
       quota: account.quota.state, loggedIn: account.quota.loggedIn, usage: account.quota.usage, resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source,
-      eligible: !ineligible, ineligible };
+      eligible: !ineligible, ineligible, smoke: account.smoke ?? null,
+      held: fleetRoles.flatMap(role => { const reason = roleIneligibility(account, role, now); return reason ? [{ role, reason }] : []; }) };
   });
   const roles: FleetRoleView[] = registry.roles.map(role => {
     const choice = host ? chooseSession(registry, { role: role.name, host }, now) : null;
@@ -167,7 +259,9 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
   });
   const unassigned = accounts.filter(account => !account.roles.length).map(account => `${account.name} serves no role; name it in a role or remove it`);
-  const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
+  const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => name === 'master'
+    ? 'role master is not configured; the durable loop launches no master session until graphyard master registry role set master ACCOUNT[,ACCOUNT…] --reason REASON names its accounts'
+    : `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
   return { revision: registry.revision, updatedAt: registry.updatedAt, configured: registry.roles.length > 0, host, runtimes: registry.runtimes, models: registry.models, accounts, roles,
     sessions: registry.sessions.slice(-30), refusals: registry.refusals, lastMutation: registry.lastMutation,
     attention: [...roles.filter(role => role.blocked).map(role => role.blocked!), ...unassigned, ...missing] };

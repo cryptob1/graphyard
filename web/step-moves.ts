@@ -38,7 +38,7 @@ export async function readStepRows(api: (path: string) => Promise<any>, since?: 
 }
 
 /**
- * The recorded step moves that start each row's "In step" clock (web/pr-steps.ts `stepSince`):
+ * The recorded step moves that start each row's "In step" clock (src/model/pr-steps.ts `stepSince`):
  * the steps drill-down, the same moves the Insights replay plays, read in full (`readStepRows`).
  * They change only when an item changes step, so a read a minute is enough; until one answers, or
  * if it fails, each clock falls back to the item's own record. An item the read did not reach

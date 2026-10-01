@@ -15,7 +15,7 @@ export async function boundedSnapshot(pool: pg.Pool): Promise<{ work: Work[]; no
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     const settled = (await client.query(settledSummariesSql)).rows;
     const live = (await client.query('SELECT w.number, w.document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled)')).rows;
-    const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
+    const meta = (await client.query("SELECT statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs")).rows[0];
     await client.query('COMMIT');
     const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
     return { work: rows.map(row => row.document), now: meta.observed_at.toISOString(), jobs: meta.jobs };

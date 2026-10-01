@@ -1,4 +1,4 @@
-import { stepIds, stepLabel, type PrSteps } from '../pr-steps';
+import { stepIds, stepLabel, type PrSteps } from '../../src/model/pr-steps';
 
 /**
  * The seven pull-request steps as one bar (GY-161): done, current (live) and pending segments,
