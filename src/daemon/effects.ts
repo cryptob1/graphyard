@@ -22,7 +22,7 @@ import { registeredLaunch } from '../model/session-state.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
-import { readControlPlaneClock, type ControlPlaneClock } from '../master/containment.js';
+import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
@@ -211,11 +211,7 @@ export interface DaemonEffects {
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
   containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
-  /**
-   * Bounds this host's clock against the control plane with a light timed read (GY-811), taken
-   * just before containment is assessed. The work snapshot's read takes seconds on a loaded plane,
-   * and its round trip alone exceeded the settlement's clock tolerance.
-   */
+  /** Bounds this host's clock against the control plane with a light timed read just before containment is assessed (GY-811). */
   controlPlaneClock?: () => Promise<ControlPlaneClock>;
   /** Settles one quarantine this host verified dead, so the item can be claimed again. */
   settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
@@ -405,20 +401,7 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
   }
 }
 
-/** The pause before the one retry of a failed snapshot read: a second or so, jittered so loops never retry in step. */
-export const snapshotRetryDelayMs = (random: () => number = Math.random) => Math.round(500 + random() * 1000);
-/**
- * The coordination snapshot read, retried once. The read is an idempotent GET, and one timed-out or
- * refused read is usually the network or a busy server, not a fault worth a failed cycle and its
- * backoff: it is tried again after a jittered pause, and only a second failure fails the cycle
- * (GY-187). `master run` wraps its snapshot effect in this.
- */
-export function retriedSnapshot<T>(read: () => Promise<T>, pause: () => number = snapshotRetryDelayMs): () => Promise<T> {
-  return async () => {
-    try { return await read(); }
-    catch { await delay(pause()); return read(); }
-  };
-}
+export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /**
  * The quota failover's relaunch of a reviewer or producer session, registered like every other
@@ -459,9 +442,6 @@ export async function relaunchSession(config: MasterConfig, session: LaunchedSes
   if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
   throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
 }
-
-/** The control-plane time and clock bounds a containment assessment is judged with, and the read that measured them. */
-export interface ContainmentObservation { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source'] }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {

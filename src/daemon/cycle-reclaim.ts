@@ -1,7 +1,7 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim, paneReclaimStatus, agentlessPaneAttentionBound } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase, containmentQuarantines } from '../master.js';
-import { containmentClock, unmeasured } from '../master/containment.js';
+import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -14,7 +14,7 @@ import type { ContainmentAssessment } from '../master.js';
 import { closablePane, endedScopeStates } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import type { DaemonAction, DaemonState } from './state.js';
-import type { ContainmentObservation, DaemonEffects } from './effects.js';
+import type { DaemonEffects } from './effects.js';
 
 /**
  * Session cleanup for a worker whose supervisor scope has ended (GY-189). `watch` exiting leaves
