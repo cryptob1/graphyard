@@ -116,7 +116,8 @@ const touchesHot = (item: Work, hot: ReadonlySet<string>) => {
  * every existing `.sort(dispatchOrder)` call site is unchanged.
  *
  * Given `now`, an item of the same priority that has waited `dispatchStarvationMs` or longer in its
- * stage is offered before every item that has not, oldest wait first, whatever its scope or heat:
+ * stage is offered before every item that has not, whatever its scope or heat (among such items the
+ * order below still decides):
  * the smallest-scope and cold-first preferences alone starved a broad item for hours while smaller
  * items kept arriving ahead of it (GY-1023, ready from 00:40 to past 04:00 on 2026-10-01).
  */
@@ -127,7 +128,7 @@ export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new S
   const waited = (item: Work) => now === undefined ? 0 : now - Date.parse(item.stageEnteredAt ?? item.createdAt);
   const starvingA = waited(a) >= dispatchStarvationMs, starvingB = waited(b) >= dispatchStarvationMs;
   return a.priority - b.priority
-    || (starvingA !== starvingB ? (starvingA ? -1 : 1) : starvingA ? waited(b) - waited(a) : 0)
+    || (starvingA !== starvingB ? (starvingA ? -1 : 1) : 0)
     || (hotA !== hotB ? (hotA ? 1 : -1) : 0)
     || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || Date.parse(a.createdAt) - Date.parse(b.createdAt);
 }
