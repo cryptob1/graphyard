@@ -21,6 +21,7 @@ import { plainStatus } from '../../src/model/plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, describeTip, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
+import { blastRadius } from '../../src/model/blast-radius';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -110,6 +111,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const checks = checkStates(item, release.ciAppIds);
   // The review gate's own verdict, whichever provider gave it (GitHub, Codex or an agent reviewer).
   const reviewGate = item.gates.find(g => g.name === 'review');
+  // What merging it would reach and what could take it back (GY-972), from its scope and gates.
+  const radius = blastRadius(item);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
@@ -146,6 +149,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
       </dl> : <p className="muted">No pull request yet.</p>}
+      {item.candidate && <details className={`blast-radius danger-${radius.danger}`}><summary>{radius.headline}</summary><ul>{radius.sentences.map(sentence => <li key={sentence}>{sentence}</li>)}</ul></details>}
     </section>
     <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
