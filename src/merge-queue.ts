@@ -1,4 +1,5 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
+import { CHECK_NAME } from './model/work.js';
 import { carriedApproval, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
@@ -958,6 +959,34 @@ export function latestCheck(checks: Observation['checks']): Observation['checks'
   }, undefined);
 }
 
+/** The conclusions of a run that failed, as the failed-CI rework rule reads them. */
+export const failedCheckResults: readonly string[] = ['failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure'];
+/** One check a candidate must pass: a policy check, or one only the base branch's protection or rulesets require. */
+export interface RequiredCheck { name: string; policy: boolean; appId: number | null }
+/**
+ * GY-430. The checks a candidate must pass: the policy's, then every check the base branch's
+ * protection or active rulesets require that the policy does not name (the observation records
+ * them, never `Graphyard / merge`). GitHub refuses the merge while any of them has not passed, so a
+ * failing protection-only check — PR #221's `secrets` scan — is judged exactly as a policy check is.
+ */
+export function requiredChecksOf(work: Pick<Work, 'policy' | 'observation'>): RequiredCheck[] {
+  const policy = work.policy.checks.map(name => ({ name, policy: true, appId: null }));
+  const extra = (work.observation?.requiredChecks ?? []).filter(check => check.name !== CHECK_NAME && !work.policy.checks.includes(check.name))
+    .map(check => ({ name: check.name, policy: false, appId: check.appId }));
+  return [...policy, ...extra];
+}
+/**
+ * The newest run that counts for a required check: a policy check's from the configured CI apps,
+ * as ever; a protection-only check's from the app protection binds it to, or from any app.
+ */
+export function requiredCheckRun(check: RequiredCheck, checks: Observation['checks'], ciAppIds: readonly number[] | null): Observation['checks'][number] | undefined {
+  return latestCheck(checks.filter(run => run.name === check.name && (check.policy ? !ciAppIds || ciAppIds.includes(run.appId) : check.appId === null || run.appId === check.appId)));
+}
+/** Whether a run satisfies its required check: success, or for a protection-only check any conclusion GitHub accepts (neutral, skipped). */
+export function requiredCheckPassed(check: RequiredCheck, run: Observation['checks'][number] | undefined): boolean {
+  return !!run && (run.result === 'success' || !check.policy && ['neutral', 'skipped'].includes(run.result));
+}
+
 declare module './model/work.js' {
   interface Gate {
     /** The server's trusted CI Apps, recorded on the test gate for downstream decisions. */
@@ -1060,8 +1089,12 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (landing) return landing;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
-  // never leaves an entry ejected by the failure it replaced.
-  const check = failedRequiredCheck(work, observation, ciAppIds);
+  // never leaves an entry ejected by the failure it replaced — nor one its rerun (GY-516)
+  // holds. GY-430: this includes both policy checks and branch-protection required checks.
+  const check = requiredChecksOf(work).find(required => {
+    const run = requiredCheckRun(required, observation.checks, ciAppIds);
+    return !!run && (required.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result)) && !holdingCheckRerun(work, candidate.sha, required.name, run);
+  })?.name;
   // Under a parallel-tip window (GY-498) the prefix tips isolate the culprit in one round instead
   // of a bisection. Outside the window nothing is required of the entry yet, and a failure on a
   // tip it still holds is inherited from the entries ahead (the waiting batch's rule); a head that
@@ -1070,6 +1103,9 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // the failure is what this entry's change added. An earlier failing tip, or a published tip
   // whose prediction moved on (a predecessor landed or left; the tip is rebuilt there before it is
   // judged again), means the failure is inherited: the entry stays queued.
+  // A batch member's tip holds every member ahead of it, so a failure there is not yet its own
+  // (GY-330): it is ejected only when the batch plan isolates it — its tip fails on a prefix known
+  // to pass, or on the base — and otherwise stays queued while the bisection runs.
   const speculation = work.queue.speculation;
   const publishedTip = speculation?.tip === candidate!.sha && speculation.base === candidate!.baseSha;
   if (check && window) {
@@ -1350,7 +1386,7 @@ export function enqueueRequestCurrent(work: Work, request: Pick<MergeEnqueueRequ
   return !!request && !!work.candidate && request.sha === work.candidate.sha && request.baseSha === work.candidate.baseSha && request.policyRevision === work.policyRevision;
 }
 export type MergeQueueAction =
-  | { kind: 'enqueue'; reason: string }
+  | { kind: 'enqueue'; reason: string; mergeNow?: boolean }
   | { kind: 'dequeue'; reason: string }
   | { kind: 'hold'; reason: string };
 /**
@@ -1381,7 +1417,10 @@ export function mergeStalls(work: Work[], now: number): { key: string; pr: numbe
   return work.flatMap(item => {
     const state = item.observation?.githubQueue, candidate = item.candidate;
     if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || state.refused || !state.requestedAt
-      || state.head !== candidate.sha || !mergeableNow(state)) return [];
+      || state.head !== candidate.sha) return [];
+    const blocked = blockedMergeStall(item, state, now);
+    if (blocked) return [blocked];
+    if (!mergeableNow(state)) return [];
     const ageMs = now - Date.parse(state.requestedAt);
     if (ageMs <= mergeStallMs) return [];
     const status = state.mergeStateStatus!;
@@ -1390,7 +1429,42 @@ export function mergeStalls(work: Work[], now: number): { key: string; pr: numbe
       next: `graphyard master create files the control-plane defect for merge state ${status} on ${item.key}; gh pr view ${candidate.pr} shows what GitHub is waiting on` }];
   });
 }
-export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null): MergeQueueAction {
+/** How long a merge may stay pending under auto-merge on a head GitHub reports BLOCKED before master status names why (GY-430). */
+export const blockedMergeStallMs = 10 * 60_000;
+/**
+ * GY-430. A merge pending under auto-merge for more than `blockedMergeStallMs` on a head GitHub
+ * reports BLOCKED, named with what blocks it: a required check that failed or has not passed, or a
+ * missing approving review. On 2026-09-25 PR #221 sat so for over ten minutes behind a failed
+ * `secrets` scan while master status said only "merge waiting".
+ */
+function blockedMergeStall(item: Work, state: GitHubMergeQueueState, now: number) {
+  const candidate = item.candidate!, observation = item.observation!;
+  if (state.mode !== 'auto-merge' || state.mergeStateStatus !== 'BLOCKED') return null;
+  const ageMs = now - Date.parse(state.requestedAt!);
+  if (!(ageMs > blockedMergeStallMs)) return null;
+  const runs = observation.candidate.sha === candidate.sha ? observation.checks : [];
+  const judged = requiredChecksOf(item).map(check => ({ check, run: requiredCheckRun(check, runs, null) }));
+  const failed = judged.filter(entry => !!entry.run && failedCheckResults.includes(entry.run.result)).map(entry => entry.check.name);
+  const missing = judged.filter(entry => !requiredCheckPassed(entry.check, entry.run) && !failed.includes(entry.check.name)).map(entry => entry.check.name);
+  const approved = observation.reviews.some(review => review.sha === candidate.sha && review.state === 'APPROVED') || observation.agentReview?.sha === candidate.sha && observation.agentReview.approved;
+  const plural = (names: string[]) => names.length === 1 ? '' : 's';
+  const reasons = [
+    ...(failed.length ? [`required check${plural(failed)} ${failed.join(', ')} failed`] : []),
+    ...(missing.length ? [`required check${plural(missing)} ${missing.join(', ')} ha${missing.length === 1 ? 's' : 've'} not passed`] : []),
+    ...(!failed.length && !missing.length && !approved ? ['a required approving review is missing'] : []),
+  ];
+  const why = reasons.join('; ') || 'GitHub names no failing required check or missing review Graphyard observed';
+  return { key: item.key, pr: candidate.pr, head: state.head, mergeStateStatus: 'BLOCKED', requestedAt: state.requestedAt!, ageMs,
+    text: `merge-stalled: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been set to auto-merge for ${Math.floor(ageMs / 60_000)} minutes (since ${state.requestedAt}) while GitHub reports mergeStateStatus BLOCKED: ${why}`,
+    next: failed.length ? `the failed-CI rework rule returns ${item.key} to a worker; gh pr checks ${candidate.pr} shows the failing run` : `gh pr view ${candidate.pr} shows what GitHub is waiting on` };
+}
+/**
+ * How long auto-merge may wait on an authorized head GitHub reports BLOCKED before the control plane
+ * asks GitHub to merge that head at once: GitHub never says why auto-merge does not fire, but a
+ * head-bound merge either lands or is refused with the rule that blocks it, recorded as the reason.
+ */
+export const blockedAutoMergeProbeMs = 10 * 60_000;
+export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null, now = Date.now()): MergeQueueAction {
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
   const withdrawn = !mergeAuthorized(work) ? `${work.key} is no longer authorized to merge: ${[...work.gates.flatMap(gate => gate.reasons), ...work.violations].join('; ') || 'no all-gates authorization binds the current candidate'}`
@@ -1398,6 +1472,9 @@ export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, reque
       : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
         : null;
   if (withdrawn) return held ? { kind: 'dequeue', reason: withdrawn } : { kind: 'hold', reason: withdrawn };
+  const waitedMs = request ? now - Date.parse(request.at) : 0;
+  if (state.mode === 'auto-merge' && state.mergeStateStatus === 'BLOCKED' && waitedMs > blockedAutoMergeProbeMs)
+    return { kind: 'enqueue', mergeNow: true, reason: `${work.key}: auto-merge has waited ${Math.floor(waitedMs / 60_000)} minutes at ${sha!.slice(0, 12)} while GitHub reports it BLOCKED with every gate passing; asking GitHub to merge that head now, so it merges or names the rule that blocks it` };
   if (held) return { kind: 'hold', reason: `${work.key} is ${state.mode === 'queued' ? `in GitHub's merge queue${state.entryState ? ` (${state.entryState.toLowerCase()}${state.position !== null ? `, position ${state.position}` : ''})` : ''}` : 'set to auto-merge'} at ${sha!.slice(0, 12)}; GitHub performs the merge` };
   return { kind: 'enqueue', reason: `${work.key}: every gate passes for ${sha!.slice(0, 12)} and the merge was requested; ${state.queue ? 'adding it to GitHub\'s merge queue' : mergeableNow(state) ? 'merging it now, bound to that head (GitHub reports it mergeable and the base branch has no merge queue)' : 'enabling auto-merge (the base branch has no merge queue)'}` };
 }

@@ -148,7 +148,9 @@ function gradedUnderProof(work: Work): Work {
     workspaces: [{ host: 'host-1', path: '/tmp/gy-7', branch: 'graphyard/gy-7-1', epoch: 1, owner: 'agent-a' }], implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 }, epoch: 1,
     submission: { epoch: 1, pr: 12 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' },
     observation: { clockOffset: { min: 0, max: 0 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' }, checks: [{ name: 'test', result: 'success', appId: 1234 }],
-      reviews: [{ reviewer: 'reviewer', sha: headSha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/x.ts'], scopeFiles: [], at: iso(-60_000),
+      reviews: [{ reviewer: 'reviewer', sha: headSha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null,
+      // GY-883: a public API path keeps the item in the high lane, which still demands the manual proof the escalation presupposes.
+      files: ['src/server/routes/x.ts'], scopeFiles: [{ path: 'src/server/routes/x.ts', status: 'added' as const, sha: 'f'.repeat(40), baseSha: null, additions: 1, deletions: 0, binary: false }], at: iso(-60_000),
       prState: 'open', draft: false, baseTip: baseSha, baseTipContained: true },
     queue: null, queueSequence: 0, queueHistory: [] } as unknown as Work;
   const result = evaluate(graded, [graded], new Date(), [1234]);

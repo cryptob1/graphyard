@@ -22,6 +22,7 @@ import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, ty
 import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
+import { workerPushPermissions } from './worker-credential.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -242,6 +243,7 @@ export function observationFingerprint(observation: Observation | null | undefin
     sha: observation.candidate.sha, baseSha: observation.candidate.baseSha, baseTip: observation.baseTip,
     prState: observation.prState, draft: observation.draft, merged: observation.merged, mergeable: observation.mergeable, conflicting: observation.conflicting || undefined, mergeabilityUnknown: observation.mergeabilityUnknown || undefined,
     checks: observation.checks.map(check => [check.name, check.result, check.appId, check.id ?? null, check.attempt ?? null]),
+    ...(observation.requiredChecks?.length ? { requiredChecks: observation.requiredChecks.map(check => [check.name, check.appId]) } : {}),
     reviews: observation.reviews.map(review => [review.id, review.reviewer, review.sha, review.state]),
     agentReview: observation.agentReview ? [observation.agentReview.sha, observation.agentReview.approved, observation.agentReview.reason ?? null] : null,
   });
@@ -908,6 +910,24 @@ export class GitHub {
       this.token = result.token; this.expires = Date.parse(result.expires_at);
       this.permissions = result.permissions && typeof result.permissions === 'object' ? result.permissions : {};
   }
+  /**
+   * A worker session's push credential (GY-999): an installation token narrowed to this one
+   * repository and to the two permissions pushing a branch and opening its pull request need. It
+   * is never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   */
+  async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
+    demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions: workerPushPermissions }),
+    });
+    this.record('/app/installations/access_tokens', response, false);
+    const refused = await this.refusal(response, 'worker push credential');
+    if (refused) throw refused;
+    const result: any = await response.json();
+    demand(typeof result?.token === 'string' && result.token.length >= 20 && Number.isFinite(Date.parse(result.expires_at)), 'GitHub returned no worker push token', 502);
+    return { token: result.token, expiresAt: new Date(Date.parse(result.expires_at)).toISOString(), permissions: result.permissions && typeof result.permissions === 'object' ? result.permissions : {} };
+  }
   private async authenticate() {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     if (this.authenticationRefusal && Date.now() < this.authenticationRefusal.until) throw this.authenticationRefusal.error;
@@ -1000,15 +1020,30 @@ export class GitHub {
    * requires, and whether it requires every review conversation resolved before a merge (GY-139).
    * An unreadable protection is neither.
    */
-  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean }> {
+  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean; requiredChecks: { name: string; appId: number | null }[] }> {
     try {
       const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
       // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
       // queue supersedes that setting with a published tip that already contains its validated base.
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
         && p.required_status_checks.checks?.some((c: any) => c.context === CHECK_NAME && c.app_id === this.config.appId);
-      return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true };
-    } catch { return { protected: false, conversationResolution: false }; }
+      const classic = [...(p.required_status_checks?.checks ?? []).map((c: any) => ({ name: c?.context, appId: c?.app_id ?? null })),
+        ...(p.required_status_checks?.contexts ?? []).map((name: any) => ({ name, appId: null }))];
+      return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true, requiredChecks: mergeRequiredChecks(classic) };
+    } catch { return { protected: false, conversationResolution: false, requiredChecks: [] }; }
+  }
+  /**
+   * The status checks the base branch's active rulesets require (GY-430), read from GitHub's
+   * branch-rules endpoint, which reports every ruleset rule that applies to the branch. An
+   * unreadable answer requires nothing extra: the policy's checks still gate.
+   */
+  private async requiredStatusChecks(): Promise<{ name: string; appId: number | null }[]> {
+    try {
+      const rules = await this.request(`/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
+      if (!Array.isArray(rules)) return [];
+      return mergeRequiredChecks(rules.filter((rule: any) => rule?.type === 'required_status_checks')
+        .flatMap((rule: any) => (rule.parameters?.required_status_checks ?? []).map((check: any) => ({ name: check?.context, appId: check?.integration_id ?? null }))));
+    } catch { return []; }
   }
   /**
    * One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`,
@@ -1167,8 +1202,9 @@ export class GitHub {
     const pr = await this.computedMergeability(await this.request(`/pulls/${work.submission!.pr}`));
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
-    const [checks, reviews, protection, files, branch] = await Promise.all([
+    const [checks, reviews, protection, files, branch, rulesetChecks] = await Promise.all([
       this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
+      this.requiredStatusChecks(),
     ]);
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
@@ -1240,7 +1276,7 @@ export class GitHub {
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
-      protected: protection.protected, conversations, files: files.map(f => f.filename), at: startedAt,
+      protected: protection.protected, requiredChecks: mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]), conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}), ...(docsBudget ? { docsBudget } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
@@ -1921,10 +1957,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * GitHub still enforces branch protection and every required check. These are the only ways
    * Graphyard ever asks GitHub to merge.
    */
-  async enqueuePullRequest(state: GitHubMergeQueueState, sha: string) {
+  async enqueuePullRequest(state: GitHubMergeQueueState, sha: string, mergeNow = false) {
     if (state.queue) return void await this.graphql(enqueueMutation, { id: state.pullRequestId, head: sha });
     const variables = { id: state.pullRequestId, head: sha, method: autoMergeMethod() };
-    if (mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
+    if (mergeNow || mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
     try { await this.graphql(autoMergeMutation, variables); }
     catch (error) {
       // The pull request became mergeable (clean, unstable or has_hooks) between the read and the
@@ -2066,6 +2102,18 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return;
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
+}
+/** Required checks by name, deduplicated, without Graphyard's own merge check (GY-430). */
+function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+  const merged = new Map<string, { name: string; appId: number | null }>();
+  for (const check of checks) {
+    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME) continue;
+    const appId = Number.isSafeInteger(check.appId) ? check.appId as number : null;
+    const known = merged.get(check.name);
+    // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
+    merged.set(check.name, { name: check.name, appId: known && (known.appId === null || known.appId !== appId) ? null : appId });
+  }
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -2293,7 +2341,7 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   state = { ...state, requestedAt: enqueueRequestCurrent(work, request) ? request!.at : null };
   try {
     if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
-    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha); }
+    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha, action.mergeNow); }
     if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };

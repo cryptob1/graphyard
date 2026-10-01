@@ -14,6 +14,7 @@ import { clearProfileFailure, profileHealth, readyToRetry, recordProfileFailure 
 import { detailChanged, fitDecisionReason, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
+import { credentialBlockedMarker } from '../worker-credential.js';
 import { attemptEndsNeedingRetry, attemptRetryHold, capBinding, capBindingPrefix, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
 import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
@@ -32,10 +33,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const hot = hotspots(open, clock), hotFiles = new Set(hot.map(entry => entry.file));
   const offered = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
-  }).sort((a, b) => dispatchOrder(a, b, hotFiles));
+  }).sort((a, b) => dispatchOrder(a, b, hotFiles, clock));
 
-  // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f').
-  // The retry ladder is computed from the item's own exhaustion record, so it survives this
+  // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
+  // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this
   // cursor and reads the same from any host: each retry waits 5, then 15 minutes; an item whose
   // attempts end without submitting three times in a row is held with every cause named instead
   // of being redispatched again, and only the decision an independent approver judges resumes it.
@@ -319,7 +320,7 @@ async function recordRetryBackoff(cycle: Cycle, item: Work, hold: AttemptRetryHo
   const { state, now, performed, effects } = cycle;
   const last = hold.ends.at(-1), since = last ? Date.parse(last.at) : hold.resumeAt! - retryBackoffMs[retryBackoffMs.length - 1];
   const detail = last
-    ? `${item.key}: attempt ${last.epoch} ended past its role's time box at ${last.at}; retry ${hold.count + 1} of ${maxFailedAttempts} waits ${Math.round((hold.resumeAt! - since) / 60_000)} minutes, until ${new Date(hold.resumeAt!).toISOString()}`
+    ? `${item.key}: attempt ${last.epoch} ended ${last.reason.startsWith(credentialBlockedMarker) ? 'on a GitHub credential failure' : "past its role's time box"} at ${last.at}; retry ${hold.count + 1} of ${maxFailedAttempts} waits ${Math.round((hold.resumeAt! - since) / 60_000)} minutes, until ${new Date(hold.resumeAt!).toISOString()}`
     : `${item.key}: the cap decision an independent approver approved was applied, and the fresh round it starts waits ${retryBackoffMs[retryBackoffMs.length - 1] / 60_000} minutes, until ${new Date(hold.resumeAt!).toISOString()}`;
   const key = `retry:backoff:${item.id}:${since}`;
   if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: last?.epoch ?? null, state: 'waiting', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
@@ -339,7 +340,7 @@ async function recordRetryBackoff(cycle: Cycle, item: Work, hold: AttemptRetryHo
 async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
   const { state, now, clock, performed, effects } = cycle;
   const key = `retry:held:${item.id}`, binding = capBinding(item, hold.boundAt!);
-  const held = `held: ${hold.count} attempts in a row ended without submitting, each past its role's time box — ${hold.causes.join('; ')}`;
+  const held = `held: ${hold.count} attempts in a row ended without submitting, each past its role's time box or on a GitHub credential failure — ${hold.causes.join('; ')}`;
   const note = async (outcome: 'done' | 'failed', detail: string) => {
     if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
@@ -364,6 +365,12 @@ async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
   try {
     const reason = fitDecisionReason(`${item.key}: `, `${held}. Only a fresh attempt can move it, and whether it gets one is the approver's judgment, not the loop's. `, 'The previous worker is stopped: the loop ended the attempt on the record itself.');
     const requested = await decide!(item, 'rework', reason, { binding });
+    // A low- or medium-lane rework is applied as it is requested (GY-883): no approver to launch.
+    const settledState = (requested as { state?: string }).state;
+    if (settledState === 'applied' || settledState === 'failed') {
+      performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: settledState === 'applied' ? 'done' : 'failed', detail: `Requested decision ${requested.id} (rework) for ${item.key}; its risk lane needs no approver, and the control plane ${settledState === 'applied' ? 'applied it' : 'could not apply it'} at once: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     // The request alone changes nothing; the independent approver session is what applies it.
     // The launch runs on the launcher beside the cycle (GY-616) and is reported next cycle.
     const launchKey = `attempt-cap:approver:${item.id}`;
