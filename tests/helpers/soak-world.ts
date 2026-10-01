@@ -13,6 +13,8 @@ import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../.
 // anything for Graphyard: the loop and the engine act, and this world only answers them.
 
 export const minute = 60_000, hour = 60 * minute;
+/** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
+export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
 const uuid = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 
@@ -106,6 +108,11 @@ export class SimulatedGitHub {
   exhaustedProfiles = new Set<string>();
   /** Items whose GitHub merge state settles as UNSTABLE (a failing optional check), and those GitHub is slow to recompute after their required check passes. */
   unstable = new Set<string>(); slowRecompute = new Set<string>();
+  /**
+   * Items GitHub keeps BLOCKED for `blockedMergeMs` after their required check passed (GY-430): a
+   * branch-protection condition Graphyard does not gate on, such as a review GitHub still requires.
+   */
+  blockedMerge = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
   /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
@@ -381,7 +388,7 @@ export class SimulatedGitHub {
   mergeState(pr: PullRequest, now: number) {
     const check = pr.graphyardCheck.get(pr.head);
     if (check?.conclusion !== 'success') return 'BLOCKED';
-    return now - check.at >= (this.slowMergeable.get(pr.key) ?? (this.slowRecompute.has(pr.key) ? 6 * minute : 0)) ? pr.settledState : 'BLOCKED';
+    return now - check.at >= (this.blockedMerge.has(pr.key) ? blockedMergeMs : this.slowMergeable.get(pr.key) ?? (this.slowRecompute.has(pr.key) ? 6 * minute : 0)) ? pr.settledState : 'BLOCKED';
   }
   /** A merge somebody made on GitHub by hand, outside Graphyard's queue: nothing asked for it. */
   mergeOutside(pr: PullRequest, now: number) { this.merge(pr, now, 'outside'); return pr.merged!; }

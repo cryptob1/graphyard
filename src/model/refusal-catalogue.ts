@@ -1,5 +1,6 @@
 import type { NextActionKind } from './action-kinds.js';
 import { ciCheckRefusalPattern, ciCheckRefusalSource } from './ci-refusal.js';
+import { requiredCheckFailurePattern } from './required-check-refusal.js';
 
 /**
  * The refusals the engine can produce, declared beside the mapping that has to cover them.
@@ -80,6 +81,8 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   // test
   { gate: 'test', id: 'check-not-passed', match: ciCheckRefusalPattern, kinds: ['resync', 'request-rework'],
     example: 'Required CI check test has not passed on the current candidate' },
+  { gate: 'test', id: 'required-check-failed', match: requiredCheckFailurePattern, kinds: ['request-rework'],
+    example: 'Required check secrets failed on the current candidate' },
   // acceptance
   { gate: 'acceptance', id: 'criterion-unproven', match: /^AC-\d+: .+ needs trusted passing evidence/, kinds: ['dispatch', 'escalate'],
     example: 'AC-1: integration:example needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
