@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { AgentRegistry } from '../src/agent-registry.js';
-import { isSettledSummary, lockedWork } from '../src/store/locked-read.js';
+import { isSettledSummary, isStandIn, lockedWork } from '../src/store/locked-read.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -28,7 +28,7 @@ const sources = (dir: string): string[] => readdirSync(dir).flatMap(name => {
   return statSync(path).isDirectory() ? sources(path) : path.endsWith('.ts') ? [path] : [];
 });
 
-test('unit:locked-transactions-read-bounded — no transaction client reads every work item\'s document; each former call site reads the item, the open items and summaries', () => {
+test('unit:locked-transactions-read-bounded — no transaction client reads every work item\'s document; each former call site reads whole only the item, its overlapping open items and its dependencies', async () => {
   const offenders: string[] = [];
   for (const file of sources(src)) {
     const text = readFileSync(file, 'utf8');
@@ -58,9 +58,32 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   }
   assert.deepEqual(offenders, [], `unbounded work_items reads on a transaction client:\n${offenders.join('\n')}`);
   // Each former call site reads through lockedWork, naming the item it acts on.
-  const engine = readFileSync(join(src, 'engine.ts'), 'utf8');
-  assert.ok((engine.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 10, 'the engine\'s commands read their item, the open items and summaries');
-  assert.match(engine, /const rows = await lockedRows\(db\)/, 'each reconciliation batch reads through the bounded read');
+  const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
+  assert.ok((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 10, 'the engine\'s commands read through the bounded read, naming their item');
+  assert.match(engineSource, /const rows = await lockedRows\(db, \[\], \{ after: cursor, limit: this\.reconcileBatchItems \}\)/, 'each reconciliation batch reads its own rows whole through the bounded read');
+  // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
+  assert.doesNotMatch(readFileSync(join(src, 'store/locked-read.ts'), 'utf8'), /settled IS NOT TRUE|NOT i\.settled/, 'the locked read does not read every open document whole');
+
+  // What a command reads whole, observed on its queries: the item, the open items overlapping it by
+  // planned files or an exclusive resource, and its dependency — never an unrelated open item, whose
+  // realistic history is read as the compact projection.
+  await ensureTemplate();
+  const dependency = delivered(template, 9000), overlapping = open(template, 9001, ['src/scope-probe/']), sharing = open(template, 9002, ['src/elsewhere/'], ['probe-db']);
+  const unrelated = Array.from({ length: 5 }, (_, n) => open(template, 9003 + n));
+  await insert([dependency, overlapping, sharing, ...unrelated]);
+  const focus = await engine.execute(operator, 'create', null, { title: 'Scope probe', plannedFiles: ['src/scope-probe/a.ts'], exclusiveResources: ['probe-db'], dependencies: [dependency.id], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  timeTransactions();
+  const { reads } = await held('scope', () => engine.execute(operator, 'ready', focus.id, {}, randomUUID()));
+  const seen = new Set(reads.flatMap(entry => entry.keys));
+  assert.deepEqual([...seen].sort(), [focus.key, dependency.key, overlapping.key, sharing.key].sort(), 'the command read whole only its item, its overlapping open items and its dependency');
+  const board = await lockedWork(store.pool, [focus.id]);
+  const standIn = (key: string) => isStandIn(board.find(item => item.key === key)!);
+  assert.deepEqual([focus.key, dependency.key, overlapping.key, sharing.key].map(standIn), [false, false, false, false], 'the item, its overlaps and its dependency are documents');
+  for (const item of unrelated) {
+    const projection = board.find(entry => entry.key === item.key)!;
+    assert.ok(standIn(item.key) && !projection.pipeline && projection.plannedFiles.length && projection.stage === item.stage, `${item.key} is read as its compact projection`);
+  }
+  await assert.rejects(store.transaction(async (db, now) => save(db, board.find(entry => entry.key === unrelated[0].key)!, 'test', 'test', now)), /compact projection/);
 });
 
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -81,30 +104,33 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
 /**
- * How long each coordination transaction held the lock, by the operation that took it, and how many
- * settled deliveries' whole documents (a summary drops the pipeline) its queries returned.
+ * How long each coordination transaction held the lock, by the operation that took it, and which
+ * documents its queries returned whole (a stand-in is returned as JSON text, a document as an object).
  */
-const holds: { label: string; ms: number; settledDocuments: number }[] = [];
-let label = 'other';
-const settledDocument = (value: unknown) => !!value && typeof value === 'object' && (value as Work).stage === 'done' && !!(value as Work).pipeline;
+const holds: { label: string; ms: number; keys: string[] }[] = [];
+let label = 'other', timing = false;
+const seededDelivered = (entry: { keys: string[] }) => entry.keys.filter(key => key.startsWith('DONE-')).length;
+const seededOpen = (entry: { keys: string[] }) => entry.keys.filter(key => key.startsWith('OPEN-')).length;
 function timeTransactions() {
+  if (timing) return; timing = true;
   const original = store.transaction.bind(store);
   store.transaction = (async (fn: any, options: any) => original(async (db, now) => {
     const started = performance.now();
-    let settledDocuments = 0;
+    const keys = new Set<string>();
     const counted = new Proxy(db, { get: (target, property) => property !== 'query' ? Reflect.get(target, property, target) : async (...args: unknown[]) => {
       const result = await (target.query as any)(...args);
-      for (const row of result?.rows ?? []) if (settledDocument(row.document)) settledDocuments++;
+      for (const row of result?.rows ?? []) if (row.document && typeof row.document === 'object' && (row.document as Work).key) keys.add((row.document as Work).key);
       return result;
     } });
-    try { return await fn(counted, now); } finally { holds.push({ label, ms: performance.now() - started, settledDocuments }); }
+    try { return await fn(counted, now); } finally { holds.push({ label, ms: performance.now() - started, keys: [...keys] }); }
   }, options)) as typeof store.transaction;
 }
-async function held<T>(name: string, run: () => Promise<T>): Promise<{ result: T; ms: number }> {
+async function held<T>(name: string, run: () => Promise<T>): Promise<{ result: T; ms: number; reads: typeof holds }> {
   label = name; const from = holds.length;
   const result = await run();
   label = 'other';
-  return { result, ms: holds.slice(from).reduce((total, entry) => total + entry.ms, 0) };
+  const reads = holds.slice(from);
+  return { result, ms: reads.reduce((total, entry) => total + entry.ms, 0), reads };
 }
 
 const sha = (n: number, salt = 'a') => (salt + n.toString(16)).padStart(40, '0').slice(-40);
@@ -112,10 +138,23 @@ const stamp = (minutes: number) => new Date(Date.parse('2026-09-01T00:00:00Z') +
 const paths = (n: number, count: number) => Array.from({ length: count }, (_, index) => `src/area-${n % 37}/module-${index}.ts`);
 
 /**
- * A delivered item as the live ledger holds one: its candidate merged and delivered, its pipeline
- * timeline, every evidence record with artifacts, the observation's per-file scope, long queue,
- * dispatch and action histories and its finished sessions — about 60 KB, nothing owed, so settled.
+ * The histories the live ledger's items carry: the pipeline timeline, evidence records with
+ * artifacts, long queue, dispatch and action histories and finished sessions. `scale` 1 is a
+ * delivered item's (about 60 KB with its observation); an open item in flight carries about half.
  */
+function histories(n: number, at: string, scale: number) {
+  const count = (full: number) => Math.round(full * scale);
+  return {
+    evidence: Array.from({ length: count(24) }, (_, index) => ({ id: randomUUID(), proof: `unit:proof-${index % 6}`, sha: sha(n - (index % 4)), baseSha: sha(n, 'b'), policyRevision: 3, producer: 'producer-a', trusted: true, result: 'pass', executed: 12, skipped: 0, at,
+      artifacts: Array.from({ length: 6 }, (_, artifact) => ({ name: `artifact-${artifact}.log`, sha256: sha(artifact, 'c'), bytes: 4096, url: `https://example.invalid/runs/${n}/${index}/${artifact}` })), provenance: { runner: 'local', command: 'node --test', environment: 'linux' } })) as unknown as Work['evidence'],
+    queueHistory: Array.from({ length: count(40) }, (_, index) => ({ sequence: index, event: 'entered', at, reason: `queued behind ${index} entries` })) as unknown as Work['queueHistory'],
+    actionQueue: { actions: [], history: Array.from({ length: count(80) }, (_, index) => ({ id: randomUUID(), kind: 'resync', state: 'done', result: 'done', requestedAt: at, resolvedAt: at, history: [{ at, event: 'requested' }, { at, event: 'claimed' }, { at, event: 'settled' }] })) } as unknown as Work['actionQueue'],
+    autoDispatch: { review: null, producers: [], history: Array.from({ length: count(40) }, (_, index) => ({ id: randomUUID(), kind: 'review', sha: sha(n - index), requestedAt: at, resolvedAt: at, outcome: 'answered' })) } as unknown as Work['autoDispatch'],
+    sessions: Array.from({ length: count(30) }, (_, index) => ({ id: `s-${n}-${index}`, kind: 'implementation', state: 'finished', runtime: 'claude', principal: 'engineer-a', startedAt: at, endedAt: at, outcome: 'finished: submitted the pull request and completed the attempt' })) as unknown as Work['sessions'],
+    pipeline: { attempts: Array.from({ length: count(30) }, (_, index) => ({ epoch: index, owner: 'engineer-a', claimedAt: at, endedAt: at, end: 'submitted' })), submittedAt: at, reworkRounds: 3 } as unknown as Work['pipeline'],
+  };
+}
+/** A delivered item as the live ledger holds one: its candidate merged and delivered, the observation's per-file scope and every history — nothing owed, so settled. */
 function delivered(template: Work, n: number): Work {
   const id = randomUUID(), key = `DONE-${n}`;
   const at = stamp(n);
@@ -128,18 +167,13 @@ function delivered(template: Work, n: number): Work {
     observation: { candidate: { sha: sha(n), baseSha: sha(n, 'b'), pr: 1000 + n, branch: `graphyard/done-${n}-2`, author: 'engineer-a' }, merged: true, mergeSha: sha(n, 'm'), mergedAt: at, mergeable: true, protected: true,
       checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ author: 'reviewer', state: 'APPROVED', commitId: sha(n), submittedAt: at }],
       files: paths(n, 40), scopeFiles: Array.from({ length: 300 }, (_, index) => ({ path: `src/area-${index}/file.ts`, digest: sha(index, 'f') })), baseTip: sha(n, 'b'), at } as unknown as Work['observation'],
-    evidence: Array.from({ length: 24 }, (_, index) => ({ id: randomUUID(), proof: `unit:proof-${index % 6}`, sha: sha(n - (index % 4)), baseSha: sha(n, 'b'), policyRevision: 3, producer: 'producer-a', trusted: true, result: 'pass', executed: 12, skipped: 0, at,
-      artifacts: Array.from({ length: 6 }, (_, artifact) => ({ name: `artifact-${artifact}.log`, sha256: sha(artifact, 'c'), bytes: 4096, url: `https://example.invalid/runs/${n}/${index}/${artifact}` })), provenance: { runner: 'local', command: 'node --test', environment: 'linux' } })) as unknown as Work['evidence'],
-    queueHistory: Array.from({ length: 40 }, (_, index) => ({ sequence: index, event: 'entered', at, reason: `queued behind ${index} entries` })) as unknown as Work['queueHistory'],
-    actionQueue: { actions: [], history: Array.from({ length: 80 }, (_, index) => ({ id: randomUUID(), kind: 'resync', state: 'done', result: 'done', requestedAt: at, resolvedAt: at, history: [{ at, event: 'requested' }, { at, event: 'claimed' }, { at, event: 'settled' }] })) } as unknown as Work['actionQueue'],
-    autoDispatch: { review: null, producers: [], history: Array.from({ length: 40 }, (_, index) => ({ id: randomUUID(), kind: 'review', sha: sha(n - index), requestedAt: at, resolvedAt: at, outcome: 'answered' })) } as unknown as Work['autoDispatch'],
-    sessions: Array.from({ length: 30 }, (_, index) => ({ id: `s-${n}-${index}`, kind: 'implementation', state: 'finished', runtime: 'claude', principal: 'engineer-a', startedAt: at, endedAt: at, outcome: 'finished: submitted the pull request and completed the attempt' })) as unknown as Work['sessions'],
-    pipeline: { attempts: Array.from({ length: 30 }, (_, index) => ({ epoch: index, owner: 'engineer-a', claimedAt: at, endedAt: at, end: 'submitted' })), submittedAt: at, reworkRounds: 3 } as unknown as Work['pipeline'],
+    ...histories(n, at, 1),
   } as Work;
 }
-/** An open item: ready, unassigned, with its own planned files and a short history. */
-function open(template: Work, n: number): Work {
-  return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(30), plannedFiles: paths(n, 4), ready: n % 2 === 0, stage: 'backlog' } as Work;
+/** An open item: unassigned, with its own planned files and the histories of earlier attempts (reworked, re-dispatched). */
+function open(template: Work, n: number, plannedFiles = paths(n, 4), exclusiveResources: string[] = []): Work {
+  return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(30), plannedFiles, exclusiveResources, ready: n % 2 === 0, stage: 'backlog',
+    ...histories(n, stamp(n), 0.5) } as Work;
 }
 async function insert(documents: Work[]) {
   for (let from = 0; from < documents.length; from += 50) {
@@ -149,6 +183,9 @@ async function insert(documents: Work[]) {
 }
 
 let template: Work, opened = 0, closed = 0, prs = 0;
+async function ensureTemplate() {
+  template ??= await engine.execute(operator, 'create', null, { title: 'Template', plannedFiles: ['src/template/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+}
 async function seed(open_: number, closed_: number) {
   await insert([...Array.from({ length: open_ }, () => open(template, opened++)), ...Array.from({ length: closed_ }, () => delivered(template, closed++))]);
 }
@@ -173,21 +210,22 @@ async function measure(round: string) {
 }
 
 test('unit:lock-hold-bounded-by-open-items — with 1000 items (600 delivered) claim, renew, submit and registry select each hold the lock under 500 ms, and the hold does not grow with the delivered history', async () => {
-  template = await engine.execute(operator, 'create', null, { title: 'Template', plannedFiles: ['src/template/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  await ensureTemplate();
   timeTransactions();
   await seed(400, 60);
   const few = await measure('few');
   await seed(0, 540);
   const count = Number((await store.pool.query('SELECT count(*) FROM work_items')).rows[0].count);
   const settled = Number((await store.pool.query('SELECT count(*) FROM work_index WHERE settled')).rows[0].count);
-  assert.ok(count >= 1000, `${count} items`); assert.equal(settled, 600, 'every delivered item is settled');
+  assert.ok(count >= 1000, `${count} items`); assert.equal(settled, closed + 1, 'every delivered item (and the scope probe\'s dependency) is settled');
   const bytes = Number((await store.pool.query("SELECT sum(pg_column_size(document)) FROM work_items WHERE document->>'stage' = 'done'")).rows[0].sum);
   assert.ok(bytes / 600 > 8_000, `a delivered document stores ${Math.round(bytes / 600)} bytes compressed`);
   const fromMany = holds.length;
   const many = await measure('many');
-  // Not one delivered document is read whole by these commands: each reads summaries of the history.
-  const reread = holds.slice(fromMany).filter(entry => entry.label !== 'other' && entry.settledDocuments > 0);
-  assert.deepEqual(reread.map(entry => `${entry.label}: ${entry.settledDocuments}`), [], 'claim, renew, submit and select read no delivered document whole');
+  // Not one delivered document, and not one open item outside the bench item's scope, is read whole
+  // by these commands: each reads the history as summaries and the other open items as projections.
+  const reread = holds.slice(fromMany).filter(entry => entry.label !== 'other' && (seededDelivered(entry) || seededOpen(entry)));
+  assert.deepEqual(reread.map(entry => `${entry.label}: ${seededDelivered(entry)} delivered, ${seededOpen(entry)} open`), [], 'claim, renew, submit and select read no delivered document and no unrelated open document whole');
   console.log(`lock hold (median ms) with 60 delivered: ${JSON.stringify(few)}; with 600 delivered: ${JSON.stringify(many)}`);
   for (const name of ['claim', 'renew', 'submit', 'select'] as const) {
     assert.ok(many[name] < 500, `${name} held the coordination lock ${many[name].toFixed(0)} ms with 600 delivered items`);
@@ -196,15 +234,17 @@ test('unit:lock-hold-bounded-by-open-items — with 1000 items (600 delivered) c
     assert.ok(many[name] - few[name] < Math.max(30, few[name]), `${name} grew from ${few[name].toFixed(0)} ms to ${many[name].toFixed(0)} ms when the delivered history grew tenfold`);
   }
 
-  // What a locked read hands out: the item and every open item whole, each settled delivery as its
-  // summary — and a summary is never saved over its document.
+  // What a locked read hands out: the item whole, every unrelated open item as its projection, each
+  // settled delivery as its summary — and a summary is never saved over its document.
   const target = (await store.pool.query("SELECT document FROM work_items WHERE document->>'key' = 'DONE-3'")).rows[0].document as Work;
   const all = await lockedWork(store.pool, []);
   assert.equal(all.length, Number((await store.pool.query('SELECT count(*) FROM work_items')).rows[0].count));
   const summary = all.find(item => item.key === 'DONE-3')!;
   assert.ok(isSettledSummary(summary) && !summary.pipeline && (summary.sessions ?? []).length === 0, 'a settled delivery is read as its summary');
   assert.deepEqual([summary.stage, summary.plannedFiles, summary.delivery, (summary.observation as any).files], [target.stage, target.plannedFiles, target.delivery, (target.observation as any).files], 'the summary keeps what decisions read');
-  assert.ok(all.filter(item => item.stage !== 'done').every(item => !isSettledSummary(item)), 'every open item is read whole');
+  assert.ok(all.filter(item => item.stage !== 'done').every(item => !isSettledSummary(item) && isStandIn(item)), 'every open item is a compact projection when no decision names it');
+  const bytesOpen = Number((await store.pool.query("SELECT avg(pg_column_size(document)) FROM work_items WHERE document->>'key' LIKE 'OPEN-%'")).rows[0].avg);
+  assert.ok(bytesOpen > 4_000, `an open document stores ${Math.round(bytesOpen)} bytes compressed: it carries its attempts' histories`);
   const focused = (await lockedWork(store.pool, ['DONE-3'])).find(item => item.key === 'DONE-3')!;
   assert.ok(!isSettledSummary(focused) && focused.pipeline, 'the item a decision acts on is read whole');
   await assert.rejects(store.transaction(async (db, now) => save(db, summary, 'test', 'test', now)), /settled summary/);
@@ -217,17 +257,25 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   const batches = holds.slice(from).filter(entry => entry.label === 'reconcile');
   label = 'other';
   const total = batches.reduce((sum, entry) => sum + entry.ms, 0), longest = Math.max(...batches.map(entry => entry.ms));
-  const reread = batches.reduce((sum, entry) => sum + entry.settledDocuments, 0);
-  console.log(`reconcile pass: ${batches.length} batches, ${total.toFixed(0)} ms of lock hold, longest ${longest.toFixed(0)} ms, ${reread} delivered documents read whole`);
-  // Each batch reads its own open rows whole and every delivered item as its compact summary: not
-  // one of the 600 delivered documents is read under the lock, in any batch.
-  assert.equal(reread, 0, `${reread} delivered documents were read whole over ${batches.length} batches (${batches.map(entry => entry.settledDocuments).join(', ')})`);
+  const reread = batches.reduce((sum, entry) => sum + seededDelivered(entry), 0);
+  const openRead = batches.map(seededOpen), opened_ = Number((await store.pool.query("SELECT count(*) FROM work_items WHERE document->>'key' LIKE 'OPEN-%'")).rows[0].count);
+  console.log(`reconcile pass: ${batches.length} batches, ${total.toFixed(0)} ms of lock hold, longest ${longest.toFixed(0)} ms, ${reread} delivered and ${openRead.reduce((a, b) => a + b, 0)} open documents read whole (${opened_} open)`);
+  // Each batch reads its own open rows whole and every other item as its compact stand-in: not one
+  // of the 600 delivered documents is read under the lock in any batch, no batch reads more open
+  // documents whole than its own rows, and the pass reads each open document whole about once — not
+  // once per batch, as re-reading every open row in each batch would.
+  assert.equal(reread, 0, `${reread} delivered documents were read whole over ${batches.length} batches (${batches.map(seededDelivered).join(', ')})`);
+  assert.ok(batches.length > 3, `${batches.length} batches`);
+  assert.ok(openRead.every(count => count <= engine.reconcileBatchItems), `a batch read ${Math.max(...openRead)} open documents whole against its ${engine.reconcileBatchItems} own rows`);
+  assert.ok(openRead.reduce((a, b) => a + b, 0) < opened_ * 2, `the pass read ${openRead.reduce((a, b) => a + b, 0)} open documents whole for ${opened_} open items`);
   assert.ok(total < 5_000, `a full pass held the lock ${total.toFixed(0)} ms over ${batches.length} batches`);
   // The budget counts from before the read: a batch overruns it by at most the one item it always completes.
   assert.ok(longest < engine.reconcileBatchMs + 250, `the longest batch held the lock ${longest.toFixed(0)} ms against a ${engine.reconcileBatchMs} ms budget`);
   // A second pass changes nothing it does not need to and still reads no delivered document.
   const again = holds.length; label = 'reconcile';
   await engine.reconcile(); label = 'other';
-  assert.ok(holds.slice(again).reduce((sum, entry) => sum + entry.ms, 0) < 5_000);
-  assert.equal(holds.slice(again).reduce((sum, entry) => sum + entry.settledDocuments, 0), 0, 'a second pass reads no delivered document whole');
+  const second = holds.slice(again).reduce((sum, entry) => sum + entry.ms, 0);
+  console.log(`second reconcile pass: ${second.toFixed(0)} ms of lock hold`);
+  assert.ok(second < 5_000, `a second pass held the lock ${second.toFixed(0)} ms`);
+  assert.equal(holds.slice(again).reduce((sum, entry) => sum + seededDelivered(entry), 0), 0, 'a second pass reads no delivered document whole');
 });

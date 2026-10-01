@@ -181,7 +181,7 @@ test('unit:sandbox-keyring-proxy — the session bus is replaced by the keyring-
   }
 });
 
-test('unit:allocated-checkout-re-exposed —a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
+test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
   const base = await temporaryDirectory('confinement-session');
   try {
     const { root } = coordinatorFixture(base);

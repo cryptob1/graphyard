@@ -7,7 +7,7 @@ import { save, wakeJob } from './store.js';
 import { settleDelivered } from './model/actions.js';
 import { reconciliationRefusalPrefix } from './merge-queue.js';
 import { unauthorizedMergeViolation, type OperatorAuthorizedDelivery } from './engine.js';
-import { lockedWork } from './store/locked-read.js';
+import { isStandIn, lockedWork } from './store/locked-read.js';
 
 /**
  * Direct-merge mode: the operator's standing statement that merges into the base branch inside a
@@ -87,9 +87,14 @@ export function directMergeAuthorization(window: DirectMergeWindow, merge: { sha
 export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows: DirectMergeWindow[], now: Date): Promise<Work[]> {
   const delivered: Work[] = [];
   if (!windows.length) return delivered;
-  for (const work of all) {
+  for (const [index, read] of all.entries()) {
+    if (read.stage === 'done' || !read.observation?.merged || !read.observation.mergeSha || !read.observation.mergedAt || !read.violations.includes(unauthorizedMergeViolation)) continue;
+    if (!coveringWindow(windows, Date.parse(read.observation.mergedAt))) continue;
+    // The locked read handed out a compact stand-in for an item it was not asked about: deliver its document.
+    const work: Work = isStandIn(read) ? (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [read.id])).rows[0].document : read;
+    all[index] = work;
     const observation = work.observation;
-    if (work.stage === 'done' || !observation?.merged || !observation.mergeSha || !observation.mergedAt || !work.violations.includes(unauthorizedMergeViolation)) continue;
+    if (work.stage === 'done' || !observation?.merged || !observation.mergeSha || !observation.mergedAt) continue;
     const window = coveringWindow(windows, Date.parse(observation.mergedAt));
     if (!window) continue;
     const record = directMergeAuthorization(window, { sha: observation.mergeSha, at: observation.mergedAt }, work.revision, observation.mergedAt, work.gates.filter(gate => !gate.passed).map(gate => `gate ${gate.name} had not passed: ${gate.reasons.join('; ')}`));

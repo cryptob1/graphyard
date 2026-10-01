@@ -14,7 +14,7 @@ import type { Services } from './routes.js';
 // an approver agreed. See model/machine-backlog.ts.
 
 type Db = pg.PoolClient;
-// Every open item and the named ones whole, locked; settled deliveries as their summaries (GY-1027).
+// The named items, what overlaps them and their dependencies whole and locked; the rest as compact stand-ins (GY-1027).
 const readAll = (db: Db, focus: string[] = []): Promise<Work[]> => lockedWork(db, focus, { forUpdate: true });
 const recordDispatch = (services: Services, db: Db, work: Work, now: Date) =>
   (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
@@ -168,7 +168,8 @@ export async function migrateFollowUps(services: Services, caller: Principal, ke
     const replay = await receipt(db, actor, key, digest({ migrate: 'followups' })); if (replay) return replay;
     const previous = (await db.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq LIMIT 1', [followUpMigrationEvent])).rows[0]?.payload;
     if (previous) return { ...previous, already: true };
-    const all = await readAll(db);
+    // The open follow-up items are what the migration writes: found on the compact read, then read whole.
+    const all = await readAll(db, (await readAll(db)).filter(item => item.stage !== 'done' && followUpParent(item)).map(item => item.id));
     const { merged, survivors, closed } = mergeDuplicateFollowUps(all, actor.id, now);
     for (const item of closed) {
       const settled = settleOpenRequests(item, item.closure!, now);

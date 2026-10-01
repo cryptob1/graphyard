@@ -11,8 +11,7 @@ import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { mergePath, namedMergePathFault } from '../master/repair-lane.js';
 import { closeWork } from './close.js';
-import { workIdByRef } from '../store/locked-read.js';
-import { lockedWork } from '../store/locked-read.js';
+import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.

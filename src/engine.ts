@@ -37,7 +37,7 @@ import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMer
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
-import { isSettledSummary, lockedRows, lockedWork, workIdByRef } from './store/locked-read.js';
+import { isStandIn, lockedRows, lockedWork, workIdByRef } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -2057,6 +2057,8 @@ export class Engine {
    * heartbeat queued behind it until the workers' supervisors gave up.
    */
   reconcileBatchMs = 250;
+  /** How many of its own rows a reconciliation batch reads whole (GY-1027); the rest of the board it reads as stand-ins. */
+  reconcileBatchItems = 32;
   /**
    * Reconcile every item, in batches. Each batch is its own short coordination transaction on the
    * background lane (a bounded share of the pool): it re-reads the items, so nothing a heartbeat
@@ -2067,28 +2069,33 @@ export class Engine {
    * Every item is evaluated against `all`, the whole fleet as it stands (dependencies, the merge
    * queue, fleet capacity), so each batch re-reads it rather than carrying a snapshot across
    * batches that the heartbeats and requests admitted between them have already changed (GY-392).
-   * That read is `lockedWork` (GY-1027): the unsettled items whole and each settled delivery as its
-   * work-index summary from the in-process cache, so it does not grow with the history — on
-   * 2026-10-01 re-reading ~1000 whole documents cost each batch 15-19 s for 1 s of work. A settled
-   * delivery needs nothing reconciled (it holds no queue entry, action or lease) and is skipped. The
-   * batch budget counts from before the read, so a batch's whole lock hold stays within it.
+   * That read is `lockedRows` (GY-1027): the batch's own rows — the next `reconcileBatchItems`
+   * unsettled items after the cursor — whole, and every other item as its compact stand-in from the
+   * in-process cache (an open item's coordination projection, a settled delivery's work-index
+   * summary), so it grows with neither the history nor the other open items' histories — on
+   * 2026-10-01 re-reading ~1000 whole documents cost each batch 15-19 s for 1 s of work. A stand-in
+   * is not reconciled here: a settled delivery needs nothing (it holds no queue entry, action or
+   * lease), and an open one is its own batch's row in turn. The batch budget counts from before the
+   * read, so a batch's whole lock hold stays within it.
    */
   async reconcile() {
     let cursor = 0, first = true;
     for (;;) {
       const finished = await this.store.transaction(async (db, now) => {
         const started = performance.now();
-        const rows = await lockedRows(db), all = rows.map(row => row.document);
+        const rows = await lockedRows(db, [], { after: cursor, limit: this.reconcileBatchItems }), all = rows.map(row => row.document);
         // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
         if (first) { await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now); first = false; }
         let reconciled = 0;
         for (const { number, document: work } of rows) {
-          if (number <= cursor || isSettledSummary(work)) continue;
-          if (reconciled && performance.now() - started >= this.reconcileBatchMs) return false;
+          if (number <= cursor || isStandIn(work)) continue;
+          // The batch's rows are done, or its budget is spent: the next batch reads from the cursor.
+          if (reconciled >= this.reconcileBatchItems || reconciled && performance.now() - started >= this.reconcileBatchMs) return false;
           await this.reconcileItem(db, work, all, now);
           cursor = number; reconciled++;
         }
-        return true;
+        // A batch that filled its rows may have more after them; one short of the limit was the last.
+        return reconciled < this.reconcileBatchItems;
       }, { lane: 'background' });
       if (finished) return;
       await new Promise(resolve => setImmediate(resolve));
