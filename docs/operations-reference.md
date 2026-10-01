@@ -13,22 +13,6 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 A lease expires 120 seconds after the last heartbeat, or one further lease period after a recorded server-side renewal fault; the next claim, a higher epoch, keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
-## Blocked work unblocks itself
-
-`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`) and, in the blocker's transaction, releases the lease; the capacity record carries `blocked on epoch N: REASON` for the next attempt. Each cycle (`blockers` step) the loop classes every standing blocker (`src/model/blocker-class.ts`):
-
-| Class | Probe, every cycle | Cleared when |
-| --- | --- | --- |
-| `github-credential` | `gh auth status`, `git ls-remote`, `git push --dry-run` under the attempt's own launch | all pass |
-| `control-plane-error` | server health | healthy |
-| `sandbox-path` | write the path (`.git/` via `git rev-parse --git-path`) in that sandbox | it succeeds |
-| `worktree-mismatch` | the attempt's lease | ended |
-| `outside-scope-test-failure` | base branch tip | moved |
-| `planned-file-scope` | additive `requirements` widening for the approver | files covered |
-| `needs-decision` | approver launched and supervised | none requested |
-
-Probes are recorded (`POST /api/work/KEY/blocker-probe`) on change or every five minutes; a pass clears the blocker (`blocker.cleared`, naming the probe). The plane refuses to clear a `genuine` or `human-only` blocker, or a fourth clear without a submission; only those, and scope no fold fits under the plannedFiles cap, need someone in `master status` and the board (class, last and next probe).
-
 ## Supervisor died leaving a containment quarantine
 
 On the worker `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).

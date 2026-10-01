@@ -48,7 +48,7 @@ another session's handle finished to free a slot.
 
 ### Blockers clear themselves
 
-`blocked` ends its attempt (work kept), freeing the slot. Each cycle the loop classes it: `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch` and `outside-scope-test-failure` are probed in the worker's sandbox and cleared on a pass; `planned-file-scope` becomes an approver widening; `needs-decision` launches its approver. Only `genuine` and `human-only` need someone ([details](operations-reference.md#blocked-work-unblocks-itself)).
+`blocked` ends its attempt (work kept), freeing the slot. Each cycle the loop classes it: `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch` and `outside-scope-test-failure` are probed in the worker's sandbox and cleared on a pass; `planned-file-scope` becomes an approver widening; `needs-decision` launches its approver. Only `genuine` and `human-only` need someone ([details](protocol/leases.md#blocked-work-unblocks-itself)).
 
 ### System invariants
 
