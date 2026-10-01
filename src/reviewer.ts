@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, withReviewerDefaults, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped } from './retry-stop.js';
 import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
@@ -576,7 +576,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   threads?: (repository: string, pr: number) => Promise<LaunchThread[]>;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
-  const config = await loadMasterConfig(root);
+  // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
+  const config = withReviewerDefaults(await loadMasterConfig(root));
   if (!config.reviewer) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
   const reviewerApp = config.reviewer;
@@ -892,7 +893,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   dismiss?: (record: ReviewRecord, reviewId: number, message: string) => Promise<void>;
 } = {}) {
   const ledger = await readReviewLedger(root);
-  if (!config.reviewer) return { reviews: ledger.reviews, changed: 0, threads: [] as string[] };
+  if (!config.reviewer) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as string[] };
   const before = new Map(ledger.reviews.map(record => [record.id, JSON.stringify(record)]));
   const reviewer = `${config.reviewer.slug}[bot]`;
   const observe = dependencies.observe ?? ((record: ReviewRecord, identity: string, answered: Set<number>) => observeReviewVerdict(config.repository, record, identity, dependencies.run ?? defaultChildRun, answered));
@@ -905,6 +906,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   const reviewerApp = config.reviewer;
   const dismiss = dependencies.dismiss ?? (dependencies.observe ? undefined : (record: ReviewRecord, reviewId: number, message: string) => dismissApproval(root, reviewerApp, config.repository, record.pr, reviewId, message));
   let changed = 0;
+  const pendingBefore = new Set(ledger.reviews.filter(record => record.state === 'pending').map(record => record.id));
   for (const record of ledger.reviews) {
     if (record.state !== 'pending') continue;
     // A reservation whose launcher is still starting the runtime is not a session yet; one that
@@ -981,6 +983,25 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     else await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: failed ? 'failed' : 'expired', resolution: failed ?? `the reviewer token expired at ${record.tokenExpiresAt} without a verdict on ${record.sha.slice(0, 12)}`, force: !failed && !sessionReported(dependencies.agents, record.agentName) });
     changed++;
   }
+  // A settled session still in its own pane holds its agent name and nothing else (GY-1072): its
+  // verdict is posted or its request is satisfied or superseded, so it decides nothing further. The
+  // close that settled it may have failed, or the pane outlived it; it is closed on this pass, so
+  // the name is released within one cycle rather than stalling every launch that needs it. The
+  // pane is matched by the record's own pane id and name, never by name alone, and a name a
+  // pending record holds is left alone; a session settled on this very pass had its close already
+  // and, if that close failed, is retried on the next.
+  const released: string[] = [];
+  for (const record of dependencies.agents ? ledger.reviews : []) {
+    if (record.state === 'pending' || !record.pane || pendingBefore.has(record.id)) continue;
+    if (!dependencies.agents!.some(agent => agent.pane_id === record.pane && agent.name === record.agentName)) continue;
+    if (ledger.reviews.some(other => other.state === 'pending' && other.agentName === record.agentName)) continue;
+    try { await closeHerdrPane(record.pane, dependencies.run); delete record.closeFailure; released.push(record.pane); }
+    catch (error) {
+      if (paneAlreadyGone(error)) { delete record.closeFailure; released.push(record.pane); }
+      else record.closeFailure = `Herdr could not close pane ${record.pane} of the settled session holding ${record.agentName}: ${error instanceof Error ? error.message : 'unknown reason'}`.slice(0, 500);
+    }
+    changed++;
+  }
   // An approval recorded as a session's verdict can be withdrawn after that session closed: a push
   // or a recomputed merge base dismisses it, the review gate refuses again, and nothing revisits a
   // settled record. A closed session carrying the approval the control plane is still waiting for
@@ -1011,7 +1032,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
   if (changed) await saveChangedRecords(root, ledger.reviews, before);
-  return { reviews: changed ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, threads: [...threads.events, ...followUps.events] };
+  return { reviews: changed ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, threads: [...threads.events, ...followUps.events], released };
 }
 
 /**
