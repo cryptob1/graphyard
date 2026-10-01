@@ -36,12 +36,17 @@ export function gitOrThrow(args: string[], cwd?: string) {
   return result.stdout;
 }
 
-/** The operation in progress in a worktree's admin directory that holds `branch`, if any. */
-function operationHolding(adminDir: string, branch: string): BranchHolder['via'] | null {
+/**
+ * The operation in progress in a worktree's admin directory that holds `branch`, if any. `attached`
+ * says git lists the worktree on the branch: a `git am` keeps HEAD attached and writes no
+ * `head-name`, so only its `applying` marker tells it from an ordinary checkout.
+ */
+function operationHolding(adminDir: string, branch: string, attached: boolean): BranchHolder['via'] | null {
   const read = (name: string) => { try { return readFileSync(resolve(adminDir, name), 'utf8').trim(); } catch { return null; } };
-  const ref = `refs/heads/${branch}`;
+  const ref = `refs/heads/${branch}`, applying = existsSync(resolve(adminDir, 'rebase-apply/applying'));
   if (read('rebase-merge/head-name') === ref) return 'rebase';
-  if (read('rebase-apply/head-name') === ref) return existsSync(resolve(adminDir, 'rebase-apply/applying')) ? 'am' : 'rebase';
+  if (read('rebase-apply/head-name') === ref) return applying ? 'am' : 'rebase';
+  if (attached && applying) return 'am';
   const bisect = read('BISECT_START');
   if (bisect === branch || bisect === ref) return 'bisect';
   return null;
@@ -55,11 +60,14 @@ export function branchHolders(root: string, branch: string, except: string, keyO
     const fields = record.split('\0');
     const path = fields.find(field => field.startsWith('worktree '))?.slice(9);
     if (!path || resolve(path) === resolve(except)) continue;
-    let via: BranchHolder['via'] | null = fields.includes(`branch refs/heads/${branch}`) ? 'checkout' : null;
-    if (!via && existsSync(path)) {
+    // An operation in progress is looked for first, so an attached `am` is not taken for a checkout.
+    const attached = fields.includes(`branch refs/heads/${branch}`);
+    let via: BranchHolder['via'] | null = null;
+    if (existsSync(path)) {
       const adminDir = git(['rev-parse', '--absolute-git-dir'], path);
-      if (adminDir.status === 0) via = operationHolding(adminDir.stdout.trim(), branch);
+      if (adminDir.status === 0) via = operationHolding(adminDir.stdout.trim(), branch, attached);
     }
+    via ??= attached ? 'checkout' : null;
     if (via) holders.push({ path, via, ...keyOf(path) });
   }
   return holders;

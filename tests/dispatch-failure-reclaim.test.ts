@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { masterConfigSchema, prepareWorkerLaunch, saveWorkerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { dispatchFailureBlockAfter, dispatchFailureCause } from '../src/daemon/dispatch-failures.js';
+import { dispatchFailureBlockAfter, dispatchFailureCause, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
 import { branchHolders } from '../src/worktree-holders.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -143,6 +143,39 @@ test('unit:worktree-failure-names-git-error — a failing git worktree add repor
   } finally { await plane.close(); await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });
 
+test('an attached git am holder is found as an am rather than a checkout, reclaimed on a first attempt, and the launcher carries what was reclaimed into its result', async () => {
+  const branch = 'graphyard/gy-7-3';
+  const root = await repository(branch);
+  const sessions = join(root, '.graphyard', 'worktrees'), holder = join(sessions, 'GY-7-2'), target = join(sessions, 'GY-7-3');
+  const credentials = await temporaryDirectory('gy-1078-credentials');
+  await mkdir(sessions, { recursive: true });
+  // A patch against a.txt that no longer applies on the branch: `git am` stops with HEAD still on it.
+  git(root, 'checkout', '-q', '-b', 'patch-source'); await writeFile(join(root, 'a.txt'), 'patched\n'); git(root, 'commit', '-q', '-am', 'patched');
+  const patch = join(root, 'change.patch'); await writeFile(patch, git(root, 'format-patch', '-1', '--stdout') + '\n');
+  git(root, 'checkout', '-q', 'main');
+  git(root, 'worktree', 'add', '-q', holder, branch);
+  await writeFile(join(holder, 'a.txt'), 'diverged\n'); git(holder, 'commit', '-q', '-am', 'diverged');
+  assert.throws(() => git(holder, 'am', patch));
+  assert.match(git(root, 'worktree', 'list', '--porcelain'), new RegExp(`worktree ${holder}\\nHEAD [0-9a-f]+\\nbranch refs/heads/${branch}`), 'git still lists the am holder on the branch');
+  const plane = await controlPlane(item({ epoch: 3, live: true }));
+  try {
+    assert.deepEqual(branchHolders(root, branch, target).map(entry => [entry.path, entry.via]), [[holder, 'am']], 'its applying marker tells it from a checkout');
+    const credential = join(credentials, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
+    await setupMaster(root, { url: plane.env.GRAPHYARD_URL, token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials },
+      (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+    await saveWorkerProfile(root, { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential }, async () => ({ actor: { id: 'worker-a', role: 'worker' } }));
+    const prepared = await prepareWorkerLaunch(root, 'GY-7', 'launch', (command, args, options) => {
+      if (command === 'git') return args[0] === 'rev-parse' ? `${git(root, 'rev-parse', 'main')}\n` : '';
+      if (args[1] === 'claim') return JSON.stringify({ epoch: 3, lease: { owner: 'worker-a' } });
+      return defaultChildRun(command, args.slice(0, 4), { cwd: options?.cwd, env: plane.env, stdout: options?.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options?.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
+    });
+    assert.equal(prepared.path, target);
+    assert.deepEqual(prepared.reclaimed, [`${holder}: aborted the am and removed the worktree`], 'a launch that succeeds still reports what it reclaimed');
+    assert.ok(!existsSync(holder));
+    assert.equal(git(target, 'log', '-1', '--format=%s'), 'diverged', 'the branch keeps the abandoned session\'s commit');
+  } finally { await plane.close(); await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
+});
+
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 const loopConfig = (credentialFile: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main',
   githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: ['one', 'two', 'three'].map(name => launchProfile(name, credentialFile)) });
@@ -180,7 +213,7 @@ test('unit:repeated-dispatch-failure-blocks — after three consecutive dispatch
     const loop = loopEffects(items, async target => {
       attempts++;
       const epoch = ++items[0].epoch;
-      if (!failing) return { pane: null };
+      if (!failing) return { pane: null, reclaimed: ['/repo/.graphyard/worktrees/GY-7-2: aborted the rebase and removed the worktree'] };
       const error = Object.assign(new Error(`Command failed: node cli worktree GY-7 ${epoch} ${'c'.repeat(40)}\nGit worktree creation failed: git worktree add /repo/.graphyard/worktrees/GY-7-${epoch} graphyard/gy-7-1 failed (exit 128): fatal: 'graphyard/gy-7-1' is already used by worktree at '/repo/.graphyard/worktrees/GY-7-2'`), { target });
       throw new Error(`Worker launch failed: the worktree for GY-7 epoch ${epoch} could not be created: ${error.message.split('\n')[1]}`);
     });
@@ -205,6 +238,7 @@ test('unit:repeated-dispatch-failure-blocks — after three consecutive dispatch
     items[0].blocker = null; failing = false;
     await cycle();
     assert.equal(attempts, dispatchFailureBlockAfter + 1, 'dispatch resumes once the blocker clears');
+    assert.match(Object.values(state.actions).find(action => action.kind === 'dispatch' && action.state === 'done')?.detail ?? '', /; freed its branch by reclaiming \/repo\/\.graphyard\/worktrees\/GY-7-2: aborted the rebase and removed the worktree$/, 'the dispatch record names what the launch reclaimed');
     assert.equal(state.dispatchFailures['item-7'], undefined);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -214,4 +248,13 @@ test('a changed cause starts a new run, and the run outlives the epochs its fail
   assert.equal(dispatchFailureCause({ key: 'GY-859' }, failure(113, '2')), dispatchFailureCause({ key: 'GY-859' }, failure(154, '2')));
   assert.equal(dispatchFailureCause({ key: 'GY-859' }, 'no worker profile can take GY-859'), 'no worker profile can take GY-859');
   assert.notEqual(dispatchFailureCause({ key: 'GY-859' }, failure(113, '2')), dispatchFailureCause({ key: 'GY-859' }, 'fatal: not a git repository'));
+});
+
+test('a repeated failure that spent no epoch, refused before any claim, never reaches the bound', () => {
+  const state = { dispatchFailures: {} } as Parameters<typeof noteDispatchFailure>[0];
+  const work = { id: 'item-7', key: 'GY-7', epoch: 4 };
+  for (let n = 0; n < 5; n++) noteDispatchFailure(state, work, 'Dispatch blocked by exclusive resources: db held by GY-8', new Date(n * 60_000).toISOString());
+  assert.equal(state.dispatchFailures['item-7'].count, 1, 'the snapshot epoch never moved, so the run stays at its first failure');
+  for (const epoch of [5, 6]) noteDispatchFailure(state, { ...work, epoch }, 'Dispatch blocked by exclusive resources: db held by GY-8', new Date().toISOString());
+  assert.equal(state.dispatchFailures['item-7'].count, dispatchFailureBlockAfter, 'failures that each followed a spent epoch count');
 });

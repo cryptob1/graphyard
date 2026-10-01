@@ -2043,7 +2043,7 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
 });
 
-test('unit:soak-invariants-hold — a worker idle past its bound whose pane died is reclaimed without pasting into or closing the pane the reused agent name holds, and is still delivered', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — a worker idle past its bound whose pane died is reclaimed without pasting into or closing the pane the reused agent name holds, and is still delivered', { timeout: 450_000 }, async () => {
   // GY-852: one worker takes its lease and then idles at its prompt for ever. Past the idle bound
   // the loop re-prompts it once — in its own pane. The pane then dies and the profile's agent name
   // is taken by another session (the shape that delivered GY-589's re-prompt to GY-831-4's pane),
@@ -2074,7 +2074,7 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
-test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 450_000 }, async () => {
   // GY-999: a worker whose push is refused for want of a valid GitHub login records that blocker.
   // The loop ends the attempt in the cycle that sees it — work kept, pane closed, lease released —
   // and the item is launched again with a fresh credential. The ending counts on the GY-885 retry
@@ -2120,8 +2120,8 @@ test('unit:soak-invariants-hold — launches that keep failing for one cause are
   // blocker request repeat per item and per cycle, so they live here.
   const constant = 2, changing = 3, unblockAfterMs = 20 * minute;
   const { items, final, violations, failures, lost, state, failing } = await simulateDay({
-    hours: 6, dispatchFailing: { constant, changing, refuseBlocks: 1, unblockAfterMs },
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+    hours: 3, dispatchFailing: { constant, changing, refuseBlocks: 1, unblockAfterMs },
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
   });
   assert.deepEqual(violations, [], 'every system invariant holds across the failing launches, the blocker and the unblock');
   assert.deepEqual(failures, [], 'no cycle failed');

@@ -24,7 +24,8 @@ import { currentAgents, dispatchedFile, DispatchReservedError, profileLaunchedFi
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
-export type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies };
+/** `reclaimed` names each abandoned worktree the `worktree` command freed the branch from (GY-1078). */
+export type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies; reclaimed?: string[] };
 /** Claims the item and builds its worktree; `claimBy` is a hand dispatch's claim deadline (prepareWorkerLaunch). */
 type WorkerPreparer = (root: string, key: string, profileName: string, run?: WorkerCommand, claimBy?: number) => Promise<PreparedWorker>;
 
@@ -86,7 +87,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
-  let dependencies: PreparedWorker['dependencies'] | null = null;
+  let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [];
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   if (profile.mode === 'existing') {
@@ -117,7 +118,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         try {
           assertClaimDeadline(work.key, options.claimBy);
           let epoch: number;
-          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null)));
+          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null)));
           // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
           const at = new Date().toISOString();
           await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -134,7 +135,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox,
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, ...(reclaimed.length ? { reclaimed } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,
@@ -185,7 +186,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
     if (hold) writeConsentHold(started.files.stem, hold);
     return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-      started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch };
+      started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [] };
   } catch (error) {
     const malformedTab = (error as any)?.herdrTab as string | undefined;
     const failed = error instanceof Error ? error.message : 'Worker launch failed';
@@ -332,7 +333,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     // The checkout is the attempt's; the dependency tree does not have to be. Sharing is a
     // convenience for the session that follows, so a refusal is reported, never fatal.
     const dependencies: SharedDependencies = await shareDependencies(root, workspace.path).catch(error => ({ shared: [], skipped: [{ name: dependencyDirectories[0], reason: failureText(error) }] }));
-    return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}) };
+    // What the command reclaimed to free the branch is carried to the dispatch record, never only
+    // to its stderr, which a launch that succeeds discards (GY-1078).
+    const reclaimed = Array.isArray(workspace.reclaimed) ? (workspace.reclaimed as { path?: unknown; action?: unknown }[]).map(entry => `${String(entry.path)}: ${String(entry.action)}`) : [];
+    return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}), ...(reclaimed.length ? { reclaimed } : {}) };
   } catch (error) {
     if (claimedEpoch !== null) try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
     catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`); }

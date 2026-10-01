@@ -3,7 +3,8 @@ import type { Work } from '../model.js';
 import type { DaemonState, DispatchFailureRun } from './state.js';
 
 /**
- * How many consecutive dispatch failures of one item with the same cause stop its redispatch.
+ * How many consecutive dispatch failures of one item with the same cause, each spending an epoch,
+ * stop its redispatch.
  *
  * Each failed launch claims the item, spends an epoch and releases it, so the next cycle sees a
  * fresh epoch and dispatches again on whichever profile is free. On 2026-10-01 GY-859 was
@@ -37,10 +38,18 @@ export function dispatchFailureCause(item: Pick<Work, 'key'>, failure: string): 
     .trim().slice(0, 2000);
 }
 
-/** Adds one failure to the item's run, starting a new run when the cause changed. */
-export function noteDispatchFailure(state: DaemonState, item: Pick<Work, 'id' | 'key'>, failure: string, at: string): DispatchFailureRun {
+/**
+ * Adds one failure to the item's run, starting a new run when the cause changed. `item.epoch` is
+ * the epoch the snapshot showed before this dispatch; a failure counts again only when it moved
+ * past the run's last one, that is when the failure before it claimed and spent an epoch. One
+ * refused before any claim (a dependency unfinished, a resource held, no account free) is a
+ * condition that clears on its own, so repeating it never reaches the bound.
+ */
+export function noteDispatchFailure(state: DaemonState, item: Pick<Work, 'id' | 'key' | 'epoch'>, failure: string, at: string): DispatchFailureRun {
   const cause = dispatchFailureCause(item, failure), previous = state.dispatchFailures[item.id];
-  const run = previous && previous.cause === cause ? { ...previous, count: previous.count + 1, lastAt: at } : { key: item.key, cause, count: 1, firstAt: at, lastAt: at };
+  const run = previous && previous.cause === cause
+    ? { ...previous, count: item.epoch > previous.epoch ? previous.count + 1 : previous.count, epoch: item.epoch, lastAt: at }
+    : { key: item.key, cause, count: 1, epoch: item.epoch, firstAt: at, lastAt: at };
   state.dispatchFailures[item.id] = run;
   return run;
 }

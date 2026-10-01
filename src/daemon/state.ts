@@ -366,7 +366,7 @@ export function masterSummary(master: MasterSessionState, now: number) {
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
 }
 
-export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), firstAt: z.string(), lastAt: z.string() }).strict();
+export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict();
 export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
