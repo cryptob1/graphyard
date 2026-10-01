@@ -33,7 +33,9 @@ test('unit:merge-stall-surfaced — a merge pending six minutes on an UNSTABLE h
 
   for (const mergeStateStatus of ['CLEAN', 'HAS_HOOKS']) assert.equal(attention([work(6, { mergeStateStatus })]).length, 1, mergeStateStatus);
   // Not mergeable, refused, queued, another head, no current request, or merged: not a stall.
-  for (const mergeStateStatus of ['BLOCKED', 'BEHIND', 'DIRTY', 'UNKNOWN', null]) assert.deepEqual(attention([work(60, { mergeStateStatus })]), [], String(mergeStateStatus));
+  // BLOCKED under auto-merge is named with GitHub's blocking reason instead (GY-430, merge-queue.ts blockedMergeStall).
+  for (const mergeStateStatus of ['BEHIND', 'DIRTY', 'UNKNOWN', null]) assert.deepEqual(attention([work(60, { mergeStateStatus })]), [], String(mergeStateStatus));
+  assert.deepEqual(attention([work(60, { mergeStateStatus: 'BLOCKED', mode: 'none' })]), []);
   assert.deepEqual(attention([work(60, { refused: { reason: 'GitHub refused to enqueue GY-245: no', head, mode: 'none', at: new Date(now).toISOString() } })]), []);
   assert.deepEqual(attention([work(60, { queue: true })]), []);
   assert.deepEqual(attention([work(60, { head: 'c'.repeat(40) })]), []);
