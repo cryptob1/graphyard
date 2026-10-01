@@ -212,8 +212,9 @@ export interface DaemonEffects {
   containment?: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number } }) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
   /** Settles one quarantine this host verified dead, so the item can be claimed again. */
   settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
-  /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
+  /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart; `setWatchdog` lengthens that window (WATCHDOG_USEC, GY-947). */
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
+  setWatchdog?: (windowMs: number) => void | Promise<void>;
   /**
    * Mid-session capacity (GY-89). `sessionOutput` reads the tail of a stopped session's own
    * terminal, which is where a runtime says its provider account is spent; `reportCapacity`
@@ -765,15 +766,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
-    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
-    // wherever NOTIFY_SOCKET is, and the loop only speaks to it when the supervisor set one.
-    // Node has no unix datagram socket, so the message goes through that short-lived child, which
-    // the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until
-    // the manager has processed the message, so it cannot exit before it is attributed; on an
-    // older systemd a keep-alive can be lost to that race, which is why the packaged window is
-    // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
-    // The keep-alive is a child too: it runs through the same runner, awaited on the event loop
-    // and bounded like every other child, and a keep-alive that fails is logged by the loop.
+    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present wherever
+    // NOTIFY_SOCKET is, and the loop only speaks to it when the supervisor set one. Node has no unix
+    // datagram socket, so the message goes through that short-lived child, which the unit admits with
+    // NotifyAccess=all. Since systemd 246 the tool waits on a barrier until the manager has processed
+    // the message, so it cannot exit before it is attributed; on an older systemd a keep-alive can be
+    // lost to that race, which is why the packaged window is 180s against a cycle of at most 30s.
+    // The keep-alive is a child too: run through the same runner, bounded, and logged when it fails.
     // GY-437: the loop upgrades its own checkout between cycles. The executors come first,
     // through the shipped restart command — a refusal (a claim in flight, another restart's
     // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
@@ -793,6 +792,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
+    setWatchdog: async windowMs => { await run('systemd-notify', [`WATCHDOG_USEC=${Math.round(windowMs) * 1000}`]); },
     masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
   };

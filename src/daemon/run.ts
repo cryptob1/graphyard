@@ -7,7 +7,7 @@ import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-c
 import { faultRecurrenceReport } from './faults.js';
 import { diagnosisReport } from './diagnosis.js';
 import { latencyBudget, silenceReport } from './metrics.js';
-import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
+import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, requiredWatchdogMs, watchdogFit, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { detailChanged } from './decisions.js';
@@ -88,10 +88,19 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
 
 /** A watchdog window too short for the configured interval is recorded once, not obeyed silently. */
 export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof watchdogPlan>, at: string, persist: DaemonEffects['persist']) {
-  if (!plan.refusal) return [];
+  const recorded = (entry: DaemonAction) => entry.kind === 'escalation' && entry.state === 'failed';
+  // GY-947: a window that now fits — raised by the loop, or a unit fixed and restarted — settles the
+  // refusal an earlier process recorded, so it stops standing as a fault.
+  if (!plan.refusal) {
+    const settled = Object.entries(state.actions).filter(([key, entry]) => key.startsWith('escalation:watchdog:') && recorded(entry))
+      .map(([key, entry]) => storeAction(state, key, { ...entry, state: 'done', detail: `The supervisor's watchdog window now fits the cycle interval${plan.windowMs ? ` (${Math.round(plan.windowMs / 1000)}s)` : ''}`, cycle: state.cycle, at }, 'action:config'));
+    if (settled.length) await persist(state);
+    return settled;
+  }
   const key = `escalation:watchdog:${plan.windowMs}`;
-  if (state.actions[key]) return [];
-  const entry = storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at }, 'action:config');
+  // A refusal already standing is recorded once; a new reason for it (the loop could not raise it) replaces the old.
+  if (state.actions[key] && recorded(state.actions[key]) && !detailChanged(state.actions[key], plan.refusal)) return [];
+  const entry = storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at }, 'action:config');
   await persist(state);
   return [entry];
 }
@@ -129,8 +138,27 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
   // silent pipeline; a window that would restart a healthy loop is recorded and left to the
   // supervisor's configuration rather than worked around.
-  const watchdog = watchdogPlan(options.environment ?? process.env, interval());
-  for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+  // GY-947: a window too short for the interval — a hand-installed unit, or one written for another
+  // interval — is raised for this process through the supervisor's own notification, to the window
+  // the generated unit writes; only a window the loop cannot raise is recorded as the fault.
+  let watchdog = watchdogPlan(options.environment ?? process.env, interval());
+  // The interval the window was last fitted for: only a reload that changes it fits again, so a
+  // window the loop cannot raise costs one notification per interval, never one per cycle.
+  let fittedFor = interval();
+  const fitWatchdog = async () => {
+    fittedFor = interval();
+    if (watchdog.supervised && watchdog.refusal && effects.setWatchdog) {
+      const windowMs = requiredWatchdogMs(interval());
+      // The notification travels the path the keep-alives do (NotifyAccess=all), so a unit that hears them hears this.
+      try {
+        await effects.setWatchdog(windowMs);
+        log(`[graphyard-master] the supervisor's watchdog window (${Math.round(watchdog.windowMs! / 1000)}s) is not longer than two cycle intervals; the loop raised it to ${windowMs / 1000}s for this process`);
+        watchdog = watchdogFit(windowMs, interval());
+      } catch (error) { watchdog = { ...watchdog, refusal: `${watchdog.refusal}; the loop could not raise it to ${windowMs / 1000}s itself: ${message(error)}` }; }
+    }
+    for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+  };
+  await fitWatchdog();
   if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
   let stopping = false;
   // A supervisor's SIGTERM must land during the wait, not one whole interval later.
@@ -193,6 +221,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       try {
         if (options.reload) {
           for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+          // A reloaded interval is judged against the window this process holds.
+          if (watchdog.supervised && interval() !== fittedFor) { watchdog = watchdogFit(watchdog.windowMs, interval()); await fitWatchdog(); }
         }
         phase = 'cycle';
         const result = await runCycle(config, state, effects, now, launcher);

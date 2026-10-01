@@ -50,6 +50,27 @@ export async function checkoutState(root: string, run: ChildRun): Promise<Checko
   return { commit, detached, dirty, branch };
 }
 
+/**
+ * Whether a failed `systemctl --no-block restart` of the loop's own unit in fact queued the
+ * restart (GY-947). The command runs inside the unit's control group, so the stop it queues sends
+ * its SIGTERM to the command too, which can die of it before it exits: a child ended by SIGTERM it
+ * was not timed out with is the hand-off going through, not a refusal. Any other signal (a SIGKILL
+ * from the OOM killer, a crash) never proves the restart was queued and stays a failure. On
+ * 2026-09-29 systemd was already stopping the loop in the same second the loop recorded that
+ * restart as failed.
+ */
+export function selfRestartQueued(error: unknown): boolean {
+  const child = error as { signal?: unknown; timedOut?: unknown } | null;
+  return !!child && child.signal === 'SIGTERM' && child.timedOut !== true;
+}
+
+/**
+ * How long an owed re-execution waits before its next try (GY-947): five minutes after the first
+ * failure, doubling to a six-hour ceiling, so a cause that persists (no user bus, a unit that
+ * refuses the restart) costs a handful of attempts a day rather than one every cycle.
+ */
+export const selfRestartRetryMs = (retries: number) => Math.min(6 * 3_600_000, 5 * 60_000 * 2 ** Math.max(0, retries - 1));
+
 export type SelfUpgradeOutcome =
   | { outcome: 'skipped'; reason: string }
   | { outcome: 'up-to-date'; commit: string }
@@ -111,7 +132,20 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     return { outcome: 'refused', reason, commit };
   };
   /** Completes the restarts one alignment owes, with the checkout already at the tip. */
-  const finish = async (pending: { from: string | null; to: string; code: boolean }): Promise<SelfUpgradeOutcome> => {
+  const finish = async (pending: { from: string | null; to: string; code: boolean; selfOnly?: boolean; retries?: number }): Promise<SelfUpgradeOutcome> => {
+    // GY-947: the fleet already runs the checked-out tip and only the loop's own re-execution is
+    // owed. A process that already loaded the tip (its supervisor or a person restarted it) owes
+    // nothing; any other retries the re-execution alone. The release it aligned was recorded then.
+    if (pending.selfOnly) {
+      if (state.release?.commit === pending.to) {
+        state.upgrade.pending = null;
+        state.upgrade.last = { ...(state.upgrade.last ?? { at: at(), from: pending.from, to: pending.to, code: true, executors: null }), at: at(), self: true };
+        await persist();
+        await note(`The loop runs base tip ${shortCommit(pending.to)}: the re-execution it owed is done`, false);
+        return { outcome: 'upgraded', from: pending.from, to: pending.to, code: true, executors: null, self: false };
+      }
+      return reexecute(pending, null);
+    }
     const release = state.deployment!.sha!;
     if (!pending.code) {
       state.upgrade.pending = null;
@@ -136,14 +170,26 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     state.upgrade.refused = null;
     await persist();
     await note(`Checked out base tip ${shortCommit(pending.to)}${pending.from ? ` from ${shortCommit(pending.from)}` : ''}; loaded code moved, the executors were restarted (${executors.result})${executors.reason ? `: ${executors.reason}` : ''}`, false);
+    return reexecute(pending, executors);
+  };
+  /**
+   * The loop's own re-execution, last. A restart the stop killed on its way out is the hand-off
+   * (`selfRestartQueued`); one that really failed stays owed on the cursor, so the next cycle
+   * retries it instead of running the old release until something else restarts the loop (GY-947).
+   */
+  const reexecute = async (pending: { from: string | null; to: string; retries?: number }, executors: ExecutorRestartResult | null): Promise<SelfUpgradeOutcome> => {
     if (!deps.restartSelf) return failed('loaded code moved and the executors were restarted, but this loop cannot re-execute itself');
     try { await deps.restartSelf(); }
     catch (error) {
-      state.upgrade.last = { ...state.upgrade.last!, self: false };
-      await persist();
-      const reason = `the loop could not re-execute itself through its supervisor: ${message(error)}`;
-      await note(`${reason}; it keeps running ${shortCommit(state.release?.commit ?? null)} until its supervisor restarts it`, true);
-      return { outcome: 'failed', reason };
+      if (!selfRestartQueued(error)) {
+        state.upgrade.last = { ...(state.upgrade.last ?? { at: at(), from: pending.from, to: pending.to, code: true, executors: null }), self: false };
+        const retries = (pending.retries ?? 0) + 1, retryAt = new Date(now() + selfRestartRetryMs(retries)).toISOString();
+        state.upgrade.pending = { from: pending.from, to: pending.to, code: true, selfOnly: true, retries, retryAt };
+        await persist();
+        const reason = `the loop could not re-execute itself through its supervisor: ${message(error)}`;
+        await note(`${reason}; it keeps running ${shortCommit(state.release?.commit ?? null)} and retries the re-execution at ${retryAt}`, true);
+        return { outcome: 'failed', reason };
+      }
     }
     // The supervisor has queued the restart; its stop signal ends this process during the wait.
     return { outcome: 'upgraded', from: pending.from, to: pending.to, code: true, executors, self: true };
@@ -157,6 +203,16 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const release = observation.sha;
   if (state.upgrade.alignedRelease === release && !state.upgrade.pending)
     return { outcome: 'skipped', reason: `release ${shortCommit(release)} was already aligned` };
+  // An owed re-execution (GY-947) is settled before anything moves again: the fleet already runs the
+  // checkout, so it is retried alone — no fetch, no new checkout — once its backoff has passed, and
+  // settled at once when this process already runs the tip it owed (its supervisor or a person
+  // restarted it). A release deployed meanwhile is aligned by the cycle after that.
+  const owedSelf = state.upgrade.pending?.selfOnly ? state.upgrade.pending : null;
+  if (owedSelf) {
+    if (owedSelf.retryAt && state.release?.commit !== owedSelf.to && Date.parse(owedSelf.retryAt) > now())
+      return { outcome: 'skipped', reason: `the loop's re-execution onto ${shortCommit(owedSelf.to)} is retried at ${owedSelf.retryAt}` };
+    return finish(owedSelf);
+  }
 
   // 2. The base tip, from a fresh fetch.
   let to: string;
