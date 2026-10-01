@@ -134,6 +134,15 @@ export async function shepherdStep(cycle: Cycle) {
       return;
     }
     if (previous && (previous.state === 'done' || previous.attempts >= maxProofAttempts || !readyToRetry(previous, state.cycle))) return;
+    // A push to the candidate already runs every automatable proof through pull_request_target, so a
+    // dispatch is only the fallback for a run that never produced the evidence: it waits a grace
+    // period from when the loop first saw the head waiting, rather than queueing a duplicate run.
+    const graceMs = (config.run.proofDispatchGraceMinutes ?? 0) * 60_000;
+    if (graceMs > 0) {
+      const seenKey = `${key}:awaiting-push-run`;
+      if (!state.actions[seenKey]) await record(state, seenKey, { kind: 'proof', work: item.key, principal: null, state: 'done', detail: `${item.key}: waiting for the push-triggered acceptance run on ${item.candidate!.sha.slice(0, 12)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+      if (clock - Date.parse(state.actions[seenKey].at) < graceMs) return;
+    }
     if (!config.run.proofWorkflow) {
       if (previous?.state !== 'failed') performed.push(await record(state, key, { kind: 'proof', work: item.key, principal: null, state: 'failed', detail: `${item.key} needs trusted evidence for ${automatable.join(', ')}; configure master run --proof-workflow so the loop can request it from the trusted producer workflow`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return;

@@ -259,6 +259,28 @@ test('one cycle closes finished sessions, dispatches, requests proof, merges onl
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('unit:proof-dispatch-waits-for-push-run — a fresh candidate is left to its push-triggered acceptance run, and the loop dispatches the proof workflow only once the grace period passes', async () => {
+  const { directory, token } = await privateDirectory();
+  try {
+    const master = config(token, { run: { proofWorkflow: 'acceptance.yml', proofDispatchGraceMinutes: 180 } });
+    const proofDispatchGraceMs = 180 * 60_000;
+    const acceptance = submitted({ id: 'acceptance', key: 'GY-44', stage: 'acceptance',
+      criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }],
+      gates: [{ name: 'acceptance', passed: false, reasons: ['needs evidence'] }] });
+    const log: string[] = [];
+    let elapsed = 0;
+    const deps = effects({ snapshot: async () => ({ work: [acceptance], now: iso(elapsed) }) }, log);
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, deps, () => clock);
+    elapsed = proofDispatchGraceMs - 60_000;
+    await runCycle(master, state, deps, () => clock + elapsed);
+    assert.deepEqual(log.filter(entry => entry.startsWith('proof:')), [], 'no duplicate run is queued while the push-triggered run has its chance');
+    elapsed = proofDispatchGraceMs;
+    await runCycle(master, state, deps, () => clock + elapsed);
+    assert.deepEqual(log.filter(entry => entry.startsWith('proof:')), ['proof:GY-44'], 'the fallback dispatch runs once the grace period passes');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('a disabled automatic merge keeps the loop cycling and never invokes the merge', async () => {
   const { directory, token } = await privateDirectory();
   try {
