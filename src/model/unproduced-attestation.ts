@@ -2,7 +2,7 @@ import type { Work } from './work.js';
 import type { ActionWait } from './action-account.js';
 import { automatableProof, dispatchIneligibility } from './mechanical-proofs.js';
 import { currentEvidence } from './evidence.js';
-import { requiredProofs } from './bootstrap.js';
+import { inheritedObligations } from './bootstrap.js';
 
 /**
  * The `manual:` proofs the loop puts to a two-party attestation itself (GY-521), or none. A proof
@@ -19,7 +19,11 @@ export function unproducedManualProofs(work: Work, all: Work[], now: Date): stri
   const failing = work.gates.find(gate => !gate.passed);
   if (failing?.name !== 'acceptance' || !failing.reasons.length) return [];
   const requested = new Set((work.autoDispatch?.producers ?? []).filter(request => request.state === 'requested').flatMap(request => request.proofs ?? []));
-  const proofs = [...new Set(requiredProofs(work, all))].filter(proof => loopAttested(work, proof, now) && !requested.has(proof));
+  // Every proof the item could be required to hold, its lane unapplied: the acceptance gate's own
+  // refusals below decide which of them the lane requires, so a loop reading the item through a
+  // view that carries no scope files (and would recompute another lane) asks for exactly those.
+  const candidates = [...work.criteria.flatMap(criterion => criterion.bootstrap ? [] : criterion.proofs), ...inheritedObligations(work, all).map(obligation => obligation.proof)];
+  const proofs = [...new Set(candidates)].filter(proof => loopAttested(work, proof, now) && !requested.has(proof));
   const named = (reason: string) => proofs.find(proof => reason.includes(`: ${proof} needs trusted passing evidence`));
   if (!failing.reasons.every(reason => named(reason))) return [];
   return proofs.filter(proof => failing.reasons.some(reason => named(reason) === proof));
