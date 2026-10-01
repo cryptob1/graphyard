@@ -5,7 +5,7 @@ import { stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { buildPlan, coreEnv, githubEnv, materializeInstall, prepareInstall, repositoryRoot } from '../src/install/index.js';
-import { protectionPayload, protectionSatisfied, CHECK_NAME } from '../src/install/github.js';
+import { protectionPayload, protectionSatisfied, CHECK_NAME, LANDABLE_CHECK } from '../src/install/github.js';
 import { fingerprint, principalOfRole, writeInstallRecord } from '../src/install/secrets.js';
 import { installIdFor, REDACTED } from '../src/install/types.js';
 import { appKey, harness, satisfiedProtection, WEBHOOK_SECRET, GRAPHYARD_APP_ID } from './install-harness.js';
@@ -177,7 +177,7 @@ test('branch protection is read-modify-write and matches the chosen review polic
   assert.equal(payload.required_pull_request_reviews.dismiss_stale_reviews, true);
   assert.equal(payload.required_pull_request_reviews.require_last_push_approval, true);
   // The repository's own check survives; Graphyard's is bound to its App.
-  assert.deepEqual(payload.required_status_checks.checks.map(check => check.context), ['lint', 'test', 'typecheck', CHECK_NAME]);
+  assert.deepEqual(payload.required_status_checks.checks.map(check => check.context), ['lint', 'test', 'typecheck', CHECK_NAME, LANDABLE_CHECK]);
   assert.equal(payload.required_status_checks.checks.find(check => check.context === CHECK_NAME)!.app_id, 4242);
   assert.equal(payload.required_status_checks.checks.find(check => check.context === 'lint')!.app_id, 77);
   assert.equal(payload.enforce_admins, true);

@@ -28,7 +28,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` from this App: `strict` **off**, admin-enforced, no force pushes or deletion; `master browser protection` reconciles it.
+On the base branch require `Graphyard / merge` and `graphyard/landable` (the [landability verdict](coordination.md)) from this App, beside CI: `strict` **off**, admin-enforced, no force pushes or deletion; `master browser protection` reconciles it.
 
 The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
 

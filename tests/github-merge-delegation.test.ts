@@ -92,7 +92,9 @@ test('unit:authorized-head-enqueued — an authorized head gets Graphyard / merg
   const inQueue = fakeGitHub({ mode: 'queued' });
   assert.equal((await gateMerge(inQueue.github, item, requested(item))).action.kind, 'hold');
   assert.equal(inQueue.named('enqueuePullRequest').length, 0);
-  assert.deepEqual(inQueue.checks().map(body => [body.head_sha, body.conclusion]), [[head, 'success'], [groupHead, 'success']]);
+  assert.deepEqual(inQueue.checks().filter(body => body.name === CHECK_NAME).map(body => [body.head_sha, body.conclusion]), [[head, 'success'], [groupHead, 'success']]);
+  // The group commit carries the landability verdict too, which branch protection also requires (GY-887).
+  assert.deepEqual(inQueue.checks().filter(body => body.name === 'graphyard/landable').map(body => [body.head_sha, body.conclusion]), [[groupHead, 'success']]);
 
   // No authorization for the head: failure is published and nothing is enqueued.
   const refused = work({ gates: [{ name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], mergeAuthorization: null, stage: 'review' });
