@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { failedCheckRework, routineDecision } from '../src/master-daemon.js';
-import { attributeTipFailure, checkFailureOf, ejectedTipRestore, predecessorWait, type CheckFailure } from '../src/merge-queue.js';
+import { attributeTipFailure, checkFailureOf, ejectedTipRestore, predecessorWait, unattributedTipFailure, windowAttributionClause, type CheckFailure } from '../src/merge-queue.js';
 import type { ScopeFile, Work } from '../src/model.js';
 import { placeInQueue } from '../src/model/queue.js';
 import { failingTestCommand, failingTests } from './helpers/timing-report.js';
@@ -189,4 +189,16 @@ test('unit:speculative-failure-attributed — the failing output is read from th
   ]);
   assert.deepEqual(failure.named, ['tests/hotspot-registry.test.ts', 'src/cli/master-status.ts', '/home/runner/work/graphyard/graphyard/tests/hotspot-registry.test.ts']);
   assert.deepEqual(failure.subjects, ['tests/hotspot-registry.test.ts: every module stays inside its line budget']);
+});
+
+test('unit:speculative-failure-attributed — a failure the parallel-tip window pinned on the entry because the tip ahead passed is still attributed, and the docs budget\'s own attribution is not', () => {
+  // The window is always on in production (mergeQueue.parallelTips defaults to 4): it ejects an
+  // entry once the tip ahead passed and says so. A predecessor whose change passes alone can still
+  // be what breaks the entry's tip, so that clause does not stop attribution; it is dropped from
+  // the reason once a predecessor explains the failure.
+  const pinned = `Required CI check test did not pass on speculative tip ${tip392.slice(0, 12)}, again after one rerun of its failed jobs, attributed to this entry: speculative tip ${tip422.slice(0, 12)} ahead of it passed test`;
+  assert.equal(unattributedTipFailure(pinned), 'test');
+  assert.equal(pinned.replace(windowAttributionClause, ''), `Required CI check test did not pass on speculative tip ${tip392.slice(0, 12)}, again after one rerun of its failed jobs`);
+  assert.equal(unattributedTipFailure(`Required CI check unit:docs-word-budget did not pass on speculative tip ${tip392.slice(0, 12)}: unit:docs-word-budget failed: its docs change takes the budgeted documentation (README.md) to 12010 words, 10 over the 12000-word budget; pages that grew: README.md (1195 → 1205)`), null);
+  assert.equal(unattributedTipFailure('Review requested changes on speculative tip bbc1c212e0e1'), null);
 });
