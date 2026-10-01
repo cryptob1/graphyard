@@ -21,7 +21,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, or the reviewer's reminder) comes from the same launcher and is acted on without confirmation.
+The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, the reviewer's reminder, or its event wake of the master session) comes from the same launcher and is acted on without confirmation.
 
 Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
@@ -31,7 +31,7 @@ Settings › **Agents** › **Connect an account**: pick a provider; paste a key
 
 ### Agent environments
 
-Each account's `~/.coding_agents` login home is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Each account's `~/.coding_agents` login home is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor, whose login is `CURSOR_CONFIG_DIR=HOME agent login`). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes

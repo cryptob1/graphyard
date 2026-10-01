@@ -389,7 +389,10 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
   const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
-  const roles: FleetRole[] = !accounts.length ? [] : fleetRoles.flatMap(name => {
+  // The master role is never proposed (GY-898): it is one account the operator names for it with
+  // `master registry role set master`, and the durable loop launches nothing until it is named.
+  const proposed = fleetRoles.filter(name => name !== 'master');
+  const roles: FleetRole[] = !accounts.length ? [] : proposed.flatMap(name => {
     const added = accounts.filter(account => serves(account, name)).map(account => account.name);
     const existing = current.roles.find(role => role.name === name);
     if (existing) return [{ ...existing, accounts: [...existing.accounts, ...added.filter(account => !existing.accounts.includes(account))] }];
@@ -497,8 +500,8 @@ export const connectProviders: readonly ConnectProvider[] = [
   {
     id: 'cursor', label: 'Cursor (subscription)', kind: 'subscription', runtime: 'cursor', model: 'cursor-default', tier: 'strong',
     // Without NO_OPEN_BROWSER the login opens a browser on the host; the card's URL is the only path.
-    login: { command: 'cursor-agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
-    smoke: { command: 'cursor-agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
+    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
+    smoke: { command: 'agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
     help: 'Your Cursor plan. Finish the sign-in in your own browser.',
   },
 ];

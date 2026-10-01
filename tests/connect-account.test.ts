@@ -45,7 +45,7 @@ before(async () => {
   // a real device login does — until the operator signs in (the test drops `signed-in` into the
   // login home), and only then writes the login file; anything else is the smoke prompt answering
   // fine. Real spawn, real PATH — only the executables are fakes.
-  for (const command of ['codex', 'claude', 'opencode', 'cursor-agent']) {
+  for (const command of ['codex', 'claude', 'opencode', 'agent']) {
     await writeFile(join(bin, command), [
       '#!/bin/sh',
       'case "$1" in',
