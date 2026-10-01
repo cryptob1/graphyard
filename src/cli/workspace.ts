@@ -15,6 +15,7 @@ import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
+import { restoreAndReport } from './sync-restore.js';
 import { defineCommands, workMutation } from './registry.js';
 
 export { installUnderLease };
@@ -58,7 +59,6 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   // against the fetched tip, before anything is pushed. Files the repository declares generated
   // are rendered afresh from the merged sources rather than merged by hand; every other conflict
   // is the worker's, reported with the shipped items that landed it.
-  const restore = args.includes('--restore');
   const baseBranch = String((await api('status')).baseBranch ?? 'main');
   const cwd = process.cwd();
   // Git's own diagnostics still reach the worker, and a failure carries them, so a refused write names its path.
@@ -127,42 +127,14 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
   const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? []);
   const refused = findings.filter(finding => finding.refused);
-
-  // `--restore` takes the remedy itself (GY-859): one plain commit on top of the branch returns every
-  // refused file to the base tip, so the PR updates with a plain push and no history is rewritten.
-  if (restore && refused.length) {
-    const restored = restoreOutOfScope(git, baseTip, refused.map(finding => finding.path));
-    const after = localScopeFindings(work.plannedFiles ?? [], git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'), generated?.files ?? []);
-    const still = after.filter(finding => finding.refused);
-    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !still.length,
-      restored, files: after, refused: still.map(finding => `${finding.path}: ${finding.detail}`),
-      next: still.length ? `Some files outside plannedFiles still differ from origin/${baseBranch} after the restore commit; rerun sync ${work.key} --restore. A force push is never needed or allowed.`
-        : `Restored ${restored.length} file${restored.length === 1 ? '' : 's'} to origin/${baseBranch} in one new commit. Push with a plain git push (a force push is never needed or allowed), then complete ${work.key} EPOCH PR.` });
-    if (still.length) process.exitCode = 1;
-    return;
-  }
+  // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR.
+  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path) });
 
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
     files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
     next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so a plain push updates the PR; a force push is never needed or allowed. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
       : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
   if (refused.length) process.exitCode = 1;
-}
-
-/**
- * Returns every refused path to its version at the base tip in one new commit whose message names
- * the files (GY-859): a path the base holds is restored — including a rename's original path or a
- * deleted file — and one the base does not hold is removed. Nothing already committed is rewritten,
- * so the branch stays a fast-forward of the pushed one. Returns the paths the commit touched, or
- * none when there was nothing to restore.
- */
-export function restoreOutOfScope(git: (...args: string[]) => string, baseTip: string, refused: readonly string[]): string[] {
-  const paths = [...new Set(refused)].sort();
-  if (!paths.length) return [];
-  git('restore', `--source=${baseTip}`, '--staged', '--worktree', '--', ...paths);
-  if (!git('diff', '--cached', '--name-only', '--', ...paths)) return [];
-  git('commit', '--quiet', '-m', `Restore out-of-scope files to the base branch: ${paths.join(', ')}`, '--', ...paths);
-  return paths;
 }
 
 /** Local worktrees and the supervised worker launch. */
