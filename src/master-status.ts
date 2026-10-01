@@ -180,8 +180,15 @@ export function faulted(items: AttentionItem[]) {
 export async function derivedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
   observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1] }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
+  // The retry schedule beside the rows, not only in the report that passed them: a settled request
+  // whose next attempt the ledger already schedules is an answer in progress, and the unobtainable
+  // review and unanswered-wait judgements read the schedule off these rows (GY-956). Built without
+  // it, the loop's own read called every withdrawal's relaunch window "nothing is running" and
+  // counted the fault class once per withdrawal — three in a day across live items — while the
+  // pipeline was doing exactly what the schedule says.
+  const retries = [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)];
   const rows = observed.rows ?? buildMasterStatus(snapshot, master.workers, observed.runtime.available ? observed.runtime.agents : [], {}, {}, reviews, master.baseBranch, coordinator ?? undefined,
-    { producers: summarizeProducers(observed.producers), failures: [], retries: [] }).work;
+    { producers: summarizeProducers(observed.producers), failures: [], retries }).work;
   const scopeRequests = [...scopeRequestAttention(snapshot, observed.approvals), ...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
   const unobtainable = unobtainableReviewAttention(rows, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(rows);

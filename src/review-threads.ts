@@ -93,6 +93,21 @@ export function threadSection(sha: string, threads: LaunchThread[], total = thre
     + 'An approval must account for every listed thread: end the review body with one line exactly of the form "Resolved threads: ID1 ID2" naming only the thread IDs you verified fixed, or no longer applicable, at this head, one line exactly of the form "Follow-up threads: ID3 ID4", and one line exactly of the form "Overridden threads: ID5 ID6". An approval that leaves a listed thread off all three lines, a bot\'s included, is withdrawn and the review asked again. '
     + 'Do not resolve any thread yourself: Graphyard records these lines with your verdict and resolves exactly the threads they name once it observes your approval of this head. ';
 }
+/**
+ * The relaunch prompt's section naming the listed threads a withdrawn approval left unaccounted
+ * for (GY-956): exactly the IDs its record keeps. The rule the predecessor broke — "an approval
+ * must account for every listed thread" — is already in the launch prompt, and it demonstrably
+ * did not converge: sessions kept approving over the same omission, each costing a withdrawal, a
+ * failed session and a relaunch. Naming the passed-over threads turns the rule this reviewer is
+ * repeat into the exact omissions it must not repeat, without weakening the complete-verdict
+ * rule that guards against blind approvals: the withdrawal still happens, and still for exactly
+ * the same gap.
+ */
+export function unaccountedThreadsSection(ids: readonly string[]) {
+  return `The previous approval of this head was withdrawn because it left these listed review threads unaccounted: ${ids.join(', ')}. `
+    + 'Name every one of them that is still an unresolved thread of this pull request on your Resolved threads, Follow-up threads or Overridden threads lines, in each line\'s exact form, with "none" after a line\'s colon when it names nothing. '
+    + 'An approval that leaves a listed thread off all three lines is withdrawn and the review asked again, as the previous one was. ';
+}
 /** What the prompt says when the thread list could not be read: nothing can be named as resolved. */
 export const threadReadFailureSection = (reason: string) => `Graphyard could not read this pull request's review threads (${reason}); judge the diff, and do not claim any review thread resolved. `;
 
