@@ -1,7 +1,7 @@
-<!-- page: Agent protocol | 6 | the `pipeline` field. -->
+<!-- page: Agent protocol | 6 | `pipeline` field. -->
 # Pipeline timeline
 
-Every work document carries `pipeline`, appended by lifecycle commands; it never moves a gate.
+Every work document carries `pipeline`, appended by lifecycle commands, never moving a gate.
 
 ```json
 {"attempts":[{"epoch":1,"owner":"graphyard-claude-2","claimedAt":"…","endedAt":"…","end":"submitted"}],
