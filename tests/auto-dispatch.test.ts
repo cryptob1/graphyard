@@ -13,7 +13,7 @@ import { automatableOutcomes, automatableProof, dispatchIneligibility, dispatchR
 import { buildMasterStatus, loadMasterConfig, managedMasterInstructions, masterConfigSchema, observedExhaustions, paneLastLine, producerProfileSchema, readEnvironmentLog, saveProducerProfile, SessionStartError, setupMaster, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, saveReviewLedger, staleReviewReason, summarizeReviews } from '../src/reviewer.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, retriedSnapshot, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { assertProducerCandidate, independentProducerProfiles, launchProducer, producerIdleGraceMs, producerPrompt, proofOutcome, readProducerLedger, reconcileProducers, summarizeProducers, type ProducerRecord } from '../src/producer.js';
 import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit, dispatchCursorPath, dispatchCursorSchema, dispatchEffects, dispatchFailureAttention, dispatchFailureLimit, dispatchFailureReasonLimit, dispatchRetryMinMs, dispatchSummary, emptyDispatchCursor, InstantExitError, readDispatchCursor, repairDispatchCursor, runAutoDispatch, runDispatchTick, selectReviewerProfile, watchInstantExit, writeDispatchCursor, type CursorRepair, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { exhaustionReportSchema } from '../src/model/capacity.js';
@@ -1151,5 +1151,25 @@ test('unit:failed-proof-reworked-before-review — a failed trusted proof on a h
     assert.match(decided[0].reason, /unit:auto-dispatch-binding failed on a1ffffffffff/);
     assert.match(decided[0].reason, /1 review thread is also unresolved .*src\/claims\.ts:42/);
     assert.equal(approvers.length, 1);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('integration:dispatcher-snapshot-retry — a dispatch tick that times out on the first snapshot read succeeds on retry (GY-877)', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'graphyard-dispatcher-snapshot-retry-'));
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const config = masterConfig(token);
+    const item = requestedWork();
+    let reads = 0;
+    const flaky = async () => { reads += 1; if (reads === 1) throw new Error('The operation was aborted due to timeout'); return { work: [item], now: iso(0) }; };
+    const effects = stubEffects(() => [item], [], {
+      snapshot: retriedSnapshot(flaky, () => 1),
+      persist: async () => {},
+    });
+    const cursor = emptyDispatchCursor(config);
+    const tick = await runDispatchTick(config, cursor, effects, () => clock);
+    assert.equal(reads, 2, 'the snapshot read was tried again after timing out');
+    assert.equal(tick.launched.length, 3, 'reviewer and two producers launch despite the timeout retry');
+    assert.ok(!tick.refused.length, `no refusal on tick despite retry: ${JSON.stringify(tick.refused)}`);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
