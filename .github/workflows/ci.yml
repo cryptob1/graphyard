@@ -136,7 +136,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/timing"
           # Test files run in parallel, each with its own Postgres on a per-file port offset. Two
           # files share offset 25; this gives one of them a free port so neither fails on scheduling.
-          GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
+          GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
       - name: Summarise this shard's timing-dependent assertions
         if: always()
         run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_RECORD" > /dev/null

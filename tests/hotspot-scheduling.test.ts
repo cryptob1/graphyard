@@ -148,7 +148,7 @@ test('unit:dispatch-ages-starving-items — a same-priority item waiting past th
   assert.deepEqual([broadStarving, smallFresh].sort((a, b) => dispatchOrder(a, b, hot)).map(w => w.key), ['GY-2001', 'GY-1023']);
   // With the clock, the item past the bound goes first even though it is broader and hot.
   assert.deepEqual([smallFresh, broadStarving].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key), ['GY-1023', 'GY-2001']);
-  // Among starving items the longest wait goes first; priority still outranks starvation.
+  // Among starving items the usual order decides (the narrower GY-0900 first); priority still outranks starvation.
   const olderStarving = item('GY-0900', ['src/two.ts'], 300);
   const urgentFresh = item('GY-3000', ['src/three.ts'], 1, -1);
   assert.deepEqual([broadStarving, olderStarving, urgentFresh, smallFresh].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key), ['GY-3000', 'GY-0900', 'GY-1023', 'GY-2001']);
