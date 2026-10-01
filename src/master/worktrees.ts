@@ -1,4 +1,5 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir } from 'node:fs/promises';
@@ -652,4 +653,13 @@ export async function releaseUnderFailure(mutate: (name: string, data: unknown) 
     if (releaseError instanceof Error && /Lease missing, expired, or superseded/.test(releaseError.message)) return;
     throw Object.assign(new Error(`The workspace failure was recorded, but the claim could not be released as one: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`), { cause: releaseError });
   }
+}
+
+/** GY-860 AC-2: why a rework workspace may not start from the submitted PR branch, or null when it may. */
+export function submittedBranchRefusal(root: string, branch: string, remoteBranch: string, candidateSha: string | undefined): string | null {
+  try {
+    execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
+    const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    return !candidateSha || remoteSha !== candidateSha ? 'Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace' : null;
+  } catch (error) { return `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`; }
 }

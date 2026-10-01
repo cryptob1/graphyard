@@ -13,7 +13,7 @@ import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { runChild } from '../child-runner.js';
-import { releaseHeldBranch, releaseUnderFailure, type PreservedWorktree } from '../master/worktrees.js';
+import { releaseHeldBranch, releaseUnderFailure, submittedBranchRefusal, type PreservedWorktree } from '../master/worktrees.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
@@ -211,12 +211,7 @@ export const workspaceCommands = defineCommands([
       if (work.submission) {
         const remoteBranch = `refs/remotes/origin/${branch}`;
         // GY-860 AC-2: an unfetchable or moved PR branch is a workspace failure, so no attempt is spent.
-        let refused: string | null = null;
-        try {
-          execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
-          const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-          if (!work.candidate?.sha || remoteSha !== work.candidate.sha) refused = 'Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace';
-        } catch (error) { refused = `Git worktree creation failed while fetching ${branch}: ${error instanceof Error ? error.message : 'git failed'}`; }
+        const refused = submittedBranchRefusal(root, branch, remoteBranch, work.candidate?.sha);
         if (refused) { await releaseUnderFailure(mutate, epoch, refused); throw new Error(`${refused}. The claim was released as a workspace failure, so the attempt costs nothing.`); }
         startPoint = remoteBranch;
       }
