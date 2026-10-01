@@ -57,7 +57,8 @@ class Api {
     match = /^\/pulls\/(\d+)\/reviews$/.exec(route);
     if (match) return params.get('page') !== '1' ? [] : this.pulls.get(Number(match[1]))!.approved ? [{ id: 40 + Number(match[1]), user: { login: 'independent-reviewer' }, commit_id: this.pulls.get(Number(match[1]))!.head, state: 'APPROVED', submitted_at: '2026-09-21T10:05:00Z' }] : [];
     match = /^\/pulls\/(\d+)\/files$/.exec(route);
-    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
+    // GY-883: a public API path keeps the item in the high lane, whose full path still demands the proof the cadence bands presuppose.
+    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/server/routes/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
     match = /^\/commits\/([a-f0-9]{40})\/check-runs$/.exec(route);
     if (match) {
       if (params.get('check_name')) return { check_runs: [] };
