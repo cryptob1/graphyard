@@ -128,43 +128,41 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? []);
   const refused = findings.filter(finding => finding.refused);
 
-  // If --restore flag is used and there are refused files, restore them with a single commit
+  // `--restore` takes the remedy itself (GY-859): one plain commit on top of the branch returns every
+  // refused file to the base tip, so the PR updates with a plain push and no history is rewritten.
   if (restore && refused.length) {
-    const refusedPaths = refused.map(f => f.path);
-    // Restore out-of-scope files: checkout modified/renamed to base, remove added files
-    for (const finding of refused) {
-      if (finding.file.status === 'added') {
-        // For added files, remove them (not in base) - git rm stages the deletion
-        git('rm', '--', finding.path);
-      } else {
-        // For modified/renamed files, restore to base version
-        git('checkout', baseTip, '--', finding.path);
-      }
-    }
-    // Stage all changes (git rm already stages deletions, just add the restored files)
-    git('add', '-A', '--', ...refusedPaths);
-    // Create a commit with all restored files
-    const commitMessage = `Restore out-of-scope files: ${refusedPaths.join(', ')}`;
-    git('commit', '--quiet', '-m', commitMessage);
-
-    // Recalculate findings after restoration
-    const newRaw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), newNumstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
-    const newFindings = localScopeFindings(work.plannedFiles ?? [], newRaw, newNumstat, generated?.files ?? []);
-    const newRefused = newFindings.filter(finding => finding.refused);
-
-    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !newRefused.length,
-      files: newFindings, refused: newRefused.map(finding => `${finding.path}: ${finding.detail}`),
-      next: newRefused.length ? `Unexpected: files still out-of-scope after restore. Investigate manually and rerun sync ${work.key}.`
-        : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
-    if (newRefused.length) process.exitCode = 1;
+    const restored = restoreOutOfScope(git, baseTip, refused.map(finding => finding.path));
+    const after = localScopeFindings(work.plannedFiles ?? [], git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'), generated?.files ?? []);
+    const still = after.filter(finding => finding.refused);
+    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !still.length,
+      restored, files: after, refused: still.map(finding => `${finding.path}: ${finding.detail}`),
+      next: still.length ? `Some files outside plannedFiles still differ from origin/${baseBranch} after the restore commit; rerun sync ${work.key} --restore. A force push is never needed or allowed.`
+        : `Restored ${restored.length} file${restored.length === 1 ? '' : 's'} to origin/${baseBranch} in one new commit. Push with a plain git push (a force push is never needed or allowed), then complete ${work.key} EPOCH PR.` });
+    if (still.length) process.exitCode = 1;
     return;
   }
 
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
     files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
-    next: refused.length ? `Restore each listed file to origin/${baseBranch} with \`sync ${work.key} --restore\` (or manually with git checkout ${baseTip.slice(0, 12)} -- PATH and commit). Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
+    next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so a plain push updates the PR; a force push is never needed or allowed. Do not push until sync reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
       : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
   if (refused.length) process.exitCode = 1;
+}
+
+/**
+ * Returns every refused path to its version at the base tip in one new commit whose message names
+ * the files (GY-859): a path the base holds is restored — including a rename's original path or a
+ * deleted file — and one the base does not hold is removed. Nothing already committed is rewritten,
+ * so the branch stays a fast-forward of the pushed one. Returns the paths the commit touched, or
+ * none when there was nothing to restore.
+ */
+export function restoreOutOfScope(git: (...args: string[]) => string, baseTip: string, refused: readonly string[]): string[] {
+  const paths = [...new Set(refused)].sort();
+  if (!paths.length) return [];
+  git('restore', `--source=${baseTip}`, '--staged', '--worktree', '--', ...paths);
+  if (!git('diff', '--cached', '--name-only', '--', ...paths)) return [];
+  git('commit', '--quiet', '-m', `Restore out-of-scope files to the base branch: ${paths.join(', ')}`, '--', ...paths);
+  return paths;
 }
 
 /** Local worktrees and the supervised worker launch. */
@@ -177,8 +175,10 @@ export const workspaceCommands = defineCommands([
       '                                (docs indexes, AGENTS.md blocks) instead of hand-merging them,',
       '                                name the shipped items behind each remaining conflict, and',
       '                                list every file outside plannedFiles that no longer matches',
-      '                                the base; run before every push. Use --restore to automatically',
-      '                                restore out-of-scope files to their base versions with a commit',
+      '                                the base; run before every push',
+      '  sync GY-N --restore           The same, then restore every such file to the base in one new',
+      '                                commit naming them; push it plainly. A force push is never',
+      '                                needed or allowed',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
