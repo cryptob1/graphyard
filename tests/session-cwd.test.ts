@@ -18,9 +18,10 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { coordinatorCheckoutRefusal, readCoordinatorCheckout } from '../src/master/profiles.js';
-import { worktreeRoot } from '../src/install/worktree-root.js';
-import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { launchProducer, readProducerLedger } from '../src/producer.js';
+import { readApproverLaunches } from '../src/master/autonomy.js';
+import { orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
+import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, readEscalationSessions, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { launchProducer, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
 import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { faultClassItem, type FaultInstance } from '../src/model/fault-classes.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
@@ -126,6 +127,29 @@ const obtainsCode = (start: string, worktree: string, commit: string) => {
   return existsSync(join(worktree, 'src', 'loop.ts'));
 };
 
+/** The value a Herdr `tab create` line sets for `name` with `--env`. */
+const tabEnv = (tab: string[], name: string) => tab.flatMap((arg, index) => tab[index - 1] === '--env' && arg.startsWith(`${name}=`) ? [arg.slice(name.length + 1)] : []).at(-1) ?? null;
+const contextModule = fileURLToPath(new URL('../src/cli/context.ts', import.meta.url));
+/**
+ * The root a `graphyard master` command resolves its installation from, run where the session
+ * starts with the environment its tab sets: the CLI's own resolution, in a process of its own.
+ */
+const cliRoot = (start: string, environment: Record<string, string>) => execFileSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e',
+  `const { createContext } = await import(${JSON.stringify(contextModule)}); console.log((await createContext('master', undefined, [], false)).repositoryRoot());`],
+  { cwd: start, encoding: 'utf8', env: { ...process.env, ...environment } }).trim();
+/**
+ * A reclaim pass run long past the orphan grace keeps `directory`, while it removes a stray
+ * managed directory no session owns — so the pass did run, and what it left was owned.
+ */
+async function survivesReclaim(root: string, config: MasterConfig, directory: string) {
+  const managedRoot = worktreeRoot(root, config);
+  const stray = join(managedRoot, `graphyard-approval-stray-${'0'.repeat(7)}-${'1'.repeat(8)}`);
+  await mkdir(stray, { recursive: true });
+  const report = await reclaimCheckouts(root, config, { now: Date.now() + 4 * orphanGraceMs });
+  assert.ok(report.removed.includes(resolve(stray)), 'the reclaim pass removes a managed directory no session owns');
+  return existsSync(directory) && !report.removed.includes(resolve(directory));
+}
+
 /** Effects both the loop's guard and the steps read: a snapshot over `work`, and stubs for everything else. */
 function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects & ControlPlaneEffects {
   const base = {
@@ -185,6 +209,16 @@ test('unit:session-cwd-own-checkout — an approver session opens its pane and s
     assert.equal(existsSync(pane!), true, 'the approver pane opens in a checkout that exists');
     const sessionCheckout = checkoutOfStem(stub.typed[0].stem);
     assert.equal(resolve(pane!), resolve(sessionCheckout!), 'the pane opens exactly where the approver checkout is');
+    // What its request runs works from there: `master decisions`, `approve` and `refuse` resolve
+    // the coordinator's installation from the root the tab hands it, and gh and git reads reach
+    // the repository from the directory itself.
+    const handed = tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT');
+    assert.equal(handed, root, 'the approver tab hands the session the coordinator root');
+    assert.equal(realpathSync(cliRoot(pane!, { GRAPHYARD_REPOSITORY_ROOT: handed! })), realpathSync(root), 'graphyard master commands run from where the approver starts resolve the coordinator installation');
+    assert.ok(obtainsCode(pane!, join(pane!, 'checkout'), fixture.head), 'git reads from where the approver starts reach the repository');
+    // The directory is owned while the session's launch record is kept: a reclaim pass past the grace leaves it.
+    assert.equal((await readApproverLaunches(root)).at(-1)?.checkout, pane, 'the launch record names the approver checkout');
+    assert.ok(await survivesReclaim(root, fixture.config, pane!), 'a reclaim pass past the orphan grace leaves the approver checkout');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });
@@ -209,6 +243,14 @@ test('unit:session-cwd-own-checkout — an escalation handler opens its pane and
     assert.equal(dirname(resolve(pane!)), resolve(managedRoot));
     assert.match(basename(pane!), /^graphyard-approval-gy-866-/i, 'the checkout is the handler\'s own, named for its item');
     assert.deepEqual(stub.pasted, [], 'the handler takes its request on its command line, never a paste');
+    // Its launch files are its own checkout's too, and `master decide` resolves the coordinator
+    // installation from where it starts with the root its tab hands it.
+    assert.equal(resolve(checkoutOfStem(stub.typed[0].stem)!), resolve(pane!), 'the handler launch files are written in its own checkout');
+    const handed = tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT');
+    assert.equal(handed, root, 'the handler tab hands the session the coordinator root');
+    assert.equal(realpathSync(cliRoot(pane!, { GRAPHYARD_REPOSITORY_ROOT: handed! })), realpathSync(root), 'graphyard master decide run from where the handler starts resolves the coordinator installation');
+    assert.equal((await readEscalationSessions(root)).at(-1)?.checkout, pane, 'the handler record names its checkout');
+    assert.ok(await survivesReclaim(root, config, pane!), 'a reclaim pass past the orphan grace leaves the handler checkout');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });
@@ -346,6 +388,35 @@ test('unit:session-cwd-own-checkout — the loop starts its research and triage 
     assert.equal(existsSync(started[0].cwd), false, 'the scratch checkout is settled when the loop that allocated it stops');
     assert.ok(researchEvents.length >= 1, 'the research run is recorded on the item');
     assert.ok(triageEvents.length === 0, 'a run that settles without a judgement records no triage judgement');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:session-cwd-own-checkout — the loop holds its scratch checkout for as long as it runs: a reclaim pass past the orphan grace leaves it, and the loop settles it when it stops', async () => {
+  const fixture = await installed({ research: true });
+  try {
+    const { root, head, config, cleanup } = fixture;
+    const managedRoot = worktreeRoot(root, config);
+    const runner: Runner = { name: 'stub', start: () => { throw new Error('no session starts in this test'); } };
+    const seen: { scratch: string | null; survives: boolean }[] = [];
+    // A cycle reads the snapshot first: there, with the loop running, the reclaim pass that runs
+    // every cycle in production is run long past the orphan grace.
+    const effects = loopEffects([], {
+      loadedRelease: { commit: head, dirty: false }, research: { cwd: root, runner },
+      snapshot: async () => {
+        const name = (await readdir(managedRoot)).find(entry => /^graphyard-approval-loop-scratch-/.test(entry));
+        const scratch = name ? join(managedRoot, name) : null;
+        seen.push({ scratch, survives: !!scratch && await survivesReclaim(root, config, scratch) && existsSync(join(scratch, 'checkout', 'src', 'loop.ts')) });
+        return { work: [], now: iso(0) };
+      },
+    });
+    await runDaemon(config, emptyDaemonState(config), effects, loopOptions(fixture));
+    assert.ok(seen.length >= 1, 'the loop ran at least one cycle');
+    for (const cycle of seen) {
+      assert.ok(cycle.scratch, 'the loop allocated its scratch checkout before its first cycle');
+      assert.ok(cycle.survives, 'a reclaim pass past the orphan grace leaves the scratch checkout, with its release, while the loop runs');
+    }
+    assert.equal(existsSync(seen[0].scratch!), false, 'the scratch checkout is settled when the loop that allocated it stops');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });

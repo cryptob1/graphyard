@@ -12,6 +12,7 @@ import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { anchorSessionCheckout, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
+import { escalationSessionMs, readApproverLaunches, readEscalationSessions } from './master/autonomy.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
@@ -559,15 +560,27 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
   return { producers: ledger.producers, changed };
 }
 
+/** GY-866: managed directories this process holds outside every ledger — the loop's scratch checkout. */
+const heldCheckouts = new Set<string>();
+/** Hold `directory` against the reclaim pass until the returned release is called. */
+export function holdCheckout(directory: string) {
+  const held = resolve(directory); heldCheckouts.add(held);
+  return () => { heldCheckouts.delete(held); };
+}
+
 /**
  * The reclaim pass over the managed worktree root: every session directory no pending producer or
  * reviewer record owns is removed. Settlement removes a session's own checkout, so what this finds
  * was left by a session whose master died before it could settle.
  */
 export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
-  const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
+  const now = options.now ?? Date.now();
+  const [producers, reviews, approvers, escalations] = await Promise.all([readProducerLedger(root), readReviewLedger(root), readApproverLaunches(root), readEscalationSessions(root)]);
   // A live headless approver's directory is owned by its run, not by a ledger record (GY-391).
-  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts()];
+  // GY-866: an interactive approver's or escalation handler's directory is owned by its launch
+  // record for as long as that record is kept, and the loop's scratch checkout by the loop holding it.
+  const recorded = [...approvers, ...escalations].filter(record => record.checkout && now - Date.parse(record.launchedAt) < escalationSessionMs).map(record => record.checkout!);
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...recorded, ...heldCheckouts];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 

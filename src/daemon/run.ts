@@ -6,6 +6,7 @@ import type { ConfigReload, MasterConfig } from '../master.js';
 import type { HerdrAgent } from '../master/herdr.js';
 import { defaultChildRun } from '../child-runner.js';
 import { allocateManagedCheckout, settleCheckout } from '../master/worktrees.js';
+import { holdCheckout } from '../producer.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
@@ -134,11 +135,14 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // The diagnostician reads the repository from the same scratch checkout: it too is a session the
   // loop launches, and without the scratch it does not run at all.
   const scratchRoot = coordinatorCheckoutRoot(config.cliPath);
-  let scratch: Awaited<ReturnType<typeof allocateManagedCheckout>> | null = null, scratchDirectory: string | null = null;
+  let scratch: Awaited<ReturnType<typeof allocateManagedCheckout>> | null = null, scratchDirectory: string | null = null, releaseScratch = () => {};
   if (raw.research || 'diagnostician' in raw) {
     try {
       scratch = await allocateManagedCheckout(scratchRoot, config, 'approval', 'loop-scratch', raw.loadedRelease?.commit ?? '0'.repeat(40), randomUUID());
       scratchDirectory = scratch.directory;
+      // No ledger record owns the scratch, so the loop holds it: a reclaim pass past the orphan
+      // grace would otherwise remove it under every later research, triage and diagnostician run.
+      releaseScratch = holdCheckout(scratch.directory);
       const release = raw.loadedRelease?.commit;
       if (release) {
         try {
@@ -254,7 +258,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
     // GY-866: the research scratch goes with the loop that allocated it; a loop that died with it
     // is the orphan reclaim pass's business, as for every session checkout.
-    if (scratch) await settleCheckout(scratchRoot, scratch.directory);
+    if (scratch) { releaseScratch(); await settleCheckout(scratchRoot, scratch.directory); }
     for (const signal of signals) host.off(signal, stop);
     host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
     state.lock = null;
