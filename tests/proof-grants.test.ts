@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -11,6 +9,7 @@ import { server } from '../src/server.js';
 import { ProofGrants, authorityRegistry, authorizedForProof, unauthorizedProofs } from '../src/proof-grants.js';
 import { grantPatternSchema, grantsAuthorize, proofMatchesGrant, type Principal, type Work } from '../src/model.js';
 import { proofAuthorization, proofGaps } from '../src/coordination.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -28,7 +27,7 @@ const id = () => randomUUID();
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_GRANT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-grants-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('grants'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('grants_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/grants_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');

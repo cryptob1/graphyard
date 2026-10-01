@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,9 +14,10 @@ import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/com
 import { ensureWorktreeDependencies, installMatchesLockfile } from '../src/repository-setup.js';
 import { installUnderLease } from '../src/cli/workspace.js';
 import { runTests } from './helpers/run-tests.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const repository = new URL('..', import.meta.url);
-const scratch = (prefix: string) => mkdtemp(join(tmpdir(), `graphyard-isolation-${prefix}-`));
+const scratch = (prefix: string) => temporaryDirectory(`isolation-${prefix}`);
 const listen = (port = 0) => new Promise<{ port: number; close(): Promise<void> }>((resolve, reject) => {
   const server = createServer();
   server.once('error', reject);

@@ -4,7 +4,7 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { mergeQueueStatus } from '../master/profiles.js';
 import { landingAttention, optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, snapshotWithClock, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
+import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
@@ -15,7 +15,7 @@ import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHead
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, directMergeLine, nameOrphanSupervisors } from './status-attention.js';
+import { approverLaunchAttention, directMergeLine, docsBudgetAttention, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -39,6 +39,7 @@ import { releaseLagStatus } from '../master/release-lag.js';
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
+import { coordinationStep } from './coordination-snapshot.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget daemon metric, read from here as it always was.
@@ -46,11 +47,10 @@ export { cycleBudget } from '../daemon/metrics.js';
 // `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they
-// read; the report reads them from here, as do the tests.
+// Observation throughput and the queue head's lag live beside the observation schedule they read;
+// the report reads them from here, as do the tests.
 export { observationThroughputStatus };
-// The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that read them from here before the split.
+// The attention builders live in `status-attention.ts`; the report reads them from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
@@ -75,7 +75,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const runtime = await timedStep('herdr', () => observeHerdrAgents());
   const credentials = await timedStep('credentials', () => inspectWorkerCredentials(root, master.workers));
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
-  const { snapshot, clockOffset } = await timedStep('snapshot', () => snapshotWithClock(() => masterApi('work-snapshot')));
+  const { snapshot, clockOffset } = await coordinationStep(run => timedStep('snapshot', run), masterApi);
   const sections = new ReportSections(); // optional sections (GY-422)
   // Sessions the dispatcher launched are settled against this snapshot: a head change cancels them here too.
   try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
@@ -94,9 +94,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
   const dispatchItems = dispatchFailureAttention(dispatch);
   const containment = await timedStep('containment', () => assessContainment(snapshot.work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset }));
-  // Disk is reported from the host, not from the cursor: the loop may be stopped, and the volume
-  // filling is what stops it. The plan is `master reclaim`'s, over the inventory the loop cached
-  // (GY-360): walking a thousand trees per call is what made status take minutes.
+  // Disk is reported from the host, not from the cursor: the volume filling is what stops it. The
+  // plan is `master reclaim`'s, over the cached inventory (GY-360): a thousand tree walks per call
+  // made status take minutes.
   const worktrees = worktreesDirectory(root);
   const inventory = await timedStep('worktrees', () => statusWorktreeInventory(root).catch(() => ({ entries: [], at: null, cached: false }))), trees = inventory.entries, reclaimPlan = planWorktreeReclaim(trees, snapshot.work, { now: Date.now(), idleMs: reclaimIdleMs(master) });
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan);
@@ -143,7 +143,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
-  const { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+  const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report is slow: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
@@ -180,9 +180,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     unavailable: sections.unavailable,
+    docsBudget: docs,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
-    // Every open item the control plane names no action for, with the account it names instead
-    // and how long it has held its failing gate; the stalled ones' judging bound.
+    // Every open item the control plane names no action for, with the account it names and how
+    // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },
     liveness,
     backlog,
@@ -243,8 +244,9 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
+  const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items];
   // The report's last step, which the loop runs too: a cause named once, in place of its symptoms.
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
+  return { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }

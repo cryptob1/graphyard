@@ -49,17 +49,34 @@ export class AgentRegistry {
   }
   /** The same view for the status route, which has already authorized its caller. */
   async snapshot(host: string | null = null) {
-    const registry = await readRegistry(this.store.pool);
-    const now = new Date((await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
-    // A read settles a copy: sessions whose lease or request has gone stop counting at once, and
-    // the next selection records their end.
-    settleSessions(registry, await this.sessionWork(this.store.pool, registry), now.toISOString());
-    return fleetView(registry, now.getTime(), host);
+    const { registry, at } = await this.settled();
+    return fleetView(registry, Date.parse(at), host);
   }
   /** The stored document, for executors that need the launch contracts and credential references. */
   async document(actor: Principal) {
     demand((configurators as readonly string[]).includes(actor.role), 'Launch contracts and credential references are read by admin and coordinator identities', 403);
-    return readRegistry(this.store.pool);
+    return (await this.settled()).registry;
+  }
+  /**
+   * The registry with every session whose lease or request has gone ended on the record (GY-974).
+   * Every read the loop and status make goes through here, so a stale session stops counting at once
+   * and its end is appended to registry history with its reason, without waiting for a selection
+   * the role's full count would never let the loop ask for. A read that closes nothing appends
+   * nothing and takes no coordination lock.
+   */
+  private async settled(): Promise<{ registry: RegistryDocument; at: string }> {
+    const registry = await readRegistry(this.store.pool);
+    const at = new Date((await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now).toISOString();
+    if (!settleSessions(structuredClone(registry), await this.sessionWork(this.store.pool, registry), at).length) return { registry, at };
+    return this.store.transaction(async (db, now) => {
+      const current = await readRegistry(db), settledAt = now.toISOString();
+      const closed = settleSessions(current, await this.sessionWork(db, current), settledAt);
+      if (closed.length) {
+        current.revision++; current.updatedAt = settledAt;
+        await this.append(db, { id: 'graphyard', role: 'coordinator' }, 'sessions-settled', current, { ended: closed.map(session => ({ session: session.id, role: session.role, account: session.account, work: session.work, reason: session.endReason })) });
+      }
+      return { registry: current, at: settledAt };
+    });
   }
 
   async history(actor: Principal, limit = 100) {

@@ -1,7 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, writeFile, rename, rm, realpath, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readdir, writeFile, rename, rm, realpath, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
@@ -9,6 +8,7 @@ import { attestable } from './helpers/attestor-ancestry.js';
 import { superviseAttempt, supervisionRequestSchema } from '../src/runner-attestor.js';
 import { collectArtifacts, verifyExecutionAttestation } from '../src/runner-collector.js';
 import { attemptBoundaryPath, preflightAttempt, type ExecutionPlan, type ExecutionRecord, type Runner, type Settler } from '../src/runner-executor.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const attestor = generateKeyPairSync('ed25519');
 const privateKey = attestor.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
@@ -33,7 +33,7 @@ const reporting = (plan: ExecutionPlan, report: unknown = passing): Runner => as
 // the fixture as another account, the attestor's preflight refusal is asserted and noted
 // instead (tests/helpers/attestor-ancestry.ts, GY-966).
 async function boundary(t: TestContext, run: (paths: { oracle: string; collection: string; output: string; plan: ExecutionPlan }) => Promise<void>) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-attestor-'));
+  const root = await temporaryDirectory('attestor');
   const oracle = join(root, 'oracle'), collection = join(root, 'output');
   await mkdir(oracle, { mode: 0o755 }); await mkdir(collection, { mode: 0o755 });
   await writeFile(join(oracle, 'suite.spec.ts'), 'approved assertion');

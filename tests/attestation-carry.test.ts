@@ -17,7 +17,9 @@ const ciAppIds = [15368];
 
 function observation(candidate: Work['candidate'], reviews: Observation['reviews']): Observation {
   return { candidate: { ...candidate! }, checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews, merged: false, mergeSha: null, mergeable: true, protected: true,
-    prState: 'open', draft: false, baseTip: candidate!.baseSha, baseTree: sha('7e'), baseTipContained: true, files: ['src/engine.ts'], scopeFiles: [], at } as Observation;
+    prState: 'open', draft: false, baseTip: candidate!.baseSha, baseTree: sha('7e'), baseTipContained: true,
+    // GY-883: a public API path keeps the item in the high lane, whose full path still demands the manual attestation this test carries.
+    files: ['src/server/routes/work.ts'], scopeFiles: [{ path: 'src/server/routes/work.ts', status: 'modified' as const, sha: sha('f'), additions: 1, deletions: 1, binary: false }], at } as Observation;
 }
 /** GY-486's shape: one manual: criterion, reviewed and attested on head A over base M. */
 function item(): Work {

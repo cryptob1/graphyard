@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
@@ -20,6 +18,7 @@ import { homeNumbers } from '../web/home-numbers.js';
 import { plainStatus } from '../src/model/plain-status.js';
 import ShippedPage from '../web/pages/shipped.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // `graphyard master close`: obsolete, duplicate and superseded items leave every open list and
 // every delivered count, in one audited transaction, against a real Postgres and the real routes.
@@ -56,7 +55,7 @@ async function patch(work: Work, change: Partial<Work>) {
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 157;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-close-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('close-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('close_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/close_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;

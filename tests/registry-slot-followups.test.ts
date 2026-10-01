@@ -1,8 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { reconcileFleetSessions, runtimeSessionGone, settledRecordSessions, type FleetClient } from '../src/fleet.js';
@@ -11,6 +10,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { emptyRegistry, type AgentRegistry, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-205: the follow-ups the independent review of GY-190 left. A reviewer's or producer's registry
@@ -41,7 +41,7 @@ const session = (role: FleetRoleName, work: string): FleetSession => ({ id: rand
   selectedAt: iso(-30 * minute), selectedBy: 'coordinator', reason: 'recorded', skipped: [], endedAt: null, endReason: null });
 
 async function config(): Promise<MasterConfig> {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-slot-followups-')); directories.push(directory);
+  const directory = await temporaryDirectory('slot-followups'); directories.push(directory);
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: HOST, masterAgentName: 'graphyard-master-project',

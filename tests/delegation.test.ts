@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -16,6 +15,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to
 // one executed case per required proof.
@@ -88,7 +88,7 @@ async function proven(work: Work, sha = head) {
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 10;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-delegation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delegation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('delegation_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delegation_test`); await store.init();
   engine = new Engine(store); engine.principals = roster;

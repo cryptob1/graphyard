@@ -9,6 +9,7 @@ import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
+import { masterSessionStep } from './cycle-master.js';
 import { scopeStep, successorStep } from './cycle-scope.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
@@ -189,6 +190,11 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
   const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock);
+
+  // 1m. The loop's own master session (GY-898): launch, adopt, supervise, rotate, wake. Isolated
+  //     like every step: a failed launch or wake is its own action, and the cycle goes on.
+  await timings.step('master session', () => masterSessionStep(cycle));
+  await settleLaunches();
 
   spent('close');
 

@@ -2,10 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { ancestryRefusal } from './helpers/attestor-ancestry.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-966: inside a worker sandbox root's /tmp and /home stat as uid 65534, and the host
 // attestor refuses every fixture beneath them. Every test that needs an attested run guards
@@ -38,8 +36,7 @@ const runnerAttestorTests = '--test-name-pattern=^the runner (holds authority wh
 test('unit:attestor-test-sandbox-conditional — the runner-attestor CLI test passes in full where the attestor ownership rule holds and passes with a recorded environment note where the sandbox stats /tmp and /home as uid 65534', async () => {
   // This host, unsimulated: where the ancestry of a fresh fixture holds, the tests run their
   // attested path and record no note; where this host is itself a sandbox, they note it.
-  const scratch = await mkdtemp(join(tmpdir(), 'gy-966-'));
-  const holds = !await ancestryRefusal(scratch).finally(() => rm(scratch, { recursive: true, force: true }));
+  const holds = !await ancestryRefusal(await temporaryDirectory('gy-966'));
   const host = await nodeTest([runnerAttestorTests, 'tests/cli.test.ts'], false);
   assert.equal(count(host.out, 'fail'), 0, host.out);
   assert.equal(host.code, 0, host.out);

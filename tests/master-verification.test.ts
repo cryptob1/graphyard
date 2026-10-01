@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -11,6 +10,7 @@ import { loadMasterConfig, managedMasterInstructions, masterConfigSchema, setupM
 import { managedInstructions } from '../src/repository-setup.js';
 import { assessDeploymentVerification, checkoutRelease, deploymentFreshnessMs, emitInstructions, masterLoopStatements, missingLoopStatements, verificationEffects, verifyDeployment, type EmittedInstructions } from '../src/master-verification.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // integration:master-loop-deployment-verification — the deployment-verification step of the
 // perpetual master loop, proven against a stubbed deployed release: an endpoint that reports
@@ -28,7 +28,7 @@ const cleanEnvironment = () => Object.fromEntries(Object.entries(process.env).fi
 
 /** A clean checkout of this repository's HEAD: the release the stub endpoint claims to serve. */
 async function releaseCheckout() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-release-'));
+  const directory = await temporaryDirectory('release');
   const checkout = join(directory, 'graphyard');
   execFileSync('git', ['clone', '-q', '--shared', '--no-hardlinks', root, checkout]);
   await symlink(nodeModules, join(checkout, 'node_modules'), 'dir');
@@ -138,7 +138,7 @@ test('integration:master-loop-deployment-verification — verification is record
 test('integration:master-loop-deployment-verification — containment is derived in the managed checkout, not in the launcher\'s directory', async () => {
   // The launcher may live outside any checkout of the managed repository (an npm install, or a
   // checkout of Graphyard beside another project). Ancestry asked there answers nothing.
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-managed-'));
+  const directory = await temporaryDirectory('managed');
   const managed = join(directory, 'project'), launcherDirectory = join(directory, 'launcher');
   const git = (...args: string[]) => execFileSync('git', ['-C', managed, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   execFileSync('git', ['init', '-q', '-b', 'main', managed]);
@@ -222,7 +222,7 @@ test('integration:master-loop-deployment-verification — stale observations, un
 
 test('integration:master-loop-deployment-verification — the checkout identity and the emitted instructions are read from the real CLI', async () => {
   const release = await releaseCheckout();
-  const outside = await mkdtemp(join(tmpdir(), 'graphyard-not-a-checkout-'));
+  const outside = await temporaryDirectory('not-a-checkout');
   try {
     assert.deepEqual(checkoutRelease(release.cliPath), { sha: release.sha, clean: true, repository: null, reason: null }, 'a clone of a local path has no GitHub origin, so it is judged as the managed checkout');
     execFileSync('git', ['-C', release.checkout, 'remote', 'set-url', 'origin', 'git@github.com:Owner/Project.git']);
@@ -239,8 +239,8 @@ test('integration:master-loop-deployment-verification — the checkout identity 
 
 test('integration:master-loop-deployment-verification — master verify-deployment records the observed release through the coordinator credential and exits nonzero on refusal', async () => {
   const release = await releaseCheckout();
-  const repository = await mkdtemp(join(tmpdir(), 'graphyard-managed-'));
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-credentials-'));
+  const repository = await temporaryDirectory('managed');
+  const credentialDirectory = await temporaryDirectory('master-credentials');
   execFileSync('git', ['init', '-q', repository]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: repository });
   const clock = Date.now();
   const state = { sha: release.sha, work: [delivered(release.sha, iso(clock, -hour))], records: [] as any[] };

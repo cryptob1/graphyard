@@ -29,8 +29,8 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write` ([regression guard](coordination.md#generated-files-never-conflict)). `tests/docs-budget.test.ts` budgets README.md and `docs/` words; each topic has one page: link, never restate.
+`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; `GRAPHYARD_GENERATED_FILES` ([value](coordination.md#generated-files-never-conflict)) exempts them from the regression guard. README.md and `docs/` stay within the `wordBudget` in `graphyard.json` (12,000 words, no page over 1,200), each topic on one page (`tests/docs-budget.test.ts`): link, never restate. A total over the budget never fails CI: the test warns, and `master status` reports the total and the largest pages; a page over its per-page cap still fails. At 97% of the budget, `master status` raises `docs`; the loop files one 5%-headroom trim item.
 
 ## Trusted contracts
 
-Trusted CI runs only protected source, refusing bases without the contract: land the harness and `scripts/contracts.mjs` entry first.
+Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry first, then require later work's proof.

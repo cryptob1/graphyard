@@ -1,12 +1,13 @@
-// Concern: cycle steps 1e–1f — what a live attempt waits on, the re-prompt when its wait clears, the one idle-lease reminder and the reclaim that hands a stalled attempt to a new one (GY-524), with the pane-binding check every paste through these paths must pass (GY-852, GY-940).
+// Concern: cycle steps 1e–1f — what a live attempt waits on, the re-prompt when its wait clears, the one idle-lease reminder and the reclaim that hands a stalled attempt to a new one (GY-524), with the pane-binding check every paste through these paths must pass (GY-852, GY-940) and the stable-absence bound a cleared wait's reclaim stands on (GY-953).
 import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master.js';
 import { message, type DaemonAction } from './state.js';
 import { boundDetail } from './decisions.js';
 import { readyToRetry } from './sessions.js';
 import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
-import { preserveInterruptedAttempt, record } from './effects.js';
+import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
 import { roleSessionMaximumMs } from '../model/sessions.js';
+import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
@@ -106,7 +107,11 @@ export function checkPaneStillBelongs(item: Work, handleId: string, pane: string
  * re-prompt goes on its handle, so the item's history shows it. A worker holding a live lease with
  * nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its handle says so,
  * naming the pane, and it is re-prompted once; still inactive `idleLeaseMs` later, its attempt is
- * handed to a new one that keeps its branch.
+ * handed to a new one that keeps its branch. A cleared wait its session cannot verifiably receive
+ * — its recorded pane gone from the runtime, or its handle recording no pane — ends the attempt
+ * only once that has stood past `launchAppearanceMs` on a later cycle, and a reappearance cancels
+ * it: one listing miss ends nothing, and an unverifiable handle is reclaimed on a bound instead of
+ * refusing every resolution for ever (GY-953).
  */
 export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingLive: boolean) {
   const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
@@ -122,7 +127,8 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     // whose coordinates are not recorded yet, and what it resolves to is validated against the
     // record before anything is pasted into it.
     const handleId = `${profile.principal}:${epoch}`;
-    const own = item.sessions?.find(s => s.kind === 'implementation' && s.id === handleId && s.pane);
+    const handle = item.sessions?.find(s => s.kind === 'implementation' && s.id === handleId);
+    const own = handle?.pane ? handle : undefined;
     const agent = own ? agents.find(candidate => candidate.pane_id === own.pane)
       : agents.find(candidate => candidate.name === profile.agentName && !!candidate.pane_id);
     const status = agent?.agent_status ?? null, pane = agent?.pane_id ?? null;
@@ -150,6 +156,26 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     const scopeDetail = request ? `${item.key} epoch ${epoch} waits on its scope request of ${request.at} for ${request.paths.join(', ')}, and ${profile.agentName} is re-prompted once it is answered` : null;
     if (blockerDetail && state.actions[keys.blocker]?.detail !== boundDetail(blockerDetail)) await entry(keys.blocker, 'waiting', blockerDetail);
     if (scopeDetail && state.actions[keys.scope]?.detail !== boundDetail(scopeDetail)) await entry(keys.scope, 'waiting', scopeDetail);
+    // GY-999: a blocker that is a GitHub credential failure is the session's credential, not the
+    // item. Waiting on it only holds the lease and the profile's slot, and the same session would
+    // fail the same way once unblocked, so the attempt is ended at once with its work kept on its
+    // branch, and the next launch mints a fresh credential — or is refused until one can be minted.
+    // The end counts on the GY-885 retry ladder, so a failure no fresh mint cures is relaunched
+    // after a backoff and held at the cap for an approver instead of ending and relaunching for ever.
+    if (item.blocker && !request && credentialFailure(item.blocker)) {
+      const key = credentialBlockedKey(item, epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+      const reason = credentialBlockedReason(item, epoch, item.blocker), attempts = (previous?.attempts ?? 0) + 1;
+      await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
+      try {
+        const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, reason, { endsBlocker: true });
+        performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch and ending the blocker it recorded`, attempts));
+        await drop(keys.blocker, keys.idle);
+      } catch (error) {
+        performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
+      }
+      return;
+    }
     // GY-867: blocked again on an epoch whose blocker was already cleared once. Re-prompting the
     // same session again would only repeat the cycle, so the attempt ends and the item goes on.
     const cleared = item.blocker && !request ? clearedBefore(state, item, epoch) : null;
@@ -209,6 +235,10 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     const unmarked = !state.actions[keys.scope] && Number.isFinite(decidedAt) && now() - decidedAt <= idleLeaseMs
       && !Object.entries(state.actions).some(([key, action]) => key.startsWith(`resume:prompt:${item.id}:${epoch}:`) && action.state !== 'failed' && Date.parse(action.at) >= decidedAt);
     if (waited.length || unmarked) {
+      // The recorded pane is listed again: an absence a reclaim bound was started on no longer
+      // stands, and a later one starts the bound afresh (GY-953). The name's holder listing while
+      // the attempt's own handle still records no pane is not a reappearance.
+      if (own && agent && state.actions[keys.idle]) await drop(keys.idle);
       const blocker = state.actions[keys.blocker]?.detail.split(blockerMarker)[1];
       // Remembered for the epoch: a second block after this clearance ends the attempt (GY-867).
       if (state.actions[keys.blocker]?.state === 'waiting' && !state.actions[clearedBlockerKey(item, epoch)])
@@ -222,7 +252,16 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         // profile's agent name, which another session may now hold, so it would believe this
         // attempt alive for ever and the cleared wait would hold the item indefinitely. The
         // attempt is ended here; the next one the item is dispatched to carries on from its branch.
-        if (own && !agent && listingLive) await reclaimIdle(`its pane ${own.pane} has been gone from the runtime since it waited, so the cleared wait cannot be delivered to it, and its agent name is no address`, null);
+        // One listing miss is not ownership truth, though — Herdr listings transiently drop panes,
+        // and the inventory and its availability check are separate reads — so the absence must
+        // stand past `launchAppearanceMs` on a later cycle first, as 1g requires of an exited
+        // session; the first miss only starts the reclaim bound (GY-953).
+        if (own && !agent && listingLive) {
+          const seen = state.actions[keys.idle];
+          if (!seen) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: its pane ${own.pane} has been gone from the runtime since this cycle while its cleared wait stood undelivered, and its agent name is no address; the reclaim bound starts here`); return; }
+          if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) return;
+          await reclaimIdle(`its pane ${own.pane} has been gone from the runtime since ${seen.at}, so the cleared wait cannot be delivered to it, and its agent name is no address`, null);
+        }
         return;
       }
       // The pane the name resolved — only before this attempt's own pane was recorded — must still
@@ -232,6 +271,18 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
       const paneReason = checkPaneStillBelongs(item, handleId, pane);
       if (paneReason) {
         performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, (previous?.attempts ?? 0) + 1));
+        // A handle that records no pane (its coordinate write failed or never completed) refuses
+        // every resolution for ever: the name-based absence checks see the name's still-listed
+        // holder, and the idle recovery below stays unreachable while the waits stand. The unsafe
+        // paste stays refused, but the first unverifiable observation starts the same reclaim bound
+        // a gone pane starts above, and past it the attempt is handed to a new one that keeps its
+        // branch (GY-953). Nothing is closed: no pane is verifiably this attempt's.
+        if (!own && handle) {
+          const seen = state.actions[keys.idle];
+          if (!seen) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: its handle ${handleId} records no pane yet (its coordinate write has not completed), so the cleared wait cannot be delivered and its agent name is no address; the reclaim bound starts here`); return; }
+          if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) return;
+          await reclaimIdle(`its handle ${handleId} has recorded no pane since ${seen.at} (its coordinate write has not completed), so the cleared wait cannot be verified deliverable to it, and its agent name is no address`, null);
+        }
         return;
       }
       if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }

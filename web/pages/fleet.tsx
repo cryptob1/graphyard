@@ -3,6 +3,8 @@ import { capabilityTiers, fleetRoles, looksLikeSecret, quotaStates, type FleetAc
 import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
+import { accountStatus, chipTones, countdown, localTime, roleLaunch, type AccountStatus } from '../agent-status';
+import { MoreDetails, PageHeader, PageSection } from '../components/page-layout';
 
 const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
 const cost = (account: FleetAccountView) => account.cost && (account.cost.inputPerMTok !== null || account.cost.outputPerMTok !== null)
@@ -114,36 +116,67 @@ export const policyText = (policy: RolePolicy | undefined) => {
   return parts.join(' · ');
 };
 
-/** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the probe clock (tests); the page passes the dashboard's server snapshot clock (GY-952). */
-export function FleetOverview({ fleet, connects = [], now, onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; now?: number; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
+/** One account's status chip: its label, drawn in its tone, with the reason as its title. */
+export const StatusChip = ({ status }: { status: AccountStatus }) =>
+  <span className={`status-chip tone-${chipTones[status.chip]}`} data-chip={status.chip}>{status.label}</span>;
+
+/** Every registry account in one table: its one status, why, when it is back, and what it serves (GY-978 AC-1). */
+export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number }) {
+  return <table className="flow-data agents-table" aria-label="Accounts at a glance"><thead><tr><th>Account</th><th>Status</th><th>Why</th><th>Back</th><th>Roles</th><th>Runs</th></tr></thead>
+    <tbody>{fleet.accounts.map(account => { const status = accountStatus(account, fleet, now); return <tr key={account.name} data-account-row={account.name} data-status={status.chip}>
+      <th scope="row">{account.name}</th>
+      <td data-label="Status"><StatusChip status={status}/></td>
+      <td data-label="Why" className="why">{status.reason}</td>
+      <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
+      <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
+      <td data-label="Runs">{account.runtime} · {account.model}</td>
+    </tr>; })}</tbody></table>;
+}
+
+/** Per role: can it launch now, and when it cannot, why and the earliest time it can (GY-978 AC-2). */
+export function RoleLaunches({ fleet, now }: { fleet: FleetView; now: number }) {
+  return <ul className="role-launches">{fleet.roles.map(role => { const launch = roleLaunch(role, fleet, now); return <li key={role.role} data-role-launch={role.role} data-can-launch={launch.canLaunch ? 'yes' : 'no'}>
+    <span className={`status-chip tone-${launch.canLaunch ? 'ok' : 'bad'}`}>{launch.canLaunch ? 'Can launch' : 'Cannot launch'}</span> {launch.text}</li>; })}</ul>;
+}
+
+/** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the clock (tests); the page passes the dashboard's server snapshot clock (GY-952). */
+export function FleetOverview({ fleet, connects = [], now = Date.now(), onChangeRoles, onCancelConnect, onAnswerConnect, onRetryConnect, onRemoveConnect }: { fleet: FleetView; connects?: ConnectView[]; now?: number; onChangeRoles?: (account: string) => void; onCancelConnect?: (id: string) => void; onAnswerConnect?: (id: string, code: string) => Promise<void>; onRetryConnect?: (connect: ConnectView) => void; onRemoveConnect?: (id: string) => void }) {
   const running = fleet.sessions.filter(session => !session.endedAt);
   const byName = new Map(connects.filter(connect => connect.name).map(connect => [connect.name!, connect]));
   return <>
     {!fleet.configured && <div className="notice">No role is configured yet, so sessions still launch from each host's local profiles. Connect an account below — or run <code>graphyard master registry propose --apply</code> on a host whose agent CLIs are logged in.</div>}
-    {fleet.attention.map(line => <div role="alert" className="notice danger" key={line}>{line}</div>)}
-    <section><div className="section-title"><h2>Accounts <span className="count">{fleet.accounts.length}</span></h2></div>
+    {/* A blocked role reads in its launch line and a role-less account in its chip; only a role missing from the registry has no other place. */}
+    {(() => { const missing = fleet.attention.flatMap(line => /^role (\S+) is not configured/.exec(line)?.[1] ?? []);
+      return missing.length > 0 && <div role="alert" className="notice danger">Not configured: {missing.join(', ')} — {missing.length > 1 ? 'their' : 'its'} sessions launch from local profiles until {missing.length > 1 ? 'they are' : 'it is'}.</div>; })()}
+    {fleet.roles.length > 0 && <PageSection title="Can launch now?" count={`${fleet.roles.filter(role => roleLaunch(role, fleet, now).canLaunch).length} of ${fleet.roles.length}`}><RoleLaunches fleet={fleet} now={now}/></PageSection>}
+    <PageSection title="Accounts" count={fleet.accounts.length}>
       {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect} onRetry={onRetryConnect} onRemove={onRemoveConnect}/>)}
-      {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles} now={now}/>)}
+      {fleet.accounts.length > 0 && <AccountsTable fleet={fleet} now={now}/>}
       {!fleet.accounts.length && !connects.length && <p>No account is connected yet. Connect an account above: pick a provider, paste its key or finish its sign-in — no shell, no configuration files.</p>}
-    </section>
-    <section><div className="section-title"><h2>Roles <span className="count">{fleet.roles.length}</span></h2></div>
-      {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
-      {!fleet.roles.length && <p>No role is configured.</p>}
-    </section>
-    <section><div className="section-title"><h2>Running sessions <span className="count">{running.length}</span></h2></div>
+      {fleet.accounts.length > 0 && <MoreDetails summary="Account details: login, usage windows, probe, capability and credential home">
+        {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles} now={now}/>)}
+      </MoreDetails>}
+    </PageSection>
+    <PageSection title="Running sessions" count={running.length}>
       {running.length > 0 && <table className="flow-data" aria-label="Running sessions by account"><thead><tr><th>Role</th><th>Work</th><th>Account</th><th>Runtime</th><th>Model</th><th>Host</th><th>Since</th></tr></thead>
         <tbody>{[...running].reverse().map(session => <tr key={session.id} data-session={session.id}><td>{session.role}</td><td>{session.work ?? '—'}</td><td>{session.account}</td><td>{session.runtime}</td><td>{session.model}</td><td>{session.host}</td><td>{when(session.selectedAt)}</td></tr>)}</tbody></table>}
       {!running.length && <p>No session launched from the registry is running.</p>}
-    </section>
-    <section><div className="section-title"><h2>Runtimes <span className="count">{fleet.runtimes.length}</span></h2></div>
-      {fleet.runtimes.map(runtime => <div className="criterion" key={runtime.name} data-runtime={runtime.name}><strong>{runtime.name}{runtime.description ? ` · ${runtime.description}` : ''}</strong><p>Launch contract: <code>{[runtime.launch.kind, ...runtime.launch.args].join(' ')}</code> · account home in <code>{runtime.launch.homeVariable ?? 'the default login'}</code> · model flag <code>{runtime.launch.modelFlag ?? 'none'}</code> · tools flag <code>{runtime.launch.toolsFlag ?? 'none'}</code></p>{runtime.launch.login && <p className="muted">Log in with: <code>{runtime.launch.login}</code></p>}</div>)}
-      {!fleet.runtimes.length && <p>No runtime is registered.</p>}
-    </section>
-    <section><div className="section-title"><h2>Recent selections <span className="count">{fleet.sessions.length}</span></h2></div>
-      {[...fleet.sessions].reverse().slice(0, 15).map(session => <div className="criterion" key={session.id}><strong>{when(session.selectedAt)} · {session.role} → {session.account}{session.work ? ` · ${session.work}` : ''}{session.endedAt ? ' · ended' : ' · live'}</strong><p>{session.reason}</p>{session.endReason && <p className="muted">Ended: {session.endReason}</p>}</div>)}
-      {fleet.refusals.slice(-5).reverse().map(refusal => <div className="criterion" key={`${refusal.at}${refusal.role}`}><strong className="amber">{when(refusal.at)} · {refusal.role}{refusal.work ? ` · ${refusal.work}` : ''} · nothing launched</strong><p>{refusal.reason}</p></div>)}
-      {!fleet.sessions.length && !fleet.refusals.length && <p>No session has been selected from the registry yet.</p>}
-    </section>
+    </PageSection>
+    <PageSection title="Roles" count={fleet.roles.length}>
+      {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
+      {!fleet.roles.length && <p>No role is configured.</p>}
+    </PageSection>
+    <MoreDetails summary={`Runtimes (${fleet.runtimes.length}) and recent selections (${fleet.sessions.length})`}>
+      <PageSection title="Runtimes" count={fleet.runtimes.length}>
+        {fleet.runtimes.map(runtime => <div className="criterion" key={runtime.name} data-runtime={runtime.name}><strong>{runtime.name}{runtime.description ? ` · ${runtime.description}` : ''}</strong><p>Launch contract: <code>{[runtime.launch.kind, ...runtime.launch.args].join(' ')}</code> · account home in <code>{runtime.launch.homeVariable ?? 'the default login'}</code> · model flag <code>{runtime.launch.modelFlag ?? 'none'}</code> · tools flag <code>{runtime.launch.toolsFlag ?? 'none'}</code></p>{runtime.launch.login && <p className="muted">Log in with: <code>{runtime.launch.login}</code></p>}</div>)}
+        {!fleet.runtimes.length && <p>No runtime is registered.</p>}
+      </PageSection>
+      <PageSection title="Recent selections" count={fleet.sessions.length}>
+        {[...fleet.sessions].reverse().slice(0, 15).map(session => <div className="criterion" key={session.id}><strong>{when(session.selectedAt)} · {session.role} → {session.account}{session.work ? ` · ${session.work}` : ''}{session.endedAt ? ' · ended' : ' · live'}</strong><p>{session.reason}</p>{session.endReason && <p className="muted">Ended: {session.endReason}</p>}</div>)}
+        {fleet.refusals.slice(-5).reverse().map(refusal => <div className="criterion" key={`${refusal.at}${refusal.role}`}><strong className="amber">{when(refusal.at)} · {refusal.role}{refusal.work ? ` · ${refusal.work}` : ''} · nothing launched</strong><p>{refusal.reason}</p></div>)}
+        {!fleet.sessions.length && !fleet.refusals.length && <p>No session has been selected from the registry yet.</p>}
+      </PageSection>
+    </MoreDetails>
   </>;
 }
 
@@ -265,15 +298,16 @@ export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, '
     if (input) { const names = input.value.split(',').map(entry => entry.trim()).filter(Boolean); if (!names.includes(account)) input.value = [...names, account].join(', '); }
     document.getElementById('role-editor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-  return <><header><div className="breadcrumb">Settings <span>/</span> Agents</div><a href="/docs/onboarding#connect-an-account">Read the guide ↗</a></header>
-    <div className="page-heading"><div><div className="eyebrow">EVERY AGENT IS CONFIGURED HERE</div><h1>Agents</h1><p>Connect an account below — pick a provider, paste its key or finish its sign-in, and the host does the rest. A pasted key is sealed to your agent host in this browser: the server stores and relays ciphertext only, the key is written only on the host, in the provider's own file, and a one-line smoke test decides when the card turns healthy. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit.</p></div></div>
+  return <><PageHeader crumbs={['Settings', 'Agents']} guide="/docs/onboarding#connect-an-account" eyebrow="EVERY AGENT IS CONFIGURED HERE" title="Agents">
+      Which agents can work right now, which are spent and until when, and why. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit. A pasted key is sealed to your agent host in this browser and never readable by the server.
+    </PageHeader>
     {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}
     {!fleet && !loadError && <p role="status">Loading the agents…</p>}
-    {fleet && canEdit && <section><div className="section-title"><h2>Connect an account</h2>{!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</div>
+    {fleet && canEdit && <PageSection title="Connect an account" actions={!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}>
       {wizard.open && <ConnectWizard providers={providers} hosts={hosts} wizard={wizard} setWizard={setWizard} onConnect={id => void connect(id, wizard.host ?? hosts[0]?.host ?? '', wizard.key)} onClose={() => setWizard(closedWizard)}/>}
-    </section>}
+    </PageSection>}
     {fleet && <FleetOverview fleet={fleet} connects={connects.filter(connect => !removed.includes(connect.id))} now={now} onChangeRoles={canEdit ? changeRoles : undefined} onCancelConnect={canEdit ? id => void cancel(id) : undefined} onAnswerConnect={status?.actor?.role === 'admin' ? answer : undefined} onRetryConnect={status?.actor?.role === 'admin' ? retry : undefined} onRemoveConnect={canEdit ? remove : undefined}/>}
-    {fleet && canEdit && <section><details className="advanced more-details" ref={advanced}><summary>Advanced: runtimes, models, roles and policies</summary>
+    {fleet && canEdit && <section><MoreDetails className="advanced" detailsRef={advanced} summary="Advanced: runtimes, models, roles and policies">
       <p className="muted">Everything below names where a login lives — never the credential. Connect accounts at the top of the page; use this only to shape the fleet itself. Every change is recorded with its reason.</p>
       {formError && <p role="alert" className="amber">{formError}</p>}
       <form className="grant-form" aria-label="Add or change a runtime" onSubmit={submit(() => 'agent-registry/runtimes', form => ({ runtime: { name: field(form, 'name'), launch: { kind: field(form, 'kind') || field(form, 'name'), args: field(form, 'args').split(/\s+/).filter(Boolean), homeVariable: optional(form, 'homeVariable'), modelFlag: optional(form, 'modelFlag'), toolsFlag: optional(form, 'toolsFlag'), login: optional(form, 'login'), loginFile: optional(form, 'loginFile') } }, reason: field(form, 'reason') }))}>
@@ -335,6 +369,6 @@ export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, '
         <label>Audit reason<input name="reason" required placeholder="Subscription cancelled"/></label>
         <button disabled={busy}>Remove</button>
       </form>
-    </details></section>}
+    </MoreDetails></section>}
   </>;
 }

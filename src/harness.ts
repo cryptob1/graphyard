@@ -19,8 +19,11 @@ export type ApprovalMode = 'auto' | 'prompt';
  * `-c approval_policy=…` would otherwise bring the approval prompt back past `--ask-for-approval`);
  * `trust` records the session's working directory as trusted where the runtime has no flag for it,
  * before the session starts, given the launch's arguments (Claude Code's folder-trust dialog).
+ * `program` is the command typed to start the runtime when it is not the kind's own name: Cursor's
+ * interactive agent is `agent`, since `cursor` is the IDE's launcher and, from Cursor CLI
+ * 2026.09.23, `cursor-agent` run interactively prints "No Cursor IDE installation found" and exits.
  */
-export interface LaunchRecipe { args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; trust?: (directory: string, environment: Record<string, string>, args: string[]) => Promise<FolderTrust>; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean>; config?: { flags: string[]; pins: Record<string, string> } }
+export interface LaunchRecipe { program?: string; args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; trust?: (directory: string, environment: Record<string, string>, args: string[]) => Promise<FolderTrust>; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean>; config?: { flags: string[]; pins: Record<string, string> } }
 /** A permission document that answers nothing with "ask", at any depth: OpenCode's prompting value. */
 export function asksNothing(value: string) {
   let document: unknown;
@@ -37,8 +40,8 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
     tradeoff: 'Claude Code stops classifying commands for this session and trusts its working directory without asking wherever that loads none of the repository\'s own Claude settings; everything the agent proposes runs without asking.' },
   codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, prompts: 'directory-trust and per-command approval prompts',
     tradeoff: 'Codex never asks for approval; only its workspace-write sandbox still limits what a command can touch.' },
-  cursor: { args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
-    tradeoff: 'cursor-agent runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
+  cursor: { program: 'agent', args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
+    tradeoff: 'Cursor Agent (`agent`) runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
   opencode: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, permits: { OPENCODE_PERMISSION: asksNothing }, prompts: 'edit, bash, and webfetch permission prompts',
     tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
   // Pi has no approval or trust prompt to suppress: every tool it has runs without asking.

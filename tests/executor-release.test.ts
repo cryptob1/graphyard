@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +13,7 @@ import { runExecutor, type ExecutorEffects } from '../src/auto-dispatch.js';
 import { releaseGuardedEffects, staleReleaseReason } from '../src/executor.js';
 import { detectSupervisorUnit, executorFleetReport, executorRegistrar, executorRestartCommand, executorsDirectory, readCommit, readExecutorRegistrations, readRelease, readRestartFence, restartFenceFile, removeExecutorRegistration, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import type { ActionRow } from '../src/model/actions.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-126: a stateless executor loads its modules once, so a delivered fix never reached it and the
@@ -29,7 +30,7 @@ import type { ActionRow } from '../src/model/actions.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-executor-release-'));
+  const root = await temporaryDirectory('executor-release');
   git(root, 'init', '-q');
   git(root, 'remote', 'add', 'origin', 'https://github.com/owner/project.git');
   await writeFile(join(root, 'README.md'), 'first\n');
@@ -39,7 +40,7 @@ async function repository() {
 async function commit(root: string, text: string) { await writeFile(join(root, 'README.md'), `${text}\n`); git(root, 'commit', '-q', '-am', text); return git(root, 'rev-parse', 'HEAD'); }
 async function fixture() {
   const root = await repository();
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-executor-credentials-'));
+  const directory = await temporaryDirectory('executor-credentials');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,

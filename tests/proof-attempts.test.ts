@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
@@ -64,7 +64,7 @@ const killed = (code: 143 | 137) => ({ runtime: 'pi', startedAt: iso(-600_000), 
   result: { ok: false as const, reason: 'exit' as const, detail: `pi exited with code ${code}` } });
 
 test('unit:killed-runs-not-counted — two producer runs ended with exit 143 settle as lost, the attempt count stays 0, and a third launch happens on the next tick', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-proof-attempts-'));
+  const root = await temporaryDirectory('proof-attempts');
   try {
     const token = join(root, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const config = masterConfig(token), item = requested();
@@ -127,7 +127,7 @@ function decisionLoop(items: () => Work[], decided: { action: string; reason: st
 }
 
 test('unit:exhausted-proofs-escalate — a producer request whose attempts are used up raises an attention item naming its proof group, each attempt and the next owner, and one cycle later a rework decision quoting the attempts', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-proof-exhausted-'));
+  const root = await temporaryDirectory('proof-exhausted');
   try {
     const token = join(root, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const config = masterConfig(token), item = requested();

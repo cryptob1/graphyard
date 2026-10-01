@@ -1035,14 +1035,27 @@ async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer
   if (!response.ok) throw new Error(`GitHub refused to dismiss review ${reviewId} (${response.status})`);
 }
 
-/** The loop's create of a follow-up item, as the master's operator-agent identity, idempotent on `key`. */
+/** The control-plane request that records an approval's follow-ups on the approved item (GY-896): its route under /api/ and body. */
+export function followUpRecordRequest(item: FollowUpItem) {
+  const parent = item.origin?.reviewFollowUps?.parent ?? item.dependencies[0];
+  if (!parent) throw new Error('the follow-up filing names no approved item to record its findings on');
+  return { parent, path: `work/${encodeURIComponent(parent)}/followups`, body: { findings: item.origin?.reviewFollowUps?.findings ?? [], reason: item.reason } };
+}
+/**
+ * The loop's filing of an approval's follow-ups, as the master's operator-agent identity, idempotent
+ * on `key` (GY-896): the findings are recorded against the approved item's own record
+ * (`POST /api/work/PARENT/followups`), where they wait as one batch for an operator to promote any
+ * of them; no work item is created. The key it answers is the approved item's, which each thread's
+ * reply then names.
+ */
 function operatorAgentCreate(root: string, config: MasterConfig): CreateFollowUpItem {
   return async (item, key) => {
     const token = await agentToken(root, config, 'operatorAgent');
-    const response = await fetch(`${config.url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(item), signal: AbortSignal.timeout(30_000) });
+    const { parent, path, body } = followUpRecordRequest(item);
+    const response = await fetch(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const result: any = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(`Graphyard refused the follow-up item (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
-    if (typeof result?.key !== 'string') throw new Error('Graphyard did not return the follow-up item key');
+    if (!response.ok) throw new Error(`Graphyard refused the follow-ups for ${parent} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    if (typeof result?.key !== 'string') throw new Error(`Graphyard did not return the key of ${parent}, which records the follow-ups`);
     return { key: result.key };
   };
 }
