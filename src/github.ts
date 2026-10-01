@@ -1991,10 +1991,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * GitHub still enforces branch protection and every required check. These are the only ways
    * Graphyard ever asks GitHub to merge.
    */
-  async enqueuePullRequest(state: GitHubMergeQueueState, sha: string) {
+  async enqueuePullRequest(state: GitHubMergeQueueState, sha: string, mergeNow = false) {
     if (state.queue) return void await this.graphql(enqueueMutation, { id: state.pullRequestId, head: sha });
     const variables = { id: state.pullRequestId, head: sha, method: autoMergeMethod() };
-    if (mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
+    if (mergeNow || mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
     try { await this.graphql(autoMergeMutation, variables); }
     catch (error) {
       // The pull request became mergeable (clean, unstable or has_hooks) between the read and the
@@ -2375,7 +2375,7 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   state = { ...state, requestedAt: enqueueRequestCurrent(work, request) ? request!.at : null };
   try {
     if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
-    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha); }
+    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha, action.mergeNow); }
     if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
