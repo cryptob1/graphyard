@@ -33,7 +33,7 @@ One landability verdict, `evaluateLandability` (`src/model/landability.ts`), is 
 
 The landing check compares the candidate's changes since its merge base with the commit it would land on (live or predicted). Each out-of-scope file is judged by the head's three-way merge onto it, not its blob: a change the commit has since extended, or one only the base made, merges to the commit's version; a head restoring the merge-base version over it is still refused. Every observation recomputes it, so stale refusals clear without a push. The simulated-day soak (`tests/soak.test.ts`) runs it across landing-base moves, and stages a compare window without a usable merge base; its false refusals hold only there.
 
-Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
+Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. `graphyard sync GY-N --restore` does the same, then restores every out-of-scope file to the base tip in one new commit whose message names them, so a plain push updates the PR; it never rewrites history, and a force push is never needed or allowed.
 
 ### Generated files never conflict
 
