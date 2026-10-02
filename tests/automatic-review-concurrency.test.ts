@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { chmod, readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { automaticReviewerConcurrency, loadMasterConfig, profileConcurrency, withReviewerDefaults } from '../src/master.js';
+import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, withReviewerDefaults } from '../src/master.js';
 import { assertNameAvailable } from '../src/master-resources.js';
 import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
@@ -20,7 +21,7 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
   try {
     const config = await loadMasterConfig(host.root);
     assert.equal(config.run.reviewerProfile, 'claude-reviewer');
-    assert.equal(config.reviewers[0].concurrency, undefined, 'the profile declares no concurrency of its own');
+    assert.equal((await loadStoredMasterConfig(host.root)).reviewers[0].concurrency, undefined, 'the profile declares no concurrency of its own');
     assert.ok(automaticReviewerConcurrency > 1, 'the documented default runs several sessions');
     // The automatic profile reads the default; every other profile keeps one session.
     const { profile } = selectReviewerProfile(config);
@@ -50,8 +51,9 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
     } finally { await parallel.cleanup(); }
 
     // A profile that declares its own concurrency keeps it, and without run.reviewerProfile nothing changes.
-    assert.equal(profileConcurrency(withReviewerDefaults({ ...config, reviewers: [{ ...config.reviewers[0], concurrency: 2 }] }).reviewers[0]), 2);
-    assert.equal(profileConcurrency(withReviewerDefaults({ ...config, run: { ...config.run, reviewerProfile: undefined } }).reviewers[0]), 1);
+    const stored = await loadStoredMasterConfig(host.root);
+    assert.equal(profileConcurrency(withReviewerDefaults({ ...stored, reviewers: [{ ...stored.reviewers[0], concurrency: 2 }] }).reviewers[0]), 2);
+    assert.equal(profileConcurrency(withReviewerDefaults({ ...stored, run: { ...stored.run, reviewerProfile: undefined } }).reviewers[0]), 1);
   } finally { await host.cleanup(); }
 });
 
@@ -148,5 +150,83 @@ test('unit:settled-reviewer-releases-name — a settled reviewer\'s pane Herdr k
     const cleared = await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [], observe: () => null });
     assert.equal(cleared.changed, 1);
     assert.deepEqual(heldNameAttention((await readReviewLedger(host.root)).reviews), []);
+  } finally { await host.cleanup(); }
+});
+
+// GY-1075: the reviewer defaults are applied once, at load, rather than by each reader.
+test('unit:automatic-reviews-run-in-parallel — loadMasterConfig applies the automatic reviewer default once at load, the loop\'s reload carries it, and a writer never stores it in master.json', async () => {
+  const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
+  try {
+    const file = join(host.root, '.graphyard/master.json');
+    const loaded = await loadMasterConfig(host.root);
+    // A reader that never calls withReviewerDefaults itself still counts the default.
+    assert.equal(loaded.reviewers.find(entry => entry.name === 'claude-reviewer')!.concurrency, automaticReviewerConcurrency);
+    assert.equal(loaded.reviewers.find(entry => entry.name === 'spare-reviewer')!.concurrency, undefined);
+    assert.equal((await loadStoredMasterConfig(host.root)).reviewers[0].concurrency, undefined);
+    const live = liveMasterConfig(host.root, loaded);
+    const reload = await live.reload();
+    assert.equal(reload.refused, null);
+    assert.deepEqual(reload.changed, [], 'the defaulted config compares equal to itself across a reload');
+    assert.equal(reload.config.reviewers[0].concurrency, automaticReviewerConcurrency);
+    // A writer reads the stored form, so the default it did not set is not written back.
+    await saveMasterSettings(host.root, { intervalSeconds: 45 });
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).reviewers[0].concurrency, undefined, 'master.json still leaves the concurrency unset');
+  } finally { await host.cleanup(); }
+});
+
+test('unit:settled-reviewer-releases-name — a credential directory a forced settlement could not remove stays on the record through the sweep, is retried, and clears once removed', { skip: process.getuid?.() === 0 ? 'root ignores directory permissions' : false }, async () => {
+  const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude', concurrency: 1 }, 'claude-reviewer');
+  let locked: string | null = null;
+  try {
+    const config = await loadMasterConfig(host.root);
+    const first = requested(1);
+    await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [first], () => config), Date.now);
+    const pane = host.agents[0].pane_id!;
+    const directory = (await readReviewLedger(host.root)).reviews[0].sessionDirectory;
+    // Herdr refuses the settlement's close and the credential directory cannot be removed.
+    host.refuseClose.set(pane, 1);
+    locked = dirname(directory); await chmod(locked, 0o500);
+    const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 501, submittedAt: new Date().toISOString() };
+    await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: record => record.key === 'GY-501' ? verdict : null });
+    const record = () => readReviewLedger(host.root).then(ledger => ledger.reviews.find(entry => entry.key === 'GY-501')!);
+    assert.match((await record()).closeFailure ?? '', new RegExp(`could not close pane ${pane}.*credential directory .* could not be removed`));
+    // The sweep closes the pane; the credential failure is kept, not dropped with the pane failure.
+    const swept = await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: () => null });
+    assert.deepEqual(swept.released, [{ pane, agentName: 'claude-reviewer' }]);
+    assert.deepEqual(host.agents, []);
+    assert.match((await record()).closeFailure ?? '', /^the reviewer credential directory .* could not be removed/);
+    assert.deepEqual(heldNameAttention([await record()]), [], 'no pane holds the name, so no held name is reported');
+    // Retried while it fails, without rewriting the ledger; cleared on the pass it succeeds.
+    assert.equal((await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [], observe: () => null })).changed, 0);
+    assert.match((await record()).closeFailure ?? '', /credential directory/);
+    await chmod(locked, 0o700); locked = null;
+    assert.equal((await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [], observe: () => null })).changed, 1);
+    assert.equal((await record()).closeFailure, undefined);
+    await assert.rejects(readFile(join(directory, 'hosts.yml')), /ENOENT/, 'the credential directory is gone');
+  } finally { if (locked) await chmod(locked, 0o700); await host.cleanup(); }
+});
+
+test('unit:settled-reviewer-releases-name — a running session handle recorded for the settled reviewer\'s pane does not hold the name in the tick that closes it', async () => {
+  const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude', concurrency: 1 }, 'claude-reviewer');
+  try {
+    const config = await loadMasterConfig(host.root);
+    const first = requested(1), second = requested(2);
+    await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [first], () => config), Date.now);
+    const pane = host.agents[0].pane_id!;
+    host.refuseClose.set(pane, Infinity);
+    const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 501, submittedAt: new Date().toISOString() };
+    await reconcileReviews(host.root, config, { run: host.run, work: [first], agents: [...host.agents], observe: record => record.key === 'GY-501' ? verdict : null });
+    // The reviewer sits at its prompt: the runtime still lists an agent in the pane, so the session
+    // report reads the handle as idle, not ended, and nothing but the release frees its slot.
+    Object.assign(host.agents[0], { agent: 'claude', agent_status: 'idle' });
+    host.refuseClose.clear();
+    // The production launcher registered the session: its handle is still running on that pane.
+    const handle = { id: 'review-501', kind: 'review', runtime: 'claude', host: config.hostId, agentName: 'claude-reviewer', pane, head: first.candidate!.sha, subject: 'Review GY-501', state: 'running', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const recorded = { ...first, sessions: [handle] } as unknown as typeof first;
+    const next = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [recorded, second], () => config), Date.now);
+    assert.ok(host.closes.includes(pane), 'the stale pane is closed');
+    assert.deepEqual(next.waiting.filter(entry => entry.work === 'GY-502'), [], 'the closed reviewer\'s handle holds no slot');
+    assert.deepEqual(next.launched.map(entry => [entry.work, entry.profile]), [['GY-502', 'claude-reviewer']], 'the next review launches on the freed name in the same tick, not on the spare profile');
+    assert.equal(starts(host.calls).at(-1), 'claude-reviewer');
   } finally { await host.cleanup(); }
 });
