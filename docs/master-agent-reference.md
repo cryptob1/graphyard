@@ -17,8 +17,6 @@ An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (o
 
 Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports candidate conflicts (`conflicts`) ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)).
 
-Before `worktree GY-N EPOCH` adds the worktree it frees the branch: a rework checkout holding it is detached; an abandoned session worktree of the item under `.graphyard/worktrees` mid-rebase, `am` or bisect has the operation aborted and is removed, reported as `reclaimed` and in the dispatch record. One dirty, unreadable, under a live lease or outside that directory is named in the error and left alone. Every failure carries git's stderr. After **3** consecutive dispatch failures of one item with one cause, each spending an epoch, the loop records the cause as its blocker (`dispatchblock`; a refusal is retried after 5 minutes, doubling to an hour) and stops dispatching it until `graphyard unblock GY-N REASON`.
-
 ### Speculative tips and branch protection
 
 **An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
