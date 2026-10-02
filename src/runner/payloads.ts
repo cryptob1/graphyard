@@ -95,7 +95,12 @@ export function diagnosticianSettings(run: { diagnostician?: unknown; pi?: { com
  * the diagnosis, and how it was answered — the fix item filed and released, or the covering item —
  * with the two-party decision in flight. `answeredBy` is the item that answers the subject.
  */
-export const diagnosisStates = ['running', 'diagnosed', 'releasing', 'closing', 'answered', 'refused', 'failed'] as const;
+/**
+ * `waiting`: every run ended on its provider's quota or rate limit (GY-1092). That is the provider's
+ * capacity, not a failed diagnosis: the subject is diagnosed again at `retryAt`, and no failure is
+ * recorded against the loop.
+ */
+export const diagnosisStates = ['running', 'waiting', 'diagnosed', 'releasing', 'closing', 'answered', 'refused', 'failed'] as const;
 export const diagnosisRecordSchema = z.object({
   subject: z.string().max(400), kind: z.enum(['recurring', 'invariant']), faultClass: z.enum(faultClasses),
   /** The recurring-fault item's key; null for an invariant violation. */
@@ -108,6 +113,8 @@ export const diagnosisRecordSchema = z.object({
   fix: z.string().max(50).nullable().default(null),
   decision: z.object({ id: z.string().max(100), action: z.enum(['release', 'close']), work: z.string().max(50), approver: z.string().max(200).nullable().default(null) }).strict().nullable().default(null),
   answeredBy: z.string().max(50).nullable().default(null),
+  /** When a `waiting` diagnosis is run again: the provider's reset, else an hour after the refusal. */
+  retryAt: z.string().max(40).nullable().default(null),
   detail: z.string().max(1000).default(''),
 }).strict();
 export type DiagnosisRecord = z.infer<typeof diagnosisRecordSchema>;
