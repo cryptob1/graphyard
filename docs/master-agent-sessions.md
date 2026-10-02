@@ -3,11 +3,11 @@
 
 ## Launch profiles
 
-`master worker add FILE` adds workers, `master reviewer setup` or `master reviewer add FILE` reviewers ([worker](../examples/master/claude-worker.json), [reviewer](../examples/master/claude-reviewer.json) examples). `master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
+`master worker add FILE` adds workers; `master reviewer setup` or `master reviewer add FILE`, reviewers ([worker](../examples/master/claude-worker.json), [reviewer](../examples/master/claude-reviewer.json) examples). `master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
 
 ### Session handles
 
-`master status` `sessions` lists handles (runtime, host, pane, transcript, attach).
+`master status` `sessions`: runtime, host, pane, transcript, attach.
 
 ### Approval modes
 
@@ -15,7 +15,7 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master's gets the checkout unwritable to shell commands, or is refused: Codex by `--sandbox workspace-write` (no grant on the checkout or its `.git`), others by bubblewrap (PIDs unshared, fresh `/proc`, systemd hidden, session bus a keyring-only proxy; only the session's directory and shared Git areas writable). The loop and executors never start, self-upgrade or restart on a dirty checkout; the escalation names paths and leases.
+Every launch but the master's gets the checkout unwritable to shell commands or is refused: Codex by `--sandbox workspace-write` (no grant on the checkout or its `.git`), others by bubblewrap (PIDs unshared, fresh `/proc`, systemd hidden, session bus a keyring-only proxy; only the session's directory and shared Git areas writable). The loop and executors never start, self-upgrade or restart on a dirty checkout; the escalation names paths and leases.
 
 ## Accounts and failover
 
@@ -47,20 +47,19 @@ A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher 
 
 ### Acknowledgement, resume and idle sessions
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless, it is **`never started`**, relaunched free a minute later, up to three (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless, it is **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`).
 
 A resolved blocker or scope request re-prompts the attempt's inactive session once (`complete GY-N EPOCH PR`); blocking again hands the epoch to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, handed on after 30 more. Pastes target the attempt's own pane, never a shared agent name; a gone pane hands it on.
 
-Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free. Only Pi is confined; triage and diagnosis runs end with the loop.
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts, re-adopted; lost ones retry free. Only Pi is confined; triage and diagnosis runs end with the loop.
 
 ### Panes are closed and reclaimed
 
-Ending a session closes its pane; each cycle also closes up to **6** panes launched **on this host** whose session or worktree is gone, agentless past **120 s**, never one with an agent or live lease. Over **20** agentless raise attention (`daemon.escalations`).
+Ending a session closes its pane; each cycle also closes up to **6** panes launched **on this host** whose session or worktree is gone, agentless past **120 s**, never with an agent or live lease. Over **20** agentless raise attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A cursor that fails its schema is repaired, not fatal**; the repair is logged once with the
-  path that failed.
+- **A cursor that fails its schema is repaired, not fatal**, logged once with the path that failed.
 - **A tick failure is attributed and surfaced** in `dispatch.lastFailure`. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 - **A session that exits at launch is classified from its pane.** One that exits **at launch** leaves `herdr agent get` only `agent_not_found`, so `herdr pane read` decides: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.

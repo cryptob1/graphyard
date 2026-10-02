@@ -7,7 +7,7 @@ With an operator `reuse` policy (`graphyard validation define`), the newest comp
 {"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,"freshnessSeconds":86400,"artifacts":"identical","relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json","**/yarn.lock"],"buildInputs":["Dockerfile","tsconfig.json",".github/workflows/**"],"configuration":["config/**",".env.example","compose.yaml"],"migrations":["migrations/**"],"services":{"api":["src/**"]}},"ignorable":["docs/**","*.md"]}
 ```
 
-`relevant.services` must list every service. Changed relevant paths forbid reuse; paths in neither list are **unknown, and unknown refuses**. `identical`: same artifact manifest; `scoped`: unchanged build inputs, only ignorable changes.
+`relevant.services` lists every service. Changed relevant paths forbid reuse; paths in neither list are **unknown, and unknown refuses**. `identical`: same artifact manifest; `scoped`: unchanged build inputs, only ignorable changes.
 
 Per attested new head: `graphyard validation reuse decision.json`:
 

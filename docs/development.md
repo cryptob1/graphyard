@@ -9,7 +9,7 @@
 - Table: `defineTable` in `src/store/tables/` (migrations, backups derive).
 - Dashboard view: `web/pages/` page listed in `index.tsx`.
 - Protocol topic: `docs/protocol/` page starting `<!-- page: Agent protocol | N | summary -->`.
-- Managed `AGENTS.md` text: templates in `src/repository-setup.ts` or `src/master.ts`; re-render.
+- Managed `AGENTS.md` text: `src/repository-setup.ts` or `src/master.ts` templates.
 
 `tests/hotspots.test.ts` holds each assembler to a size budget.
 
@@ -19,7 +19,7 @@
 npm ci && npm run build && npm test
 ```
 
-`npm test` hides `GRAPHYARD_*`/`HERDR_*` and reserves free Postgres ports. Worktree installs need [bubblewrap](install.md#preconditions).
+`npm test` hides `GRAPHYARD_*`/`HERDR_*`, reserving free Postgres ports. Worktree installs need [bubblewrap](install.md#preconditions).
 
 ## CI
 
@@ -31,4 +31,4 @@ npm ci && npm run build && npm test
 
 ## Trusted contracts
 
-Trusted CI runs only protected source, so land a contract's harness and `scripts/contracts.mjs` entry before requiring its proof.
+Trusted CI runs only protected source: land a contract's harness and `scripts/contracts.mjs` entry before requiring its proof.

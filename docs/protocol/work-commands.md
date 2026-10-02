@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 1 | every work mutation. -->
 # Work commands
 
-All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; a `409` coordination refusal is read, not blindly retried.
+All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; read a `409` coordination refusal, never blindly retry it.
 
 `POST /api/work` ([example](../../examples/work.json)) requires `title`, `criteria`; optional `dependencies`, `exclusiveResources`, `plannedFiles`, `producerProofs` (producer-runnable `manual:` proofs). Others: `POST /api/work/KEY/COMMAND`:
 
@@ -13,6 +13,6 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 - `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
 - `deployment`: `{"sha","mergeSha","source":"endpoint","observedAt"}`; coordinator/admin, delivered work, once.
 - `followups` `{findings,reason}` (master): records approval findings on the item (or an open legacy follow-up; `409` once closed); read `GET /api/work/KEY/followups`, `/api/followups?pr=N`. `promote` `{index}` (operator): finding → item, once ([follow-ups](../followups.md)); `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
-- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis). `POST /api/retro/ID/approve|refuse` `{reason}`: AI admin/operator agent with `decision:approve`; never human sessions, drafters or instance recorders (`403`; `409` once judged).
+- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis). `POST /api/retro/ID/approve|refuse` `{reason}`: AI admin/operator agent with `decision:approve`; never human sessions, drafters or recorders (`403`; `409` once judged).
 
 No endpoint sets lifecycle state.

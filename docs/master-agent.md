@@ -40,7 +40,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research`, a feature (or `"research": true`) gets one read-only Pi brief per revision, which build follows; a differing answer reworks, failure never blocks, product questions go to a human.
 
-Approvals' [follow-ups](followups.md) stay on the item until `graphyard promote-followup`. With `run.research`, Pi triages machine-filed items (legacy follow-ups, faults), `triageConcurrency` (default 2) at once: release, approved close, or merge (`machineUntriaged`, `operatorBacklog`).
+[Follow-ups](followups.md) stay on the item until `graphyard promote-followup`. With `run.research`, Pi triages machine-filed items (legacy follow-ups, faults), `triageConcurrency` (default 2) at once: release, approved close, or merge (`machineUntriaged`, `operatorBacklog`).
 
 ## Automatic dispatch at submit
 
@@ -49,7 +49,7 @@ Past the build gate a candidate gets (`autoDispatch`) a producer request per pro
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart; lowering it drains first (`longestWaitMs`); ten starved minutes count in `counts.concurrencyStarved`.
 - **Requests always settle.** A `pane_not_found` pane is closed. No request outlives its own token: expired and unreported by Herdr, it settles `expired`, else counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere, 12 per request (`dispatch.abandoned`); an unposted reviewer is reminded first. Killed producer runs spend no attempt; exhausted ones raise `escalation:proof-exhausted`, then rework.
 
-The master never launches reviews or producers by hand (`master review GY-N [PROFILE]` only once the loop stops relaunching).
+The master never launches reviews or producers by hand (`master review GY-N [PROFILE]` only after the loop stops relaunching).
 
 ### Proofs must exercise their criterion
 

@@ -7,7 +7,7 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up item).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up).
 
 ## Lost worker before submission
 
@@ -48,7 +48,7 @@ A failing required check [reruns once](github.md#merge-queue) per sha, keeping p
 | `steady` | unchanged: 5 min or longer |
 | `idle` | awaiting dispatch or escalation: 5 min |
 
-Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
+Unchanged non-merge candidates: **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
@@ -56,7 +56,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What an observation costs
 
-About ten requests; unchanged, none.
+About ten requests; unchanged, none. Immutable, per-cycle and webhook-driven reads are [not repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### What a pause means for gates
 
@@ -64,7 +64,7 @@ A `403`/`429` pauses requests; gates read stale until it lifts, and nothing merg
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): `perHour` across `instances`, `limit`, `share`, `target` 0.6, `byEndpoint`.
 
 ### Webhook liveness
 

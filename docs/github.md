@@ -40,7 +40,7 @@ The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/
 
 Reviews and proofs bind a head, base and policy revision; on a moved base all carry if the patch-id held; else the approval carries if no reviewed file changed, as do proofs with disjoint `scopeFiles`. A republished tip of the same head and patch keeps it; a person's approval never carries.
 
-Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review at once, and the entry yields the head to the next until a fresh approval re-enters. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) and which is applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
+Before merging, the reviewer App re-posts the bound reviewer's latest approval of the tip's reviewed head when the carried review is missing from the PR; a newer approval of that head re-binds the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the carried approval is cleared (`mergeRefusal.action: rereview`), a fresh review is requested at once, and the entry yields the head until a fresh approval re-enters. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), judged by an approver in the high [risk lane](how-graphyard-works.md#risk-lanes), applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
 
 ### Parallel tips
 
@@ -56,7 +56,7 @@ The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow on each `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs, **exercise** runs each secret-free on the base-merged candidate, **publish** reports via the [CI producer](deployment.md#ci-producer). Queue tips are cached. Manual proofs stay producer sessions.
+A protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs, **exercise** runs each secret-free on the base-merged candidate, **publish** reports via the [CI producer](deployment.md#ci-producer). Queue tips are cached. Manual proofs stay producer sessions.
 
 `"deploySmoke": true` smoke-installs once production serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 

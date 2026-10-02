@@ -37,7 +37,7 @@ Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-mo
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (needs the host's executor) seals a key or login into a 0600 auth file and smoke-tests it; admin-only **Retry** re-enters a failed one.
+Settings › **Agents** › **Connect an account** (needs the host's executor) seals a key or login into a 0600 auth file and smoke-tests it; admins **Retry** a failed one.
 
 ### Configure the fleet
 
@@ -92,14 +92,14 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # executors
 node "$GRAPHYARD_CLI" master start codex
 ```
 
-Use an OS user whose GitHub credentials workers cannot read; `--browser-profile` is Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); its manifest flow is the only App confirmation. Setup writes [`mergeQueue.optimisticExclude`](github.md#optimistic-merges) to `.graphyard/master.json`.
+Use an OS user whose GitHub credentials workers can't read; `--browser-profile` is Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); its manifest flow is the only App confirmation. Setup writes [`mergeQueue.optimisticExclude`](github.md#optimistic-merges) to `.graphyard/master.json`.
 
 ### The loop must be supervised
 
-`master init` in the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger`; never a side effect: worker checkouts and temp directories are refused. Move it: `master init --token-stdin --replace-supervisor` in the new checkout. `master status` reports `setup.supervisor`.
+`master init` in the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`, never a side effect: worker checkouts and temp directories are refused. Move it: `master init --token-stdin --replace-supervisor` in the new checkout. `master status` reports `setup.supervisor`.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged once branch protection requires `Graphyard / merge`.
+`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged once protection requires `Graphyard / merge`.
 
 CI workflows should cancel superseded pull-request runs: group by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.

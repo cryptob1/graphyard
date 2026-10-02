@@ -15,7 +15,7 @@ Ask only: **Which provider** (`--workspace` for multi-workspace Railway); **Prov
 
 ## Preconditions
 
-Node 24, a checkout of `OWNER/REPO`, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts must pass `bwrap --unshare-all --ro-bind / / -- true` (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+Node 24, a checkout of `OWNER/REPO`, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts must pass `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true`, Graphyard's probe (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 
 ### Providers
 
@@ -71,7 +71,7 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 
 ## Agent execution contract
 
-Run steps 1–5, report each verification and `nextSteps`; never weaken a gate.
+Run steps 1–5, reporting each verification and `nextSteps`; never weaken a gate.
 
 ## Manual fallback for unsupported platforms
 

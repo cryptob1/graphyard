@@ -3,51 +3,51 @@
 
 ### 1. Human operator (human authority)
 
-The `admin` credential holder declaring `sessionKind: "human"`; alone decides goals, priorities, spending, new accounts and people's credentials.
+The `admin` holder declaring `sessionKind: "human"`; alone decides goals, priorities, spending, accounts and people's credentials.
 
-**Canonical usage:** *human operator*; bare *operator* means this person.
+**Canonical usage:** *human operator*; bare *operator* means them.
 
 ### 2. AI agent
 
-A model acting through a runtime with only its credential's authority.
+A model acting through a runtime with its credential's authority only.
 
-**Canonical usage:** name the role.
+**Canonical usage:** the role's name.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running agent instance in a runtime.
+One agent instance running in a runtime.
 
-**Canonical usage:** *session*; *runtime* for the hosting software.
+**Canonical usage:** *session*; *runtime*: the hosting software.
 
 ### 4. Principal, role, and credential
 
-*Principal*: an authenticated identity; *role*: its authority class; *credential* (*token*): its secret.
+*Principal*: authenticated identity; *role*: its authority class; *credential* (*token*): its secret.
 
-**Canonical usage:** one principal per concurrent session.
+**Canonical usage:** one principal per session.
 
 ### 5. Worker lease and worktree
 
-*Lease*: a worker's timed hold on one item at one *epoch*; *assigned worktree*: its registered `(host, path)` checkout and reserved branch.
+*Lease*: a worker's timed hold on one item at one *epoch*; *assigned worktree*: its registered `(host, path)` checkout and branch.
 
 **Canonical usage:** *lease*, *epoch*, *assigned worktree*.
 
 ### 6. Independent reviewer and proof producer
 
-A *reviewer*: a non-author GitHub identity approving the exact head; a *proof producer*: a `producer` principal granted exact proof names. Neither implements.
+*Reviewer*: a non-author GitHub identity approving the exact head; *proof producer*: a `producer` principal granted exact proofs. Neither implements.
 
 **Canonical usage:** *reviewer*, *proof producer*.
 
 ### 7. Graphyard control plane
 
-Server, database, dashboard and CLI.
+Server, database, dashboard, CLI.
 
-**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; it never *runs* a session.
+**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; never *runs* a session.
 
 ### 8. Herdr runtime
 
-Launches sessions and reports liveness.
+Launches sessions, reports liveness.
 
-**Canonical usage:** *Herdr*; other runtimes by product name.
+**Canonical usage:** *Herdr*; others by product name.
 
 ## The roles at a glance
 
@@ -63,8 +63,8 @@ Launches sessions and reports liveness.
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Two-party decisions (`master decide GY-N ACTION REASON`, applied by a separate approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. An approver may not be the requester, an assignee, the evidence producer or the grantee. Reviewers, producers and the merge gate decide the rest; a human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until answered.
+The master applies non-weakening intent (create, release, unblock, add requirements) itself. Two-party decisions (`master decide GY-N ACTION REASON`, applied by another approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. The approver is never the requester, an assignee, the evidence producer or grantee. Reviewers, producers and the merge gate decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) the item.
 
 ## Diagram legend
 
-Amber rounded box: human operator; green rounded box: agent session (one role, one credential); blue square box: Graphyard control plane; violet box: Herdr runtime; grey square box: GitHub and external facts; dashed chip: credential, lease epoch or worktree; solid arrow: authenticated command; dashed arrow: observation, never authority.
+Amber rounded: human operator; green rounded: agent session (one role, one credential); blue square: Graphyard control plane; violet: Herdr runtime; grey square: GitHub and external facts; dashed chip: credential, lease epoch or worktree; solid arrow: authenticated command; dashed arrow: observation, never authority.

@@ -7,7 +7,7 @@
 
 ## Artifact backends, capacity and migration
 
-Artifacts live in Postgres (default) or S3: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_{ENDPOINT,BUCKET,REGION,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, optional `_PREFIX`. Only the server holds the credential; reads verify SHA-256. Failed uploads return 503 (retry, same key), past `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB) 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves up to 100 per call; at `remaining` 0, switch every replica's backend.
+Artifacts live in Postgres (default) or S3: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_{ENDPOINT,BUCKET,REGION,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, optional `_PREFIX`. Only the server holds the credential; reads verify SHA-256. Failed uploads return 503 (retry, same key); past `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB), 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves ≤100 per call; at `remaining` 0, switch every replica.
 
 ## Rollback
 
@@ -19,7 +19,7 @@ A rollback completes once the target [verifies](delivery.md#observe-and-verify).
  "services":["api","web"],"rollback":{"fencing":"provider","automatic":true}}
 ```
 
-Fencing: `provider` conditions the write on the running release; `serialized` freezes the environment until settled; `none` is never automatic. The human operator or a promoter's `delegate` lease requests a release verified here (`POST /api/delivery/rollback`):
+Fencing: `provider` conditions the write on the running release; `serialized` freezes the environment until settled; `none` never runs automatically. The human operator or a promoter's `delegate` lease requests a release verified here (`POST /api/delivery/rollback`):
 
 ```json
 {"environment":{"id":"production","revision":1},"target":{"id":"2026.09.17-4","revision":1},"expectedGeneration":7,
@@ -47,4 +47,4 @@ then reports `applied`, `failed` or `unknown` (`POST /api/delivery/rollback-sett
  "evidence":"https://railway.app/project/example/deployments/01J8Q5"}
 ```
 
-`"automaticRollback": true` in the environment's `delivery` policy rolls a degraded generation back to the last verified release when fenced automatic executors cover every service; else `automaticRollbackRefusal` says why.
+`"automaticRollback": true` (environment `delivery` policy) rolls a degraded generation back to the last verified release when fenced automatic executors cover every service; else `automaticRollbackRefusal` says why.

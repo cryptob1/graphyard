@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 4 | the release API. -->
 # Releases and observed delivery
 
-Records which release each environment should run, verified only by service-scoped observers ([rollback](recovery.md#rollback)). `admin`: policy, approvals. `producer` + `builder` registration: builds. `admin`/`promoter`: selection. `producer` + `observer` registration and lease (`POST /api/delivery/lease`): observations.
+Which release each environment should run, verified only by service-scoped observers ([rollback](recovery.md#rollback)). `admin`: policy, approvals. `producer` + `builder` registration: builds. `admin`/`promoter`: selection. `producer` + `observer` registration and lease (`POST /api/delivery/lease`): observations.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
@@ -39,8 +39,8 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete `provider`/`host-attestation` listings verify; repeated `snapshotId`s return the original receipt; `POST /api/delivery/notify` only hints. A 2 s sweep (`graphyard delivery sweep` forces one) verifies a generation once all services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to included items; else `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows state.
+Only complete `provider`/`host-attestation` listings verify; a repeated `snapshotId` returns its receipt; `POST /api/delivery/notify` only hints. A 2 s sweep (`graphyard delivery sweep` forces one) verifies a generation once all services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to included items; else `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery`: state.
 
 ## Attribution
 
-Validation requests bind the manifest, a compatibility signature (build inputs, bundle, configuration, source, policy, artifacts) and observed measurements; client SHAs count for nothing (`POST /api/validation/result` refuses top-level SHAs). An in-window mismatch records `attribution-undermined`, voiding the pass. `GET /api/analytics/attribution` reports mismatches, paid-run cost.
+Validation requests bind the manifest, a compatibility signature (build inputs, bundle, configuration, source, policy, artifacts) and observed measurements; client SHAs count for nothing (`POST /api/validation/result` refuses top-level SHAs). An in-window mismatch records `attribution-undermined`, voiding the pass. `GET /api/analytics/attribution`: mismatches, paid-run cost.

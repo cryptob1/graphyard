@@ -16,7 +16,7 @@ Producers ever assigned the item or in its slice are refused (`evidence.producer
 | `security-concern` | A lead's `escalate` ruling. |
 | `requirement-weakening` | A revision retires a criterion or narrows proofs. |
 
-An unresolved trigger drops merge authorization; raising one dequeues the head. An explained lapse is `lease.expired` with its [cause](protocol/leases.md#how-a-lease-ends) (`blocked-awaiting-operator`, `stopped-by-attestation`); a later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). A replacement may claim; delivery waits.
+An unresolved trigger drops merge authorization, dequeuing the head. An explained lapse is `lease.expired` with its [cause](protocol/leases.md#how-a-lease-ends) (`blocked-awaiting-operator`, `stopped-by-attestation`); a later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). A replacement may claim; delivery waits.
 
 ### Who may settle what
 

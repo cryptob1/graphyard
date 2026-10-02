@@ -26,7 +26,7 @@ graphyard recover-containment GY-N --previous-worker-stopped "reason"        # d
 graphyard unblock GY-N "reason"                                              # unowned blocker
 ```
 
-Never attest a stop you have not confirmed. Merged work changes only through a follow-up item.
+Never attest a stop you have not confirmed. Merged work changes only via a follow-up item.
 
 ## Safety facts that never change
 
