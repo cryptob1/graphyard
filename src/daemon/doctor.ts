@@ -389,6 +389,9 @@ export async function doctorStep(cycle: Cycle) {
       current.detail = outcome.report ? 'reported' : `no report: ${outcome.runs.map(entry => `${entry.model} ${entry.result}`).join('; ')}`.slice(0, 1000);
       if (!outcome.report) {
         current.state = 'failed';
+        // Queued for posting before the fallible record, as the apply-failure path below does: a
+        // failed run is never reaped as lost, so the marker is what keeps it retryable.
+        state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);
         await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
         await postRun(cycle, doctor, current, now);
         return;

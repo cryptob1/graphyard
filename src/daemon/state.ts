@@ -454,7 +454,6 @@ export const daemonStateSchema = z.object({
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
-  /**
    * The pipeline doctor's last runs (GY-711, src/daemon/doctor.ts): each with what it found, did
    * and filed, and the runs it took. The newest is kept whole; the list is bounded below.
    */

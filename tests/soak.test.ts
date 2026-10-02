@@ -51,6 +51,9 @@ import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
 import { itemLane, lanes, laneSpeedTargets } from '../src/model/policy.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
+import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
+import { containmentPhase } from '../src/master/containment.js';
+import { scopeRefusalBlocker } from '../src/model/scope.js';
 import type { DoctorEffects } from '../src/daemon/doctor.js';
 
 /**
@@ -184,6 +187,8 @@ const basePlan = {
 };
 /** GY-430: the main day's item whose auto-merge GitHub holds BLOCKED past the bound: one with no other merge-path fault. */
 const blockedMergeItem = 6;
+/** GY-711: the main day's item whose first attempt is fenced and blocked on a covered scope refusal: the fault-free one. */
+const remedyItem = 2;
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
@@ -524,6 +529,15 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     await confine('worker', key);
     await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+    // GY-711: the routine-remedy item's first attempt is launched under a containment fence, as a
+    // supervised launch is, and a minute in it reports a scope refusal naming only its own planned
+    // file — the blocker a widening already covers. Both remedies must then fire from the real cycle.
+    if (mainDay && n === remedyItem && attempt === 1) {
+      const settlementHash = createHash('sha256').update(`soak-settlement-${key}-${epoch}`).digest('hex');
+      await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash }, id());
+      await engine.execute(principal, 'launch', work.id, { epoch, settlementHash }, id());
+      pending.push(async () => { await engine.execute(principal, 'blocked', work.id, { epoch, reason: `${scopeRefusalBlocker}: ${file(n)} is outside the attempt's plannedFiles` }, id()); });
+    }
     // GY-852: the reassigned item's first session takes the lease and then sits at its prompt for
     // ever, as an idle worker does, so the loop's idle re-prompt and reclaim run against it.
     const idling = options.reassigned === n && attempt === 1;
@@ -843,6 +857,33 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     file: (input, key) => engine.execute(principals.operatorAgent, 'create', null, input, key),
     decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
   };
+  // GY-711's routine remedies run from the real cycle: this host's containment probe (its
+  // supervisor verified gone once the fence lapsed), the coordinator's autosettle — whose first
+  // call the control plane fails transiently, so the reclaim step's settle fails and the doctor's
+  // settle remedy is what lowers the fence — and the operator-agent unblock.
+  const remedies = { settles: [] as { key: string; ok: boolean }[], unblocks: [] as { key: string; revision: number }[] };
+  const containment: DaemonEffects['containment'] = async (work, observed) => {
+    const now = Date.parse(observed.now);
+    return Object.fromEntries(work.filter(item => item.containmentQuarantine && containmentPhase(item, now)?.state !== 'live').map(item => {
+      const fence = item.containmentQuarantine!, workspace = item.workspaces.find(entry => entry.epoch === fence.epoch)!;
+      const verification = containmentVerificationSchema.parse({ method: 'linux-proc-systemd', host: workspace.host, uid: 1000, platform: 'linux', workspacePath: workspace.path,
+        observedAt: observed.now, clockOffset: { min: 0, max: 0 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [] });
+      const refusals = containmentSettlementRefusals(item, verification, { now });
+      return [item.id, { key: item.key, id: item.id, epoch: fence.epoch, owner: fence.owner, at: fence.at, host: workspace.host, workspacePath: workspace.path, scope: fence.scope ?? null,
+        settleable: !refusals.length, refusals, attestation: 'soak', verification }];
+    }));
+  };
+  const settleContainment: DaemonEffects['settleContainment'] = async (work, assessment) => {
+    const first = !remedies.settles.length;
+    remedies.settles.push({ key: work.key, ok: !first });
+    if (first) throw new Error('the control plane answered 502 Bad Gateway');
+    return api(principals.coordinator, 'POST', `work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
+      reason: `The soak loop verified the supervisor of epoch ${assessment.epoch} gone`, verification: assessment.verification });
+  };
+  const unblock: DaemonEffects['unblock'] = async (work, reason) => {
+    remedies.unblocks.push({ key: work.key, revision: work.revision });
+    return api(principals.operatorAgent, 'POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision });
+  };
   // The control plane's status read the faults are classified from; `heldJobs` is the flap below.
   let heldJobs = false;
   const effects: DaemonEffects = {
@@ -853,7 +894,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge, refuseMerge, doctor,
+    snapshot, dispatch, requestProof, approver, merge, refuseMerge, doctor, containment, settleContainment, unblock,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
     decide: (work, action, reason, input = {}) => {
       const bound = decisionInput(action, work, input);
@@ -1398,7 +1439,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mergeStallSightings, restoreLines, master, lanesSeen, laneApplications, approverWorks, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size } };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mergeStallSightings, restoreLines, master, lanesSeen, laneApplications, approverWorks, webhook, remedies, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size } };
 }
 
 /**
@@ -1558,6 +1599,18 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(postedDoctorRuns >= Math.floor(Number(process.env.SOAK_HOURS ?? 24) * 2), `the doctor ran on its interval through the day: ${postedDoctorRuns} summaries on the ledger`);
   assert.ok(state.doctor.runs.length > 0 && state.doctor.runs.every(entry => entry.state === 'reported'), 'every doctor run the cursor retains reported');
   assert.ok(state.doctor.runs.some(entry => entry.findings.some(finding => finding.subject === items[0].key && finding.check === 'worker')), 'the doctor report applied: its finding is on the run record');
+  // GY-711, AC-3: the two per-item remedies the loop applies without an agent fired in the real
+  // cycle across the day, each exactly once, and nothing repeated after. The fenced item's reclaim
+  // settle was failed by the control plane, so the doctor's settle remedy lowered the fence on its
+  // own key; the covered scope-refusal blocker was cleared once, at the revision the loop read.
+  const { remedies } = day, remedied = items[remedyItem - 1], remedyFinal = final.find(item => item.id === remedied.id)!;
+  const remedyActions = (name: string) => Object.entries(state.actions).filter(([key]) => key.startsWith(`remedy:${name}:${remedied.id}:`)).map(([, action]) => action);
+  assert.deepEqual(remedies.settles, [{ key: remedied.key, ok: false }, { key: remedied.key, ok: true }], 'the fence was settled twice in all: the reclaim step\'s refused call, then the remedy\'s one successful call');
+  assert.deepEqual(remedyActions('settle').map(action => `${action.state} x${action.attempts}`), ['done x1'], 'the settle remedy applied once, on its first attempt');
+  assert.equal(remedyFinal.containmentQuarantine ?? null, null, 'the submitted attempt\'s lapsed fence is settled');
+  assert.deepEqual(remedies.unblocks, [{ key: remedied.key, revision: remedies.unblocks[0]?.revision }], 'the covered scope-refusal blocker was cleared exactly once');
+  assert.deepEqual(remedyActions('unblock').map(action => `${action.state} x${action.attempts}`), ['done x1'], 'the unblock remedy applied once, on its first attempt');
+  assert.ok(!remedyFinal.blocker, 'the cleared blocker never came back');
   // The loop published its merge-queue settings exactly once for the whole day — on a change, not
   // every cycle (GY-330, GY-498, GY-500, GY-516) — and each setting reached the installation ledger.
   assert.equal(mergeQueuePosts.length, 1, `one publication, not one per cycle: ${JSON.stringify(mergeQueuePosts)}`);
