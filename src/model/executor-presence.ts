@@ -25,6 +25,13 @@ import type { Work } from './work.js';
  * however long it waits — it waits on the judgment it names, which master status already reports
  * with the command that answers it — and naming it here would report a healthy fleet as broken and
  * offer a start command the executor rejects.
+ *
+ * Nor is a pending `merge` row unserved while a live master loop merges (GY-916). Exactly one
+ * component merges (GY-245): the loop acquires every merge itself and every executor refuses the
+ * kind while it lives, so a merge row waits on the loop's next cycle, not on an executor, and the
+ * remedy `--kinds merge` would install the very configuration the executors refuse. The loop is
+ * known two ways: the master CLI on its own host detects it (`detectLoopMerger`), and the control
+ * plane reads the merge requests its ledger holds from the loop's `daemon-` instance (`ledgerLoopMerger`).
  */
 
 export interface ExecutorPresence { executor: string; host: string; principal: string; kinds: NextActionKind[]; seenAt: string; claims: number }
@@ -35,6 +42,27 @@ export interface ExecutorPresence { executor: string; host: string; principal: s
  */
 export const executorLiveMs = 120_000;
 export const retainedExecutors = 200;
+
+/**
+ * How long a loop's merge request keeps it the installation's merger on the control plane's view.
+ * The loop requests a merge only when something is mergeable, so the window spans many cycles at
+ * the longest supported interval; past it the report is the presence report it always was, never
+ * a loop inferred from nothing.
+ */
+export const loopMergerLiveMs = 3_600_000;
+/** The master loop that merges on this installation, as the report needs it: live, and named. */
+export interface ReportedLoopMerger { live: boolean; name: string }
+
+/**
+ * The control plane's own reading of the loop (GY-916): the newest merge request its ledger holds
+ * from a `daemon-` merge instance — the instance only the durable loop mints (`daemonExecutor`);
+ * an executor's is `executor-…` — inside the window. A range read on the `(kind, created_at)` index.
+ */
+export async function ledgerLoopMerger(query: (text: string, values: unknown[]) => Promise<{ rows: any[] }>, now: Date, liveMs = loopMergerLiveMs): Promise<ReportedLoopMerger | null> {
+  const [latest] = (await query("SELECT payload->'details'->>'requestedBy' AS by, created_at FROM events WHERE kind='merge.enqueue.requested' AND created_at > $1 AND payload->'details'->>'requestedBy' LIKE '%#daemon-%' ORDER BY created_at DESC LIMIT 1",
+    [new Date(now.getTime() - liveMs)])).rows;
+  return latest ? { live: true, name: `the master loop (${String(latest.by).split('#')[0]}, last merge request ${new Date(latest.created_at).toISOString()})` } : null;
+}
 
 export class ExecutorRegistry {
   private readonly seen = new Map<string, ExecutorPresence>();
@@ -73,6 +101,8 @@ export interface ExecutorReport {
   served: NextActionKind[];
   /** Pending rows no live executor can claim, longest wait first. */
   unserved: UnservedAction[];
+  /** The live master loop that serves `merge` on this installation, when one is known; merge rows then wait on it. */
+  loop?: ReportedLoopMerger | null;
 }
 
 /** The command that serves a kind: the supervised slot on a coordinator host, or the bare executor. */
@@ -85,20 +115,27 @@ export const startExecutorFor = (kind: NextActionKind) => `start an executor tha
  * failure. A row whose kind no executor may ever run is not listed either — no fleet serves it by
  * design. Only an executor-runnable kind with no live executor at all is unserved.
  */
-export function executorReport(all: Work[], registry: ExecutorRegistry, now: Date, liveMs = executorLiveMs): ExecutorReport {
+export function executorReport(all: Work[], registry: ExecutorRegistry, now: Date, liveMs = executorLiveMs, loop: ReportedLoopMerger | null = null): ExecutorReport {
   const live = registry.live(now, liveMs);
   const served = [...new Set(live.flatMap(entry => entry.kinds))].sort() as NextActionKind[];
+  const merging = loop?.live ? loop : null;
   const unserved = openActions(all, now)
-    .filter(({ row }) => (executorRunnableKinds as readonly NextActionKind[]).includes(row.kind) && !served.includes(row.kind))
+    .filter(({ row }) => (executorRunnableKinds as readonly NextActionKind[]).includes(row.kind) && !served.includes(row.kind) && !(merging && row.kind === 'merge'))
     .map(({ row }) => ({ key: row.key, work: row.work, id: row.id, kind: row.kind, reason: row.reason, waitedMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)), since: row.requestedAt, start: startExecutorFor(row.kind) }))
     .sort((a, b) => b.waitedMs - a.waitedMs);
-  return { live, liveMs, served, unserved };
+  return { live, liveMs, served, unserved, ...(merging ? { loop: merging } : {}) };
+}
+
+/** The same report with a live merging loop applied: its merge rows wait on the loop, never on an executor. */
+export function withLoopMerger<R extends Pick<ExecutorReport, 'unserved'>>(report: R, loop: ReportedLoopMerger | null): R & { loop?: ReportedLoopMerger } {
+  return loop?.live ? { ...report, unserved: report.unserved.filter(entry => entry.kind !== 'merge'), loop } : report;
 }
 
 /** One sentence per unserved kind, for master status and the dashboard: the kind, who waits and for how long, and what to start. */
-export function describeUnserved(report: Pick<ExecutorReport, 'live' | 'unserved'>): { kind: NextActionKind; text: string; start: string; waitedMs: number; keys: string[] }[] {
+export function describeUnserved(report: Pick<ExecutorReport, 'live' | 'unserved' | 'loop'>): { kind: NextActionKind; text: string; start: string; waitedMs: number; keys: string[] }[] {
   const kinds = new Map<NextActionKind, UnservedAction[]>();
-  for (const entry of report.unserved) kinds.set(entry.kind, [...(kinds.get(entry.kind) ?? []), entry]);
+  // A merging loop serves merge: no line may name it unserved or propose giving executors the kind.
+  for (const entry of report.unserved) if (!(report.loop?.live && entry.kind === 'merge')) kinds.set(entry.kind, [...(kinds.get(entry.kind) ?? []), entry]);
   const wait = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
   return [...kinds.entries()].map(([kind, rows]) => {
     const [longest] = rows;

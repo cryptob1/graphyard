@@ -55,6 +55,8 @@ export type SelfUpgradeOutcome =
   | { outcome: 'up-to-date'; commit: string }
   | { outcome: 'refused'; reason: string; commit: string | null }
   | { outcome: 'failed'; reason: string }
+  /** The checkout moved and the restarts it owes wait on the cursor: the executor restart was refused (a claim still held), which the next cycle retries. */
+  | { outcome: 'pending'; reason: string; to: string }
   | { outcome: 'upgraded'; from: string | null; to: string; code: boolean; executors: ExecutorRestartResult | null; self: boolean };
 
 /** The one line about an outcome, for the loop's log. */
@@ -63,9 +65,25 @@ export function describeSelfUpgrade(upgraded: SelfUpgradeOutcome): string {
   if (upgraded.outcome === 'up-to-date') return `the checkout is current at ${shortCommit(upgraded.commit)}`;
   if (upgraded.outcome === 'refused') return `refused: ${upgraded.reason}`;
   if (upgraded.outcome === 'failed') return `failed: ${upgraded.reason}`;
+  if (upgraded.outcome === 'pending') return `pending at ${shortCommit(upgraded.to)}: ${upgraded.reason}`;
   return `checked out ${shortCommit(upgraded.to)}${upgraded.code ? '; loaded code moved' : '; no loaded code moved'}`
     + `${upgraded.executors ? `; executors ${upgraded.executors.result}${upgraded.executors.reason ? ` (${upgraded.executors.reason})` : ''}` : ''}`
     + `${upgraded.self ? '; the loop re-executes itself' : ''}`;
+}
+
+/**
+ * Whether the awaited `systemctl --no-block restart` ended because the restart it queued began
+ * (GY-916). The loop asks systemd to restart the very unit it runs in, so the queued stop ends
+ * the unit's whole cgroup — the systemctl child with it — while the loop still awaits that child.
+ * The child then dies on the stop's signal instead of exiting: that is the hand-off succeeding,
+ * observable in the journal as Stopping → Stopped → Started in the same second. A systemctl that
+ * ran to its end and exited non-zero (no such unit, no user bus, access denied), or was cut off by
+ * its own timeout, is a genuine failure and is still recorded as one.
+ */
+export function restartEndedBySupervisorStop(error: unknown): boolean {
+  const ended = error as { signal?: unknown; status?: unknown; timedOut?: unknown } | null;
+  return !!ended && typeof ended === 'object' && typeof ended.signal === 'string' && ['SIGTERM', 'SIGKILL', 'SIGHUP', 'SIGINT'].includes(ended.signal)
+    && (ended.status === null || ended.status === undefined) && ended.timedOut !== true;
 }
 
 export interface SelfUpgradeDeps {
@@ -77,6 +95,11 @@ export interface SelfUpgradeDeps {
   restartExecutors?: (to: string) => Promise<ExecutorRestartResult>;
   /** Re-executes the loop through its own supervisor unit; a loop no unit supervises cannot. */
   restartSelf?: () => Promise<void>;
+  /**
+   * Rewrites the loop's supervisor unit when it no longer matches the running configuration
+   * (`alignLoopUnit`), before the loop re-executes itself through it (GY-916).
+   */
+  alignUnit?: () => Promise<{ wrote: string; reason: string | null }>;
   now?: () => number;
   persist?: (state: DaemonState) => Promise<void>;
 }
@@ -110,6 +133,27 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     }
     return { outcome: 'refused', reason, commit };
   };
+  /**
+   * The supervisor unit re-applied before the loop re-executes through it (GY-916): a unit whose
+   * text drifted from the running configuration — a hand-copied example's watchdog window — is
+   * rewritten, so the process the restart starts runs under the window the configuration needs.
+   * A rewrite is a done action; a refusal is recorded once per distinct reason, never per pass.
+   */
+  const alignUnit = async () => {
+    if (!deps.alignUnit) return;
+    const unitKey = 'upgrade:unit';
+    const aligned = await deps.alignUnit().catch(error => ({ wrote: 'refused', reason: message(error) }));
+    if (aligned.wrote === 'updated' || aligned.wrote === 'created') {
+      storeAction(state, unitKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The loop's supervisor unit no longer matched the running configuration and was rewritten (${aligned.wrote}); the restart that follows starts the loop under it`, attempts: (state.actions[unitKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+      await persist();
+    } else if (aligned.wrote === 'refused') {
+      const detail = `The loop's supervisor unit does not match the running configuration and was not rewritten: ${aligned.reason ?? 'the rewrite was refused'}`;
+      if (detailChanged(state.actions[unitKey], detail)) {
+        storeAction(state, unitKey, { kind: 'config', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[unitKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+        await persist();
+      }
+    }
+  };
   /** Completes the restarts one alignment owes, with the checkout already at the tip. */
   const finish = async (pending: { from: string | null; to: string; code: boolean }): Promise<SelfUpgradeOutcome> => {
     const release = state.deployment!.sha!;
@@ -124,8 +168,14 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
     if (executors.result === 'refused') {
+      // The designed safety, not a fault (GY-916): a claim still held after the bounded wait. The
+      // owed restarts stay on the cursor as pending, the action is recorded waiting, and the next
+      // cycle's pass finds the checkout at the tip and completes them.
       const reason = `the executors were not restarted: ${executors.reason ?? 'the restart was refused'}; the fleet stands down on the moved checkout on its own and the restart is retried next cycle`;
-      return failed(reason);
+      state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
+      storeAction(state, key, { kind: 'config', work: null, principal: null, state: 'waiting', detail: reason, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+      await persist();
+      return { outcome: 'pending', reason, to: pending.to };
     }
     // The cursor is written before the loop re-executes itself: the next process must find the
     // alignment complete, never repeat it. `self` is written true before the call, because the
@@ -137,8 +187,12 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     await persist();
     await note(`Checked out base tip ${shortCommit(pending.to)}${pending.from ? ` from ${shortCommit(pending.from)}` : ''}; loaded code moved, the executors were restarted (${executors.result})${executors.reason ? `: ${executors.reason}` : ''}`, false);
     if (!deps.restartSelf) return failed('loaded code moved and the executors were restarted, but this loop cannot re-execute itself');
+    await alignUnit();
     try { await deps.restartSelf(); }
     catch (error) {
+      // The supervisor's own stop ended the awaited child: the restart the loop asked for is under
+      // way, so the alignment is complete and nothing failed (GY-916).
+      if (restartEndedBySupervisorStop(error)) return { outcome: 'upgraded', from: pending.from, to: pending.to, code: true, executors, self: true };
       state.upgrade.last = { ...state.upgrade.last!, self: false };
       await persist();
       const reason = `the loop could not re-execute itself through its supervisor: ${message(error)}`;

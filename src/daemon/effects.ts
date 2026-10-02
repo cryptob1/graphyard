@@ -47,6 +47,7 @@ import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import { alignLoopUnit, loopUnitName } from '../supervisor.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -789,6 +790,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         // --no-block queues the restart and returns: the hand-off is systemd's stop signal, which
         // the loop takes during its wait, not a call this process must survive.
         await run('systemctl', ['--user', '--no-block', 'restart', unit]);
+      },
+      // GY-916: the unit the restart above starts from is first brought back to the running
+      // configuration (its watchdog window follows run.intervalSeconds); only the packaged unit
+      // name is rewritten, and only when the loop runs under it.
+      alignUnit: async () => {
+        const config = current();
+        if (detectLoopSupervisorUnit() !== loopUnitName) return { wrote: 'none', reason: `this loop does not run under ${loopUnitName}` };
+        return alignLoopUnit({ root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds });
       },
       persist: persistLoop,
     }),
