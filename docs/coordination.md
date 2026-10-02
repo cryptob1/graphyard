@@ -37,6 +37,10 @@ The landing check compares the candidate's changes since its merge base with the
 
 Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. `graphyard sync GY-N --restore` does the same, then restores every out-of-scope file to the base tip in one new commit whose message names them, so a plain push updates the PR; it never rewrites history, and a force push is never needed or allowed.
 
+### Submit when your own criteria pass
+
+The full suite is CI's gate, not the worker's (GY-853). Every worker request says so. A worker runs the build and `graphyard verify GY-N`, which runs only its own criteria's proofs, and submits when they pass. It names in the PR any full-suite failure that comes only from its sandbox and lies outside `plannedFiles`, and it records no blocker for that failure. `verify` marks a proof `leftToCi` only when every one of the proof's own cases executed and passed, yet the run still ended abnormally (a hook, crash or signal from other suites in the file). `verify` then exits 0, and `complete` reports `passing` while naming that proof as left to CI. A failed, skipped or unexecuted case of the proof always blocks.
+
 ### Generated files never conflict
 
 `docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)) and `init` renders the managed `AGENTS.md` blocks; `sync` regenerates them after merging. The regression guard classifies `GRAPHYARD_GENERATED_FILES` paths (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.

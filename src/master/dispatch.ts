@@ -20,7 +20,7 @@ import { closeFailedLaunch, launchStartMs, type PromptDelivery, PromptNotAccepte
 import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
-import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness } from './harness.js';
+import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, submissionPolicyRule } from './harness.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, profileLaunchedFile, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
@@ -263,6 +263,7 @@ export function workerPrompt(config: Pick<MasterConfig, 'cliPath'> & Partial<Pic
     + (work.researchBrief && work.criteria ? researchWorkerSection({ ...work, criteria: work.criteria, description: work.description ?? '' }, config.cliPath) : '')
     // The standard documentation criterion the control plane stamped at create time (GY-215).
     + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
+    + submissionPolicyRule
     + destructivePromptGuidance
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     + resumedAttempt(work)
