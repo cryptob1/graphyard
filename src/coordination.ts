@@ -120,17 +120,36 @@ const touchesHot = (item: Work, hot: ReadonlySet<string>) => {
  * order below still decides):
  * the smallest-scope and cold-first preferences alone starved a broad item for hours while smaller
  * items kept arriving ahead of it (GY-1023, ready from 00:40 to past 04:00 on 2026-10-01).
+ * `dispatchSort` reads each item's wait once per sort; prefer it over `.sort(dispatchOrder)` when
+ * ordering a whole set with a clock.
  */
 export const dispatchStarvationMs = 60 * 60_000;
-export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new Set(), now?: number) {
+/**
+ * How long `item` has waited in its stage: from `stageEnteredAt`, else `createdAt`. A row whose
+ * times are both unreadable cannot be shown to be fresh, so it counts as having waited without
+ * bound and is aged like a starving item rather than silently never (GY-1040).
+ */
+export function stageWaitMs(item: Pick<Work, 'stageEnteredAt' | 'createdAt'>, now: number) {
+  const entered = Date.parse(item.stageEnteredAt ?? ''), created = Date.parse(item.createdAt);
+  const since = Number.isNaN(entered) ? created : entered;
+  return Number.isNaN(since) ? Infinity : now - since;
+}
+const starving = (item: Work, now: number | undefined) => now !== undefined && stageWaitMs(item, now) >= dispatchStarvationMs;
+function dispatchRank(a: Work, b: Work, hot: ReadonlySet<string>, starvingA: boolean, starvingB: boolean) {
   const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
   const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);
-  const waited = (item: Work) => now === undefined ? 0 : now - Date.parse(item.stageEnteredAt ?? item.createdAt);
-  const starvingA = waited(a) >= dispatchStarvationMs, starvingB = waited(b) >= dispatchStarvationMs;
   return a.priority - b.priority
     || (starvingA !== starvingB ? (starvingA ? -1 : 1) : 0)
     || (hotA !== hotB ? (hotA ? 1 : -1) : 0)
-    || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || Date.parse(a.createdAt) - Date.parse(b.createdAt);
+    || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || (Date.parse(a.createdAt) - Date.parse(b.createdAt) || 0);
+}
+export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new Set(), now?: number) {
+  return dispatchRank(a, b, hot, starving(a, now), starving(b, now));
+}
+/** `items` in dispatch order, each item's starvation read once rather than on every comparison. */
+export function dispatchSort(items: readonly Work[], hot: ReadonlySet<string> = new Set(), now?: number) {
+  const starved = new Map(items.map(item => [item, starving(item, now)]));
+  return [...items].sort((a, b) => dispatchRank(a, b, hot, starved.get(a)!, starved.get(b)!));
 }
 
 export function diagnose(work: Work, all: Work[], now: number, jobs: IntegrationJob[] = []): Diagnostic[] {

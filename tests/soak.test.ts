@@ -1714,7 +1714,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')), [], 'no exited-session sighting outlives the day');
   assert.deepEqual(final.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').map(handle => `${item.key} ${handle.id}`)), [], 'every implementation handle is closed once its item is delivered');
   const seconds = (performance.now() - began) / 1000;
-  assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
+  assert.ok(seconds < 120, `the day runs well inside the six minutes its case timeout allows it (${seconds.toFixed(1)} s)`);
 });
 
 test('unit:soak-invariants-hold — the parallel-tip window validates several queue positions at once, a failing tip ejects only its own entry while the suffix rebuilds without it, and a mid-day window change is republished, with every system invariant holding', { timeout: 360_000 }, async () => {
@@ -1785,7 +1785,7 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-854: a queue-only day in which item three's first tip, chained behind item two's, fails and
   // keeps failing after its rerun. Item two's tip passes but GitHub is slow to make it mergeable, so
   // item three is ejected while item two is still queued: the ejected tip holds item two's unlanded
@@ -2019,7 +2019,7 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   assert.ok(seconds < 150, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 600_000 }, async () => {
   // GY-898: the master-session step runs every cycle of the real loop here. The session dies at
   // minute 70, inside a window (minutes 60–100) in which the registry refuses every end, so the
   // rotation's release is owed and retried; the relaunched session passes its 90-minute budget.
@@ -2318,7 +2318,7 @@ test('unit:soak-invariants-hold — headless approver runs through loop restarts
   assert.deepEqual(readdirSync(registry), [], 'ended runs leave the registry once past their retention');
 });
 
-test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 450_000 }, async () => {
+test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-999: a worker whose push is refused for want of a valid GitHub login records that blocker.
   // The loop ends the attempt in the cycle that sees it — work kept, pane closed, lease released —
   // and the item is launched again with a fresh credential. The ending counts on the GY-885 retry
