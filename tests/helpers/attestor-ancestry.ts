@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { lstat } from 'node:fs/promises';
+import { isAbsolute, relative, resolve } from 'node:path';
 import type { TestContext } from 'node:test';
 import { assertAncestryFixed } from '../../src/runner-executor.js';
 
@@ -18,20 +19,25 @@ export async function ancestryRefusal(path: string, uid = process.getuid!()) {
 /**
  * Whether the fixture under ROOT can be attested here. When it can, the test runs in full.
  * When this host's ancestry fails the ownership rule, `refuses` — the attestor's own check of
- * the fixture — must reject with exactly that ownership refusal, the test records an
+ * the fixture — must reject with an ownership refusal of a directory above it, the test records an
  * environment note, and the caller stops: what the host allows is asserted, and nothing that
  * needs an attested run is claimed.
  */
 export async function attestable(t: TestContext, root: string, refuses: () => Promise<unknown>) {
-  const refusal = await ancestryRefusal(root);
-  if (!refusal) return true;
-  const unowned = refusal.slice(refusal.lastIndexOf(': ') + 2);
-  await assert.rejects(refuses(), (error: Error) => {
-    assert.match(error.message, /Every directory leading to the .+ must be owned by the supervising attestor identity or by root: /);
-    assert.ok(error.message.includes(`: ${unowned}`), `the attestor refused ${unowned}: ${error.message}`);
-    return true;
-  });
-  t.diagnostic(`environment note (GY-966): ${unowned} stats as uid ${(await lstat(unowned)).uid}, an account that is neither this one nor root, as a worker sandbox reports root-owned /tmp and /home; the attestor's ownership refusal of this fixture was asserted in place of an attested run`);
+  const uid = process.getuid!();
+  if (!await ancestryRefusal(root, uid)) return true;
+  const error = await refuses().then(() => null, (failure: Error) => failure);
+  assert.ok(error, `the attestor accepted ${root} although a directory above it fails the ownership rule`);
+  assert.match(error.message, /Every directory leading to the .+ must be owned by the supervising attestor identity or by root: /);
+  // The attestor names the deepest foreign ancestor it sees. A child attestor may see a
+  // different one than this process does (a simulated sandbox follows each process's own
+  // temporary directory), so the refusal must name some directory above the fixture that
+  // this process, too, sees owned by neither this account nor root.
+  const unowned = error.message.slice(error.message.lastIndexOf(': ') + 2).trim();
+  const above = relative(unowned, resolve(root));
+  assert.ok(isAbsolute(unowned) && above !== '' && !above.startsWith('..') && !isAbsolute(above), `the attestor refused ${unowned}, which is not above ${root}: ${error.message}`);
+  const owner = (await lstat(unowned)).uid;
+  assert.ok(owner !== uid && owner !== 0, `the attestor refused ${unowned}, which this process sees owned by uid ${owner}: ${error.message}`);
+  t.diagnostic(`environment note (GY-966): ${unowned} stats as uid ${owner}, an account that is neither this one nor root, as a worker sandbox reports root-owned /tmp and /home; the attestor's ownership refusal of this fixture was asserted in place of an attested run`);
   return false;
 }
-
