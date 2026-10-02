@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { demand } from './refusal.js';
-import { actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
+import { actionRecordLimit, actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
 
@@ -82,7 +82,8 @@ export interface ActionRow {
 export interface ActionQueue { actions: ActionRow[]; history: ActionRow[] }
 export interface ActionTransition { event: ActionEvent; action: ActionRow }
 
-export const actionHistoryLimit = 50, actionRecordLimit = 20;
+export const actionHistoryLimit = 50;
+export { actionRecordLimit };
 /** How long a claim holds a row before another executor may take it. */
 export const actionClaimMs = 120_000;
 /**
