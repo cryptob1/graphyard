@@ -114,7 +114,7 @@ export const herdrFaultKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['sess
  * no action named is the blocker holding it. A derived line of the item's own kind always restates it.
  */
 export const restatements: Partial<Record<FaultKind, FaultKind[]>> = {
-  'containment-settleable': ['containment'], 'containment-grace': ['containment'], 'reviewer-exhausted': ['role-capacity'], 'session': ['escalation:lease-loss'], 'stalled-item': ['blocker', 'sandbox-blocker'],
+  'containment-settleable': ['containment'], 'containment-grace': ['containment'], 'reviewer-exhausted': ['role-capacity'], 'session': ['escalation:lease-loss'], 'stalled-item': ['blocker', 'sandbox-blocker', 'workflow-permission'],
 };
 /**
  * A failing run ends when its action succeeds (noteActionOutcome), and also when the loop no longer
