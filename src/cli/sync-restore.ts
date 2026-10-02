@@ -1,5 +1,7 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { shellQuote } from '../repository-setup.js';
 import { localScopeFindings } from '../sync.js';
 
 type Git = (...args: string[]) => string;
@@ -29,6 +31,10 @@ export function restoreOutOfScope(git: Git, baseTip: string, refused: readonly s
  * fetch that brings it in (GY-1080): `restore --recurse-submodules` cannot check out a commit the
  * clone never fetched, and a raw git error would not say which submodule or what to run. A
  * submodule that is not checked out has no clone to move, so it is never missing a commit.
+ *
+ * The probe runs quietly: a missing commit is the expected answer, so git's "fatal:" stderr is never
+ * echoed ahead of the report. The fetch quotes a path that a shell would split or expand, so the
+ * named command can be pasted as it is.
  */
 export function missingSubmoduleCommits(git: Git, baseTip: string, refused: readonly string[]): { path: string; commit: string; fetch: string }[] {
   const paths = [...new Set(refused)].sort();
@@ -41,8 +47,8 @@ export function missingSubmoduleCommits(git: Git, baseTip: string, refused: read
     if (!match) continue;
     const [, commit, path] = match;
     if (!existsSync(join(top, path, '.git'))) continue;
-    try { git('-C', join(top, path), 'cat-file', '-e', `${commit}^{commit}`); }
-    catch { missing.push({ path, commit, fetch: `git -C ${path} fetch origin ${commit}` }); }
+    const probe = spawnSync('git', ['-C', join(top, path), 'cat-file', '-e', `${commit}^{commit}`], { stdio: 'ignore' });
+    if (probe.status !== 0) missing.push({ path, commit, fetch: `git -C ${/^[\w@%+=:,./-]+$/.test(path) ? path : shellQuote(path)} fetch origin ${commit}` });
   }
   return missing;
 }

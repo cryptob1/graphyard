@@ -235,6 +235,42 @@ test('unit:sync-restores-out-of-scope — a submodule clone missing the base com
   assert.equal(at(join(worker, 'vendor/library'))('rev-parse', 'HEAD'), second);
 });
 
+test('unit:sync-restores-out-of-scope — the missing-commit probe is quiet and the named fetch quotes a path a shell would split', async () => {
+  const directory = await temporaryDirectory('sync-restore');
+  const library = join(directory, 'library'), worker = join(directory, 'worker');
+  const at = (cwd: string) => (...args: string[]) => execFileSync('git', ['-c', 'protocol.file.allow=always', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const lib = at(library), raw = at(worker);
+  for (const [cwd, run] of [[library, lib], [worker, raw]] as const) {
+    execFileSync('git', ['init', '--quiet', '--initial-branch=main', cwd]);
+    run('config', 'user.email', 'test@example.com'); run('config', 'user.name', 'Test');
+  }
+  await writeFile(join(library, 'lib.txt'), 'one\n'); lib('add', '.'); lib('commit', '--quiet', '-m', 'One');
+  const first = lib('rev-parse', 'HEAD');
+  const path = "vendor/odd lib's $HOME";
+  raw('submodule', 'add', '--quiet', library, path);
+  raw('commit', '--quiet', '-m', 'Add the library');
+  await writeFile(join(library, 'lib.txt'), 'two\n'); lib('commit', '--quiet', '-am', 'Two');
+  const second = lib('rev-parse', 'HEAD');
+  raw('update-index', '--cacheinfo', `160000,${second},${path}`); raw('commit', '--quiet', '-m', 'Base bumps the library');
+  const baseTip = raw('rev-parse', 'HEAD');
+  raw('update-index', '--cacheinfo', `160000,${first},${path}`); raw('commit', '--quiet', '-m', 'Worker pins the old library');
+
+  // The workspace git wrapper echoes stderr; the expected cat-file failure must never go through it.
+  const calls: string[][] = [];
+  const git = (...args: string[]) => { calls.push(args); return raw(...args); };
+  const missing = missingSubmoduleCommits(git, baseTip, [path]);
+  assert.ok(!calls.some(args => args.includes('cat-file')));
+  assert.equal(missing.length, 1);
+  const fetch = `git -C 'vendor/odd lib'\\''s $HOME' fetch origin ${second}`;
+  assert.deepEqual(missing, [{ path, commit: second, fetch }]);
+
+  // The named command runs as pasted into a shell, and the restore then succeeds.
+  execFileSync('sh', ['-c', `${fetch.replace('git ', 'git -c protocol.file.allow=always ')} --quiet`], { cwd: worker, stdio: 'ignore' });
+  assert.deepEqual(missingSubmoduleCommits(git, baseTip, [path]), []);
+  assert.deepEqual(restoreOutOfScope(git, baseTip, [path]), [path]);
+  assert.equal(raw('rev-parse', `HEAD:${path}`), second);
+});
+
 test('unit:worker-prompt-names-sync-restore — the worker instructions name sync --restore and rule out a force push', () => {
   const instructions = managedInstructions('', 'https://graphyard.example');
   assert.match(instructions, /sync GY-N --restore/);
