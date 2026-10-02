@@ -433,6 +433,7 @@
     "tests/reblocked-attempt.test.ts": 1636,
     "tests/receipt-retention.test.ts": 2396,
     "tests/reconcile-batch-setting.test.ts": 1027,
+    "tests/reconcile-scale.test.ts": 17577,
     "tests/reconciliation-snapshot.test.ts": 10034,
     "tests/recovery-docs.test.ts": 714,
     "tests/recovery.test.ts": 7978,
