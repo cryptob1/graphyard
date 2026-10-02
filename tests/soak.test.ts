@@ -962,7 +962,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // ---- GY-811: the containment day. The work snapshot takes 6 s to read, as it does on a loaded
   // ---- plane, so its own bound is wider than the 5 s tolerance and cannot settle; the loop bounds its clock with the light
   // ---- timed HEAD / instead, which fails, then answers slowly, then answers fast as the day goes on.
-  const fenced = { drift: 0, probes: [] as { cycle: number; elapsed: number; phase: 'fail' | 'slow' | 'fast' }[], assessable: new Set<number>(), liveOnly: new Set<number>(), bare: new Set<number>(),
+  const fenced = { drift: 0, probes: [] as { cycle: number; elapsed: number; phase: 'fail' | 'slow' | 'fast' }[], assessable: new Set<number>(), liveOnly: new Set<number>(), graced: new Set<number>(), bare: new Set<number>(),
     settled: [] as { key: string; epoch: number; elapsed: number }[], assessed: [] as { key: string; epoch: number; elapsed: number; refusals: string[] }[] };
   if (options.containment) {
     const phases = options.containment;
@@ -972,9 +972,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await slowRead(3_000);
       const result = await read();
       await slowRead(3_000);
-      // What this cycle's reclaim step will see: a quarantine it may assess, only live ones, or none.
+      // What this cycle's reclaim step will see: a quarantine that could settle (past its grace
+      // window), one still in its grace window, only live ones, or none.
       const at = Date.parse(result.now), local = containmentQuarantines(result.work, config.hostId);
-      if (local.some(item => containmentPhase(item, at)?.state !== 'live')) fenced.assessable.add(cycles);
+      if (local.some(item => containmentPhase(item, at)?.state === 'lapsed')) fenced.assessable.add(cycles);
+      else if (local.some(item => containmentPhase(item, at)?.state === 'grace')) fenced.graced.add(cycles);
       else if (local.length) fenced.liveOnly.add(cycles);
       else fenced.bare.add(cycles);
       return result;
@@ -2411,8 +2413,9 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   assert.deepEqual(lost, [], 'no lease was lost: a dead worker lapses and its fence waits for the loop');
   assert.deepEqual(final.filter(item => item.containmentQuarantine).map(item => item.key), [], 'no fence outlives the day');
 
-  // Probe volume is bounded: at most one timed read a cycle, exactly one in each cycle with an
-  // assessable quarantine, and none in a cycle whose quarantines are all live or that has none.
+  // Probe volume is bounded: at most one timed read a cycle, exactly one in each cycle with a
+  // quarantine past its grace window, and none in a cycle whose quarantines are all live or still in
+  // grace, or that has none (GY-1044).
   const perCycle = new Map<number, number>();
   for (const probe of fenced.probes) perCycle.set(probe.cycle, (perCycle.get(probe.cycle) ?? 0) + 1);
   assert.deepEqual([...perCycle.values()].filter(count => count > 1), [], 'never more than one timed read in a cycle');
@@ -2420,6 +2423,7 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   assert.deepEqual([...fenced.assessable].filter(cycle => !perCycle.has(cycle)), [], 'every cycle with an assessable quarantine read the clock');
   assert.ok(fenced.liveOnly.size > 30, `many cycles held only live workers' fences, and read no clock (${fenced.liveOnly.size})`);
   assert.ok(fenced.bare.size > 0, 'cycles with no fence at all read no clock');
+  assert.ok(fenced.graced.size > 0, `cycles whose fences were at most in their grace window read no clock (${fenced.graced.size})`);
   const lastSettled = Math.max(...fenced.settled.map(entry => entry.elapsed));
   assert.deepEqual(fenced.probes.filter(probe => probe.elapsed > lastSettled).map(probe => probe.elapsed / minute), [], `no read after the last fence settled, for the rest of the day's ${cycles} cycles`);
   for (const phase of ['fail', 'slow', 'fast'] as const) assert.ok(fenced.probes.some(probe => probe.phase === phase), `the fences stood through ${phase} reads`);
