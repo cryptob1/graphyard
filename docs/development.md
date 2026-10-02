@@ -27,6 +27,8 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 `test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips every pre-merge file (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).
 
+A check `main` fails too is no candidate's fault: the loop requests no rework or approver (an unreadable base log waits), raises one attention and P0 repair item per test and base head, and once the base is green reruns and refreshes the blocked candidates.
+
 ## Documentation
 
 `docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; `GRAPHYARD_GENERATED_FILES` ([value](coordination.md#generated-files-never-conflict)) exempts them from the regression guard. README.md and `docs/` stay within the `wordBudget` in `graphyard.json` (12,000 words, no page over 1,200), each topic on one page (`tests/docs-budget.test.ts`): link, never restate. A total over the budget never fails CI: the test warns, and `master status` reports the total and the largest pages; a page over its per-page cap still fails. At 97% of the budget, `master status` raises `docs`; the loop files one 5%-headroom trim item.

@@ -14,7 +14,6 @@
   - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair the cause; never bypass.
-- **CI check main fails too**: no candidate's fault, so no rework or approver (an unreadable base log waits). One attention and P0 repair item per test and base head; once the base is green the loop reruns and refreshes the blocked candidates.
 - **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
 - **Wrong accepted evidence**: [revoke it](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).
 - **GitHub paused or webhook silent**: [request budget](operations-reference.md#github-request-budget).
