@@ -58,13 +58,13 @@ export const faultCatalogue = {
   'overlap-hold': ['hold-overdue'],
   'observation': ['github-budget', 'integration-job', 'action:refresh'],
   'deployment': ['production', 'throughput', 'action:deployment', 'action:smoke'],
-  'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'action:config'],
+  'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'workflow-permission', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
   'merge': ['base-conflict', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
-  'proof': ['proof-gap', 'timing-failure', 'escalation:evidence-policy-conflict', 'action:proof'],
+  'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'memory-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault', 'action:diagnosis'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
   'unclassified': ['unclassified'],
@@ -108,6 +108,8 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['overlong-session', (_, text) => /past the .+ maximum for its role/.test(text)],
   ['context-overflow', (_, text) => /escalation context for \S+ assembled to/.test(text)],
   ['timing-failure', (_, text) => /^Required CI check .+ failed on .*timing-dependent/.test(text)],
+  ['nonexercising-proof', (_, text) => /^\S+ is awaiting rework for a non-exercising proof: /.test(text)],
+  ['retry-stopped', (_, text) => /^The loop stopped retrying .+: \d+ consecutive attempts failed with the same client error/.test(text)],
   ['agent-request', (_, text) => /recorded a \S+ on \S+ .+ ago and released/.test(text)],
   ['owed-decision', (_, text) => /no executor may run it; .+ has been owed for/.test(text)],
   ['generated-files', (_, text) => /generated-file manifest|GRAPHYARD_GENERATED_FILES/.test(text)],
@@ -166,8 +168,24 @@ export function workFaults(work: Work, now: number): FaultObservation[] {
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
   const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait, a refused scope request */ (work.humanRequest && !work.humanRequest.answer) || (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker));
-  if (work.blocker && !restated) found.push(observe(/sandbox|refused path|--add-dir|Operation not permitted/i.test(work.blocker) ? 'sandbox-blocker' : 'blocker', work.key, work.blocker));
+  if (work.blocker && !restated) found.push(observe(blockerKind(work.blocker), work.key, work.blocker));
   return found;
+}
+
+/**
+ * The kind of a recorded blocker. A blocker is a stalled gate only when it names nothing the
+ * installation lacks: one quoting a sandbox refusal is the sandbox rule (`sandbox-blocker`), and one
+ * quoting GitHub's refusal to let an App write `.github/workflows` without the `workflows`
+ * permission is that permission (`workflow-permission`, GY-1097). Worker push tokens are narrowed
+ * to contents and pull requests by design, so every worker whose push carries a workflow-file
+ * change — its own, or main's brought in by a base sync — meets that refusal however long the gate
+ * is held: on 2 October 2026 GY-793 and GY-1094 were both filed as stalled gates for it, within
+ * three minutes of main taking GY-1093's workflow changes.
+ */
+export function blockerKind(blocker: string): 'sandbox-blocker' | 'workflow-permission' | 'blocker' {
+  if (/sandbox|refused path|--add-dir|Operation not permitted/i.test(blocker)) return 'sandbox-blocker';
+  if (/refusing to allow an? .{0,40}App to create or update workflow/i.test(blocker)) return 'workflow-permission';
+  return 'blocker';
 }
 
 // ---------------------------------------------------------------------------

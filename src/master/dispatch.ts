@@ -19,7 +19,7 @@ import { closeFailedLaunch, launchStartMs, type PromptDelivery, PromptNotAccepte
 import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
-import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant } from './harness.js';
+import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, profileLaunchedFile, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 
@@ -246,6 +246,7 @@ export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<W
     + (work.researchBrief && work.criteria ? researchWorkerSection({ ...work, criteria: work.criteria, description: work.description ?? '' }, config.cliPath) : '')
     // The standard documentation criterion the control plane stamped at create time (GY-215).
     + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
+    + submissionPolicyRule
     + destructivePromptGuidance
     + resumedAttempt(work)
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide), which ends your lease and parks the item for the human, then stop. `

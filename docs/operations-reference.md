@@ -11,7 +11,7 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ## Lost worker before submission
 
-A lease expires 120 s after the last heartbeat (one more lease period after a recorded server renewal fault); the next claim (higher epoch) keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
+A lease expires 120 s after the last heartbeat (a lease period more after a recorded renewal fault); the next, higher-epoch claim keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -27,7 +27,7 @@ With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rew
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile, however long its workflow run waits for a runner (`check.rerun.waiting`; master status says *waiting for a runner*); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), keeping position, approval and proofs without rework, however long it is waiting for a runner (`check.rerun.waiting`); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). A passing rerun lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 
@@ -74,19 +74,19 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`. The database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else the data directory's volume size when readable (same host, role may read `data_directory`), else an advisory 10 GiB that only warns.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (filesystem-wide, not per-user quota; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. The database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else its data directory's volume size when readable (same host, role may read `data_directory`), else an advisory 10 GiB warning.
 
 ## Storage retention
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
-- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a row a delta extends, an item's newest save, a delivery event or the revision a delivery cites, a row of an item merged but not done, or a row the flow projection has not read. Each batch appends a `ledger.compacted` event with counts per kind. Postgres reuses the space; only `VACUUM FULL` returns it to the volume.
+- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed unless they move the stage or delivery.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, ≤2,000 rows per phase batch, never a row a delta extends, an item's newest save, a delivery event or its cited revision, an item merged but not done, or one the flow projection has not read; each batch appends `ledger.compacted`. Only `VACUUM FULL` returns space to the volume.
 
 ### Host memory
 
-Session-started `npm test`, `test:browser`, `npm run typecheck`, `tsc --noEmit` take a host slot in `.verification-slots` under the managed worktree root (Codex: `--add-dir`): max(2, floor(total GB / 8)), or `GRAPHYARD_VERIFICATION_SLOTS`. A run finding all held prints what it waits on. CI and your shell run unbounded.
+Session-started `npm test`, `test:browser`, `npm run typecheck`, `tsc --noEmit` hold one of max(2, floor(total GB / 8)) host slots (`GRAPHYARD_VERIFICATION_SLOTS`) in `.verification-slots` under the managed worktree root (Codex: `--add-dir`), printing what they wait on; CI and shells are unbounded.
 
-Below max(10% of total, 4 GB) available, the loop, dispatcher and executors launch nothing there, recording `Launches deferred` (`escalation:dispatch:memory`) and one `memory` attention item (class `resources`) naming top consumers, under one `memory-pressure` fault per dip; 1 GB above the floor resumes launches, recorded; running sessions are untouched.
+Under max(10% of total, 4 GB) available, nothing launches there (`Launches deferred`, `escalation:dispatch:memory`; one `memory` attention item, class `resources`, naming top consumers; one `memory-pressure` fault per dip) until 1 GB above it; running sessions continue.
 
 ## Bootstrap mode for a self-proving change
 
@@ -125,6 +125,8 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 ## Scale limits
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token (budget above reserve, less others' spend, to reset). Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed, five-minute-due, review/rework waits, running sessions, `available_at`; tight, idle items await webhooks. `observationThroughput`: budget, pace, head lag, oldest unobserved (`github` past 120s). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
+
+Reconcile reads each live item once per pass, not per batch, and locks only its batch rows, so mutations on other items never wait. Contended batches back off, then defer to the next tick; deferrals and ticks over 5 s log warnings.
 
 ### Concurrent reconciliation
 
