@@ -89,7 +89,8 @@ const fleetConfig = masterConfigSchema.parse({
   repository: 'owner/project', baseBranch: 'main', githubAppId: 15368, hostId: 'host-1', masterAgentName: 'm', herdrWorkspace: 'wF',
   workers: [{ name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }],
   reviewer: { appId: 4242, installationId: 99, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.json', boundAt: '2026-09-01T00:00:00.000Z' },
-  reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto' }],
+  // Concurrency 1 declared: the automatic profile's unset concurrency reads as automaticReviewerConcurrency (GY-1072), and these tests are about one slot.
+  reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto', concurrency: 1 }],
   producers: [{ name: 'claude-producer', principal: producer.id, agentName: 'proof-claude', kind: 'claude', credentialFile: '/outside/producer.token', approvals: 'auto' }],
   run: { reviewerProfile: 'claude-reviewer' },
 });

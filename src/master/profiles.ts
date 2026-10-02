@@ -367,6 +367,21 @@ export const masterConfigSchema = z.object({
   invariants: invariantThresholdsSchema.optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
+/**
+ * How many sessions the automatic reviewer profile runs when its `concurrency` is unset (GY-1072).
+ * Every automatic review goes to the profile `run.reviewerProfile` names, so at the general
+ * default of one the whole installation reviewed one candidate at a time, and one finished
+ * session left in its pane held the only name and stalled every review behind it. The profile
+ * `run.reviewerProfile` names therefore runs this many sessions unless it declares its own
+ * concurrency; every other profile keeps the default of one.
+ */
+export const automaticReviewerConcurrency = 4;
+/** The config as the reviewer launchers and their readers count sessions: the automatic profile's unset concurrency read as `automaticReviewerConcurrency`. */
+export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 'run'>>(config: T): T {
+  const automatic = config.run.reviewerProfile;
+  if (!automatic || !config.reviewers.some(profile => profile.name === automatic && profile.concurrency === undefined)) return config;
+  return { ...config, reviewers: config.reviewers.map(profile => profile.name === automatic && profile.concurrency === undefined ? { ...profile, concurrency: automaticReviewerConcurrency } : profile) };
+}
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
