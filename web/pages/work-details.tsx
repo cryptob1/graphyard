@@ -10,6 +10,7 @@ import { assignment } from '../../src/model/assignment';
 import { CandidatePr, CandidateSha, shortShas } from '../candidate';
 import EvidenceArtifacts from '../components/evidence-artifacts';
 import PostDeployment from '../components/post-deployment';
+import TestCases from '../components/test-cases';
 import StatusAge from '../components/status-age';
 import Term, { Explained } from '../components/term';
 import { age } from '../../src/model/format';
@@ -18,8 +19,9 @@ import { candidatePrUrl } from '../links';
 import { activityLabel, historyLabel, overlapLine, whatIsLeft, type LeftGroup } from '../item-page';
 import { plainStatus } from '../../src/model/plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
-import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
+import { checkStates, describeTip, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
+import { blastRadius } from '../../src/model/blast-radius';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';
@@ -42,7 +44,8 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
  * section answers one question, in this order: What is left (one plain line per unmet
  * requirement, grouped by step, naming who clears it; gate reasons only through `plainReason`),
  * Requirements (one line per criterion with its met or pending mark, the full text on expand),
- * Pull request (link, commit, changed files, checks, review) and Activity (the latest events, the
+ * Pull request (link, commit, changed files, checks, review), Test cases (the e2e cases linked to
+ * the pull request, with their result on its head, GY-162) and Activity (the latest events, the
  * full history on expand). Everything technical — gate internals, sessions and their attach
  * commands, review provider, next action and executors, agent requests, evidence — is in one
  * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
@@ -108,6 +111,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const checks = checkStates(item, release.ciAppIds);
   // The review gate's own verdict, whichever provider gave it (GitHub, Codex or an agent reviewer).
   const reviewGate = item.gates.find(g => g.name === 'review');
+  // What merging it would reach and what could take it back (GY-972), from its scope and gates.
+  const radius = blastRadius(item);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
@@ -144,7 +149,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
       </dl> : <p className="muted">No pull request yet.</p>}
+      {item.candidate && <details className={`blast-radius danger-${radius.danger}`}><summary>{radius.headline}</summary><ul>{radius.sentences.map(sentence => <li key={sentence}>{sentence}</li>)}</ul></details>}
     </section>
+    <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}
       <details className="full-history"><summary>{historyLabel(events.length)}</summary><History key={item.id} events={events}/></details>
@@ -172,7 +179,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}
       {!!item.exclusiveResources?.length && <p>Exclusive resources: {item.exclusiveResources.join(', ')}. Reserved only while an assignment lease is active.</p>}
       {overlap && <p className="overlap-line">{overlap}. Coordinate the changes; this warning does not establish a semantic conflict.</p>}
-      {entry && <><h3>Merge queue</h3><p>Position {entry.position + 1} of {entry.size} · waiting {age(entry.enqueuedAt)} · {entry.current ? 'validated on its predicted tip' : 'awaiting speculative validation'}</p><p className="muted">Predicted base <code>{entry.predictedBase ? entry.predictedBase.slice(0, 8) : 'pending'}</code> · predicted tip <code>{entry.tip ? entry.tip.slice(0, 8) : 'pending'}</code>{entry.predecessors.length ? ` · behind ${entry.predecessors.join(', ')}` : ''}</p>{entry.reasons.map(reason => <p className="muted" key={reason}>{shortShas(reason)}</p>)}{item.queue?.speculation && <code>{shortShas(item.queue.speculation.ref)}</code>}</>}
+      {entry && <><h3>Merge queue</h3><p>Position {entry.position + 1} of {entry.size} · waiting {age(entry.enqueuedAt)} · {entry.current ? 'validated on its predicted tip' : 'awaiting speculative validation'}</p><p className="muted">Predicted base <code>{entry.predictedBase ? entry.predictedBase.slice(0, 8) : 'pending'}</code> · predicted tip <code>{entry.tip ? entry.tip.slice(0, 8) : 'pending'}</code>{entry.predecessors.length ? ` · behind ${entry.predecessors.join(', ')}` : ''}</p>{entry.reasons.map(reason => <p className="muted" key={reason}>{shortShas(reason)}</p>)}{!!item.queue?.tips?.length && <ul className="queue-tips" aria-label="In-flight tips">{item.queue.tips.map(tip => <li key={tip.position} data-tip={tip.position} data-ci={tip.ci}>{describeTip(tip)}{tip.tip && <> · <code>{tip.tip.slice(0, 8)}</code></>}</li>)}</ul>}{item.queue?.speculation && <code>{shortShas(item.queue.speculation.ref)}</code>}</>}
       {!entry && item.queueEjection && <><h3>Merge queue</h3><p className="amber">Ejected {new Date(item.queueEjection.at).toLocaleString()}: {shortShas(item.queueEjection.reason)}</p><p className="muted">A new candidate re-enters at the back of the queue. There is no bypass.</p></>}
       <h3>Code review</h3><p>Provider: {item.policy.reviewProvider === 'codex' ? 'Codex cloud' : item.policy.reviewProvider === 'agent' ? 'Identity-bound agent reviewers' : 'Formal GitHub approval'}</p>{item.policy.reviewProvider === 'agent' && <p className="muted">Reviewer profiles in failover order: {(item.policy.reviewerProfiles ?? []).map(p => `${p.name} (${p.runtime})`).join(' → ') || 'none configured'}</p>}{item.observation?.agentReview && <p>{shortShas(item.observation.agentReview.reason)}</p>}{(item.reviewFailovers ?? []).filter(f => f.sha === item.candidate?.sha && f.baseSha === item.candidate?.baseSha && f.policyRevision === item.policyRevision).map(f => <p className="amber" key={`${f.profile}-${f.at}`}>Failover: {f.profile} exhausted ({f.exhaustion}) · {f.nextProfile ? `dispatched to ${f.nextProfile}` : 'no reviewer profile remains'}</p>)}{admin && <p className="muted">Changing provider creates a policy revision and requires fresh acceptance evidence. Agent reviewer profiles are configured through the CLI or API because they name registered reviewer App identities.</p>}
       <h3>Next action and executors</h3>

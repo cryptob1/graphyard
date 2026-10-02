@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { readdirSync, readFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentRuntimeRun, agentRuntimeTimeoutMs, daemonExecutor, listHerdrAgents, masterConfigSchema, masterHarness, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
@@ -11,6 +11,7 @@ import { daemonEffects, emptyDaemonState, runDaemon, writeDaemonState } from '..
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
 import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * Each test is named for the proof it produces (GY-114): integration:setup-installs-supervisor,
@@ -34,7 +35,7 @@ const masterSource = () => readdirSync(fileURLToPath(new URL('../src/master', im
 const supervisedUser = String(process.getuid?.() ?? '');
 
 async function repository() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-supervision-'));
+  const root = await temporaryDirectory('supervision');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
@@ -84,8 +85,8 @@ const fileState = async (path: string) => { try { const info = await stat(path);
 
 test('integration:setup-installs-supervisor — setup writes, enables and starts the loop unit, and a second run changes nothing', async () => {
   const root = await repository();
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-supervision-credentials-'));
-  const home = await mkdtemp(join(tmpdir(), 'graphyard-supervision-home-'));
+  const credentialDirectory = await temporaryDirectory('supervision-credentials');
+  const home = await temporaryDirectory('supervision-home');
   try {
     const first = hostStub();
     const setup = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, run: { intervalSeconds: 20 }, installSupervisor: true },
@@ -149,9 +150,9 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
 });
 
 test('unit:supervision-reported — master status reports whether the loop is supervised, and names the command that fixes it', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-supervision-status-'));
+  const directory = await temporaryDirectory('supervision-status');
   const root = await repository();
-  const home = await mkdtemp(join(tmpdir(), 'graphyard-supervision-status-home-'));
+  const home = await temporaryDirectory('supervision-status-home');
   try {
     const credential = join(directory, 'coordinator.token');
     await writeFile(credential, coordinatorToken, { mode: 0o600 });
@@ -191,7 +192,7 @@ test('unit:supervision-reported — master status reports whether the loop is su
     // Stopped, and missing altogether: each says what is not happening and what starts it again.
     const stopped = await report({ ...hostStub({ active: 'inactive' }).host, home });
     assert.ok(stopped.attentionItems.some(entry => /installed but not running/.test(entry.text) && entry.next === `systemctl --user start ${loopUnitName}`));
-    const bare = await mkdtemp(join(tmpdir(), 'graphyard-supervision-bare-'));
+    const bare = await temporaryDirectory('supervision-bare');
     try {
       const missing = await report({ ...hostStub({ enabled: 'not-found', active: 'inactive' }).host, home: bare });
       assert.equal(missing.setup.supervisor.installed, false);
@@ -217,7 +218,7 @@ test('unit:supervision-reported — master status reports whether the loop is su
 
 test('unit:unsupervised-host-stated — a host that can have no supervisor is told so at setup, with what to run instead', async () => {
   const root = await repository();
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-supervision-unsupported-'));
+  const credentialDirectory = await temporaryDirectory('supervision-unsupported');
   try {
     // Two ways a host has no supervisor to install: another platform, and no systemd user manager.
     assert.match(supervisorSupport({ platform: 'darwin' }).reason!, /this host reports darwin/);
@@ -257,8 +258,8 @@ test('unit:unsupervised-host-stated — a host that can have no supervisor is to
 });
 
 test('integration:runtime-calls-bounded — a hung agent runtime fails its step, the cycle keeps going, and the loop still answers its stop signal', async () => {
-  const stubs = await mkdtemp(join(tmpdir(), 'graphyard-supervision-runtime-'));
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-supervision-runtime-state-'));
+  const stubs = await temporaryDirectory('supervision-runtime');
+  const directory = await temporaryDirectory('supervision-runtime-state');
   const root = await repository();
   const previousPath = process.env.PATH;
   try {
@@ -332,8 +333,8 @@ test('manual:supervisor-onboarding-review — the onboarding guide states that t
 
 test('integration:supervisor-install-explicit-only — the unit is written only by an explicit operator install into the coordinator checkout on durable storage, never as a side effect', async () => {
   const root = await repository();
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-supervision-explicit-credentials-'));
-  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-supervision-explicit-'));
+  const credentialDirectory = await temporaryDirectory('supervision-explicit-credentials');
+  const scratch = await temporaryDirectory('supervision-explicit');
   const home = join(scratch, 'home');
   const previous = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
   // The unit under the real user home, as it stands: this proof reads it and must leave it exactly so.

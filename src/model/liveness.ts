@@ -4,7 +4,7 @@ import { nextActionLlmRoles, type NextAction } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { producerGroupDecisions } from './mechanical-proofs.js';
 import { roleSessionMaximumMs } from './sessions.js';
-import { redecidableScopeRefusal, routableScopeRequest, scopeRefusalBlocker } from './scope.js';
+import { redecidableScopeRefusal, routableScopeRequest, scopeRefusalBlocker, terminalScopeRefusal } from './scope.js';
 import type { Work } from './work.js';
 
 /**
@@ -111,7 +111,9 @@ function stalledConversion(work: Work, action: NextAction, now: Date): NextActio
  * A refused scope request is owed a scope decision: the rule again when it would now approve;
  * otherwise one escalation row, the only one. For an additive request of the live attempt the loop
  * routes that row's judgement to an independent approver as a requirements decision (GY-176), so it
- * names that owner rather than a master; anything else is the master's.
+ * names that owner rather than a master; a terminal over-cap refusal names `master requirements`,
+ * whose revision can fold or split the ask the plain union `master scope` posts is refused by the
+ * same bound (GY-936); anything else is the master's.
  */
 function scopeDecision(work: Work, action: NextAction, now: Date): NextAction | null {
   const request = work.scopeRequest;
@@ -119,7 +121,11 @@ function scopeDecision(work: Work, action: NextAction, now: Date): NextAction | 
   if (redecidableScopeRefusal(work) && liveLease(work, now) && work.lease!.epoch === request.epoch)
     return { ...action, kind: 'approve-scope', reason: `${work.key}'s refused scope request would be approved by the rules as they stand; the control plane decides it again`,
       inputs: { kind: 'approve-scope', epoch: request.epoch, paths: [...request.paths], requestedBy: request.requestedBy, detail: request.reason }, llmRole: null, binding: `scope:${request.epoch}:${request.at}:redecide` };
-  const decides = routableScopeRequest(work, now.getTime()) ? `the independent approver judges the requirements decision the loop requests for it (graphyard master decisions ${work.key}), which` : `graphyard master scope ${work.key}`;
+  const decides = routableScopeRequest(work, now.getTime())
+    ? `the independent approver judges the requirements decision the loop requests for it (graphyard master decisions ${work.key}), which`
+    : terminalScopeRefusal(work)
+      ? `graphyard master requirements ${work.key} FILE REASON, whose plannedFiles can fold or split the ask under the cap, which`
+      : `graphyard master scope ${work.key}`;
   return escalate(work, 'scope', `${request.requestedBy}'s scope request on ${work.key} was refused and is owed a scope decision: ${request.decision.reason}`,
     `${decides} decides ${request.paths.join(', ')} (${request.reason}); refused because ${request.decision.reason}`, `scope-refused:${request.epoch}:${request.at}`, action.gate, action.refusal);
 }

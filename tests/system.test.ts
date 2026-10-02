@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -22,6 +21,7 @@ import { supervise } from '../src/supervisor.js';
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { providerMergeInstant } from './helpers/merge-instants.js';
 import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithClock } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
@@ -43,7 +43,7 @@ let http: ReturnType<typeof server>; let url: string;
 const workInput = { title: 'Claims are exclusive', criteria: [{ id: 'AC-1', text: 'Only one agent claims the work', proofs: ['integration:claim-safety'] }] };
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store, [15368], 120, 'owner/project');
   engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = GRAPHYARD_APP;
@@ -140,7 +140,7 @@ test('real HTTP coordination refusal envelope is classified as definitive', asyn
   });
   const envelope = await response.json();
   assert.equal(response.status, 404);
-  assert.deepEqual(envelope, { error: 'Work item not found' });
+  assert.deepEqual(envelope, { error: 'Work item not found', code: 'work-not-found' });
   assert.equal(isConfirmedCoordinationRefusal(response.status, envelope), true);
 });
 test('expired lease is recoverable and all stale-owner commands are fenced', async () => {
@@ -171,7 +171,7 @@ test('transactional launch acknowledgement races rework without a stale start or
   let w = await claimed();
   const settlementToken = 'd'.repeat(64), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
   w = await engine.execute(worker, 'quarantine', w.id, { epoch: 1, settlementHash }, randomUUID());
-  const dir = await mkdtemp(join(tmpdir(), 'graphyard-launch-race-')), marker = join(dir, 'started');
+  const dir = await temporaryDirectory('launch-race'), marker = join(dir, 'started');
   let releaseResponse!: () => void, acknowledgementCommitted!: () => void, monotonic = 0;
   const responseGate = new Promise<void>(resolve => { releaseResponse = resolve; });
   const committed = new Promise<void>(resolve => { acknowledgementCommitted = resolve; });
@@ -508,12 +508,14 @@ test('revocation withdraws every accepted run for the candidate and republishes 
   assert.equal(published.length, 1);
   assert.ok(published[0].gates.some(gate => !gate.passed), 'the published check must stop reporting success for a revoked candidate');
   // Revocation is not a dead end for the proof: a fresh accepted run satisfies acceptance again.
-  // The merge queue treats the withdrawal like a failed proof, so the ejected commit itself does
-  // not re-enter; a new candidate does, at the back of the queue.
+  // The withdrawal ejected the entry as a landability refusal, and such an ejection is never
+  // sticky (GY-878): once the verdict is landable the same commit re-enters, at the back of the queue.
   w = await proven(w);
   assert.ok(w.gates.find(gate => gate.name === 'acceptance')!.passed);
-  assert.match(w.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue: Proof integration:claim-safety was revoked/);
-  assert.equal(w.mergeAuthorization ?? null, null);
+  assert.doesNotMatch(w.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
+  assert.equal(w.queueEjection, null);
+  assert.ok(w.queue, 'the same head re-entered the queue');
+  assert.equal(w.queueHistory?.findLast(entry => entry.event === 'ejected')?.reason, 'Proof integration:claim-safety was revoked on speculative tip ' + head.slice(0, 12) + ': Producer retracted both reported runs');
 });
 test('delivered work refuses revocation and keeps its authorized delivery record', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));

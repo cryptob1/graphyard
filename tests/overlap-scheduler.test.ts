@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +10,7 @@ import { candidateConflicts, fetchCandidateHeads, gitConflictProbe } from '../sr
 import { assertDispatchable, buildMasterStatus, dispatchSchedule, dispatchWork, masterConfigSchema, sequenceAdvice, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
@@ -84,7 +84,7 @@ test('unit:overlap-detection — dispatch never holds an overlapping item, exclu
   assert.deepEqual(plan.highConflict, [{ key: 'GY-5', broad: ['docs/'] }]);
 
   // `master dispatch` launches the overlapping item with no override and records the overlap.
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-overlap-')); const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-overlap-credentials-'));
+  const root = await temporaryDirectory('overlap'); const credentialDirectory = await temporaryDirectory('overlap-credentials');
   try {
     execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
     const credential = join(credentialDirectory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
@@ -104,7 +104,7 @@ function daemonConfig(credentialFile: string, workers: WorkerProfile[]): MasterC
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 
 test('integration:overlap-scheduler — the durable loop offers ready items smallest scope first and dispatches an overlapping item beside the one in flight', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-overlap-daemon-'));
+  const directory = await temporaryDirectory('overlap-daemon');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
     const credential = join(directory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
@@ -154,7 +154,7 @@ test('integration:overlap-scheduler — master status shows what each item runs 
 });
 
 test('integration:overlap-scheduler — the conflict probe is a real in-memory git merge of the two candidate heads', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-merge-tree-'));
+  const root = await temporaryDirectory('merge-tree');
   try {
     const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git('init', '-q', '-b', 'main'); git('config', 'user.email', 't@example.com'); git('config', 'user.name', 'T');

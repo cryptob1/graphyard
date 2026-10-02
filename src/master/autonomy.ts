@@ -26,7 +26,7 @@ import type { FilesystemProbe } from '../install/worktree-root.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
-import { applyDecision, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, runOutcome, startNarrowRun } from '../runner/roles.js';
+import { applyDecision, approverRunContext, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, runOutcome, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 
@@ -95,7 +95,8 @@ export async function agentToken(root: string, config: MasterConfig, which: 'ope
  * decision and its reason and Graphyard supplies the exact revision or candidate it binds to.
  */
 export function decisionInput(action: string, work: Work, input: Record<string, unknown>) {
-  if (['release', 'unblock', 'resolve'].includes(action)) return { expectedRevision: work.revision, ...input };
+  // A triage closure (GY-402) binds its judgement, not the revision; a diagnostician's closure (GY-439) binds the revision.
+  if (['release', 'unblock', 'resolve'].includes(action) || (action === 'close' && input.triageAt === undefined)) return { expectedRevision: work.revision, ...input };
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
   if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
@@ -109,23 +110,48 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
  * confirms it by running the proof there before approving; without it the control plane records
  * the attested pass as not exercising its criterion (GY-135), and no remedy but a second,
  * hand-built attestation would move the item.
+ *
+ * GY-535. The record is a claim for the approver to confirm, not a measurement: an approval
+ * carries only its reason, so it states no more than that confirmation establishes. The behaviour
+ * removed is the candidate's diff against its base, named by both commits, and `executed: 1` is
+ * the floor the approver's one confirming run guarantees; what the approver actually ran and saw
+ * is recorded in its approval reason (see attestConfirmation). A requester that measured more
+ * names its own `exercise`.
  */
 export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown) {
   const criterion = work.criteria.find(entry => typeof proof === 'string' && entry.proofs.includes(proof));
   if (!criterion || !work.candidate) return {};
-  return { exercise: { criterion: criterion.id, behaviour: `the whole change: ${proof} run against the candidate base ${work.candidate.baseSha.slice(0, 12)}, the tree without it`, result: 'fail' as const, executed: 1 } };
+  return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the approver confirms by running it and records in its approval reason`, result: 'fail' as const, executed: 1 } };
 }
 /**
  * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
  * says the proof fails against the candidate base, so the approver runs it there, and against the
  * candidate, and approves only on both outcomes. An approved attestation is then recorded as
- * exercising its criterion rather than as an unexercised pass.
+ * exercising its criterion rather than as an unexercised pass. The approval reason records what the
+ * approver observed, since the approval carries no fields of its own (GY-535).
  */
 export const attestConfirmation = (baseSha?: string) =>
-  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. `;
-/** The Pi approver's prompt, with the attestation confirmation before its call to decide. */
-export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, repository?: string) =>
-  piApproverPrompt(config, work.key, decision, config.approver!.id, repository).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
+  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. The record states only that the proof fails there with at least one case executed, so say in your approval reason what you ran on each tree, how many cases executed, and the failure you saw. `;
+/** The Pi approver's prompt, with the attestation confirmation before its call to decide; the caller guards it on the decision being an attest (carriesAttestation, GY-535). */
+export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, clone?: string) =>
+  piApproverPrompt(config, work.key, decision, config.approver!.id, clone).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
+/**
+ * GY-535. Whether an approver's prompt carries the attestation confirmation: only an attest
+ * decision's, the only one whose record names a proof its approver must run, so any other approver
+ * told to confirm an exercise record would assert an audit nobody measured. The action is read from
+ * the decision ledger with the master's credential; an item without a candidate carries no attest
+ * (decisionInput builds attest only for one) and answers without the read. A ledger that cannot be
+ * read keeps the confirmation in place — an attest that lost its instruction is a gate quietly
+ * dropped, which an unreadable lookup must not cause — and the launch is never failed for it.
+ */
+async function carriesAttestation(config: MasterConfig, work: Work, decision: string, fetcher: AutonomyFetch): Promise<boolean> {
+  if (!work.candidate) return false;
+  try {
+    const response = await fetcher(`${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(2_000) });
+    if (!response.ok) throw new Error(`the decision ledger answered ${response.status}`);
+    return ((await response.json()) as { decisions?: { id: string; action: string }[] }).decisions?.some(entry => entry.id === decision && entry.action === 'attest') ?? false;
+  } catch { return true; }
+}
 /** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
 export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
@@ -289,18 +315,30 @@ async function abandonLaunch(error: unknown, pane: string | undefined, tabId: st
  */
 export const approverSessionId = (decision: string) => `approver:${decision}`;
 /**
+ * The approver's own copy of the repository (GY-564): a clone with its own refs, index, working tree and object store, detached at the candidate head (or the current head when none is bound), with no remote.
+ * Nothing is shared with the operator's repository (GY-926): no `--shared` alternates — git-clone(1) calls them dangerous: gc/prune there can delete objects the approver's clone needs, and the file would name the operator's store — and no hardlinks.
+ * The bound SHA is fetched while the remote exists; one the repository cannot supply refuses the launch rather than silently detach at HEAD, where the approver would judge an unrelated tree.
+ */
+export async function approverClone(root: string, target: string, sha?: string, run: ChildRun = defaultChildRun) {
+  await run('git', ['clone', '--quiet', '--no-hardlinks', '--no-checkout', root, target], { cwd: root });
+  if (sha) try { await run('git', ['-C', target, 'fetch', '--quiet', 'origin', sha], { cwd: target }); } catch { /* not in the operator's repository */ }
+  await run('git', ['-C', target, 'remote', 'remove', 'origin'], { cwd: target });
+  await run('git', ['-C', target, 'checkout', '--quiet', '--detach', sha ?? 'HEAD'], { cwd: target });
+}
+/**
  * A headless approver's run (GY-169), in a directory of its own under the managed worktree root
  * (GY-391) — never the operator's repository, which the destructive-command guard would otherwise
  * treat as the run's worktree and let it remove files in. The directory goes when the run ends,
  * and a reclaim pass takes back one a dead master left behind.
  */
-async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
+async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, attest: boolean, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
   const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
-  let started: ReturnType<typeof startNarrowRun>;
+  let started: ReturnType<typeof startNarrowRun>; const timeoutMs = piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000;
   try {
-    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory,
-      prompt: piApproverWithAttestation(config, work, decision, root),
-      options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000),
+    await approverClone(root, checkout.worktree, work.candidate?.sha);
+    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory, root, context: approverRunContext(config.url, work.id, decision, timeoutMs, checkout.directory),
+      prompt: attest ? piApproverWithAttestation(config, work, decision, checkout.worktree) : piApproverPrompt(config, work.key, decision, config.approver!.id, checkout.worktree),
+      options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, timeoutMs),
       apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
   return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };
@@ -317,6 +355,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const config = await loadMasterConfig(root);
   const { agents } = herdr;
   const token = await agentToken(root, config, 'approver');
+  // GY-535: the attestation confirmation is an attest decision's instruction alone.
+  const attest = await carriesAttestation(config, work, decision, headless.fetcher ?? fetch);
   const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
   const name = nameForLaunch(retry, () => approverSessionName(work, decision));
   if (agents.some(agent => agent.name === name)) throw new Error(`Approver session ${name} is already visible in Herdr; let it finish or close it first`);
@@ -330,19 +370,19 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
   if (registry && registry.account.kind === 'pi') {
     let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
-    try { started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? registryRunner(registry.account), headless); }
+    try { started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? registryRunner(registry.account), headless); }
     catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
     // The run is the session: the registry's slot is given back the moment it ends.
     // Its outcome counts toward the account's runs without a result (GY-446).
     const settled = started.settled.then(async run => { await registry.release(`the headless approver run for ${work.key} ended`, runOutcome(run)); return run; },
-      async error => { await registry.release(`the headless approver run for ${work.key} ended`); throw error; });
+      async error => { await registry.release(`the headless approver run for ${work.key} ended`, 'no-result'); throw error; });
     settled.catch(() => { /* the run's own record carries its failure */ });
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: registry.account.fleet.session,
       account: { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped },
       run: started.record, settled: settled as Promise<RunRecord> | undefined };
   }
   if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
-    const started = await startHeadlessApprover(root, config, work, decision, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
+    const started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
     return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
       run: started.record, settled: started.settled as Promise<RunRecord> | undefined };
   }
@@ -372,7 +412,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   catch (error) { await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
-  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attestConfirmation(work.candidate?.baseSha)}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
+  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attest ? attestConfirmation(work.candidate?.baseSha) : ''}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
   let pane: string | undefined, tabId: string | undefined;
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
@@ -566,7 +606,12 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   try { launch = accountLaunch({ kind: runtime, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null); }
   catch (error) { await selected?.release(`escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
   const cli = `node ${config.cliPath}`;
-  const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which. If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once, citing only ids listed in precedent.detail; when precedent.detail lists no decision that applies, leave out --precedent and the control plane records that no precedent was available — never invent an id. An independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
+  // A requirement-weakening reason is a claim about one item's criteria (GY-873): the spawned
+  // handler is told to judge this item's own revision, never to copy another item's reason.
+  const ownRevision = context.escalation.trigger === 'requirement-weakening'
+    ? ` This is a requirement-weakening escalation, so judge it against this item's own revision: state each criterion whose text or proofs changed, before and after, from the item's requirements history (item.requirementRevisions), and name the decision that applied it — never copy another item's reason into yours; the precedent you cite is the rule followed, nothing more.`
+    : '';
+  const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which.${ownRevision} If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once, citing only ids listed in precedent.detail; when precedent.detail lists no decision that applies, leave out --precedent and the control plane records that no precedent was available — never invent an id. An independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
   let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
   try {
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));

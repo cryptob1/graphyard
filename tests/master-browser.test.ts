@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback, execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -12,7 +11,10 @@ import { loadMasterConfig, managedMasterInstructions, masterConfigSchema, master
 import { masterHarnessPlan, writeHarnessPermissions } from '../src/harness.js';
 import { agentBrowserArguments, agentBrowserPage, appendAdministrationEntry, browserFlows, controlPlanePermissions, detectSudo, missingPermissions, passSudo, readAdministrationLedger, readSudoState, recordingPage, runBrowserFlow, sudoAttention, summarizeAdministration, type BrowserPage, type Located, type SudoState } from '../src/master-browser.js';
 import type { Work } from '../src/model.js';
+import { GitHub, type InstallationState } from '../src/github.js';
+import { statusRoutes } from '../src/server/routes/status.js';
 import { readMasterGuide } from './helpers/master-guide.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const execFile = promisify(execFileCallback);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -20,7 +22,7 @@ const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 
 async function master(browser = { profile: 'Default' }) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-browser-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-browser-credentials-'));
+  const root = await temporaryDirectory('browser'), credentialDirectory = await temporaryDirectory('browser-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, browser }, coordinatorStatus as typeof fetch);
@@ -39,7 +41,7 @@ function work(overrides: Partial<Work> = {}) {
  * the real pages behave, and the API stub reads the same state.
  */
 class StubGitHub {
-  app: Record<string, string> = { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' };
+  app: Record<string, string> = { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read', workflows: 'read' };
   installation: Record<string, string> = { ...this.app };
   pendingRequest = false;
   protection = { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true, strict: true, enforce_admins: true, hasCheck: true, hasRule: true };
@@ -130,11 +132,11 @@ class StubGitHub {
     }
     throw new Error(`stub page has no element ${selector}`);
   }
+  // What GET /api/github/installation answers: the control plane's App-credential read (GY-964).
+  installationState = async (): Promise<InstallationState> => ({ appId: 1234, installationId: 91011, slug: 'graphyard-owner-project', account: 'owner', accountType: 'User', installationUrl: 'https://github.com/settings/installations/91011', suspended: false, permissions: { ...this.installation }, app: { ...this.app } });
   api = (_command: string, args: string[]): string => {
     const path = args[args.indexOf('api') + 1];
     if (path === 'user') return JSON.stringify({ login: 'operator-cli' });
-    if (path.startsWith('user/installations')) return JSON.stringify({ installations: [{ id: 91011, app_id: 1234, app_slug: 'graphyard-owner-project', account: { login: 'owner', type: 'User' }, permissions: this.installation }, { id: 5, app_id: 99, app_slug: 'other', permissions: {} }] });
-    if (path.startsWith('apps/')) return JSON.stringify({ slug: 'graphyard-owner-project', permissions: this.app });
     if (path.endsWith('/protection')) return JSON.stringify({ required_pull_request_reviews: { required_approving_review_count: this.protection.required_approving_review_count, require_last_push_approval: this.protection.require_last_push_approval, dismiss_stale_reviews: this.protection.dismiss_stale_reviews },
       required_status_checks: { strict: this.protection.strict, checks: this.protection.hasCheck ? [{ context: 'Graphyard / merge', app_id: 1234 }] : [] }, enforce_admins: { enabled: this.protection.enforce_admins }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
     throw new Error(`stub API has no route ${path}`);
@@ -202,7 +204,7 @@ test('the browser flows administer GitHub through the recorded page, verify via 
     const github = new StubGitHub();
     github.sudo.pending = 1;
     let tick = Date.parse('2026-09-18T12:00:00Z'); const now = () => new Date(tick += 1_000);
-    const common = { api: github.api, coordinator: 'master', now, sleep: noSleep, sudo: { pollMs: 10, timeoutMs: 10_000 } };
+    const common = { api: github.api, installation: github.installationState, coordinator: 'master', now, sleep: noSleep, sudo: { pollMs: 10, timeoutMs: 10_000 } };
 
     const permissions = await runBrowserFlow(root, config, 'app-permissions', { page: github.page(), ...common });
     assert.equal(permissions.outcome, 'applied'); assert.equal(permissions.verified, true);
@@ -253,7 +255,7 @@ test('a flow that cannot find its page, verify its result, or sign in refuses wi
   try {
     const github = new StubGitHub();
     github.protection.hasRule = false;
-    const common = { api: github.api, sleep: noSleep, sudo: { pollMs: 10, timeoutMs: 10_000 } };
+    const common = { api: github.api, installation: github.installationState, sleep: noSleep, sudo: { pollMs: 10, timeoutMs: 10_000 } };
     const missingRule = await runBrowserFlow(root, config, 'protection', { page: github.page(), work: [work()], ...common });
     assert.equal(missingRule.outcome, 'refused'); assert.match(missingRule.reason!, /classic protection rule for main/); assert.match(missingRule.next, /record\.json/);
     github.protection.hasRule = true; github.protection.hasCheck = false;
@@ -263,11 +265,11 @@ test('a flow that cannot find its page, verify its result, or sign in refuses wi
     github.protection.hasCheck = true;
     const appBehind = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), ...common });
     assert.equal(appBehind.outcome, 'refused'); assert.match(appBehind.reason!, /run master browser app-permissions first/);
-    github.app.contents = 'write';
+    github.app.contents = 'write'; github.app.workflows = 'write';
     const notPending = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), ...common });
     assert.equal(notPending.outcome, 'refused'); assert.match(notPending.reason!, /no pending permission request/);
     github.login = null;
-    const signedOut = await runBrowserFlow(root, config, 'app-permissions', { page: github.page(), api: (command, args) => { const body = JSON.parse(github.api(command, args)); if (body.slug) body.permissions = { ...body.permissions, contents: 'read' }; return JSON.stringify(body); }, sleep: noSleep });
+    const signedOut = await runBrowserFlow(root, config, 'app-permissions', { page: github.page(), api: github.api, installation: async () => { const state = await github.installationState(); return { ...state, app: { ...state.app, contents: 'read' } }; }, sleep: noSleep });
     assert.equal(signedOut.outcome, 'refused'); assert.match(signedOut.reason!, /not signed in to GitHub/);
     const ledger = await readAdministrationLedger(root);
     assert.equal(ledger.entries.length, 5); assert.ok(ledger.entries.every(entry => entry.reason));
@@ -275,6 +277,63 @@ test('a flow that cannot find its page, verify its result, or sign in refuses wi
     await assert.rejects(runBrowserFlow(root, withoutProfile, 'protection', { api: github.api }), /master init --browser-profile/);
     await assert.rejects(runBrowserFlow(root, config, 'export-cookies' as any, { api: github.api }), /Use master browser/);
   } finally { await cleanup(); }
+});
+
+test('unit:app-permissions-verify-via-installation — both permission flows decide and verify from the App-credential installation read, whatever the operator\'s gh token can list', async () => {
+  const { root, config, cleanup } = await master();
+  try {
+    const github = new StubGitHub();
+    // The operator's gh token lacks the scopes user/installations needs: it lists nothing, and
+    // any App or installation read through it is recorded so the test can prove none was made.
+    const ghPaths: string[] = [];
+    const scopedOut = (command: string, args: string[]) => {
+      const path = args[args.indexOf('api') + 1]; ghPaths.push(path);
+      if (path.startsWith('user/installations')) return JSON.stringify({ total_count: 0, installations: [] });
+      return github.api(command, args);
+    };
+    let reads = 0;
+    const installation = async () => { reads += 1; return github.installationState(); };
+    const common = { api: scopedOut, installation, sleep: noSleep, sudo: { pollMs: 10, timeoutMs: 10_000 } };
+    const raised = await runBrowserFlow(root, config, 'app-permissions', { page: github.page(), ...common });
+    assert.equal(raised.outcome, 'applied', raised.reason); assert.equal(raised.verified, true);
+    assert.deepEqual(raised.target, { repository: 'owner/project', appId: 1234, slug: 'graphyard-owner-project', installationId: 91011 });
+    assert.equal((raised.before as any).app.contents, 'read'); assert.equal((raised.after as any).app.contents, 'write', 'the save is verified from a fresh read after it');
+    const accepted = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), ...common });
+    assert.equal(accepted.outcome, 'applied', accepted.reason); assert.deepEqual((accepted.after as any).installation, controlPlanePermissions);
+    assert.ok(github.visited.includes('https://github.com/settings/installations/91011/permissions/update'), 'the acceptance page is the installation URL the App reported');
+    assert.equal(reads, 4, 'each flow reads the installation before acting and again to verify');
+    assert.ok(!ghPaths.some(path => path.startsWith('user/installations') || path.startsWith('apps/')), `no installation or App state is read through the operator's gh token: ${ghPaths.join(', ')}`);
+
+    const unread = await runBrowserFlow(root, config, 'app-permissions', { page: github.page(), api: scopedOut, sleep: noSleep });
+    assert.equal(unread.outcome, 'refused'); assert.match(unread.reason!, /control plane's App credential/);
+    const failing = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), api: scopedOut, installation: async () => { throw new Error('{"error":"GitHub is not configured on this control plane"}'); }, sleep: noSleep });
+    assert.equal(failing.outcome, 'refused'); assert.match(failing.reason!, /could not read App 1234's installation with the App's own credential: .*not configured/);
+    const foreign = await runBrowserFlow(root, config, 'app-permissions', { page: github.page(), api: scopedOut, installation: async () => ({ ...await github.installationState(), appId: 99 }), sleep: noSleep });
+    assert.equal(foreign.outcome, 'refused'); assert.match(foreign.reason!, /App 99, not App 1234/);
+  } finally { await cleanup(); }
+});
+
+test('unit:app-permissions-verify-via-installation — the control plane reads the installation and the App\'s requested permissions with the App JWT, coordinators only, leaving the preflight alone', async t => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 91011, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() });
+  const requests: { url: string; authorization: string }[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: unknown, options: any) => {
+    requests.push({ url: String(url), authorization: String(options?.headers?.Authorization ?? '') });
+    if (String(url).endsWith('/app/installations/91011')) return new Response(JSON.stringify({ id: 91011, app_id: 1234, app_slug: 'graphyard-owner-project', account: { login: 'acme', type: 'Organization' }, html_url: 'https://github.com/organizations/acme/settings/installations/91011', permissions: { metadata: 'read', contents: 'read' }, suspended_at: null }));
+    if (String(url).endsWith('/app')) return new Response(JSON.stringify({ id: 1234, slug: 'graphyard-owner-project', permissions: { metadata: 'read', contents: 'write', checks: 'write' } }));
+    return new Response('{}', { status: 404 });
+  });
+  const route = statusRoutes.routes.find(candidate => candidate.method === 'GET' && candidate.path === '/api/github/installation')!;
+  assert.ok(route, 'GET /api/github/installation is served by the authenticated status routes');
+  const context = (role: string, configured = true) => ({ actor: { id: 'master', role }, services: { github: configured ? github : null } }) as any;
+  const state = await route.handle(context('coordinator'), []) as InstallationState;
+  assert.deepEqual(state, { appId: 1234, installationId: 91011, slug: 'graphyard-owner-project', account: 'acme', accountType: 'Organization', installationUrl: 'https://github.com/organizations/acme/settings/installations/91011', suspended: false, permissions: { metadata: 'read', contents: 'read' }, app: { metadata: 'read', contents: 'write', checks: 'write' } });
+  assert.deepEqual(requests.map(request => new URL(request.url).pathname), ['/app/installations/91011', '/app']);
+  for (const request of requests) assert.match(request.authorization, /^Bearer [\w-]+\.[\w-]+\.[\w-]+$/, 'each read carries the App JWT, not a user token');
+  assert.equal(github.permissionReport(), null, 'the read leaves the preflight schedule and its hold decision to the loop');
+  await assert.rejects(route.handle(context('worker'), []) as Promise<unknown>, /Coordinator permission required/);
+  await assert.rejects(route.handle(context('admin', false), []) as Promise<unknown>, /GitHub is not configured/);
 });
 
 test('the agent-browser page drives one headless session on the operator profile and never touches its cookies', () => {
@@ -296,7 +355,7 @@ test('the agent-browser page drives one headless session on the operator profile
 });
 
 test('the recording page captures every step and a screenshot after each mutation', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-record-'));
+  const directory = await temporaryDirectory('record');
   try {
     const github = new StubGitHub();
     const steps: any[] = [];
@@ -361,11 +420,13 @@ test('the generated master instructions and the guides assign GitHub administrat
 });
 
 test('the master CLI stores the browser profile, refuses flows without one, and reports administration in status', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-browser-cli-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-browser-cli-credentials-'));
+  const root = await temporaryDirectory('browser-cli'), credentialDirectory = await temporaryDirectory('browser-cli-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  let installation: object | null = null;
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
+    if (request.url === '/api/github/installation') { if (installation) return response.end(JSON.stringify(installation)); response.statusCode = 503; return response.end(JSON.stringify({ error: 'GitHub is not configured on this control plane' })); }
     if (request.url === '/api/status') return response.end(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
     if (request.url === '/api/work-snapshot') return response.end(JSON.stringify({ work: [], now: new Date().toISOString() }));
     response.statusCode = 404; response.end('{}');
@@ -392,16 +453,20 @@ test('the master CLI stores the browser profile, refuses flows without one, and 
     assert.deepEqual(JSON.parse((await cli(['master', 'init', '--url', url, '--token-stdin', '--cli-path', launcher], coordinatorToken)).stdout).browser, { profile: 'Default' }, 'rerunning init keeps the profile');
     const usage = await cli(['master', 'browser']);
     assert.match(usage.stderr!, /Use master browser app-permissions\|installation-accept\|protection/);
-    // Without an installation visible to the operator's token the flow refuses before opening a page, and the refusal is audited.
+    // Without the control plane's installation read the flow refuses before opening a page, and the refusal is audited.
     const noInstallation = await cli(['master', 'browser', 'app-permissions']);
     assert.equal(noInstallation.code, 1);
-    const result = JSON.parse(noInstallation.stdout); assert.equal(result.outcome, 'refused'); assert.match(result.reason, /sees no installation of App 1234/);
+    const result = JSON.parse(noInstallation.stdout); assert.equal(result.outcome, 'refused'); assert.match(result.reason, /could not read App 1234's installation with the App's own credential: .*not configured/);
     const status = JSON.parse((await cli(['master', 'status'])).stdout);
     assert.deepEqual(status.administration.browser, { profile: 'Default' }); assert.equal(status.administration.total, 1); assert.equal(status.administration.recent[0].outcome, 'refused'); assert.equal(status.administration.sudo, null);
     const pending: SudoState = { flow: 'protection', record: 'x', code: '58', issuedAt: new Date().toISOString(), attempt: 1, deadline: new Date(Date.now() + 60_000).toISOString(), state: 'waiting' };
     await writeFile(join(root, '.graphyard/master-actions/sudo.json'), JSON.stringify(pending), { mode: 0o600 });
     const waiting = JSON.parse((await cli(['master', 'status'])).stdout);
     assert.equal(waiting.administration.sudo.code, '58'); assert.match(waiting.administration.sudo.instruction, /choose 58/);
+    // The installation the operator's gh token cannot list is read through the control plane (GY-964).
+    installation = { appId: 1234, installationId: 91011, slug: 'graphyard-owner-project', account: 'owner', accountType: 'User', installationUrl: 'https://github.com/settings/installations/91011', suspended: false, permissions: { ...controlPlanePermissions }, app: { ...controlPlanePermissions } };
+    const viaApp = JSON.parse((await cli(['master', 'browser', 'installation-accept'])).stdout);
+    assert.equal(viaApp.outcome, 'unchanged'); assert.equal(viaApp.verified, true); assert.deepEqual(viaApp.target, { repository: 'owner/project', appId: 1234, slug: 'graphyard-owner-project', installationId: 91011, account: 'owner' });
     const harness = JSON.parse((await cli(['master', 'harness', 'claude'])).stdout);
     assert.ok(harness.added.some((entry: any) => entry.list === 'allow' && entry.rule === `Bash(node ${launcher} master browser:*)` && entry.why));
     assert.ok(harness.added.some((entry: any) => entry.list === 'deny' && entry.rule === 'Bash(agent-browser *)' && /identity/.test(entry.why)));

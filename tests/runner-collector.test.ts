@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, symlink, realpath, rm, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile, symlink, realpath, rm, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -9,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, generateKeyPairSync, randomUUID, sign as signBytes } from 'node:crypto';
 import { assembleResult, attestationBytes, attributeExecution, collectArtifacts, collectionBinding, collectionInputs, deriveSettlement, executionAttestationPayload, grantDigest, selfReportedObservation, verifyExecutionAttestation, type TargetObservation } from '../src/runner-collector.js';
 import { containerNames, type AttemptGrant, type ExecutionRecord } from '../src/runner-executor.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const run = promisify(execFile);
 const bundle = `sha256:${'a'.repeat(64)}`, image = `sha256:${'b'.repeat(64)}`;
@@ -288,7 +288,7 @@ test('missing, skipped, inconsistent and unstored artifacts never produce succes
 });
 
 test('collection accepts only approved reporter output from the attempt boundary', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-collect-'));
+  const root = await temporaryDirectory('collect');
   try {
     const output = join(root, 'output'); await mkdir(output, { mode: 0o700 });
     await writeFile(join(output, 'inventory.json'), JSON.stringify(inventoryOf(['books'])));
@@ -327,7 +327,7 @@ test('publishing a subset of the artifacts still verifies the whole boundary', a
   assert.deepEqual(collectionInputs(['report']), ['inventory', 'report']);
   assert.deepEqual(collectionInputs(['report', 'trace']), ['inventory', 'report', 'trace']);
 
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-subset-'));
+  const root = await temporaryDirectory('subset');
   try {
     const output = join(root, 'output'); await mkdir(output, { mode: 0o700 });
     await writeFile(join(output, 'inventory.json'), JSON.stringify(inventoryOf(['books'])));
@@ -353,7 +353,7 @@ test('publishing a subset of the artifacts still verifies the whole boundary', a
 test('a real Playwright attempt is collected end to end, and a broken assertion fails acceptance', async () => {
   // Locally authored trusted fixtures stand in for an approved oracle bundle; no
   // untrusted repository code executes here.
-  const root = await mkdtemp(resolve('.graphyard-collector-test-'));
+  const root = await temporaryDirectory('.graphyard-collector-test', process.cwd());
   try {
     const config = join(root, 'playwright.config.ts'), spec = join(root, 'suite.spec.ts');
     await writeFile(config, `export default { testDir: '.', retries: 0, workers: 1, reporter: [[${JSON.stringify(resolve('src/playwright-reporter.ts'))}]] };`);
@@ -394,7 +394,7 @@ test('a real Playwright attempt is collected end to end, and a broken assertion 
 
 test('a JUnit-pinned attempt is collected through its adapter: raw bytes are attested, only the structure is published, and a Playwright grant refuses the same boundary', async () => {
   const { inventoryFormat, normaliseJunit } = await import('../src/report-adapters.js');
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-collect-junit-'));
+  const root = await temporaryDirectory('collect-junit');
   try {
     const output = join(root, 'output'); await mkdir(output, { mode: 0o700 });
     const xml = await readFile(resolve('tests/fixtures/reports/pytest-8.xml'));

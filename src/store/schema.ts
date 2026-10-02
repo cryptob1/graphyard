@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
+import { schemaVersion } from '../release.js';
 import { workTables } from './tables/work.js';
 import { workIndexTables } from './tables/work-index.js';
 import { delegationTables } from './tables/delegation.js';
@@ -29,6 +31,53 @@ CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsq
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
 ${tables.map(table => table.ddl).join('\n')}
 `;
+
+/** The migration digests a release records with its generation (the graphyard_schema comment), so the next one touches only what changed. */
+export interface MigrationDigests {
+  /** The whole migration's digest, in the format the comment carried before per-table digests existed. */
+  migration: string;
+  /** The digest of the statements ahead of the first table's DDL (the shared trigger function). */
+  prelude: string;
+  /** One digest per table's own DDL. */
+  tables: Record<string, string>;
+}
+
+const sha256 = (text: string) => `sha256:${createHash('sha256').update(text).digest('hex')}`;
+
+/** The digests of this release's migration: the whole text, its prelude, and each table's own DDL. */
+export const migrationDigests = (): MigrationDigests => ({
+  migration: `migration ${sha256(migration)}`,
+  prelude: sha256(migration.slice(0, migration.indexOf(tables[0].ddl))),
+  tables: Object.fromEntries(tables.map(table => [table.name, sha256(table.ddl)])),
+});
+
+/**
+ * What a recorded graphyard_schema comment says. Releases before per-table digests carried
+ * `migration sha256:…` alone — their tables are unknown, so the next migration must read each
+ * table's DDL as unproven (unless the whole digest matches, which proves every table's DDL ran).
+ */
+export const recordedMigrationDigests = (comment: string | null): { migration: string | null; prelude: string | null; tables: Record<string, string> | null } => {
+  if (!comment) return { migration: null, prelude: null, tables: null };
+  if (comment.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(comment) as Partial<MigrationDigests>;
+      return {
+        migration: typeof parsed.migration === 'string' ? parsed.migration : null,
+        prelude: typeof parsed.prelude === 'string' ? parsed.prelude : null,
+        tables: parsed.tables && typeof parsed.tables === 'object' && !Array.isArray(parsed.tables)
+          ? Object.fromEntries(Object.entries(parsed.tables).filter(([, digest]) => typeof digest === 'string'))
+          : null,
+      };
+    } catch { return { migration: null, prelude: null, tables: null }; }
+  }
+  return { migration: comment.startsWith('migration sha256:') ? comment : null, prelude: null, tables: null };
+};
+
+/** Refuses to run a release under a database a newer release already migrated. */
+export const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
+
+/** The recorded digests as a comment statement, escaped for SQL. */
+export const migrationDigestComment = (digests: MigrationDigests) => `'${JSON.stringify(digests).replace(/'/g, "''")}'`;
 
 /**
  * Every table a logical backup carries, derived from the registry so a new table can never

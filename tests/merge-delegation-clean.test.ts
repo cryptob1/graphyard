@@ -1,8 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -11,6 +9,7 @@ import { GitHub, gateMerge } from '../src/github.js';
 import { buildMasterStatus } from '../src/master.js';
 import type { GitHubMergeQueueState, MergeEnqueueRequest } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // All merges stalled after GY-258: on a base branch without a merge queue Graphyard enabled
 // auto-merge, but it only asks once every gate — including the required `Graphyard / merge` check
@@ -34,7 +33,7 @@ function work(overrides: Partial<Work> = {}): Work {
 const requested = (item: Work): MergeEnqueueRequest => ({ sha: item.candidate!.sha, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, requestedBy: 'master#daemon-1', at: new Date().toISOString() });
 
 /** A base branch with no merge queue; the pull request's merge state and GitHub's answer to auto-merge are the fake's. */
-function fakeGitHub(options: { mergeStateStatus: string | null; autoMergeError?: string; mergeError?: string }) {
+function fakeGitHub(options: { mergeStateStatus: string | null; autoMergeError?: string; mergeError?: string; autoMerge?: boolean }) {
   const operations: { operation: string; query: string; variables: Record<string, unknown> }[] = [];
   const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used' });
   github.request = async (path: string, method = 'GET') => {
@@ -50,7 +49,7 @@ function fakeGitHub(options: { mergeStateStatus: string | null; autoMergeError?:
     operations.push({ operation, query, variables });
     if (operation === 'mergeQueue(branch') {
       assert.match(query, /mergeStateStatus/, 'the merge-queue read asks GitHub for the pull request\'s merge state');
-      return { repository: { mergeQueue: null, pullRequest: { id: pullRequestId, headRefOid: head, mergeStateStatus: options.mergeStateStatus, isInMergeQueue: false, autoMergeRequest: null, mergeQueueEntry: null } } };
+      return { repository: { mergeQueue: null, pullRequest: { id: pullRequestId, headRefOid: head, mergeStateStatus: options.mergeStateStatus, isInMergeQueue: false, autoMergeRequest: options.autoMerge ? { enabledAt: new Date().toISOString() } : null, mergeQueueEntry: null } } };
     }
     if (operation === 'enablePullRequestAutoMerge' && options.autoMergeError) throw new Error(options.autoMergeError);
     if (operation === 'mergePullRequest' && options.mergeError) throw new Error(options.mergeError);
@@ -132,6 +131,26 @@ test('unit:clean-status-refusal-falls-back — auto-merge refused because the pu
   assert.match(refused.action.reason, /^GitHub refused to enqueue GY-42: Head branch was modified/);
 });
 
+test('unit:blocked-auto-merge-probed — auto-merge left BLOCKED on an authorized head past the bound is merged now, head-bound, and a refusal names GitHub\'s reason; a fresh request keeps waiting', async () => {
+  const item = work();
+  const aged = { ...requested(item), at: new Date(Date.now() - 11 * 60_000).toISOString() };
+  const waiting = fakeGitHub({ mergeStateStatus: 'BLOCKED', autoMerge: true });
+  const fresh = await gateMerge(waiting.github, item, requested(item));
+  assert.equal(fresh.action.kind, 'hold', fresh.action.reason);
+  assert.deepEqual(waiting.named('mergePullRequest'), [], 'a fresh auto-merge request is left to GitHub');
+
+  const stalled = fakeGitHub({ mergeStateStatus: 'BLOCKED', autoMerge: true });
+  const probed = await gateMerge(stalled.github, item, aged);
+  assert.equal(probed.action.kind, 'enqueue', probed.action.reason);
+  assert.match(probed.action.reason, /reports it BLOCKED with every gate passing/);
+  assert.deepEqual(stalled.named('mergePullRequest'), [{ id: pullRequestId, head, method: 'MERGE' }], 'one merge, bound to the authorized head');
+
+  const refused = fakeGitHub({ mergeStateStatus: 'BLOCKED', autoMerge: true, mergeError: 'At least 1 approving review is required by reviewers with write access.' });
+  const named = await gateMerge(refused.github, item, aged);
+  assert.equal(named.action.kind, 'hold');
+  assert.match(named.action.reason, /^GitHub refused to enqueue GY-42: At least 1 approving review is required/, 'GitHub\'s own reason is the recorded refusal');
+});
+
 test('unit:merge-refused-status — master status names the latest refusal for the current head', () => {
   const refused = { reason: 'GitHub refused to enqueue GY-42: Pull request is in clean status', head, mode: 'none' as const, at: new Date().toISOString() };
   const githubQueue: GitHubMergeQueueState = { pullRequestId, head, queue: false, mergeStateStatus: 'CLEAN', mode: 'none', entryState: null, position: null, groupHead: null, at: new Date().toISOString(), refused };
@@ -153,7 +172,7 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 let pg: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 292;
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-merge-clean-pg-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-clean-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_clean_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_clean_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'test/repository');
