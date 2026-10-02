@@ -7,7 +7,7 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up). Without `--deployment-url` it reads only the `productionEnvironment` deployments: the newest successful one, or the newest overall if it succeeded and was later marked inactive (Railway does so minutes after success).
 
 ## Lost worker before submission
 
