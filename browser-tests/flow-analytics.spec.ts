@@ -153,6 +153,9 @@ test('integration:flow-analytics-browser', async ({ page }) => {
   await expect(page.locator('table').filter({ hasText: 'pr created to review start' })).toContainText('—');
 
   // Filters narrow the query the control plane is asked for.
+  await expect(page.getByLabel('Window').locator('option')).toHaveText(['24 hours', '7 days', '30 days', '90 days']);
+  await page.getByLabel('Window').selectOption('1');
+  await expect.poll(() => state.queries.at(-1)).toContain('window=1');
   await page.getByLabel('Window').selectOption('7');
   await expect.poll(() => state.queries.at(-1)).toContain('window=7');
   await page.getByLabel('Work type').selectOption('feature');

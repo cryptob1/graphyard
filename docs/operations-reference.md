@@ -11,11 +11,11 @@ Restart `graphyard master run` freely; it never dispatches twice. `master status
 
 ## Lost worker before submission
 
-A lease expires 120 s after the last heartbeat (a lease period more after a recorded renewal fault); the next, higher-epoch claim keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
+A lease expires 120 s after the last heartbeat (one more lease period after a recorded server renewal fault); the next claim (higher epoch) keeps the worktree. An unexplained lapse raises `lease-loss` ([classification](protocol/leases.md#how-a-lease-ends)), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, then `rework`, or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, then `rework` (`recover-containment` once delivered; [recipes](operations.md#recovery-recipes)). Autosettle bounds clock skew via `HEAD`.
 
 ## Submitted implementation needs rework
 
@@ -23,11 +23,11 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rework interventions by cause (declared refusal shape `build/out-of-scope-count`; loop refusal trigger; normalised rework reason). A cause at the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed: standards/criteria wording, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent with `decision:approve` (not a human session, the drafter or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording cause, fingerprint, instances closed, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals), counting recurrences. Drafted instances never recount; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rework interventions by cause (declared refusal shape `build/out-of-scope-count`; loop refusal trigger; normalised rework reason). A cause at the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed: standards/criteria wording, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent with `decision:approve` (not a human session, the drafter or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording cause, fingerprint, instances closed, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals), counting recurrences. Drafted instances never recount; a recurrence after application is redrafted, naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), keeping position, approval and proofs without rework, however long it is waiting for a runner (`check.rerun.waiting`); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). A passing rerun lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile, however long its workflow run waits for a runner (`check.rerun.waiting`; master status says *waiting for a runner*); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). Its passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 
@@ -84,9 +84,9 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ### Host memory
 
-Session-started `npm test`, `test:browser`, `npm run typecheck`, `tsc --noEmit` hold one of max(2, floor(total GB / 8)) host slots (`GRAPHYARD_VERIFICATION_SLOTS`) in `.verification-slots` under the managed worktree root (Codex: `--add-dir`), printing what they wait on; CI and shells are unbounded.
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB / 8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`), naming waits; CI, shells unbounded.
 
-Under max(10% of total, 4 GB) available, nothing launches there (`Launches deferred`, `escalation:dispatch:memory`; one `memory` attention item, class `resources`, naming top consumers; one `memory-pressure` fault per dip) until 1 GB above it; running sessions continue.
+Below max(10% RAM, 4 GB) available, launches defer (`Launches deferred`, `escalation:dispatch:memory`; one `memory` item, class `resources`, naming top consumers; one `memory-pressure` fault per dip) until 1 GB above; running ones continue.
 
 ## Bootstrap mode for a self-proving change
 
@@ -126,7 +126,7 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token (budget above reserve, less others' spend, to reset). Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed, five-minute-due, review/rework waits, running sessions, `available_at`; tight, idle items await webhooks. `observationThroughput`: budget, pace, head lag, oldest unobserved (`github` past 120s). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
-Reconcile reads each live item once per pass, not per batch, and locks only its batch rows, so mutations on other items never wait. Contended batches back off, then defer to the next tick; deferrals and ticks over 5 s log warnings.
+Reconcile reads each live item once per pass and locks only its batch rows, so other items' mutations never wait. Contended batches back off, then defer to the next tick; deferrals and ticks over 5 s log warnings.
 
 ### Concurrent reconciliation
 

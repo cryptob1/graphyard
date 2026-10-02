@@ -2,7 +2,7 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
@@ -38,6 +38,8 @@ export interface FaultSources {
   loop?: AttentionItem[];
   /** Herdr could not be read this cycle: every kind read from its inventory (herdrFaultKinds) goes unobserved. */
   herdrUnavailable?: boolean;
+  /** The loop puts a rule-refused scope request to the independent approver (GY-176), so that refusal is still being decided (GY-1085). */
+  scopeRoutes?: boolean;
 }
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
@@ -56,7 +58,8 @@ export interface FaultSources {
  * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
-  const own = work.flatMap(item => workFaults(item, now));
+  const routes = sources.scopeRoutes ?? true;
+  const own = work.flatMap(item => workFaults(item, now, routes));
   const derived: FaultObservation[] = [];
   const { config } = sources;
   if (config) {
@@ -81,7 +84,10 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
   const derivedKinds = new Set(derived.map(fault => `${fault.kind}|${fault.subject}`));
   if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor') && !derivedKinds.has(`${fault.kind}|${fault.subject}`)));
-  const shown = new Set(own.map(fault => `${fault.subject}|${fault.kind}`));
+  // A scope request the product is still settling (standingScopeRequest) is no fault however its attention line reads: the snapshot may
+  // predate the rule's decision this cycle took, so the line can still name a refusal the approver is about to judge (GY-1085).
+  const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
+  const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
 }
 /**
@@ -297,7 +303,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
     refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
-  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }), ...invariantFaults(invariants)],
+  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
   await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed);
