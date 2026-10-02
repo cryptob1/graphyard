@@ -8,13 +8,17 @@ type Git = (...args: string[]) => string;
  * deleted file — and one the base does not hold is removed. Nothing already committed is rewritten,
  * so the branch stays a fast-forward of the pushed one. Returns the paths the commit touched, or
  * none when there was nothing to restore.
+ *
+ * Every command reads the names as literal pathspecs (GY-1080): a refused file named like pathspec
+ * magic, such as `:(top)**`, must never widen the restore to in-scope files. Submodules are restored
+ * recursively, so the checkout matches the base gitlink the path-limited commit then records.
  */
 export function restoreOutOfScope(git: Git, baseTip: string, refused: readonly string[]): string[] {
   const paths = [...new Set(refused)].sort();
   if (!paths.length) return [];
-  git('restore', `--source=${baseTip}`, '--staged', '--worktree', '--', ...paths);
-  if (!git('diff', '--cached', '--name-only', '--', ...paths)) return [];
-  git('commit', '--quiet', '-m', `Restore out-of-scope files to the base branch: ${paths.join(', ')}`, '--', ...paths);
+  git('--literal-pathspecs', 'restore', `--source=${baseTip}`, '--staged', '--worktree', '--recurse-submodules', '--', ...paths);
+  if (!git('--literal-pathspecs', 'diff', '--cached', '--name-only', '--', ...paths)) return [];
+  git('--literal-pathspecs', 'commit', '--quiet', '-m', `Restore out-of-scope files to the base branch: ${paths.join(', ')}`, '--', ...paths);
   return paths;
 }
 
