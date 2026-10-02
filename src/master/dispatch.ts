@@ -178,7 +178,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, onRun: () => { ran = true; } });
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ownGitHubCredential: !!credential, onRun: () => { ran = true; } });
     // A worker stopped on a prompt the launcher does not answer is held for a human rather than
     // closed: its record beside the launch files is what master status raises and what the watch
     // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.

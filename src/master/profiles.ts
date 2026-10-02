@@ -544,6 +544,8 @@ export interface ConfinementInput {
   bwrap?: string | null;
   /** Overrides the availability probe (tests); when absent, the probe runs once and is cached. */
   mountNamespaceWorks?: boolean;
+  /** The session pushes and calls GitHub with a short-lived credential of its own (a worker's, GY-999; a reviewer's), so its session bus stays `/dev/null` instead of the keyring-only proxy that reaches the operator's login (GY-1039). */
+  ownGitHubCredential?: boolean;
 }
 const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
 /** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
@@ -623,10 +625,11 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
  * that pair to one mask, and hiding the real directory hides every symlink to it.
  *
  * When `secretsBus` names a live socket, each session-bus socket is replaced by it instead of by
- * `/dev/null`. That socket is an `xdg-dbus-proxy --filter --talk=org.freedesktop.secrets` proxy
- * (`graphyard-secrets-bus.service`): a session reaches the keyring that holds the operator's
- * GitHub login, so `git push` through `gh auth git-credential` works, while systemd1 and every
- * other bus name stay unreachable, so `systemd-run --user` is still refused.
+ * `/dev/null`. That socket is the keyring-only proxy (`graphyard-secrets-bus.socket`, filtered by
+ * `xdg-dbus-proxy` in `graphyard-secrets-bus-filter.service`): a session reaches the read methods of
+ * the keyring that holds the operator's GitHub login, so `git push` through `gh auth git-credential`
+ * works, while systemd1 and every other bus name stay unreachable, so `systemd-run --user` is still
+ * refused. A session with a GitHub credential of its own is given no `secretsBus` (GY-1039).
  */
 export const processLaunchMaskWords = (
   targets: { directories?: readonly string[]; busSockets?: readonly string[]; secretsBus?: string | null },
@@ -640,7 +643,7 @@ export const processLaunchMaskWords = (
   return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
 };
 const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
-/** Where `graphyard-secrets-bus.service` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
+/** Where `graphyard-secrets-bus.socket` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
 export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
   env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
 /**
@@ -665,7 +668,7 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * hidden so no command can start the write outside the namespace; a session keeps the network and
  * its own process tree. The wrapper ends with `--`, so the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
   const gitDir = join(root, '.git');
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -677,7 +680,9 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
-  const masks = processLaunchMaskWords(hostProcessLaunchTargets(), [root, directory]);
+  const targets = hostProcessLaunchTargets();
+  // A session that carries its own GitHub credential never needs the operator's keyring (GY-1039).
+  const masks = processLaunchMaskWords(input.ownGitHubCredential ? { ...targets, secretsBus: null } : targets, [root, directory]);
   return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
     ...[...shared, ...own].flatMap(path => ['--bind', path, path]), '--'];
 }
@@ -730,7 +735,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };

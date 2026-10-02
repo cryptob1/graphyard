@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { createServer } from 'node:net';
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
@@ -181,7 +182,47 @@ test('unit:sandbox-keyring-proxy — the session bus is replaced by the keyring-
   }
 });
 
-test('unit:allocated-checkout-re-exposed —a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
+test('unit:own-credential-no-keyring — a session that carries its own GitHub credential never gets the keyring-only proxy, even when it is live (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-own-credential');
+  const server = createServer();
+  const saved = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, GRAPHYARD_SECRETS_BUS: process.env.GRAPHYARD_SECRETS_BUS };
+  try {
+    // A worker pushes with the credential minted for its attempt (GY-999) and a reviewer posts with
+    // its own; the keyring behind the proxy holds the operator's login, which neither may read.
+    const runtime = join(base, 'run'), root = join(base, 'checkout'), session = join(root, '.graphyard', 'worktrees', 'GY-1-1');
+    mkdirSync(runtime, { recursive: true }); mkdirSync(session, { recursive: true });
+    const bus = join(runtime, 'bus'), proxy = join(runtime, 'graphyard-secrets-bus');
+    writeFileSync(bus, '');
+    await new Promise<void>(done => server.listen(proxy, done));
+    process.env.XDG_RUNTIME_DIR = runtime; delete process.env.GRAPHYARD_SECRETS_BUS;
+    const replacement = (wrapper: readonly string[]) => wrapper[wrapper.indexOf(realpathSync(bus)) - 1];
+    assert.equal(replacement(readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: session })), realpathSync(proxy), 'a session without a credential of its own reaches the keyring through the proxy');
+    assert.equal(replacement(readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: session, ownGitHubCredential: true })), '/dev/null', 'a session with its own credential keeps the bus unconnectable');
+    const confinement = await coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: session, bwrap: '/usr/bin/bwrap', platform: 'linux', mountNamespaceWorks: true, ownGitHubCredential: true });
+    assert.equal(replacement(confinement!.wrapper), '/dev/null', 'the launch confinement passes the flag through');
+  } finally {
+    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:keyring-proxy-units — the shipped units keep the proxy read-only and its endpoint stable across restarts (GY-1039)', () => {
+  const unit = (name: string) => readFileSync(fileURLToPath(new URL(`../deploy/systemd/${name}`, import.meta.url)), 'utf8');
+  const filter = unit('graphyard-secrets-bus-filter.service');
+  assert.doesNotMatch(filter, /--talk=|--own=/, 'no bus name is opened wholesale');
+  const calls = [...filter.matchAll(/--call=org\.freedesktop\.secrets=([\w.]+)@/g)].map(match => match[1]);
+  assert.ok(calls.includes('org.freedesktop.Secret.Item.GetSecret') && calls.includes('org.freedesktop.Secret.Collection.SearchItems'), 'the reads `gh auth git-credential` makes stay allowed');
+  for (const call of calls) assert.doesNotMatch(call, /\.(Delete|CreateItem|CreateCollection|SetSecret|SetAlias|Lock|ChangeLock|GetSecrets|Set)$/, `${call} reads, never writes or bulk-reads`);
+  // systemd holds the endpoint sessions bind-mount, so a restarted proxy never replaces its inode.
+  assert.match(unit('graphyard-secrets-bus.socket'), /^ListenStream=%t\/graphyard-secrets-bus$/m);
+  const forwarder = unit('graphyard-secrets-bus.service');
+  assert.match(forwarder, /systemd-socket-proxyd %t\/graphyard-secrets-bus-filter$/m);
+  assert.doesNotMatch(forwarder + filter, /rm -f %t\/graphyard-secrets-bus\s/, 'no unit unlinks the endpoint');
+  assert.equal(secretsBusPath(1000, { XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/graphyard-secrets-bus', 'the launcher binds the socket unit\'s endpoint');
+});
+
+test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
   const base = await temporaryDirectory('confinement-session');
   try {
     const { root } = coordinatorFixture(base);

@@ -191,11 +191,12 @@ test('unit:sandboxed-worker-push-without-keyring — under the containment sandb
     await writeWorkerCredential(directory, { key: 'GY-999', epoch: 4, repository: 'owner/project', token: token('sandboxed'), tokenExpiresAt: new Date(now + 3_600_000).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString(), leaseBound: new Date(now + 4 * 3_600_000).toISOString(), permissions: { ...workerPushPermissions } });
 
     // The confinement a worker runs in (GY-888): bubblewrap with the checkout read-only and the
-    // session bus masked by /dev/null. A host without working bubblewrap runs the same commands
+    // session bus masked by /dev/null — a worker carries its own credential, so the keyring-only
+    // proxy is never bound in (GY-1039). A host without working bubblewrap runs the same commands
     // with the bus address pointed at /dev/null, which is what the mask leaves a client.
     const bwrap = (process.env.PATH ?? '').split(delimiter).map(entry => join(entry, 'bwrap')).find(candidate => existsSync(candidate)) ?? null;
     const confined = !!bwrap && process.platform === 'linux' && await sessionMountNamespaceWorks(bwrap);
-    const wrapper = confined ? [...readOnlyMountWrapper({ coordinatorRoot: coordinator, sessionDirectory: worktree, bwrap })] : [];
+    const wrapper = confined ? [...readOnlyMountWrapper({ coordinatorRoot: coordinator, sessionDirectory: worktree, bwrap, ownGitHubCredential: true })] : [];
     const bus = hostProcessLaunchTargets().busSockets.find(socket => existsSync(socket));
     const base = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), GIT_CONFIG_NOSYSTEM: '1', LANG: 'C', GH_TOKEN: 'host-environment-token', DBUS_SESSION_BUS_ADDRESS: confined && bus ? `unix:path=${bus}` : 'unix:path=/dev/null' };
     const inSandbox = (command: string, args: string[], env: NodeJS.ProcessEnv, input?: string) => {
