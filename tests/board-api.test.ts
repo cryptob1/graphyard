@@ -220,15 +220,19 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
   assert.match(docs, /GET \/api\/board/, 'docs/dashboard.md documents the endpoint');
 });
 
-test('unit:server-does-not-import-web — the layering runs web → src only: no module under src imports from web/, so the runtime image needs no web tree (GY-371)', async () => {
-  const sources = execFileSync('git', ['ls-files', 'src'], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' }).split('\n').filter(path => /\.tsx?$/.test(path));
-  // Every way a module reaches another: `import … from`, `export … from`, a side-effect `import`,
-  // a dynamic `import(` and a `require(` — to web/ itself or anything under it (GY-469).
-  const reachesWeb = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"`](?:\.\.\/)+web(?:\/|['"`])/;
+// Every way a module reaches another: `import … from`, `export … from`, a side-effect `import`,
+// a dynamic `import(` and a `require(` — to web/ itself or anything under it (GY-469).
+const reachesWeb = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"`](?:\.\.\/)+web(?:\/|['"`])/;
+
+test('manual:review-followups-triaged GY-469.1: the layering guard catches every form that reaches web/ — `from`, `export … from`, a side-effect import, a dynamic `import(` and `require(` — and nothing that only names a sibling', () => {
   for (const form of [`import { x } from '../web/x.js';`, `export * from "../../web/x.js";`, `import '../../web/x.css';`, `await import('../web/x.js')`, `require('../web/x')`, `import x from '../../web';`])
     assert.match(form, reachesWeb, `the guard catches ${form}`);
   for (const form of [`import { x } from './web/x.js';`, `import x from '../webhooks/x.js';`, `const web = 'web/';`])
     assert.doesNotMatch(form, reachesWeb, `the guard ignores ${form}`);
+});
+
+test('unit:server-does-not-import-web — the layering runs web → src only: no module under src imports from web/, so the runtime image needs no web tree (GY-371)', async () => {
+  const sources = execFileSync('git', ['ls-files', 'src'], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' }).split('\n').filter(path => /\.tsx?$/.test(path));
   const offenders: string[] = [];
   for (const path of sources) {
     const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -238,7 +242,7 @@ test('unit:server-does-not-import-web — the layering runs web → src only: no
   assert.doesNotMatch(await readFile(new URL('../Dockerfile', import.meta.url), 'utf8'), /COPY web /, 'the runtime image does not copy web/');
 });
 
-test('unit:actor-role-covers-every-label — every `who` label the board writes names a role, and an unknown label reads as held, never the control plane (GY-469)', async () => {
+test('manual:review-followups-triaged GY-469.2: every `who` label the board writes names a role, and an unknown label reads as held, never the control plane (GY-469)', async () => {
   const labels = new Set<string>();
   for (const path of ['src/model/board.ts', 'src/model/pr-steps.ts']) {
     const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
