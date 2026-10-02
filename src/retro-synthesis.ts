@@ -24,7 +24,9 @@ type Db = { query: pg.Pool['query'] };
 type OperatorAuthorizer = (db: pg.PoolClient, now: Date, actor: Principal) => Promise<Principal>;
 /** The newest unjudged drafts a reading folds; a registry holds tens of entries, not thousands. */
 export const retroLedgerLimit = 5_000;
-const judgedIds = `SELECT payload->>'id' FROM events WHERE kind IN ('retro.applied', 'retro.refused')`;
+const judgedIds = `SELECT payload->>'id' FROM events WHERE kind IN ('retro.applied', 'retro.refused') AND payload->>'id' IS NOT NULL`;
+/** NOT EXISTS, not NOT IN: one judgement without an id would make NOT IN NULL for every draft. */
+const unjudged = (draft: string) => `NOT EXISTS (SELECT 1 FROM events judged WHERE judged.kind IN ('retro.applied', 'retro.refused') AND judged.payload->>'id' = ${draft}.payload->>'id')`;
 const foldRows = (rows: any[]) => foldRetroArtefacts(rows.map((row): RetroLedgerRow => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), payload: row.payload })));
 
 /**
@@ -36,7 +38,7 @@ const foldRows = (rows: any[]) => foldRetroArtefacts(rows.map((row): RetroLedger
 export async function readRetroArtefacts(db: Db): Promise<RetroArtefact[]> {
   const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM events WHERE kind = ANY($1) AND (kind <> 'retro.drafted'
       OR payload->>'id' IN (${judgedIds})
-      OR seq IN (SELECT seq FROM events WHERE kind = 'retro.drafted' AND payload->>'id' NOT IN (${judgedIds}) ORDER BY seq DESC LIMIT $2))
+      OR seq IN (SELECT seq FROM events draft WHERE kind = 'retro.drafted' AND ${unjudged('draft')} ORDER BY seq DESC LIMIT $2))
     ORDER BY seq`, [[...retroLedgerKinds], retroLedgerLimit]);
   return foldRows(result.rows);
 }

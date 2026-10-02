@@ -299,6 +299,8 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
   await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL, $2, 'retro.drafted', jsonb_build_object('id', id, 'at', $3::text, 'draft', $4::jsonb, 'pattern', $5::jsonb) FROM unnest($1::text[]) AS id`,
     [burst, coordinator.id, now, JSON.stringify({ kind: 'standards-update', registry: 'requirements', target: 'coding-standards', title: 'Burst', proposal: 'Burst' }), JSON.stringify(pattern)]);
   await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL, $2, 'retro.refused', jsonb_build_object('id', id, 'refusal', jsonb_build_object('by', $2::text, 'at', $3::text, 'reason', 'burst')) FROM unnest($1::text[]) AS id`, [burst, approver.id, now]);
+  // A judgement row without an id never turns the unjudged predicate NULL for every draft.
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [approver.id, 'retro.refused', JSON.stringify({ refusal: { by: approver.id, at: now, reason: 'no id' } })]);
   const read = await readRetroArtefacts(store.pool);
   assert.equal(read.find(artefact => artefact.id === waiting)?.state, 'drafted');
   assert.equal(read.filter(artefact => artefact.refusal?.reason === 'burst').length, retroLedgerLimit + 1);
