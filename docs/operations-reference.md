@@ -15,7 +15,7 @@ A lease expires 120 s after the last heartbeat, or one further lease period afte
 
 ## Supervisor died leaving a containment quarantine
 
-`graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)). Automatic settlement bounds the clock with a timed `HEAD /` (plane `Date` header), read once a cycle and only while a non-live quarantine is registered on this host, not the snapshot read, falling back on failure; a too-slow read is refused naming the round trip, escalated again only when the cause changes, not the number.
+`graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)). Automatic settlement bounds the clock with a timed `HEAD /` (plane `Date` header), read once a cycle only while this host holds a non-live quarantine, falling back on failure; a too-slow read is refused naming the round trip, re-escalated only when the cause changes.
 
 ## Submitted implementation needs rework
 
@@ -27,7 +27,7 @@ With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's pattern scan groups refu
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, no rework; a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, no rework, however long its workflow run waits for a runner (`check.rerun.waiting`; master status says *waiting for a runner*); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 

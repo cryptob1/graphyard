@@ -1,0 +1,120 @@
+name: Release candidate
+# Release-candidate validation (GY-1093): the long suites the pre-merge gate never runs — the soak,
+# the timing-budget suites, container acceptance, container recovery and the chart — run here
+# against one pinned SHA, never on a pull request and never as a required check. Dispatch it with
+# the candidate's full SHA, or push an rc tag (rc-*) at that commit.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character release-candidate commit SHA
+        required: true
+  push:
+    tags: ['rc-*']
+permissions:
+  contents: read
+concurrency:
+  # One validation per candidate SHA; a second request for the same SHA waits rather than cancels.
+  group: ${{ github.workflow }}-${{ inputs.sha || github.sha }}
+  cancel-in-progress: false
+env:
+  CANDIDATE_SHA: ${{ inputs.sha || github.sha }}
+jobs:
+  long-suites:
+    name: soak and timing-budget suites
+    runs-on: ubuntu-latest
+    # The soak runs the launcher's real mount namespace on every simulated launch (GY-888) and
+    # takes about twenty minutes on a runner by itself.
+    timeout-minutes: 45
+    steps:
+      - name: Refuse anything but a full commit SHA
+        run: '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full 40-character commit SHA: $CANDIDATE_SHA" >&2; exit 1; }'
+        shell: bash
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Install bubblewrap (the soak confines every simulated launch in real namespaces)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      - name: Run the release-candidate test files
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/ci-tests.mjs release-candidate --out "$RUNNER_TEMP/release-candidate-tests.txt"
+          mkdir -p "$RUNNER_TEMP/timing"
+          GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/release-candidate.jsonl" npm test -- --files-from "$RUNNER_TEMP/release-candidate-tests.txt" --durations "$RUNNER_TEMP/timing/durations-release-candidate.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-release-candidate.log"
+      - name: Summarise the timing-dependent assertions
+        if: always()
+        run: npx tsx tests/helpers/timing-report.ts "$RUNNER_TEMP/timing/release-candidate.jsonl" "$RUNNER_TEMP/timing/test-release-candidate.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graphyard-release-candidate-timing
+          path: ${{ runner.temp }}/timing/
+          if-no-files-found: ignore
+  container-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Build candidate image as the release process would
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag graphyard-ci .
+      - name: Exercise container over HTTP with an isolated database
+        # Validation only: this job has no evidence-producer credential.
+        run: |
+          echo '{}' > "$RUNNER_TEMP/candidate.json"
+          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/acceptance.json"
+      - name: Exercise the merge-authorization contract against the container
+        # Validation only: this job has no evidence-producer credential.
+        run: node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/merge-authorization.json" integration:merge-authorization
+      - name: Verify the release contract, backup and restore with the shipped image
+        run: node scripts/verify-image-release.mjs graphyard-ci "$(node -p "require('./package.json').version")" "$CANDIDATE_SHA"
+  container-recovery:
+    runs-on: ubuntu-latest
+    # The recovery contract waits out the shipped two-minute lease and launch fences.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Build candidate image
+        run: docker build --tag graphyard-ci .
+      - name: Recover an expired lease on a second machine identity
+        # Validation only: this job has no evidence-producer credential.
+        run: |
+          echo '{}' > "$RUNNER_TEMP/candidate.json"
+          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/recovery.json" integration:herdr-recovery
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Lint and render the chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/graphyard --strict --set secrets.existingSecret=graphyard-credentials
+          helm template graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials > /dev/null
+          # An installation with nowhere to hold credentials must not render.
+          if helm template graphyard deploy/helm/graphyard > /dev/null 2>&1; then echo 'chart rendered without credentials' >&2; exit 1; fi
+      - name: Build the candidate image
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag "graphyard:$version" .
+          docker tag "graphyard:$version" "graphyard:$version-next"
+      - uses: helm/kind-action@v1
+        with: { cluster_name: graphyard }
+      - name: Install, exercise, upgrade and restore on a real cluster
+        run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
