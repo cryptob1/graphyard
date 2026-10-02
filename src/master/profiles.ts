@@ -661,23 +661,27 @@ const isSocketPath = (path: string) => { try { return statSync(path).isSocket();
 /** Where `graphyard-secrets-bus.socket` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
 export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
   env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
+/** secretsBusEndpointProblem's answer when the user manager could not judge the endpoint. */
+export const secretsBusUnjudged = 'unjudged' as const;
 export const secretsBusMigration = 'copy deploy/systemd/graphyard-secrets-bus.socket, graphyard-secrets-bus.service and graphyard-secrets-bus-filter.service to ~/.config/systemd/user/, then systemctl --user daemon-reload && systemctl --user disable --now graphyard-secrets-bus.service && systemctl --user enable --now graphyard-secrets-bus.socket';
 /**
  * The keyring endpoint when `graphyard-secrets-bus.socket` does not hold it (GY-1039): an install
  * that enabled the earlier `graphyard-secrets-bus.service` has `xdg-dbus-proxy` listen at the path
  * itself, and every restart of that proxy replaces the socket a confined session has bind-mounted,
- * leaving the session on a dead listener. Null when there is nothing to judge — no endpoint, a path
- * that is not a socket, or a systemd user manager that does not answer — never a guess.
+ * leaving the session on a dead listener. Null when the socket unit holds it or there is nothing to
+ * judge — no endpoint, or a path that is not a socket. `secretsBusUnjudged` when the systemd user
+ * manager does not answer or its answer is unreadable: the endpoint may still be unheld, so a caller
+ * that remembers verdicts must ask again later rather than keep this one — never a guess.
  */
-export async function secretsBusEndpointProblem(run: ChildRun | undefined, path: string | null = secretsBusPath()): Promise<{ text: string; next: string } | null> {
+export async function secretsBusEndpointProblem(run: ChildRun | undefined, path: string | null = secretsBusPath()): Promise<{ text: string; next: string } | typeof secretsBusUnjudged | null> {
   if (!path || !isAbsolute(path) || !isSocketPath(path)) return null;
   // The suite never asks the real user manager about the real runtime directory.
   if (!run && underTestRunner()) return null;
   let shown: string;
-  try { shown = String(await (run ?? defaultChildRun)('systemctl', ['--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket'], { timeoutMs: 10_000 })); } catch { return null; }
+  try { shown = String(await (run ?? defaultChildRun)('systemctl', ['--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket'], { timeoutMs: 10_000 })); } catch { return secretsBusUnjudged; }
   const lines = shown.split(/\r?\n/);
   const state = lines.find(line => line.startsWith('ActiveState='))?.slice('ActiveState='.length);
-  if (!state) return null;
+  if (!state) return secretsBusUnjudged;
   const canonical = (candidate: string) => { try { return realpathSync(candidate); } catch { return candidate; } };
   const listens = lines.filter(line => line.startsWith('Listen=')).map(line => line.slice('Listen='.length).replace(/ \([^)]*\)$/, ''));
   if (state === 'active' && listens.some(listen => canonical(listen) === canonical(path))) return null;

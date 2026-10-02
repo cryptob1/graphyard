@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusMigration, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusMigration, secretsBusPath, secretsBusUnjudged, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { createServer } from 'node:net';
 import { headlessConfinementWrapper, keyringEndpointWarning, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
@@ -235,12 +235,13 @@ test('unit:keyring-endpoint-unheld-reported — a launch that binds an endpoint 
     assert.deepEqual(asked[0], ['systemctl', '--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket']);
     // An earlier install enabled the service itself: xdg-dbus-proxy listens at the path and the socket unit is not loaded.
     const unheld = await secretsBusEndpointProblem(show('ActiveState=inactive\n'), endpoint);
-    assert.ok(unheld && unheld.text.includes(endpoint) && unheld.text.includes('is inactive'), 'an endpoint the socket unit does not hold is named');
-    assert.equal(unheld!.next, secretsBusMigration);
+    assert.ok(unheld && unheld !== secretsBusUnjudged && unheld.text.includes(endpoint) && unheld.text.includes('is inactive'), 'an endpoint the socket unit does not hold is named');
+    assert.equal(unheld.next, secretsBusMigration);
     assert.match(secretsBusMigration, /disable --now graphyard-secrets-bus\.service && systemctl --user enable --now graphyard-secrets-bus\.socket/);
-    assert.ok((await secretsBusEndpointProblem(show('ActiveState=active\nListen=/run/user/1/graphyard-secrets-bus (Stream)\n'), endpoint))!.text.includes('listens at /run/user/1/graphyard-secrets-bus instead'), 'a socket unit listening elsewhere does not hold this endpoint');
-    assert.equal(await secretsBusEndpointProblem(() => { throw new Error('Failed to connect to bus'); }, endpoint), null, 'no answering user manager judges nothing');
-    assert.equal(await secretsBusEndpointProblem(show(''), endpoint), null, 'unreadable output judges nothing');
+    const elsewhere = await secretsBusEndpointProblem(show('ActiveState=active\nListen=/run/user/1/graphyard-secrets-bus (Stream)\n'), endpoint);
+    assert.ok(elsewhere && elsewhere !== secretsBusUnjudged && elsewhere.text.includes('listens at /run/user/1/graphyard-secrets-bus instead'), 'a socket unit listening elsewhere does not hold this endpoint');
+    assert.equal(await secretsBusEndpointProblem(() => { throw new Error('Failed to connect to bus'); }, endpoint), secretsBusUnjudged, 'no answering user manager judges nothing');
+    assert.equal(await secretsBusEndpointProblem(show(''), endpoint), secretsBusUnjudged, 'unreadable output judges nothing');
     assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), plain), null, 'a path that is no socket is not an endpoint');
     assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), join(base, 'missing')), null, 'no endpoint, nothing to migrate');
     assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), null), null);
@@ -267,7 +268,7 @@ test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is pro
     let probes = 0;
     const unheld = () => { probes++; return 'ActiveState=inactive\n'; };
     const bound = () => ({ mechanism: 'read-only-mount' as const, wrapper: ['bwrap', '--ro-bind', realpathSync(endpoint), '/run/user/1/bus', '--'], detail: '' });
-    const verdicts = new Map<string, Promise<string | null>>();
+    const verdicts = new Map<string, Promise<string | null | undefined>>();
     // Launches racing on the same socket share one probe, and only the first logs.
     const first = await Promise.all([keyringEndpointWarning('gy-a', bound(), unheld, endpoint, verdicts), keyringEndpointWarning('gy-b', bound(), unheld, endpoint, verdicts)]);
     assert.equal(first.filter(Boolean).length, 1, 'concurrent launches on one socket log the line once');
@@ -288,6 +289,20 @@ test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is pro
     assert.equal(await keyringEndpointWarning('gy-e', bound(), () => { held++; return `ActiveState=active\nListen=${endpoint} (Stream)\n`; }, endpoint, verdicts), null, 'a socket the unit holds logs nothing');
     assert.equal(await keyringEndpointWarning('gy-f', bound(), () => { held++; return ''; }, endpoint, verdicts), null);
     assert.equal(held, 1, 'and its verdict is kept too');
+    // A probe that cannot judge the socket is not kept as its verdict (GY-1039 follow-up 8): once
+    // the user manager answers, a later launch in the same process still reports the endpoint.
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    let asked = 0;
+    assert.equal(await keyringEndpointWarning('gy-g', bound(), () => { asked++; throw new Error('Failed to connect to bus'); }, endpoint, verdicts), null, 'no answering user manager logs nothing');
+    assert.equal(await keyringEndpointWarning('gy-h', bound(), () => { asked++; return ''; }, endpoint, verdicts), null, 'nor does an unreadable answer');
+    assert.equal(asked, 2, 'and neither is remembered, so each launch asks again');
+    const later = await keyringEndpointWarning('gy-i', bound(), unheld, endpoint, verdicts);
+    assert.ok(later && later.startsWith('graphyard: gy-i: ') && later.endsWith(`migrate: ${secretsBusMigration}`), 'the user manager answering later reports the unmigrated endpoint');
+    assert.equal(probes, 3);
+    assert.equal(await keyringEndpointWarning('gy-j', bound(), unheld, endpoint, verdicts), null, 'and that judged verdict is kept');
+    assert.equal(probes, 3);
   } finally {
     await new Promise<void>(done => server.close(() => done()));
     rmSync(base, { recursive: true, force: true });

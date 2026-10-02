@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusPath, secretsBusUnjudged, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -460,22 +460,26 @@ export async function startAgentSession(name: string, kind: string, pane: string
  * and a socket replaced at the path — the socket unit binding it after a migration, or a restarted
  * proxy — is judged afresh. Null when the confinement binds no endpoint (an unconfined session, a
  * runtime's own sandbox, a session with a credential of its own), the endpoint is held or cannot be
- * judged, or this socket was already judged.
+ * judged, or this socket was already judged. A probe that cannot judge the socket — no user manager
+ * answers, or its answer is unreadable — is not remembered, so a later launch asks again and still
+ * reports an unmigrated endpoint once the user manager answers.
  */
-export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, Promise<string | null>> = keyringEndpointVerdicts): Promise<string | null> {
+export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, Promise<string | null | undefined>> = keyringEndpointVerdicts): Promise<string | null> {
   if (!confinement || !path) return null;
   let endpoint: string, socket: string;
   try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
   if (!confinement.wrapper.includes(endpoint)) return null;
   const judged = verdicts.get(socket);
   if (judged) { await judged; return null; }
-  const verdict = secretsBusEndpointProblem(run, path).then(problem => problem ? `${problem.text}; migrate: ${problem.next}` : null, () => null);
+  const verdict = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? undefined : problem ? `${problem.text}; migrate: ${problem.next}` : null, () => undefined);
   verdicts.set(socket, verdict);
   const problem = await verdict;
+  // A probe that could not judge the socket is not its verdict: the next launch asks again.
+  if (problem === undefined) { if (verdicts.get(socket) === verdict) verdicts.delete(socket); return null; }
   return problem ? `graphyard: ${name}: ${problem}` : null;
 }
 /** Each keyring endpoint socket's verdict in this process, by `dev:inode:ctime` (keyringEndpointWarning). */
-const keyringEndpointVerdicts = new Map<string, Promise<string | null>>();
+const keyringEndpointVerdicts = new Map<string, Promise<string | null | undefined>>();
 
 /**
  * A launch that failed before its runtime started closes what it created (GY-413): its pane
