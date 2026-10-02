@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
-import { scopeRefusalBlocker } from './scope.js';
+import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from './scope.js';
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
@@ -61,10 +61,10 @@ export const faultCatalogue = {
   'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'workflow-permission', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
   'merge': ['base-conflict', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
-  'proof': ['proof-gap', 'timing-failure', 'escalation:evidence-policy-conflict', 'action:proof'],
+  'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault', 'action:diagnosis'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
   'unclassified': ['unclassified'],
@@ -107,6 +107,8 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['overlong-session', (_, text) => /past the .+ maximum for its role/.test(text)],
   ['context-overflow', (_, text) => /escalation context for \S+ assembled to/.test(text)],
   ['timing-failure', (_, text) => /^Required CI check .+ failed on .*timing-dependent/.test(text)],
+  ['nonexercising-proof', (_, text) => /^\S+ is awaiting rework for a non-exercising proof: /.test(text)],
+  ['retry-stopped', (_, text) => /^The loop stopped retrying .+: \d+ consecutive attempts failed with the same client error/.test(text)],
   ['agent-request', (_, text) => /recorded a \S+ on \S+ .+ ago and released/.test(text)],
   ['owed-decision', (_, text) => /no executor may run it; .+ has been owed for/.test(text)],
   ['generated-files', (_, text) => /generated-file manifest|GRAPHYARD_GENERATED_FILES/.test(text)],
@@ -150,17 +152,33 @@ export interface FaultObservation extends Classified { subject: string; text: st
 const observe = (kind: FaultKind, subject: string, text: string): FaultObservation => ({ ...classified(kind), subject, text: text.slice(0, 500) });
 /**
  * The faults an open item's own record shows: its standing escalations, a lapsed containment
- * fence, a human-only park, a live attempt's open scope request, a proof nobody may produce, a spent provider
+ * fence, a human-only park, a live attempt's standing scope request, a proof nobody may produce, a spent provider
  * account, its out-of-scope violations and its blocker. The dashboard and the loop read the same.
  */
-export function workFaults(work: Work, now: number): FaultObservation[] {
+/**
+ * GY-1085: a live attempt's scope request is a fault only when the product will not settle it
+ * itself. Nine in one day were not: each was asked, decided by the widening rule on the loop's next
+ * scope step or put to the independent approver (`routes`, GY-176), and widened within minutes — the
+ * routine master status already leaves out of its attention (scopeRequestAttention). One stands when
+ * it has waited past the bound the loop promises (scopeBlockedBudgetMs), or when it is refused and
+ * nothing will judge it again: a non-additive or over-cap ask, an approver's refusal, or no approver.
+ */
+export function standingScopeRequest(work: Pick<Work, 'scopeRequest' | 'lease' | 'plannedFiles' | 'criteria'>, now: number, routes = true): boolean {
+  const request = work.scopeRequest;
+  if (!request || !work.lease || work.lease.epoch !== request.epoch || Date.parse(work.lease.expiresAt) <= now) return false; /* an expired attempt's request is moot (owed-report's rule) */
+  if (now - Date.parse(request.at) > scopeBlockedBudgetMs) return true;
+  if (request.decision?.state !== 'refused') return false;
+  return !(routes && request.decision.decidedBy === 'graphyard' && routableScopeRequest(work, now));
+}
+
+export function workFaults(work: Work, now: number, routes = true): FaultObservation[] {
   if (work.stage === 'done' || isClosed(work)) return [];
   const found: FaultObservation[] = [];
   const escalations = work.escalations ?? (work.escalation ? [work.escalation] : []);
   for (const escalation of escalations) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`));
   if (work.containmentQuarantine && !(work.lease && Date.parse(work.lease.expiresAt) > now)) found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
   if (work.humanRequest && !work.humanRequest.answer) found.push(observe('human-request', work.key, `${work.key} is parked on a human-only decision: ${work.humanRequest.needed}`));
-  if (work.scopeRequest && work.lease?.epoch === work.scopeRequest.epoch && Date.parse(work.lease.expiresAt) > now) /* an expired attempt's request is moot (owed-report's rule) */ found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
+  if (work.scopeRequest && standingScopeRequest(work, now, routes)) found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
