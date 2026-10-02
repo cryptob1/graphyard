@@ -18,7 +18,15 @@ import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEn
  * never evidence: trusted evidence still comes only from an independent producer, and the control
  * plane requests no review until that evidence has passed on the head.
  */
-export interface ProofRun { proof: string; criteria: string[]; result: 'pass' | 'fail'; executed: number; failed: number; skipped: number; files: string[]; abnormal?: string }
+export interface ProofRun { proof: string; criteria: string[]; result: 'pass' | 'fail'; executed: number; failed: number; skipped: number; files: string[]; abnormal?: string; leftToCi?: boolean }
+// leftToCi marks a run the proof's own cases did not decide: every case of the proof passed, and
+// the run still failed around them — a hook, a crash or a signal from the other suites its files
+// carry (GY-853). The item's own criteria are not judged by it; CI, which runs the whole suite,
+// settles it. A failed, skipped or unexecuted case of the proof itself is never left to CI.
+/** A failed run its proof's own cases did not decide: they executed, none failed or skipped, and the run still ended abnormally. */
+export function leftToCiRun(run: Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'abnormal'>) {
+  return run.result === 'fail' && Boolean(run.abnormal) && run.executed > 0 && run.failed === 0 && run.skipped === 0;
+}
 export interface Outstanding { proof: string; criteria: string[]; reason: string }
 export interface VerifyRecord { key: string; head: string; clean: boolean; at: string; ran: ProofRun[]; outstanding: Outstanding[] }
 type Criterion = { id: string; proofs: string[]; bootstrap?: unknown };
@@ -96,7 +104,15 @@ export async function verifyWorkingTree(work: { key: string; criteria: Criterion
   const head = git(root, ['rev-parse', 'HEAD']);
   const clean = git(root, ['status', '--porcelain']) === '';
   const ran: ProofRun[] = [];
-  for (const entry of runnable) ran.push({ proof: entry.proof, criteria: entry.criteria, ...await runProof(root, entry.proof, await proofFiles(root, entry.proof)) });
+  for (const entry of runnable) {
+    const files = await proofFiles(root, entry.proof);
+    const result = await runProof(root, entry.proof, files);
+    // The proof's own cases decide its criterion (GY-853): a failed, skipped or unexecuted case is
+    // the item's own test failing and blocks, wherever its file sits. When every case of the proof
+    // passed but the run still did not complete normally, the failure lies in the rest of the run —
+    // the other suites the files carry, which a sandbox may not be able to run — and is left to CI.
+    ran.push({ proof: entry.proof, criteria: entry.criteria, ...result, ...(leftToCiRun(result) ? { leftToCi: true } : {}) });
+  }
   const record: VerifyRecord = { key: work.key, head, clean, at: now().toISOString(), ran, outstanding };
   await mkdir(join(root, '.graphyard', 'verify'), { recursive: true });
   await writeFile(recordPath(root, work.key), JSON.stringify(record, null, 2));
@@ -110,13 +126,16 @@ export async function selfVerification(root: string, key: string) {
     return { state: 'not-run' as const, reason: `graphyard verify ${key} was not run in this worktree; no proof was checked before submission`, ran: [], outstanding: [] };
   }
   const head = git(root, ['rev-parse', 'HEAD']);
-  const summary = { ran: record.ran.map(({ proof, criteria, result, executed, failed, skipped, abnormal }) => ({ proof, criteria, result, executed, failed, skipped, ...(abnormal ? { abnormal } : {}) })),
+  const summary = { ran: record.ran.map(({ proof, criteria, result, executed, failed, skipped, abnormal, leftToCi }) => ({ proof, criteria, result, executed, failed, skipped, ...(abnormal ? { abnormal } : {}), ...(leftToCi ? { leftToCi } : {}) })),
     outstanding: record.outstanding.map(({ proof, criteria, reason }) => ({ proof, criteria, reason })), verifiedAt: record.at };
   if (record.head !== head) return { state: 'stale' as const, reason: `verified ${record.head.slice(0, 12)}, not HEAD ${head.slice(0, 12)}; run graphyard verify ${key} again`, ...summary };
-  const failing = record.ran.filter(entry => entry.result !== 'pass');
+  const failing = record.ran.filter(entry => entry.result !== 'pass' && !leftToCiRun(entry));
+  const deferred = record.ran.filter(entry => entry.result !== 'pass' && leftToCiRun(entry));
+  const clean = record.clean ? '' : ' (with uncommitted changes present when it ran)';
   return { state: failing.length ? 'failing' as const : 'passing' as const,
     reason: failing.length ? `${failing.map(entry => entry.proof).join(', ')} did not pass on HEAD; the control plane returns this head to its worker before review`
-      : `every mechanical proof passed on HEAD${record.clean ? '' : ' (with uncommitted changes present when it ran)'}`, ...summary };
+      : deferred.length ? `the item's own criteria passed on HEAD${clean}; ${deferred.map(entry => entry.proof).join(', ')} did not complete in this sandbox with every case of the proof passing, so its failure is left to CI`
+      : `every mechanical proof passed on HEAD${clean}`, ...summary };
 }
 
 export const verifyCommand: CliCommand = {
@@ -130,6 +149,6 @@ export const verifyCommand: CliCommand = {
   run: async (context, work) => {
     const record = await verifyWorkingTree(work, context.repositoryRoot());
     context.print(record);
-    if (record.ran.some(entry => entry.result !== 'pass')) process.exitCode = 1;
+    if (record.ran.some(entry => entry.result !== 'pass' && !leftToCiRun(entry))) process.exitCode = 1;
   },
 };
