@@ -33,15 +33,15 @@ Worker tokens also request Workflows write ([push credential](protocol/leases.md
 
 ## Require the check
 
-On the base branch require `Graphyard / merge` from this App: `strict` **off**, admin-enforced, no force pushes or deletion; `master browser protection` reconciles it.
+On the base branch require `Graphyard / merge`: `strict` **off**, admin-enforced, no force pushes or deletion; `master browser protection` reconciles it.
 
 The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed rerun lapses after 15 runless minutes; an accepted one is read from its run: queued or in progress is a runner-queue wait, one not found is requested once more; lacking Actions: write, preflight diagnoses it and rerun requests hold.
+A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed rerun lapses after 15 runless minutes; an accepted one is read from its workflow run: queued or in progress is a runner-queue wait (no new head owed), one not found is requested once more; lacking Actions: write, preflight diagnoses it and rerun requests hold.
 
-Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once that check's newest run on that tip passes and no other required check fails (`queue.ejection-lifted`). It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+Once gated, the candidate's speculative tip, pushed onto the candidate branch once and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once that check's newest run on that tip passes and no other required check fails (`queue.ejection-lifted`). It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
 ### Bindings and carry
 
@@ -51,11 +51,11 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Each entry validates on its own tip, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the first entry whose docs change crossed the budget, naming the words over and the pages that grew; entries ahead still merge. The word budget itself is never a merge gate (see [development](development.md#documentation)): a total over it warns.
+`mergeQueue.parallelTips` (default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Each entry validates on its own tip, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the first entry whose docs change crossed the budget, naming the words over and the pages that grew; entries ahead still merge. The word budget itself is never a merge gate (see [development](development.md#documentation)): a total over it warns.
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), so nothing touching one, or whose base changed one since its run, merges optimistically; `optimistic: false` turns the lane off.
+`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), so nothing touching one, or whose base changed one since its run, merges optimistically; `optimistic: false` turns the lane off.
 
 ### Pre-merge gate and release-candidate validation
 
