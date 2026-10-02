@@ -27,9 +27,9 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 `graphyard master reviewer setup` creates it (Pull requests write, reads otherwise). Review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Grants recheck every five minutes and 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
-## Base syncs carrying workflow changes
+## Workflow base syncs
 
-Worker push tokens carry `workerPushPermissions` (`src/worker-credential.ts`): Contents, Pull requests, Workflows write, so workers push base syncs carrying main's workflow changes. Refused (Workflows ungranted), `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT if it fast-forwards, merges `origin/BASE` and keeps its workflow files (plannedFiles aside), else names the differing paths; history records `sync.workflow-push` per worker and epoch.
+Worker tokens include Workflows write. Refused, `sync GY-N --push-via-control-plane COMMIT` has the control plane push a fast-forwarding merge of `origin/BASE` matching its workflow files (plannedFiles aside), else names differing paths; recorded as `sync.workflow-push` (worker, epoch).
 
 ## Require the check
 
