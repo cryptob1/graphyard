@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { attentionKind, classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Evidence, type Observation, type Work } from '../src/model.js';
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
@@ -14,7 +14,9 @@ import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSourc
 import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { sessionRetries } from '../src/producer.js';
-import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/master-status.js';
+import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/unanswered-requests.js';
+import { retryStopAttention } from '../src/retry-stop.js';
+import { stoppedFollowUpAttention, type ReviewRecord } from '../src/reviewer.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
@@ -69,7 +71,8 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
-      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless']],
+      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless',
+      'nonexercising-proof', 'retry-stopped']],
     ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
   for (const [source, kinds] of sources) for (const kind of kinds) {
@@ -1028,3 +1031,59 @@ test('unit:recurring-class-item — daemonSummary reports faults under the polic
     assert.deepEqual([...livenessFaults([gy523, gy368, gy491], now), ...reviewLines].filter(line => line.faultClass === 'session-liveness'), []);
   });
 }
+
+// GY-915: the non-exercising-proof rework line (GY-817) and the stopped-retry line (GY-598) set no
+// kind and matched no signature, so every instance was counted as unclassified and the loop filed
+// grab-bag GY-889 for them. These are the instance texts listed on GY-889: the 2026-09-27 trio
+// verbatim as the loop recorded them, GY-831's as recorded up to its truncation, and GY-876's and
+// GY-727's in the builder's wording.
+const gy889Lines = [
+  { subject: 'GY-537', text: 'The loop stopped retrying follow-up filing for approval 5327884989 (PR #372) for GY-537: 10 consecutive attempts failed with the same client error, so another attempt would get the same answer — the follow-ups could not be appended to GY-808: Graphyard refused the follow-ups for GY-808 (409): Idempotency key reused with different input' },
+  { subject: 'GY-853', text: 'GY-853 is awaiting rework for a non-exercising proof: unit:worker-submits-sandbox-failures-to-ci was recorded as not exercising AC-1 on 1d49f9919749: the mutation removing "Workers submit when their own criteria pass; the full test suite is CI\'s gate. The submission policy rule is exported from src/master/harness.ts and included in the worker prompt in src/master/dispatch.ts." survived — unit:worker-submits-sandbox-failures-to-ci does not exercise AC-1: no case ran against the tree with "Workers' },
+  { subject: 'GY-888', text: 'GY-888 is awaiting rework for a non-exercising proof: unit:coordinator-write-blocked-for-shell was recorded as not exercising AC-1 on 70826ae41197: the mutation removing "assertion that write operations to read-only mounted coordinator checkout fail with Permission denied or Read-only error" survived — unit:coordinator-write-blocked-for-shell does not exercise AC-1: it passed against the tree with "assertion that write operations to read-only mounted coordinator checkout fail with Permission den' },
+  { subject: 'GY-831', text: 'GY-831 is awaiting rework for a non-exercising proof: unit:carried-approval-rebinds was recorded as not exercising unit:carried-approval-rebinds on 5b4ac3a6decb: the mutation removing "refreshedCarriedApproval function re-binds a carried approval from an earlier pull request to a newer approval of …' },
+  { subject: 'GY-876', text: 'GY-876 is awaiting rework for a non-exercising proof: unit:master-status-fast was recorded as not exercising AC-1 on 71edb8fc5b78: the mutation removing "the bounded status read" survived. The unit proofs are a defect of the candidate\'s tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh' },
+  { subject: 'GY-727', text: 'GY-727 is awaiting rework for a non-exercising proof: unit:gy727-proof was recorded as not exercising AC-1 on 2823718ea08d: the mutation removing "the guarded branch" survived. The unit proofs are a defect of the candidate\'s tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh' },
+];
+
+test('unit:gy889-attention-lines-classified — every GY-889 instance line has a catalogue kind with a real class', () => {
+  for (const line of gy889Lines) {
+    const kind = attentionKind(line);
+    assert.notEqual(kind, 'unclassified', `${line.subject}: ${line.text}`);
+    assert.notEqual(faultClassOf(kind), 'unclassified', `${line.subject}: ${kind}`);
+  }
+  assert.deepEqual(gy889Lines.map(line => attentionKind(line)), ['retry-stopped', ...Array(5).fill('nonexercising-proof')]);
+  assert.deepEqual(classifyAttention(gy889Lines).map(entry => entry.faultClass), ['loop', ...Array(5).fill('proof')]);
+});
+
+test('unit:nonexercising-proof-kind — the non-exercising-proof rework line is a proof fault', () => {
+  const finding = 'unit:widget-renders was recorded as not exercising AC-1 on 0123456789ab: the mutation removing "the widget" survived';
+  const producer = { requestId: 'request-1', sinceMs: 3 * hour, group: 'unit', session: { state: 'completed', attempt: 1, resolution: `evidence does not exercise its criterion: ${finding}`, verdict: null }, unexercised: [finding] };
+  const [line, ...rest] = unansweredRequestAttention([{ key: 'GY-42', dispatch: { review: null, producers: [producer] } }]);
+  assert.equal(rest.length, 0);
+  assert.match(line.text, /^GY-42 is awaiting rework for a non-exercising proof: /);
+  assert.equal(line.kind, 'nonexercising-proof');
+  assert.equal(faultClassOf(line.kind!), 'proof');
+  const [classifiedLine] = classifyAttention([line]);
+  assert.deepEqual([classifiedLine.kind, classifiedLine.faultClass], ['nonexercising-proof', 'proof']);
+  // The same line without its kind, as a recorded instance carries it, is recognised by its wording.
+  assert.equal(attentionKind({ subject: line.subject, text: line.text }), 'nonexercising-proof');
+  // A producer request that settled with no finding stays the unanswered request it was.
+  const { unexercised: _finding, ...plain } = producer;
+  assert.equal(attentionKind(unansweredRequestAttention([{ key: 'GY-42', dispatch: { review: null, producers: [plain] } }])[0]), 'unanswered-request');
+});
+
+test('unit:retry-stop-kind — the stopped-retry line is a loop fault', () => {
+  const error = 'Graphyard refused the follow-ups for GY-808 (409): Idempotency key reused with different input';
+  const direct = retryStopAttention({ step: 'follow-up filing for approval 77 (PR #64)', item: 'GY-64', error, count: 10, at: iso(0) });
+  const record = { key: 'GY-64', pr: 64, followUps: { reviewId: 77, stoppedAt: iso(0), clientError: { error, count: 10 } } } as unknown as ReviewRecord;
+  const [stopped, ...rest] = stoppedFollowUpAttention([record]);
+  assert.equal(rest.length, 0);
+  for (const line of [direct, stopped]) {
+    assert.match(line.text, /^The loop stopped retrying follow-up filing for approval 77 \(PR #64\) for GY-64: 10 consecutive attempts/);
+    assert.equal(line.kind, 'retry-stopped');
+    assert.equal(faultClassOf(line.kind!), 'loop');
+    assert.deepEqual(classifyAttention([line]).map(entry => [entry.kind, entry.faultClass]), [['retry-stopped', 'loop']]);
+    assert.equal(attentionKind({ subject: line.subject, text: line.text }), 'retry-stopped', 'recognised by its wording without the kind');
+  }
+});
