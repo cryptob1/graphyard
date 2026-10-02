@@ -16,6 +16,7 @@ import { superviseSessionCredential, type MintedPushCredential } from '../worker
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { restoreAndReport } from './sync-restore.js';
+import { pushViaControlPlane } from './sync-push.js';
 import { defineCommands, workMutation } from './registry.js';
 
 export { installUnderLease };
@@ -151,8 +152,14 @@ export const workspaceCommands = defineCommands([
       '  sync GY-N --restore           The same, then restore every such file to the base in one new',
       '                                commit naming them; push it plainly. A force push is never',
       '                                needed or allowed',
+      '  sync GY-N --push-via-control-plane COMMIT',
+      '                                Have the control plane push a base-sync merge COMMIT whose',
+      '                                push was refused for the workflows permission: only when it',
+      '                                fast-forwards the assigned branch, merges origin/BASE, and',
+      '                                leaves .github/workflows as the base has it (plannedFiles aside)',
     ],
     async run(context, work) {
+      if (context.args.includes('--push-via-control-plane')) return pushViaControlPlane(context, work);
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
       // so the item never presents as a ready-gate refusal or an unexplained lapse (GY-134).
       try { await syncWork(context, work); }

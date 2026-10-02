@@ -5,15 +5,15 @@
  * else. Anything not declared here is not requested and is never silently relied upon.
  */
 export type PermissionLevel = 'read' | 'write' | 'admin';
-export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue' | 'check-rerun';
+export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue' | 'check-rerun' | 'workflow-sync';
 export interface PermissionRequirement { permission: string; level: PermissionLevel; feature: PermissionFeature; reason: string }
 export interface PermissionShortfall { permission: string; required: PermissionLevel; granted: PermissionLevel | null; features: PermissionFeature[]; reasons: string[] }
 
 const levels: PermissionLevel[] = ['read', 'write', 'admin'];
-export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration' };
+export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration', workflows: 'Workflows' };
 export const featureLabels: Record<PermissionFeature, string> = {
   repository: 'repository access', observation: 'pull request observation', check: 'the required check',
-  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue',
+  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue', 'workflow-sync': 'base syncs carrying workflow changes',
 };
 
 /** The control-plane App: it observes, publishes the gate check, dispatches reviews, and lands the queue. */
@@ -28,12 +28,15 @@ export const controlPlanePermissions: readonly PermissionRequirement[] = [
   { permission: 'checks', level: 'read', feature: 'observation', reason: 'read CI check runs' },
   { permission: 'checks', level: 'write', feature: 'check', reason: 'publish `Graphyard / merge` on the exact candidate commit' },
   { permission: 'administration', level: 'read', feature: 'observation', reason: 'inspect branch protection' },
+  { permission: 'workflows', level: 'write', feature: 'workflow-sync', reason: 'push a worker\'s base-sync merge commit that carries the base branch\'s own `.github/workflows` changes, which a worker push credential (Contents and Pull requests only) is refused' },
 ];
 /**
  * A reviewer App reads code and writes pull request comments. It deliberately never gains
  * `contents: write`, `checks`, or `administration`: a reviewer can neither publish Graphyard's
  * own gate check, change protection, nor write source code. Worker identities are not Apps
- * at all; they push their own branches with their own credentials.
+ * at all; they push their own branches with a credential narrowed to `contents` and
+ * `pull_requests` (worker-credential.ts), never `workflows`: a base sync carrying the base
+ * branch's workflow changes is pushed by the control plane instead (sync.ts, GY-1098).
  */
 export const reviewerPermissions: readonly PermissionRequirement[] = [
   { permission: 'metadata', level: 'read', feature: 'repository', reason: 'read the managed repository' },

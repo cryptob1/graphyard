@@ -14,6 +14,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
+| Workflows | Read and write | push a worker's base-sync merge commit that carries the base branch's own `.github/workflows` changes, which a worker push credential (Contents and Pull requests only) is refused (base syncs carrying workflow changes) |
 
 A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
@@ -25,6 +26,10 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
 `graphyard master reviewer setup` creates it (Pull requests write, reads otherwise). Review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Grants recheck every five minutes and 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
+
+## Base syncs carrying workflow changes
+
+Worker push credentials are minted with Contents and Pull requests only, never Workflows, so no worker can change CI configuration. GitHub then refuses a worker's push of a merge of `origin/BASE` that brings in the base's own workflow changes. The worker asks instead: `graphyard sync GY-N --push-via-control-plane COMMIT`. The control plane pushes COMMIT to the worker's assigned branch with its App's Workflows: write only when COMMIT fast-forwards that branch on GitHub, its second parent is in `origin/BASE`, and every `.github/workflows` path matches that parent except paths in plannedFiles. It rebuilds COMMIT through the Git Data API and pushes only an exact match. Anything else is refused naming the differing paths. Each outcome is recorded in the item's history under the worker and epoch (`sync.workflow-push`, `sync.workflow-push.refused`).
 
 ## Require the check
 

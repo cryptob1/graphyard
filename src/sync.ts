@@ -1,4 +1,6 @@
-import type { ScopeFile, Work } from './model.js';
+import { z } from 'zod';
+import { activeLease, demand, type Principal, type ScopeFile, type Work } from './model.js';
+import type { Store } from './store.js';
 import { classifyScope, inPlannedScope, shippedBy, type ScopeFinding } from './regression-guard.js';
 
 /**
@@ -88,4 +90,112 @@ export function attributeConflicts(paths: string[], all: Work[], landed: (sha: s
     const causes = arrived.filter(covers).map(item => item.key);
     return { path, generated: generated.includes(path), shippedBy: causes.length ? causes : shippedBy(path, all), landedSince: causes.length > 0 };
   });
+}
+
+/**
+ * A base sync that carries the base branch's own workflow changes (GY-1098). A worker's push
+ * credential is narrowed to `contents` and `pull_requests` and never carries `workflows`, so
+ * GitHub refuses any push whose commits change `.github/workflows` — including the merge of a base
+ * that changed them. The worker names the merge commit instead and the control plane pushes it
+ * with its own App, which holds `workflows: write`, only when the commit is a pure base sync:
+ * a merge whose first parent is the assigned branch's head on GitHub (a fast-forward), whose
+ * second parent is in origin/BASE, and whose workflow files are byte-identical to that parent
+ * except for paths in plannedFiles. The control plane rebuilds the commit from the base tree plus
+ * the listed entries through GitHub's Git Data API and refuses unless the rebuilt tree and commit
+ * are the named ones, so an entry list that hides a workflow change cannot produce the commit.
+ */
+export const workflowsDirectory = '.github/workflows/';
+const sha40 = z.string().regex(/^[a-f0-9]{40}$/);
+const person = z.object({ name: z.string(), email: z.string(), date: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/) }).strict();
+export const syncPushRequest = z.object({
+  epoch: z.number().int().positive(), commit: sha40, tree: sha40, parents: z.array(sha40).min(1).max(8),
+  message: z.string(), author: person, committer: person, signature: z.string().optional(),
+  entries: z.array(z.object({ path: z.string().min(1), mode: z.enum(['100644', '100755', '120000', '160000']), type: z.enum(['blob', 'commit']), sha: sha40.nullable() }).strict()).max(20_000),
+  blobs: z.array(z.object({ sha: sha40, content: z.string() }).strict()).max(5_000),
+}).strict();
+export type SyncPushRequest = z.infer<typeof syncPushRequest>;
+/** The slice of the GitHub client the guarded push uses; `GitHub` satisfies it. */
+export interface GitDataApi { config: { base: string }; request(path: string, method?: string, body?: unknown): Promise<any> }
+
+/** The workflow paths a sync commit changes against the base it merged that plannedFiles do not cover. */
+export const workflowPaths = (entries: readonly { path: string }[]) => entries.map(entry => entry.path).filter(path => path.startsWith(workflowsDirectory)).sort();
+export function workflowSyncRefusal(input: { request: Pick<SyncPushRequest, 'commit' | 'parents' | 'entries'>; branch: string; baseBranch: string; branchHead: string | null; baseContains: boolean; plannedFiles: string[] }): string | null {
+  const { request, branch, baseBranch, branchHead, baseContains, plannedFiles } = input;
+  const commit = request.commit.slice(0, 12);
+  if (request.parents.length !== 2) return `${commit} is not a base sync: it has ${request.parents.length} parent${request.parents.length === 1 ? '' : 's'}, and only the two-parent merge of origin/${baseBranch} into ${branch} is pushed by the control plane`;
+  if (!branchHead) return `${branch} does not exist on GitHub; push the branch's own commits first, then ask for the base sync`;
+  if (request.parents[0] !== branchHead) return `${commit} does not fast-forward ${branch}: its first parent is ${request.parents[0].slice(0, 12)} but the branch is at ${branchHead.slice(0, 12)}; push the branch's own commits first with a plain git push, then ask again`;
+  if (!baseContains) return `${commit} does not merge origin/${baseBranch}: its second parent ${request.parents[1].slice(0, 12)} is not in origin/${baseBranch}`;
+  const differing = workflowPaths(request.entries).filter(path => !inPlannedScope(plannedFiles, path));
+  if (differing.length) return `${commit} changes workflow files beyond origin/${baseBranch} outside plannedFiles, so it is not a pure base sync: ${differing.join(', ')}`;
+  return null;
+}
+
+/**
+ * Rebuilds the named commit on GitHub and moves the branch to it without force: the blobs the
+ * worker sent, the base parent's tree with the listed entries applied, then the commit itself with
+ * its own message, people, parents and signature. A rebuilt tree or commit that is not the named
+ * one is refused — nothing is pushed that the worker did not commit, and nothing the guard did not see.
+ */
+export async function pushWorkflowSync(github: GitDataApi, branch: string, request: SyncPushRequest): Promise<void> {
+  const short = request.commit.slice(0, 12);
+  for (const blob of request.blobs) {
+    const created = await github.request('/git/blobs', 'POST', { content: blob.content, encoding: 'base64' });
+    demand(created?.sha === blob.sha, `GitHub stored a blob of ${short} as ${String(created?.sha).slice(0, 12)}, not ${blob.sha.slice(0, 12)}`, 422);
+  }
+  const baseTree = (await github.request(`/git/commits/${request.parents[1]}`))?.tree?.sha;
+  demand(typeof baseTree === 'string', `GitHub did not return the tree of ${request.parents[1].slice(0, 12)}`, 502);
+  const tree = request.entries.length ? (await github.request('/git/trees', 'POST', { base_tree: baseTree, tree: request.entries }))?.sha : baseTree;
+  demand(tree === request.tree, `The base tree with the listed entries is ${String(tree).slice(0, 12)}, not the tree ${request.tree.slice(0, 12)} of ${short}; the entries do not describe the commit`, 422);
+  const commit = await github.request('/git/commits', 'POST', { message: request.message, tree, parents: request.parents, author: request.author, committer: request.committer, ...(request.signature ? { signature: request.signature } : {}) });
+  demand(commit?.sha === request.commit, `GitHub rebuilt ${short} as ${String(commit?.sha).slice(0, 12)}; the commit cannot be reproduced exactly, so nothing was pushed`, 422);
+  await github.request(`/git/refs/heads/${branch.split('/').map(encodeURIComponent).join('/')}`, 'PATCH', { sha: request.commit, force: false });
+}
+
+/** Where the request may push: the requesting worker's own workspace branch for the leased epoch. */
+export interface SyncPushOutcome { key: string; epoch: number; worker: string; branch: string; baseBranch: string; commit: string; from: string; base: string; workflowPaths: string[]; pushed: true }
+/**
+ * `graphyard sync GY-N --push-via-control-plane COMMIT`, server side: the lease holder only, its
+ * own assigned branch only. Every outcome is appended to the item's history attributed to the
+ * requesting worker and epoch — `sync.workflow-push` when pushed, `sync.workflow-push.refused`
+ * with the reason otherwise.
+ */
+export async function controlPlaneSyncPush(services: { engine: { store: Store }; github: GitDataApi | null }, actor: Principal, id: string, input: unknown, now = new Date()): Promise<SyncPushOutcome> {
+  demand(actor.role === 'worker', 'Only the worker holding the item\'s lease may ask the control plane to push its base sync', 403);
+  const parsed = syncPushRequest.safeParse(input);
+  demand(parsed.success, `A sync push request names the epoch and the commit as graphyard sync --push-via-control-plane sends them: ${parsed.success ? '' : parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`, 422);
+  const request = parsed.data;
+  const work = (await services.engine.store.list()).find(item => item.id === id || item.key === id);
+  demand(work, 'Work not found', 404);
+  activeLease(work, actor, request.epoch, now);
+  demand(work.submission?.epoch !== request.epoch, `${work.key} epoch ${request.epoch} was submitted; its attempt pushes nothing more`);
+  const workspace = work.workspaces.find(entry => entry.owner === actor.id && entry.epoch === request.epoch);
+  demand(workspace, `${work.key} records no workspace branch for ${actor.id} epoch ${request.epoch}`, 422);
+  demand(services.github, 'GitHub integration is required for the control plane to push a base sync', 503);
+  const github = services.github, branch = workspace.branch, baseBranch = github.config.base;
+  const record = (kind: string, payload: Record<string, unknown>) => services.engine.store.transaction(async (db, at) => {
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, kind, JSON.stringify({ worker: actor.id, epoch: request.epoch, branch, baseBranch, commit: request.commit, ...payload, at: at.toISOString() })]);
+  });
+  const branchHead = await github.request(`/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`).then((ref: any) => typeof ref?.object?.sha === 'string' ? ref.object.sha as string : null, (error: unknown) => {
+    if (/\(404\)/.test(error instanceof Error ? error.message : String(error))) return null;
+    throw error;
+  });
+  let baseContains = false;
+  if (request.parents.length === 2 && request.parents[0] === branchHead) {
+    const status = (await github.request(`/compare/${request.parents[1]}...${encodeURIComponent(baseBranch)}`))?.status;
+    baseContains = status === 'ahead' || status === 'identical';
+  }
+  const refusal = workflowSyncRefusal({ request, branch, baseBranch, branchHead, baseContains, plannedFiles: work.plannedFiles ?? [] });
+  if (refusal) {
+    await record('sync.workflow-push.refused', { reason: refusal, workflowPaths: workflowPaths(request.entries) });
+    demand(false, refusal, 422);
+  }
+  try { await pushWorkflowSync(github, branch, request); }
+  catch (error) {
+    await record('sync.workflow-push.refused', { reason: error instanceof Error ? error.message : String(error), workflowPaths: workflowPaths(request.entries) });
+    throw error;
+  }
+  const outcome: SyncPushOutcome = { key: work.key, epoch: request.epoch, worker: actor.id, branch, baseBranch, commit: request.commit, from: request.parents[0], base: request.parents[1], workflowPaths: workflowPaths(request.entries), pushed: true };
+  await record('sync.workflow-push', { from: outcome.from, base: outcome.base, workflowPaths: outcome.workflowPaths });
+  return outcome;
 }
