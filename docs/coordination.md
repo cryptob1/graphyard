@@ -21,7 +21,7 @@ A criterion states an outcome and its proofs:
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden — by its thread ID or a comment ID the prompt shows beside it; prose counts for nothing — or is withdrawn, and the relaunch's prompt names the threads it missed; the loop resolves those named, always by thread ID. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
@@ -46,3 +46,5 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 ## Explain stalls
 
 `graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
+
+A [stalled row](master-agent-reference.md#typed-actions-and-executors)'s attention and escalation name its reason's bound remedy (`src/stall-remedies.ts`); an unrecognised reason keeps the generic line. On an App permission hold the loop itself runs `master browser installation-accept` (`app-permissions` first when the App does not yet request the permission) once per unchanged run, recording attempt and outcome on the row (`POST /api/actions/:id/remedy`); a refusal escalates once, naming it, and is never retried. A role at its concurrency limit names its capacity lever, a master decision: raise it (`master registry role set ROLE ACCOUNT… --concurrency N`) or let a live session end.
