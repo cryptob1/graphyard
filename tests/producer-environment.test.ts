@@ -54,7 +54,10 @@ test('unit:producer-environment reads quoted values as a pair, drops inline comm
   assert.equal(parseEnvValue('"a\\\\" # note'), 'a\\', 'an escaped backslash does not escape the closing quote');
   assert.equal(parseEnvValue('"a\\nb"'), 'a\\nb', 'a backslash before any other character is kept');
   assert.equal(parseEnvValue("'a\\'"), 'a\\', 'single quotes take a backslash literally');
-  for (const unpaired of ['"abc', "abc'", '"abc\'', 'a"bc', '"abc"def', '"abc\\"'])
+  assert.equal(parseEnvValue('a\\ b'), 'a b', 'an unquoted backslash escapes the following character as in sh');
+  assert.equal(parseEnvValue('a\\\\b'), 'a\\b', 'an unquoted backslash can escape a backslash');
+  assert.equal(parseEnvValue('a\\ b # note'), 'a b', 'an unquoted value with backslash-escaped space before a comment');
+  for (const unpaired of ['"abc', "abc'", '"abc\'', 'a"bc', '"abc"def', '"abc\\"', 'a\\'])
     assert.equal(parseEnvValue(unpaired), null, `${unpaired} is refused, not altered`);
   const { directory, cleanup } = await scratch();
   try {
