@@ -265,6 +265,7 @@
     "tests/connect-account.test.ts": 3623,
     "tests/consent-prompt.test.ts": 1719,
     "tests/containment-attention.test.ts": 1266,
+    "tests/containment-verification-bounded.test.ts": 382,
     "tests/coordination.test.ts": 552,
     "tests/coordinator-checkout-guard.test.ts": 1762,
     "tests/cycle-failure.test.ts": 2295,
