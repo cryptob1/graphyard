@@ -2,9 +2,19 @@ import { agentOwner, approverSessionName, type AttentionItem, type HerdrAgent } 
 import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
+import { approverJudgeBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
 
 type DecisionRow = { id: string; action: string; state: string; requestedAt: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
-type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[] };
+type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
+/**
+ * GY-1084. Whether the loop puts the decision to a fresh approver on its own: it watches the decision,
+ * has not escalated it as unjudged, has launches left, and its last launch is within the bound
+ * `approvalStep` gives a session before relaunching. Until then the gone session is the loop's relaunch
+ * in progress, not a stall: GY-711's and GY-887's were named unanswered a minute after their session
+ * ended, and the loop's relaunch was judged minutes later.
+ */
+const relaunchPending = (watch: ApprovalWatch | undefined, requestedAt: string, now: number) => !!watch && !watch.settledAt && !watch.exhaustedAt
+  && (watch.launches ?? 0) < maxApproverLaunches && now - Date.parse(watch.launchedAt ?? requestedAt) < approverJudgeBoundMs;
 export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[] }
 
 /**
@@ -14,13 +24,15 @@ export interface UnansweredDecision { work: string; id: string; action: string; 
  * judgement: an approver that declines records `master refuse`, and its decision ends `refused`.
  * Nothing is concluded while Herdr cannot be read. An item waiting for an approver account to
  * reset is not one: the loop launches no approver before then, and master status names that wait
- * once, as the approver capacity line, not as a stall per decision (GY-182).
+ * once, as the approver capacity line, not as a stall per decision (GY-182). Nor is one whose session
+ * the loop relaunches on its next cycle (`relaunchPending`, GY-1084): only one it has stopped relaunching.
  */
 export function unansweredDecisions(items: { key: string; decisions: DecisionRow[]; capacity?: CapacityState | null }[], approvals: ApprovalWatch[], runtime: { available: boolean; agents: HerdrAgent[] }, now: number): UnansweredDecision[] {
   if (!runtime.available) return [];
   return items.flatMap(item => standingCapacity(item, 'approver').length ? [] : item.decisions.flatMap(decision => {
     if (decision.state !== 'requested') return [];
     const watch = approvals.find(entry => entry.decision === decision.id);
+    if (relaunchPending(watch, decision.requestedAt, now)) return [];
     const session = watch?.agentName ?? approverSessionName(item, decision.id);
     const live = runtime.agents.find(agent => agent.name === session);
     if (live && live.agent_status !== 'done') return [];

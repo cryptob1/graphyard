@@ -1,21 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { attentionKind, classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, leaseLossReason, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { humanNeededAttention } from '../src/cli/master-status.js';
+import { owedAttention } from '../src/cli/owed-report.js';
+import { unansweredDecisions } from '../src/cli/decision-report.js';
+import * as decisionRules from '../src/daemon/decisions.js';
+import { approverJudgeBoundMs, failedCheckRework, maxApproverLaunches, maxDecisionRequests, neededDecision, supersededLeaseLoss } from '../src/daemon/decisions.js';
+import { actOnRepeatedRefusal } from '../src/daemon/cycle-delivery.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import { operatorAgentRouteGuard } from '../src/server/auth.js';
+import { Next } from '../src/server/routes.js';
 import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
 import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import type { ResourceReading } from '../src/master-resources.js';
-import { predictQueue } from '../src/merge-queue.js';
+import { predictQueue, reconcileCheckReruns } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
 import { describeUnserved } from '../src/model/executor-presence.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
@@ -498,7 +507,7 @@ test('unit:recurring-class-item — review conflicts and the other lines status 
     'three review conflicts in the window file the review-convergence item');
 });
 
-test('unit:fault-class-decision — a judgment the loop requests itself is not owed, so ordinary rework rounds and superseded lease-losses file no decision faults (GY-1084)', async () => {
+test('manual:fault-class-decision — a judgment the loop requests itself is not owed, so ordinary rework rounds and superseded lease-losses file no decision faults (GY-1084)', async () => {
   // 2026-10-01: 324 decision faults in a day, 78 of the 100 GY-1084 lists `owed-decision` lines such as "GY-1023 needs a new
   // head: Required CI check test has not passed on the current candidate; rerun: expired … — no executor may run it; a new
   // head for GY-1023 has been owed for 46s", and "GY-612 carries a standing lease-loss escalation while it is worked: Worker
@@ -515,29 +524,209 @@ test('unit:fault-class-decision — a judgment the loop requests itself is not o
   const lost = { trigger: 'lease-loss' as const, reason: leaseLossReason({ owner: 'graphyard-cursor-2', epoch: 35 }), at: iso(-hour), actor: 'graphyard' };
   const superseded = item('GY-612', { stage: 'build', ready: true, epoch: 36, lease: { owner: 'graphyard-cursor-1', epoch: 36, expiresAt: iso(hour) }, escalation: lost, escalations: [lost],
     gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] } as unknown as Partial<Work>);
-  // The control: a rework the loop has no ground to request (files outside plannedFiles, GY-971) is still somebody's to judge.
+  // A head that changes files outside plannedFiles (GY-971): the refusal says what its worker does, and the loop asks for that round.
   const outside = failedCi('GY-971', 971);
   Object.assign(outside, { observation: { ...outside.observation!, checks: [{ appId: 15368, name: 'test', result: 'success', id: 971, attempt: 1 }] },
-    gates: [{ name: 'build', passed: false, reasons: ['Candidate changes 7 files outside its planned files that must match the base branch byte-for-byte'] }] });
-  const work = [failedCi('GY-1023', 1023), failedCi('GY-73', 73), failedCi('GY-957', 957), superseded, outside];
+    gates: [{ name: 'build', passed: false, reasons: ['Candidate changes 7 files outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-971, restore each file from origin/<base>, and push again'] }] });
+  // The control: a judgment the loop has no rule to request (a violation) is still somebody's to make.
+  const violation = item('GY-9', { stage: 'merge', ready: true, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: ['Merge observed without a prior authorization for this candidate'] } as unknown as Partial<Work>);
+  const work = [failedCi('GY-1023', 1023), failedCi('GY-73', 73), failedCi('GY-957', 957), superseded, outside, violation];
   for (const entry of work) entry.nextAction = nextAction(entry, work, new Date(clock));
-  assert.deepEqual(work.map(entry => entry.nextAction?.kind), ['request-rework', 'request-rework', 'request-rework', 'escalate', 'request-rework']);
+  assert.deepEqual(work.map(entry => entry.nextAction?.kind), ['request-rework', 'request-rework', 'request-rework', 'escalate', 'request-rework', 'escalate']);
   const snapshot = { work, now: iso(0) };
 
   // The base: every one of them was an owed line, and the loop counted each as a decision fault.
   const before = classifyAttention(humanNeededAttention(snapshot));
-  assert.deepEqual(before.map(entry => `${entry.subject} ${entry.kind} ${entry.faultClass}`).sort(), ['GY-1023', 'GY-612', 'GY-73', 'GY-957', 'GY-971'].map(key => `${key} owed-decision decision`));
+  assert.deepEqual(before.map(entry => `${entry.subject} ${entry.kind} ${entry.faultClass}`).sort(), ['GY-1023', 'GY-612', 'GY-73', 'GY-9', 'GY-957', 'GY-971'].map(key => `${key} owed-decision decision`));
   assert.match(before.find(entry => entry.subject === 'GY-1023')!.text, /needs a new head: Required CI check test has not passed .* no executor may run it; a new head for GY-1023 has been owed for/);
 
   // The candidate: the attention master status and the loop read names only the judgment nobody requests.
   const derived = await derivedAttention('/nonexistent', config(), async () => ({}), { github: true }, snapshot, { reviews: [], producers: [], runtime: { available: true, agents: [] }, trees: [] });
-  assert.deepEqual(derived.owed.rows.map(row => row.key), ['GY-971'], 'the loop requests the rework rounds and the lease-loss resolve itself');
+  assert.deepEqual(derived.owed.rows.map(row => row.key), ['GY-9'], 'the loop requests the rework rounds and the lease-loss resolve itself');
   const owed = classifyAttention(derived.items).filter(entry => entry.kind === 'owed-decision');
-  assert.deepEqual(owed.map(entry => entry.subject), ['GY-971']);
+  assert.deepEqual(owed.map(entry => entry.subject), ['GY-9']);
   const state = emptyDaemonState(config());
   for (let round = 0; round < 4; round++) trackFaults(state.faults, cycleFaults(state, work, clock + round * 60_000, { config: config(), reported: derived.items }), iso(round * 60_000));
-  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision').map(entry => [entry.kind, entry.subject]), [['owed-decision', 'GY-971']]);
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision').map(entry => [entry.kind, entry.subject]), [['owed-decision', 'GY-9']]);
   assert.deepEqual(recurringClasses(state.faults.instances, work, policy, clock + hour).filter(entry => entry.faultClass === 'decision' && entry.file), [], 'no decision class past the threshold to file');
+});
+
+// ---- GY-1084: every decision fault the item lists, replayed --------------------------------------
+// The master loop filed GY-1084 for 324 decision faults in a day; the item lists 100 of them. Each is
+// replayed below from the ledger as it stood when the loop recorded it (tests/fixtures/
+// gy-1084-decision-faults.json, read with `graphyard events --payload full`), and asserted not to
+// recur. The causes they share:
+//   - loop-rework, loop-resolve: an owed line for a rework round or a superseded lease-loss resolve
+//     the loop puts to its approver itself (`loopRequestsJudgment`), and for a head with files outside
+//     its plannedFiles, which the loop now asks the round for (`scopeRegressionRework`);
+//   - stalled-action, operator-proof: an owed line restating a fault of another class — a stalled
+//     action (stalled-gate) or a proof no producer may run (proof) — counted again as a decision;
+//   - request-timeout: a decision the control plane recorded and applied whose answer outlived the
+//     loop's 30-second request, recorded as a failure (`timedOut`, read back next cycle);
+//   - migrate-route: the follow-up migration the loop asks as the operator agent, refused by the route guard;
+//   - approver-relaunch: a decision named unanswered while the loop was relaunching its approver;
+//   - merge-authorization: a guarded-merge refusal for want of an authorization marked for rework;
+//   - rerun-expiry: a rework asked, and refused, while the failed check's rerun was still running (GY-1096);
+//   - scope-budget: the scope-decision latency escalation recorded under the decision class;
+//   - base-failure: a rework asked for a required check the base fails too, which GY-528 raises against the base.
+interface DecisionFault {
+  id: string; at: string; kind: string; subject: string; text: string | null;
+  cause: 'loop-rework' | 'loop-resolve' | 'stalled-action' | 'operator-proof' | 'request-timeout' | 'migrate-route' | 'approver-relaunch' | 'merge-authorization' | 'rerun-expiry' | 'scope-budget' | 'base-failure';
+  /** The item as the ledger held it at the instance (trimmed to what the replay reads); for a timeout, before its request. */
+  work?: Work;
+  /** request-timeout: when the control plane recorded the request, and the item once it had applied it. */
+  requestedAt?: string; after?: Work;
+  /** approver-relaunch: the decision and the approver session the line named. */
+  decision?: { id: string; action: string; session: string; requestedAt: string };
+}
+const decisionFaults: DecisionFault[] = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1084-decision-faults.json', import.meta.url)), 'utf8'));
+const owedWording = (text: string) => text.replace(/ has been owed for .*$/, '');
+// Read through the module, so this file loads against the base: there neither exists, and each instance fails on its own assertion.
+const { loopRequestsJudgment, timedOut } = decisionRules as Partial<typeof decisionRules>;
+const loopRequests = (work: Work, judgment: { kind: string; trigger: string | null }) => loopRequestsJudgment?.(work, judgment, config()) ?? false;
+
+test('manual:fault-class-decision — the item lists 100 instances, and every one is replayed below', () => {
+  assert.equal(decisionFaults.length, 100);
+  assert.equal(new Set(decisionFaults.map(entry => entry.id)).size, 100);
+  const kinds: Record<string, number> = {};
+  for (const entry of decisionFaults) kinds[entry.kind] = (kinds[entry.kind] ?? 0) + 1;
+  assert.deepEqual(kinds, { 'owed-decision': 78, 'action:decision': 14, 'decision-refused': 4, 'decision-unanswered': 2, 'action:escalation': 2 });
+  for (const entry of decisionFaults) assert.equal(faultClassOf(entry.kind), 'decision', entry.id);
+});
+
+for (const instance of decisionFaults.filter(entry => entry.kind === 'owed-decision')) {
+  test(`manual:fault-class-decision — ${instance.id} (${instance.cause}): its owed line is not a decision fault`, () => {
+    const work = instance.work!, snapshot = { work: [work], now: instance.at };
+    // The item as it stood: the line the loop recorded, which the base classified by its wording as owed-decision.
+    const lines = humanNeededAttention(snapshot).filter(line => instance.text ? owedWording(line.text) === owedWording(instance.text) : true);
+    assert.ok(lines.length, `the snapshot reproduces the line: ${instance.text ?? `an owed line on ${instance.subject}`}`);
+    for (const line of lines) assert.equal(attentionKind({ subject: line.subject, text: line.text }), 'owed-decision');
+    // The candidate: no line on the item counts toward the decision class.
+    const owed = owedAttention(snapshot, [], [], loopRequests);
+    assert.deepEqual(classifyAttention(owed.items).filter(line => line.faultClass === 'decision').map(line => line.text), []);
+    if (instance.cause === 'loop-rework') assert.equal(neededDecision(work, config())?.action, 'rework', 'the loop requests the round itself');
+    if (instance.cause === 'loop-resolve') assert.ok(loopRequests(work, { kind: 'escalate', trigger: 'lease-loss' }) && supersededLeaseLoss(work)?.superseded, 'the loop requests the superseded lease-loss resolve itself');
+    if (instance.cause === 'stalled-action') assert.deepEqual(classifyAttention(owed.items).map(line => line.kind), ['stalled-action']);
+    if (instance.cause === 'operator-proof') assert.deepEqual(classifyAttention(owed.items).map(line => line.kind), ['proof-gap']);
+  });
+}
+
+/** The loop's effects over one item's snapshot, its control-plane calls answered as the test says. */
+function replayEffects(work: Work, now: string, decide: DaemonEffects['decide'], decisions: () => Promise<{ decisions: any[] }>): DaemonEffects {
+  return { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [work], now, jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), recordDeployment: async () => {}, requestSmoke: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: now, reason: 'not configured', deployed: [], pending: [] }),
+    decide, decisions, approver: async () => ({ agentName: `graphyard-approver-${work.key.toLowerCase()}`, pane: 'pane-1' }), persist: async () => {} } as unknown as DaemonEffects;
+}
+for (const instance of decisionFaults.filter(entry => entry.cause === 'request-timeout')) {
+  test(`manual:fault-class-decision — ${instance.id}: a request whose answer timed out is read back, not recorded failed`, async () => {
+    // The ledger: the request was recorded at requestedAt and applied seconds later; the loop's call had given up at 30 s.
+    const before = instance.work!, after = instance.after!;
+    assert.ok(Date.parse(instance.requestedAt!) <= Date.parse(instance.at) && after.reworkRequested, 'the control plane recorded and applied the request the loop called failed');
+    const at = Date.parse(before.observation!.at) + 10_000, state = emptyDaemonState(config());
+    const recorded = { id: '1084aaaa-0000-4000-8000-000000000001', action: 'rework', state: 'requested' };
+    const timeout = async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); };
+    await runCycle(config(), state, replayEffects(before, new Date(at).toISOString(), timeout as unknown as DaemonEffects['decide'], async () => ({ decisions: [] })), () => at);
+    const [key, action] = Object.entries(state.actions).find(([, entry]) => entry.kind === 'decision' && entry.work === before.key)!;
+    assert.equal(action.state, 'waiting', action.detail);
+    assert.match(action.detail, /timed out before the control plane answered .* reads \S+ decisions back and adopts the one standing, or asks again/);
+    // The next cycle reads the decision back: applied, the item needs no request, and nothing failed.
+    let asked = 0;
+    await runCycle(config(), state, replayEffects(after, new Date(at + 60_000).toISOString(), async () => { asked += 1; return recorded; }, async () => ({ decisions: [{ ...recorded, state: 'applied' }] })), () => at + 60_000);
+    assert.equal(asked, 0, 'no second request');
+    assert.notEqual(state.actions[key].state, 'failed');
+    assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision' && entry.subject === before.key).map(entry => entry.text), []);
+  });
+}
+
+test('manual:fault-class-decision — a timed-out request is a failure once its bounded tries are spent, and a refusal is one at once', async () => {
+  const instance = decisionFaults.find(entry => entry.cause === 'request-timeout')!, before = instance.work!;
+  const at = Date.parse(before.observation!.at) + 10_000, state = emptyDaemonState(config());
+  const timeout = async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); };
+  for (let cycle = 0; cycle < maxDecisionRequests; cycle++) await runCycle(config(), state, replayEffects(before, new Date(at).toISOString(), timeout as unknown as DaemonEffects['decide'], async () => ({ decisions: [] })), () => at);
+  const action = Object.values(state.actions).find(entry => entry.kind === 'decision' && entry.work === before.key)!;
+  assert.equal(action.state, 'failed');
+  assert.match(action.detail, /^Could not put the rework decision for \S+ to an approver: The operation was aborted due to timeout/);
+  assert.equal(timedOut?.(new Error('Graphyard refused work/x/decide (409): identical request')), false);
+});
+
+test('manual:fault-class-decision — the follow-up migration the loop asks as the operator agent passes the route guard', async () => {
+  const listed = decisionFaults.filter(entry => entry.cause === 'migrate-route');
+  assert.equal(listed.length, 3);
+  for (const instance of listed.filter(entry => entry.text)) assert.match(instance.text!, /Graphyard refused followups\/migrate \(403\): Route is not available to operator agents/);
+  const agent = { id: 'graphyard-master-graphyard-operator', role: 'operator-agent', scope: { repositories: ['owner/project'], workItems: ['*'] } };
+  const guard = (path: string) => operatorAgentRouteGuard.handle({ actor: agent, url: new URL(`https://graphyard.example${path}`) } as any, []);
+  assert.equal(await guard('/api/followups/migrate'), Next);
+  await assert.rejects(Promise.resolve(guard('/api/followups/triage')), /Route is not available to operator agents/, 'the guard still refuses what the loop does not ask');
+});
+
+test('manual:fault-class-decision — a decision whose approver the loop is relaunching is not unanswered', () => {
+  const listed = decisionFaults.filter(entry => entry.cause === 'approver-relaunch');
+  assert.deepEqual(listed.map(entry => entry.subject).sort(), ['GY-711', 'GY-887']);
+  for (const instance of listed) {
+    const { id, action, session, requestedAt } = instance.decision!;
+    assert.match(instance.text!, new RegExp(`^Decision ${id} \\(${action}\\) is unanswered after 1m: approver session ${session} is not running and recorded no outcome`));
+    const items = [{ key: instance.subject, decisions: [{ id, action, state: 'requested', requestedAt }] }], runtime = { available: true, agents: [] }, now = Date.parse(instance.at);
+    // The loop launched one session, it ended, and approvalStep relaunches it on the next cycle.
+    assert.deepEqual(unansweredDecisions(items, [{ work: instance.subject, decision: id, agentName: session, launches: 1, launchedAt: requestedAt, settledAt: null, exhaustedAt: null }], runtime, now), []);
+    // …within the bound the loop gives a session; past it with nothing relaunched, the loop is not relaunching it.
+    assert.equal(unansweredDecisions(items, [{ work: instance.subject, decision: id, agentName: session, launches: 1, launchedAt: requestedAt, settledAt: null, exhaustedAt: null }], runtime, Date.parse(requestedAt) + approverJudgeBoundMs).length, 1);
+    // Only once the loop stops relaunching — every launch spent, or a decision it does not watch — is it a stall.
+    assert.equal(unansweredDecisions(items, [{ work: instance.subject, decision: id, agentName: session, launches: maxApproverLaunches, settledAt: null, exhaustedAt: instance.at }], runtime, now).length, 1);
+    assert.equal(unansweredDecisions(items, [], runtime, now).length, 1);
+  }
+});
+
+test('manual:fault-class-decision — a guarded-merge refusal for want of an authorization is not marked for rework (GY-1005)', async () => {
+  const [instance] = decisionFaults.filter(entry => entry.cause === 'merge-authorization');
+  assert.equal(instance.subject, 'GY-1005');
+  const work = instance.work!, refusal = work.mergeRefusal!;
+  assert.match(refusal.reason, /does not have a current all-gates-passing merge authorization/);
+  assert.ok(work.gates.find(gate => gate.name === 'merge')!.reasons.some(reason => /^Waiting for GY-521, GY-957 to land/.test(reason)), 'the merge gate was waiting on its predecessors');
+  const marked: string[] = [], at = Date.parse(refusal.at);
+  const cycle = { state: emptyDaemonState(config()), performed: [], now: () => at, effects: { persist: async () => {}, refuseMerge: async (item: Work) => { marked.push(item.key); } } } as unknown as Cycle;
+  await actOnRepeatedRefusal(cycle, work, `merge:${work.id}`, refusal.reason, refusal.since);
+  assert.deepEqual(marked, [], 'no rework is marked, so none is put to an approver to refuse');
+  // A refusal the candidate does cause is still acted on past the bound.
+  await actOnRepeatedRefusal(cycle, work, `merge:${work.id}`, 'Head 7685faf28852 changed on GitHub before merge', refusal.since);
+  assert.deepEqual(marked, ['GY-1005']);
+});
+
+for (const instance of decisionFaults.filter(entry => entry.cause === 'rerun-expiry')) {
+  test(`manual:fault-class-decision — ${instance.id}: no rework is asked while the failed check's rerun is still running`, () => {
+    const work = instance.work!, observation = work.observation!;
+    const expired = work.checkReruns!.find(entry => entry.sha === work.candidate!.sha && entry.state === 'expired')!;
+    assert.ok(expired.runId, 'GitHub had accepted the rerun and named its workflow run');
+    assert.ok(observation.checks.some(check => check.name === 'test shard 4' && check.result === 'in_progress'), 'the rerun of the failed shard was running');
+    // The same reconciliation, from the rerun as it stood before it was expired.
+    const { state: _state, detail: _detail, resolvedAt, ...requested } = expired;
+    const held = { ...work, checkReruns: work.checkReruns!.map(entry => entry === expired ? { ...requested, state: 'requested' as const } : entry) };
+    const { reruns, transitions } = reconcileCheckReruns(held, [15368], 1, new Date(resolvedAt!));
+    assert.deepEqual(transitions.map(entry => entry.kind), [], 'an accepted rerun naming its run is a wait, never expired (GY-1096)');
+    assert.equal(failedCheckRework({ ...held, checkReruns: reruns }), null, 'so no rework is asked for the approver to refuse');
+  });
+}
+
+test('manual:fault-class-decision — the scope-decision latency escalation is a scope fault, not a decision fault', async () => {
+  const listed = decisionFaults.filter(entry => entry.cause === 'scope-budget');
+  assert.equal(listed.length, 2);
+  assert.match(listed[0].text!, /^Scope decisions are too slow: p90 is 354s over the last 200 requests, above the 5-minute budget/);
+  const state = emptyDaemonState(config()), at = Date.parse(listed[0].at);
+  state.scope = Array.from({ length: 200 }, (_, n) => ({ work: `GY-${n}`, epoch: 1, at: new Date(at - n * 60_000).toISOString(), waitedMs: 354_000, state: 'approved' as const }));
+  await runCycle(config(), state, replayEffects(item('GY-1'), new Date(at).toISOString(), async () => ({ id: 'none' }), async () => ({ decisions: [] })), () => at);
+  const escalation = state.actions['escalation:scope-budget:p90'];
+  assert.match(escalation.detail, /^Scope decisions are too slow: p90 is 354s over the last 200 requests/);
+  assert.equal(escalation.faultClass, 'scope');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision').map(entry => entry.text), []);
+});
+
+test(`manual:fault-class-decision — GY-1033: a rework refused because the base fails the same check is GY-528's base-failure cause`, () => {
+  const [instance] = decisionFaults.filter(entry => entry.cause === 'base-failure');
+  assert.equal(instance.subject, 'GY-1033');
+  // Unlike the rerun-expiry refusals, the rerun had run and failed again: the failure is the base's, not a wait.
+  const work = instance.work!;
+  assert.equal(work.checkReruns!.find(entry => entry.sha === work.candidate!.sha)!.state, 'failed');
+  assert.match(instance.text!, /fail on main itself at the candidate's base e1bbbc6/);
 });
 
 test('unit:recurring-class-item — the fault record stays bounded when failing runs never succeed', () => {

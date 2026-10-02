@@ -3,6 +3,7 @@ import { carriedApproval, reviewProviderOf, reviewerProfileFor, exhaustedReviewe
 import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
 import { type Work } from '../model.js';
 import { queueSequencingReason } from '../merge-queue.js';
+import { unauthorizedMergeRefusal } from '../master/merge.js';
 import type { DaemonAction } from './state.js';
 import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message } from './state.js';
 import { candidateKey, decisionKey } from './reconcile.js';
@@ -57,13 +58,18 @@ export const repeatedMergeRefusalMs = 10 * 60_000;
  * the phase is the carried binding the action would clear, so a re-review that is answered — the
  * carry gone, the refusal standing — re-arms the handling and moves the candidate on to the rework
  * action instead of being deduplicated away by the first phase's marker (GY-831 review). A carry
- * re-bound to another review is a phase of its own.
+ * re-bound to another review is a phase of its own. A refusal for want of an all-gates-passing
+ * authorization is never marked for rework (GY-1084): the gates that withhold it name their own remedy.
  */
 export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string) {
   const { state, effects, now, performed } = cycle;
   const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
   if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
   const carry = carriedApproval(item), carried = !!carry;
+  // A refusal for want of an authorization is the record not authorizing the merge yet (a queue wait,
+  // a stale observation, a gate): each names its own remedy, and a rework would fix none of them.
+  // GY-1005's was marked for one on 2026-10-01 and its approver refused it as premature (GY-1084).
+  if (!carried && reason.includes(unauthorizedMergeRefusal)) return;
   const key = `${mergeKey}:repeated:${carry ? `carry:${carry.reviewId ?? 'unnumbered'}:${carry.originalSha}` : 'rework'}`, previous = state.actions[key];
   if (previous?.state === 'done' && previous.since === since) return;
   // Like the refusal itself, the attention is the gate working, not a daemon fault: no fault kind.

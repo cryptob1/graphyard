@@ -68,6 +68,13 @@ export function routedScopeStatus<S extends { work: { key: string; attention: st
 }
 
 /**
+ * GY-1084. The fault an owed row restates when it waits on something other than a two-party decision:
+ * an action escalated for failing in a row is the stall `master status` names as `stalled-action`, and
+ * a proof no producer session may run is a `proof-gap`. Each is a fault of its own class, so its owed
+ * line is not a decision fault besides; every other owed row is one (`owed-decision`).
+ */
+const owedFaultKind = (row: HumanNeededRow) => row.trigger === 'stalled-action' ? { kind: 'stalled-action' as const } : row.trigger === 'operator-proof' ? { kind: 'proof-gap' as const } : {};
+/**
  * One attention item per action nobody in the executor loop may run, and per concern carried
  * beside an action that is running. Each names what is waiting, how long it has waited and the
  * command that answers it.
@@ -76,7 +83,7 @@ export function humanNeededAttention(snapshot: { work: Work[]; now: string }, lo
   return humanNeededActions(snapshot.work, new Date(snapshot.now), loopRequests).map(row => ({
     subject: row.key,
     text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
-    ...agentOwner('master', row.resolve, 'approver'),
+    ...agentOwner('master', row.resolve, 'approver'), ...owedFaultKind(row),
   }));
 }
 
