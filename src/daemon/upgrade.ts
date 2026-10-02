@@ -74,17 +74,42 @@ export function describeSelfUpgrade(upgraded: SelfUpgradeOutcome): string {
 
 /**
  * Whether the awaited `systemctl --no-block restart` ended because the restart it queued began
- * (GY-916). The loop asks systemd to restart the very unit it runs in, so the queued stop ends
- * the unit's whole cgroup — the systemctl child with it — while the loop still awaits that child.
- * The child then dies on the stop's signal instead of exiting: that is the hand-off succeeding,
- * observable in the journal as Stopping → Stopped → Started in the same second. A systemctl that
- * ran to its end and exited non-zero (no such unit, no user bus, access denied), or was cut off by
- * its own timeout, is a genuine failure and is still recorded as one.
+ * (GY-916). The loop asks systemd to restart the very unit it runs in, so the queued stop signals
+ * the unit's whole cgroup — the systemctl child and the loop alike — while the loop still awaits
+ * that child. The child then dies on the stop's signal instead of exiting: that is the hand-off
+ * succeeding, observable in the journal as Stopping → Stopped → Started in the same second. Both
+ * halves are required: the child ended by a stop signal with no exit status and no timeout of its
+ * own, and the loop itself received the stop during the wait (`awaitSupervisorRestart` marks it).
+ * A child signalled by anything else, a systemctl that exited non-zero (no such unit, no user
+ * bus, access denied), or one cut off by its own timeout is a genuine failure and is recorded.
  */
 export function restartEndedBySupervisorStop(error: unknown): boolean {
-  const ended = error as { signal?: unknown; status?: unknown; timedOut?: unknown } | null;
-  return !!ended && typeof ended === 'object' && typeof ended.signal === 'string' && ['SIGTERM', 'SIGKILL', 'SIGHUP', 'SIGINT'].includes(ended.signal)
+  const ended = error as { signal?: unknown; status?: unknown; timedOut?: unknown; supervisorStop?: unknown } | null;
+  return !!ended && typeof ended === 'object' && ended.supervisorStop === true && typeof ended.signal === 'string' && supervisorStopSignals.includes(ended.signal)
     && (ended.status === null || ended.status === undefined) && ended.timedOut !== true;
+}
+/** The signals a unit's stop delivers to its cgroup: KillSignal, then SIGKILL past TimeoutStopSec. */
+const supervisorStopSignals = ['SIGTERM', 'SIGKILL'];
+/** How long a signalled child waits for the loop's own stop signal to arrive beside it; both come from one stop. */
+export const supervisorStopGraceMs = 2_000;
+type SignalHost = Pick<NodeJS.EventEmitter, 'on' | 'removeListener'>;
+
+/**
+ * Runs the self-restart while watching for the supervisor's stop to reach this process (GY-916).
+ * When the restart child fails on a signal, the stop that killed it reaches the loop in the same
+ * instant, so it is awaited for at most `graceMs`; the failure is rethrown marked with whether it
+ * came — the mark `restartEndedBySupervisorStop` requires.
+ */
+export async function awaitSupervisorRestart(restart: () => unknown, host: SignalHost = process, graceMs = supervisorStopGraceMs): Promise<void> {
+  let stopped = false, wake: (() => void) | null = null;
+  const onStop = () => { stopped = true; wake?.(); };
+  host.on('SIGTERM', onStop);
+  try { await restart(); }
+  catch (error) {
+    const signalled = !!error && typeof error === 'object' && typeof (error as { signal?: unknown }).signal === 'string';
+    if (signalled && !stopped) await new Promise<void>(resolve => { const timer = setTimeout(resolve, graceMs); wake = () => { clearTimeout(timer); resolve(); }; });
+    throw error && typeof error === 'object' ? Object.assign(error, { supervisorStop: stopped }) : error;
+  } finally { host.removeListener('SIGTERM', onStop); }
 }
 
 /**

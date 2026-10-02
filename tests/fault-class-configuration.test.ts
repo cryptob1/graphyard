@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -8,10 +9,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { loadMasterConfig, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
-import { describeUnserved, ExecutorRegistry, executorReport, ledgerLoopMerger, startExecutorFor } from '../src/model/executor-presence.js';
+import { describeUnserved, ExecutorRegistry, executorReport, ledgerLoopMerger, LoopRegistry, loopPresenceInterval, loopPresenceLiveMs, reportedLoopMerger, startExecutorFor } from '../src/model/executor-presence.js';
 import { executorFleet } from '../src/cli/executor-report.js';
 import { deploymentObservationSchema, emptyDaemonState, noteWatchdog, watchdogPlan, writeDaemonState, type DaemonState } from '../src/master-daemon.js';
-import { performSelfUpgrade, restartEndedBySupervisorStop } from '../src/daemon/upgrade.js';
+import { awaitSupervisorRestart, performSelfUpgrade, restartEndedBySupervisorStop } from '../src/daemon/upgrade.js';
 import { ChildProcessError } from '../src/child-runner.js';
 import { readRestartFence, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import { alignLoopUnit, loopUnitName, loopUnitText, loopWatchdogSeconds } from '../src/supervisor.js';
@@ -81,6 +82,25 @@ test('unit:merge-row-served-by-live-loop — with a live master loop merging, ex
   assert.equal(await ledgerLoopMerger(query, new Date(clock + 2 * 3_600_000)), null, 'a loop not seen merging for hours is not assumed live');
   ledger.shift();
   assert.equal(await ledgerLoopMerger(query, now), null, 'an executor\'s merge request is not the loop');
+  // The loop's own reads (GY-916): a live loop that has had nothing to merge for hours still reads
+  // every cycle, and each read keeps it the merger; with no merge request in the ledger at all.
+  const loops = new LoopRegistry();
+  assert.equal(await reportedLoopMerger(loops, query, now), null, 'no read and no merge request: no loop');
+  for (let hour = 0; hour <= 3; hour += 1) {
+    const at = new Date(clock + hour * 3_600_000);
+    loops.observe({ principal: 'graphyard-master', intervalSeconds: 300 }, at);
+    const reading = await reportedLoopMerger(loops, query, new Date(at.getTime() + 600_000));
+    assert.deepEqual(reading, { live: true, name: `the master loop (graphyard-master, cycling every 300s, last read ${at.toISOString()})` }, `still the merger ${hour}h after its last merge request`);
+    assert.deepEqual(executorReport(work, registry, new Date(at.getTime() + 600_000), undefined, reading).unserved.map(entry => entry.key), ['GY-904']);
+  }
+  // A loop that stops reading lapses after three of its cycles, and the report is the fleet's again.
+  const lastRead = clock + 3 * 3_600_000;
+  assert.equal(loopPresenceLiveMs(300), 900_000);
+  assert.equal(loopPresenceLiveMs(20), 120_000, 'never under an executor\'s window');
+  assert.equal((await reportedLoopMerger(loops, query, new Date(lastRead + 900_000)))?.live, true);
+  assert.equal(await reportedLoopMerger(loops, query, new Date(lastRead + 900_001)), null);
+  // Only an interval `master run` accepts names a loop.
+  assert.deepEqual(['300', ['20'], undefined, '', '4', '901', '1.5', 'x'].map(value => loopPresenceInterval(value as never)), [300, 20, null, null, null, null, null, null]);
 
   // master status's fleet: the control plane did not see the loop, the master CLI on its host does.
   const root = await temporaryDirectory('config-faults-fleet');
@@ -153,13 +173,19 @@ test('unit:upgrade-self-restart-survives-supervisor-stop — when the supervisor
     const state = emptyDaemonState(master);
     state.deployment = verified(hex('b'));
     state.release = { commit: hex('a'), dirty: false };
-    // The child runner's own rejection when the unit's stop kills its cgroup: no exit status, the stop's signal.
-    const stopped = new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', loopUnitName], { stdout: '', stderr: '', status: null, signal: 'SIGTERM', timedOut: false });
-    assert.equal(restartEndedBySupervisorStop(stopped), true);
+    // The unit's stop signals its whole cgroup: the systemctl child dies on SIGTERM with no exit
+    // status (the child runner's own rejection), and the loop process receives the same SIGTERM.
+    const killed = () => new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', loopUnitName], { stdout: '', stderr: '', status: null, signal: 'SIGTERM', timedOut: false });
+    const loopProcess = new EventEmitter();
     let selfCalls = 0;
     const upgraded = await performSelfUpgrade(master, state, { root: '/srv/graphyard', run: fakeGit(hex('a'), hex('b')), now: () => clock, persist: async () => {},
-      restartExecutors: async to => restarted(to), restartSelf: async () => { selfCalls += 1; throw stopped; } });
+      restartExecutors: async to => restarted(to),
+      restartSelf: () => awaitSupervisorRestart(async () => { selfCalls += 1; loopProcess.emit('SIGTERM'); throw killed(); }, loopProcess) });
     assert.equal(selfCalls, 1);
+    assert.equal(loopProcess.listenerCount('SIGTERM'), 0, 'the watch ends with the wait');
+    // The loop's own stop may land a moment after the child's: it is awaited inside the grace.
+    const late = await awaitSupervisorRestart(async () => { setTimeout(() => loopProcess.emit('SIGTERM'), 20); throw killed(); }, loopProcess, 5_000).catch(error => error);
+    assert.equal(restartEndedBySupervisorStop(late), true);
     assert.deepEqual({ outcome: upgraded.outcome, self: upgraded.outcome === 'upgraded' && upgraded.self, to: upgraded.outcome === 'upgraded' && upgraded.to }, { outcome: 'upgraded', self: true, to: hex('b') });
     assert.deepEqual(failedActions(state), [], 'no failed action is stored');
     assert.equal(state.faults.instances.length, 0, 'and no fault instance');
@@ -176,6 +202,9 @@ test('unit:upgrade-self-restart-failure-still-recorded — a systemctl failure n
       new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', loopUnitName], { stdout: '', stderr: 'Failed to connect to bus', status: 1, signal: null, timedOut: false }),
       new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', loopUnitName], { stdout: '', stderr: '', status: null, signal: 'SIGTERM', timedOut: true, timeoutMs: 30_000 }),
       new Error('this loop runs under no graphyard-master supervisor unit'),
+      // A child signalled by something other than the unit's stop: the loop itself received no stop.
+      await awaitSupervisorRestart(async () => { throw new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', loopUnitName], { stdout: '', stderr: '', status: null, signal: 'SIGTERM', timedOut: false }); }, new EventEmitter(), 10).catch(error => error),
+      await awaitSupervisorRestart(async () => { throw new ChildProcessError('systemctl', ['--user', '--no-block', 'restart', loopUnitName], { stdout: '', stderr: '', status: null, signal: 'SIGINT', timedOut: false }); }, new EventEmitter(), 10).catch(error => error),
     ]) {
       assert.equal(restartEndedBySupervisorStop(failure), false);
       const state = emptyDaemonState(master);

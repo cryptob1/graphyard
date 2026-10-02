@@ -31,7 +31,10 @@ import type { Work } from './work.js';
  * kind while it lives, so a merge row waits on the loop's next cycle, not on an executor, and the
  * remedy `--kinds merge` would install the very configuration the executors refuse. The loop is
  * known two ways: the master CLI on its own host detects it (`detectLoopMerger`), and the control
- * plane reads the merge requests its ledger holds from the loop's `daemon-` instance (`ledgerLoopMerger`).
+ * plane sees the loop itself — every coordination read the loop's cycle and dispatcher make names
+ * it (`loopPresenceHeader`), so a live loop is live however long it has had nothing to merge
+ * (`LoopRegistry`). Until this process has seen one such read (a restart, another replica), the
+ * merge requests its ledger holds from the loop's `daemon-` instance stand in (`ledgerLoopMerger`).
  */
 
 export interface ExecutorPresence { executor: string; host: string; principal: string; kinds: NextActionKind[]; seenAt: string; claims: number }
@@ -44,14 +47,57 @@ export const executorLiveMs = 120_000;
 export const retainedExecutors = 200;
 
 /**
- * How long a loop's merge request keeps it the installation's merger on the control plane's view.
- * The loop requests a merge only when something is mergeable, so the window spans many cycles at
- * the longest supported interval; past it the report is the presence report it always was, never
- * a loop inferred from nothing.
+ * How long a loop's merge request keeps it the installation's merger on the control plane's view
+ * when this process has not seen the loop read. The fallback only: the loop requests a merge only
+ * when something is mergeable, so the window spans many cycles; past it the report is the presence
+ * report it always was, never a loop inferred from nothing.
  */
 export const loopMergerLiveMs = 3_600_000;
 /** The master loop that merges on this installation, as the report needs it: live, and named. */
 export interface ReportedLoopMerger { live: boolean; name: string }
+
+/**
+ * The header on the master loop's coordination reads (`graphyard master run`): its cycle interval
+ * in whole seconds. Only a coordinator's read counts; the loop is the one coordinator that sends it.
+ */
+export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string }
+/**
+ * How long one read keeps the loop live: three of its cycles, never under an executor's window —
+ * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
+ * every few seconds, so a long cycle does not lapse it.
+ */
+export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * intervalSeconds * 1000, executorLiveMs);
+
+/** The loop as the control plane last saw it read, in memory beside the engine like executor presence. */
+export class LoopRegistry {
+  private latest: LoopPresence | null = null;
+  observe(poll: { principal: string; intervalSeconds: number }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString() };
+  }
+  live(now: Date): LoopPresence | null {
+    const latest = this.latest;
+    return latest && now.getTime() - Date.parse(latest.seenAt) <= loopPresenceLiveMs(latest.intervalSeconds) ? latest : null;
+  }
+}
+const loopRegistries = new WeakMap<object, LoopRegistry>();
+export function loopRegistry(owner: object): LoopRegistry {
+  let registry = loopRegistries.get(owner);
+  if (!registry) { registry = new LoopRegistry(); loopRegistries.set(owner, registry); }
+  return registry;
+}
+/** The interval a coordination read names, or null when it names none or an unsupported one (`master run` accepts 5–900). */
+export function loopPresenceInterval(header: string | string[] | undefined): number | null {
+  const value = Number(Array.isArray(header) ? header[0] : header);
+  return Number.isInteger(value) && value >= 5 && value <= 900 ? value : null;
+}
+
+/** The installation's loop as the control plane knows it: seen reading, else its ledger's merge requests. */
+export async function reportedLoopMerger(registry: LoopRegistry, query: (text: string, values: unknown[]) => Promise<{ rows: any[] }>, now: Date): Promise<ReportedLoopMerger | null> {
+  const seen = registry.live(now);
+  if (seen) return { live: true, name: `the master loop (${seen.principal}, cycling every ${seen.intervalSeconds}s, last read ${seen.seenAt})` };
+  return ledgerLoopMerger(query, now);
+}
 
 /**
  * The control plane's own reading of the loop (GY-916): the newest merge request its ledger holds

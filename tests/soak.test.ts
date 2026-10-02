@@ -19,7 +19,7 @@ import { approverSessionName, automaticReviewerConcurrency, decisionInput, loadM
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { adoptHeadlessRuns } from '../src/daemon/run.js';
+import { adoptHeadlessRuns, noteWatchdog } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
 import { applyDecision, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
@@ -43,6 +43,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { watchdogPlan } from '../src/daemon/liveness.js';
+import { loopWatchdogSeconds } from '../src/supervisor.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
@@ -121,7 +123,12 @@ const basePlan = {
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour],
+  // GY-916: the first deploy's executor restart meets a claim still held for this many passes, and
+  // the loop's installed unit carries a hand-copied watchdog window too short for its interval
+  // (the supervisor also restarts the loop at these offsets, before any alignment rewrites it).
+  heldClaimRestarts: 3, driftedWatchdogSec: 120, loopRestarts: [1 * hour, 2 * hour],
+  dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -956,7 +963,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
   // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
   const checkout = { head: github.tip, origin: github.tip, dirty: false };
-  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][] };
+  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
+    /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
+    held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
+    starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[] };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
   const changedPaths = (from: string, to: string) => {
     const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
@@ -988,13 +998,31 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
-    restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
-    // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
-    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
+    restartExecutors: async to => {
+      // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
+      if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
+      upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
+    },
+    // The alignment re-applies the unit the loop runs under: a drifted watchdog window is rewritten to the configuration's.
+    alignUnit: async () => {
+      if (upgrades.unit.watchdogSec === loopWatchdogSeconds(config.run.intervalSeconds)) return { wrote: 'unchanged', reason: null };
+      upgrades.unit.watchdogSec = loopWatchdogSeconds(config.run.intervalSeconds); upgrades.unit.rewrites++;
+      return { wrote: 'updated', reason: null };
+    },
+    // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
+    // and starts under the unit as it now stands.
+    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; await processStart(state); },
   });
+  /** What runDaemon does once per process start: the supervisor's watchdog window judged against the interval (GY-916). */
+  const processStart = async (state: DaemonState) => {
+    upgrades.starts++;
+    await noteWatchdog(state, watchdogPlan({ NOTIFY_SOCKET: '/run/user/1000/systemd/notify', WATCHDOG_USEC: String(upgrades.unit.watchdogSec * 1_000_000) }, config.run.intervalSeconds * 1000), new Date(clock.now()).toISOString(), async () => {});
+  };
 
   // ---- The day. ----
   let state = emptyDaemonState(config);
+  await processStart(state);
+  const loopRestarts = [...plan.loopRestarts];
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
   const refusalSamples: { keys: number; attempts: number }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
@@ -1280,6 +1308,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
       }
       master.cycleOf = cycles;
+      // GY-916: the supervisor restarts the loop for its own reasons: a new process, the same unit.
+      if (loopRestarts.length && elapsed >= loopRestarts[0]) { loopRestarts.shift(); await processStart(state); }
       try {
         if (headless) for (const run of await adoptHeadlessRuns(state, effects, () => {}, 'cycle')) {
           headless.settling.set(run.directory, run.settled);
@@ -1326,6 +1356,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       const upgraded = await selfUpgrade(state);
       upgrades.outcomes.push(upgraded.outcome);
       if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
+      if (upgraded.outcome === 'pending') upgrades.owed.push({ to: state.upgrade.pending?.to ?? 'none', state: state.actions[`upgrade:${state.deployment?.sha}`]?.state ?? 'none', attempts: state.actions[`upgrade:${state.deployment?.sha}`]?.attempts ?? 0 });
+      const watchdogActions = Object.entries(state.actions).filter(([key]) => key.startsWith('escalation:watchdog:'));
+      upgrades.watchdog.push({ failed: watchdogActions.filter(([, action]) => action.state === 'failed').length, attempts: watchdogActions.reduce((total, [, action]) => total + action.attempts, 0), windowSec: upgrades.unit.watchdogSec });
       if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
       // The loop restarts after every other cycle a run is live, once its launches have settled as
       // `runDaemon` lets them: it signals none, and the next cycle adopts them.
@@ -1645,7 +1678,30 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
-  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:') && key !== 'upgrade:unit').length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // GY-916: the first deploy's executor restart met a held claim. Each refused pass left the owed
+  // restart pending on the cursor and its action waiting — never a failed action:config, so no
+  // cycle failed — one attempt per pass, and the next pass after the claim settled completed it.
+  assert.deepEqual(upgrades.held, Array(basePlan.heldClaimRestarts).fill(upgrades.checkouts[0].to), 'the restart was refused only on the first deploy, against its tip');
+  assert.equal(upgrades.outcomes.filter(outcome => outcome === 'pending').length, basePlan.heldClaimRestarts, 'one pending pass per refusal');
+  assert.deepEqual(upgrades.owed.map(sample => sample.to), upgrades.held, 'the owed restart stood on the cursor against the moved tip');
+  assert.ok(upgrades.owed.every(sample => sample.state === 'waiting'), `the owed restart is waiting, not failed: ${JSON.stringify(upgrades.owed)}`);
+  assert.deepEqual(upgrades.owed.map((sample, index) => sample.attempts - upgrades.owed[0].attempts), upgrades.owed.map((_, index) => index), 'one attempt per refused pass, never more');
+  const firstRelease = production.deploys[0].sha;
+  assert.equal(state.actions[`upgrade:${firstRelease}`]?.state, 'done', 'the owed restart converged: the first deploy\'s action ends done');
+  assert.equal(state.actions[`upgrade:${firstRelease}`]?.attempts, upgrades.owed.at(-1)!.attempts + 1, 'and the pass that completed it is its last attempt');
+  // (The dirty checkout's standing refusal, `upgrade:refused`, is its own record and is not one of these.)
+  const restartFaults = Object.entries(state.actions).filter(([key, action]) => (/^upgrade:[0-9a-f]{40}$/.test(key) || key === 'upgrade:unit' || key.startsWith('escalation:watchdog:')) && action.state === 'failed');
+  assert.deepEqual(restartFaults.map(([key]) => key), [], 'no restart, unit or watchdog fault stands at the end of the day');
+  // GY-916: the drifted watchdog window was refused once at the first process start, not again at
+  // the supervisor's own restarts or on any cycle, and cleared by the first alignment's re-applied unit.
+  assert.equal(upgrades.unit.rewrites, 1, 'the unit was rewritten once, at the first alignment');
+  assert.equal(state.actions['upgrade:unit']?.state, 'done');
+  assert.equal(upgrades.starts, 1 + basePlan.loopRestarts.length + production.deploys.length, 'every process start judged the window');
+  const drifted = upgrades.watchdog.filter(sample => sample.windowSec === basePlan.driftedWatchdogSec), aligned = upgrades.watchdog.filter(sample => sample.windowSec !== basePlan.driftedWatchdogSec);
+  assert.ok(drifted.length > basePlan.loopRestarts.length && aligned.length > 0, 'the day ran under both units');
+  assert.ok(drifted.every(sample => sample.failed === 1 && sample.attempts === 1), `under the drifted unit the refusal stood once, across restarts and cycles: ${JSON.stringify(drifted.slice(0, 3))}`);
+  assert.ok(aligned.every(sample => sample.failed === 0 && sample.windowSec === loopWatchdogSeconds(soakConfig.run.intervalSeconds)), 'under the re-applied unit the refusal is cleared, every cycle after');
   // GY-842 across the day: every pane the day's launches opened went somewhere — closed once, by
   // the step that ended its session or by the bounded sweep — the operator's own pane was never
   // touched, the previous day's backlog drained over successive bounded passes, and the drain

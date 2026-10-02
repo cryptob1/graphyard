@@ -1,6 +1,6 @@
 import { demand } from '../../model.js';
 import { idleActionable, queueSnapshot, type ActionRow } from '../../model/actions.js';
-import { executorRegistry, executorReport, ledgerLoopMerger } from '../../model/executor-presence.js';
+import { executorRegistry, executorReport, loopRegistry, reportedLoopMerger } from '../../model/executor-presence.js';
 import { mechanicalActionKinds, nextActionKinds } from '../../model/next-action.js';
 import { openAgentRequests } from '../../model/agent-requests.js';
 import { runningSessions } from '../../model/sessions.js';
@@ -36,7 +36,7 @@ export const actionRoutes = defineRoutes('actions', [
         idle: idleActionable(work, now),
         // Who is alive to claim, and every pending row whose kind none of them serves (GY-105):
         // an action nobody can run, reported apart from one waiting its turn.
-        executors: executorReport(work, executorRegistry(services.engine), now, undefined, await ledgerLoopMerger((text, values) => services.engine.store.pool.query(text, values), now)),
+        executors: executorReport(work, executorRegistry(services.engine), now, undefined, await reportedLoopMerger(loopRegistry(services.engine), (text, values) => services.engine.store.pool.query(text, values), now)),
         requests: work.flatMap(item => openAgentRequests(item, now).map(request => ({ ...request, key: item.key, work: item.id }))),
         sessions: runningSessions(work, now),
       };
