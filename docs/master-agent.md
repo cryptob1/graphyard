@@ -58,7 +58,7 @@ With `run.research` set, a feature (or `"research": true`) gets one read-only Pi
 
 ## Machine-filed backlog
 
-Approvals' follow-up findings are recorded on the approved item and held until it ships (delivered; if optimistic, once main's suite passes), shown on its page and in `master status` (`pendingFollowUps`); then those not promoted become one follow-up item depending on nothing, or join its open one: one per parent, in any stage. Closing it unshipped drops them ([follow-ups](followups.md)). Triage skips follow-ups of unshipped parents; a one-time migration folded such items back. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Approvals' follow-up findings are held on the approved item until it ships (delivered; if optimistic, once main's suite passes), shown in `master status` (`pendingFollowUps`); then unpromoted ones become, or join, its one follow-up item. Closing it unshipped drops them ([follow-ups](followups.md)). Triage skips follow-ups of unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
