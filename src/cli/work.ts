@@ -5,6 +5,27 @@ import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPre
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
+import { classifyGateRefusals } from '../model/retro-synthesis.js';
+
+/**
+ * The item with the retro registries in force beside it, when any artefact has been applied: the
+ * requirements and checks a worker or producer follows were approved from recurring refusals and
+ * rework, so the session that reads its item reads them too, and its gate refusals an applied
+ * catalogue entry recognises are filed under that entry (`retroCatalogued`). Only a server without
+ * the route (404) adds nothing; any other failure to read the standing registries is an error.
+ */
+export async function withRetroStanding(work: any, api: (path: string) => Promise<any>) {
+  let standing: any[] = [];
+  try { standing = (await api('retro/standing')).standing ?? []; } catch (error: any) {
+    if (error?.status === 404 || /\b404\b/.test(String(error?.message ?? error))) return work;
+    throw error;
+  }
+  const inForce = standing.filter(registry => registry.entries?.length);
+  if (!inForce.length) return work;
+  const catalogue = inForce.find(registry => registry.registry === 'catalogue')?.entries ?? [];
+  const retroCatalogued = classifyGateRefusals(work.gates ?? [], catalogue.map((entry: any) => ({ ...entry, state: 'applied' })));
+  return { ...work, retroStanding: inForce, ...(retroCatalogued.length ? { retroCatalogued } : {}) };
+}
 
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
 export const workCommands = defineCommands([
@@ -13,7 +34,8 @@ export const workCommands = defineCommands([
     scope: 'work',
     help: ['  status [GY-N]                Control-plane or work status'],
     unscoped: async ({ api, print }) => print(await api('status')),
-    run: async ({ print }, work) => print(work),
+    // The applied retro requirements and checks (GY-970) travel with the item a session reads first.
+    run: async ({ api, print }, work) => print(await withRetroStanding(work, api)),
   },
   {
     name: 'diagnose',

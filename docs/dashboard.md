@@ -36,7 +36,7 @@ Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**; merged reads 
 
 ## An item page
 
-Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request**, **Test cases** and **Activity**. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion), **Pull request**, **Test cases** and **Activity**. **Pull request** folds a **Merge danger** (low, medium, high; one-way or two-way door): what the change touches, what a revert restores, what the merge guard still checks. Schema, deployment and workflow files are one-way. **Technical details** holds gates, sessions, evidence and overlaps (`Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 

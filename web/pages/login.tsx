@@ -1,9 +1,26 @@
 import { useEffect, useState } from 'react';
 import type { Dashboard } from './dashboard';
 
-/** How long the first status read may take before the page says the control plane cannot be reached. */
-export const VERIFY_TIMEOUT_MS = 10_000;
+/**
+ * How long the server may take to answer the first status read before the page says the control
+ * plane cannot be reached. /api/status alone ran 3 s at the median and 10-15 s at the tail on
+ * 2026-09-30, so 10 s told reachable operators it was down.
+ */
+export const VERIFY_TIMEOUT_MS = 30_000;
 export const REJECTED_NOTICE = 'That token was not accepted';
+/** The username a password manager stores the token under; the site address already tells installations apart. */
+export const LOGIN_USERNAME = 'graphyard';
+const visuallyHidden = { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', border: 0, padding: 0, margin: -1 } as const;
+/**
+ * Offers the accepted token to the browser's own password store (Credential Management API, where the browser
+ * has it), so it is saved as a password beside what a password-manager extension picks up from the form.
+ */
+export function offerToSavePassword(token: string, scope: { PasswordCredential?: new (data: { id: string; password: string; name?: string }) => unknown; navigator?: { credentials?: { store?(credential: unknown): Promise<unknown> } } } = globalThis as never) {
+  const Credential = scope.PasswordCredential, store = scope.navigator?.credentials?.store;
+  if (!Credential || !store) return false;
+  void store.call(scope.navigator!.credentials, new Credential({ id: LOGIN_USERNAME, password: token, name: 'Graphyard control plane' })).catch(() => {});
+  return true;
+}
 export const HELPER_TEXT = 'Tokens are scoped to your role and kept for this browser session.';
 /** How the human operator signs in without a token (GY-738). */
 export const SIGN_IN_LINK_TEXT = 'Operator? Open the one-time link graphyard login prints: it signs you in as a human, no token needed.';
@@ -31,9 +48,11 @@ export type VerifyOutcome = { kind: 'accepted'; status: unknown } | { kind: 'rej
 export interface VerifyClock { setTimeout(run: () => void, ms: number): unknown; clearTimeout(timer: unknown): void }
 
 /**
- * Reads /api/status with the token once, then runs `load` (the dashboard's first read) with the status. It always
- * settles: accepted with the status, rejected on 401 or 403 (or when `load` throws an error marked unauthorized), and unreachable on any other failure or when the
- * status reply and the load have not both finished within VERIFY_TIMEOUT_MS.
+ * Reads /api/status with the token once, then runs `load` (the dashboard's first read) with the status. It
+ * settles accepted with the status, rejected on 401 or 403 (or when `load` throws an error marked unauthorized),
+ * and unreachable on any other failure or when the status reply has not arrived within VERIFY_TIMEOUT_MS. The
+ * deadline covers only reaching the server: once /api/status has answered, the server is reachable, so a slow
+ * dashboard load keeps the page verifying (with its "Use another token" escape) instead of calling it unreachable.
  */
 export function verifyToken(token: string, fetcher: typeof fetch, clock: VerifyClock, load: (status: unknown, signal: AbortSignal) => Promise<void> = async () => {}): { result: Promise<VerifyOutcome>; cancel(): void } {
   const controller = new AbortController();
@@ -45,6 +64,8 @@ export function verifyToken(token: string, fetcher: typeof fetch, clock: VerifyC
       if (response.status === 401 || response.status === 403) return { kind: 'rejected' };
       if (!response.ok) return { kind: 'unreachable' };
       const status = await response.json();
+      // The server answered: the reachability deadline is met, and the dashboard's first read runs without it.
+      clock.clearTimeout(timer);
       await load(status, controller.signal);
       return { kind: 'accepted', status };
     } catch (error) { return (error as { unauthorized?: boolean })?.unauthorized ? { kind: 'rejected' } : { kind: 'unreachable' }; }
@@ -67,9 +88,12 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
     <div className="brand"><img className="mark" src="/graphyard-symbol.svg" alt="" width="32" height="32"/> graphyard</div>
     <h1>Keep the work<br/>moving forward.</h1>
     <p className="login-tagline">One place for ownership, evidence, and delivery.</p>
-    {state.kind === 'form' && <form className="login-form" onSubmit={e => { e.preventDefault(); submit(); }}>
+    {state.kind === 'form' && <form className="login-form" method="post" onSubmit={e => { e.preventDefault(); submit(); }}>
       {error && <p role="alert" className="notice danger">{error}</p>}
-      <label>Access token<input type="password" required autoFocus value={draftToken} onChange={e => setDraftToken(e.target.value)} autoComplete="off" placeholder="Your Graphyard token"/></label>
+      {/* A password manager saves a login as a username/password pair: the fixed, visually hidden username lets
+          1Password and the browser offer to save the token and fill it next time. */}
+      <input type="text" name="username" autoComplete="username" value={LOGIN_USERNAME} readOnly tabIndex={-1} aria-hidden="true" style={visuallyHidden}/>
+      <label>Access token<input type="password" name="password" required autoFocus value={draftToken} onChange={e => setDraftToken(e.target.value)} autoComplete="current-password" placeholder="Your Graphyard token"/></label>
       <button type="submit">Open control plane ↗</button>
       <p className="login-help">{SIGN_IN_LINK_TEXT}</p>
     </form>}
@@ -109,7 +133,7 @@ export default function LoginPage({ token, error, signOut, setError, sessionEpoc
     const check = verifyToken(token, (input, init) => fetch(input, init), { setTimeout: (run, ms) => setTimeout(run, ms), clearTimeout: timer => clearTimeout(timer as ReturnType<typeof setTimeout>) }, onVerified);
     void check.result.then(outcome => {
       if (!active || epoch !== sessionEpoch.current) return;
-      if (outcome.kind === 'accepted') return;
+      if (outcome.kind === 'accepted') { offerToSavePassword(token); return; }
       if (outcome.kind === 'rejected') { signOut(); setError(REJECTED_NOTICE); }
       else setUnreachable(true);
     });

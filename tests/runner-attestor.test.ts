@@ -1,12 +1,13 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readdir, writeFile, rename, rm, realpath, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { oracleBundleDigest } from '../src/runner-setup.js';
+import { attestable } from './helpers/attestor-ancestry.js';
 import { superviseAttempt, supervisionRequestSchema } from '../src/runner-attestor.js';
 import { collectArtifacts, verifyExecutionAttestation } from '../src/runner-collector.js';
-import { attemptBoundaryPath, type ExecutionPlan, type ExecutionRecord, type Runner, type Settler } from '../src/runner-executor.js';
+import { attemptBoundaryPath, preflightAttempt, type ExecutionPlan, type ExecutionRecord, type Runner, type Settler } from '../src/runner-executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const attestor = generateKeyPairSync('ed25519');
@@ -28,7 +29,10 @@ const reporting = (plan: ExecutionPlan, report: unknown = passing): Runner => as
   return { exitCode: 0, timedOut: false };
 };
 
-async function boundary(run: (paths: { oracle: string; collection: string; output: string; plan: ExecutionPlan }) => Promise<void>) {
+// Every test here needs an attested run. Where a worker sandbox stats the directories above
+// the fixture as another account, the attestor's preflight refusal is asserted and noted
+// instead (tests/helpers/attestor-ancestry.ts, GY-966).
+async function boundary(t: TestContext, run: (paths: { oracle: string; collection: string; output: string; plan: ExecutionPlan }) => Promise<void>) {
   const root = await temporaryDirectory('attestor');
   const oracle = join(root, 'oracle'), collection = join(root, 'output');
   await mkdir(oracle, { mode: 0o755 }); await mkdir(collection, { mode: 0o755 });
@@ -44,10 +48,12 @@ async function boundary(run: (paths: { oracle: string; collection: string; outpu
   // The attestor provisions this attempt's own boundary under the collection root, so a
   // retry or a second assignment never meets the previous attempt's leftover artifacts.
   const output = attemptBoundaryPath(plan);
-  try { await run({ oracle, collection, output, plan }); } finally { await rm(root, { recursive: true, force: true }); }
+  try {
+    if (await attestable(t, oracle, () => preflightAttempt(plan))) await run({ oracle, collection, output, plan });
+  } finally { await rm(root, { recursive: true, force: true }); }
 }
 
-test('the attestor signs the attempt it ran, so a fabricated record cannot borrow its signature', async () => boundary(async ({ output, plan }) => {
+test('the attestor signs the attempt it ran, so a fabricated record cannot borrow its signature', async t => boundary(t, async ({ output, plan }) => {
   const supervised = await superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent });
   // The signed boundary is this attempt's own directory beneath the configured root.
   assert.equal(supervised.record.outputPath, await realpath(output));
@@ -79,7 +85,7 @@ test('the attestor signs the attempt it ran, so a fabricated record cannot borro
   }
 }));
 
-test('no execution fact crosses the boundary into the attestor', async () => boundary(async ({ plan }) => {
+test('no execution fact crosses the boundary into the attestor', async t => boundary(t, async ({ plan }) => {
   // The runner sends a plan and nothing else. An interval, an exit code, a measured digest
   // or a container state arriving from the worker would be exactly the fabrication the
   // signature exists to exclude, so the request schema has no place to put one.
@@ -101,7 +107,7 @@ test('no execution fact crosses the boundary into the attestor', async () => bou
   await assert.doesNotReject(superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent, callerUid: process.getuid!() + 1 }));
 }));
 
-test('preflight completes before acknowledgement, and an unacknowledged attempt starts nothing', async () => boundary(async ({ oracle, output, plan }) => {
+test('preflight completes before acknowledgement, and an unacknowledged attempt starts nothing', async t => boundary(t, async ({ oracle, output, plan }) => {
   const started: string[] = [];
   const watching: Runner = async command => { started.push(String(command.argv.at(-1))); return { exitCode: 0, timedOut: false }; };
 
@@ -128,7 +134,7 @@ test('preflight completes before acknowledgement, and an unacknowledged attempt 
   assert.ok(oracle);
 }));
 
-test('a key that cannot produce this attempt\'s signature is refused before acknowledgement', async () => boundary(async ({ output, plan }) => {
+test('a key that cannot produce this attempt\'s signature is refused before acknowledgement', async t => boundary(t, async ({ output, plan }) => {
   const started: string[] = [];
   const watching: Runner = async command => { started.push(String(command.argv.at(-1))); return { exitCode: 0, timedOut: false }; };
   const unusable = async (key: string, expected: RegExp) => {
@@ -157,7 +163,7 @@ test('a key that cannot produce this attempt\'s signature is refused before ackn
   assert.deepEqual(verifyExecutionAttestation(plan.grant, supervised.record, collected, supervised.attestation).reasons, []);
 }));
 
-test('a boundary swapped out from under the measurement is never signed', async () => boundary(async ({ collection, output, plan }) => {
+test('a boundary swapped out from under the measurement is never signed', async t => boundary(t, async ({ collection, output, plan }) => {
   // The attestor measures the output boundary by pathname. A runner that can redirect
   // that pathname could otherwise have an older attempt's passing report measured and
   // signed as this execution's own bytes, so the identity preflight approved is checked
@@ -177,7 +183,7 @@ test('a boundary swapped out from under the measurement is never signed', async 
   await rename(displaced, output);
 }));
 
-test('the attestation covers every artifact kind the boundary held, whatever the collector publishes', async () => boundary(async ({ output, plan }) => {
+test('the attestation covers every artifact kind the boundary held, whatever the collector publishes', async t => boundary(t, async ({ output, plan }) => {
   const supervised = await superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent });
   assert.deepEqual(supervised.collection.artifacts.map(a => a.name), ['inventory', 'report']);
 
@@ -192,7 +198,7 @@ test('the attestation covers every artifact kind the boundary held, whatever the
   assert.ok(verifyExecutionAttestation(plan.grant, supervised.record, rewritten, supervised.attestation).reasons.some(r => /differ from the host-attested boundary/.test(r)));
 }));
 
-test('each attempt is given its own boundary, so a retry never meets the last one\'s artifacts', async () => boundary(async ({ collection, output, plan }) => {
+test('each attempt is given its own boundary, so a retry never meets the last one\'s artifacts', async t => boundary(t, async ({ collection, output, plan }) => {
   const first = await superviseAttempt({ plan }, { privateKey, run: reporting(plan), settle: absent });
   assert.deepEqual(first.collection.artifacts.map(a => a.name), ['inventory', 'report']);
 

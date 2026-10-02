@@ -12,6 +12,7 @@ import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { appendFollowUps, followUpsByPr, migrateFollowUps, promoteFollowUp, readFollowUps, recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
+import { issuePushCredential } from '../push-credential.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -128,6 +129,14 @@ export const workRoutes = defineRoutes('work', [
       // is recorded here rather than inherited from a handler never reached.
       await refuseLead(context, id, 'merge-acquire');
       return engine.requestEnqueue(actor, id, await parseJson(context, undefined, '{}'), context.idempotencyKey());
+    },
+  },
+  // A worker session's short-lived push credential (GY-999), for the lease holder only.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/push-credential$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'push-credential');
+      return issuePushCredential(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
     },
   },
   {
