@@ -1,4 +1,6 @@
 import { documentationGlobMatches } from './documentation-glob.js';
+import { companionGround } from './scope-companions.js';
+export { companionGround, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
@@ -116,7 +118,7 @@ export function namedPaths(text: string) {
   return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
 }
 
-export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'timing-companion'; why: string }
+export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
  * documentation the repository requires updating for the behaviour those criteria change.
@@ -175,7 +177,11 @@ export function decideScopeRequest(
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : []),
     // A change that adds a test file may record its timing line (GY-1023): the baseline is implied by the test.
     ...(addsTestFile(item) ? [{ scope: timingBaselinePath, kind: 'timing-companion' as const, why: `${timingBaselinePath} records the timing line of a test file this item adds or changes` }] : [])];
-  const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) }));
+  // GY-955: a companion the change inevitably carries — the documentation-budget gate beside a
+  // documentation path, the test file named for a criterion's proofs — is implied as well.
+  const documentation = options.documentation ?? itemDocumentationPaths(item);
+  const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation); return why ? { scope: path, kind: 'companion', why } : null; };
+  const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) ?? companion(path) }));
   const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
   if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
   // An implied ask no fold can represent under the plannedFiles cap is refused, never applied or

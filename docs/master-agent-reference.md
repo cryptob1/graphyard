@@ -11,7 +11,7 @@
 
 ## Items, scope and human waits
 
-An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` are refused). Automatic, grounded: documentation; `tests/helpers/timing-baseline.json` for items touching tests (outside `plannedFiles`: only their lines change); files criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or current-head `CHANGES_REQUESTED`, names literally (unnegated; rechecked every two minutes); tests pinning planned-file quotes or criterion labels; files defining a criterion's symbol or calling a rare one; planned files' successors (renames, copies, `Graphyard-Successor: OLD -> NEW` trailers, re-export barrels), also added to open items. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`scope-request GY-N EPOCH --wait` reads the outcome). A request belongs to its attempt: when that ends (submit, release, lease lapse, rework, a requirements revision) an open or refused request closes with reason `attempt ended` (`scope.closed`), no longer holding the ready gate, and the next attempt asks afresh; `master unblock GY-N` closes one whose attempt already ended, naming it in the unblock's history. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
+An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` are refused). Automatic, grounded: documentation; files criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests pinning planned-file quotes or criterion labels; files defining a criterion's symbol or calling a rare one; planned files' successors (renames, copies, `Graphyard-Successor: OLD -> NEW` trailers, re-export barrels), also added to open items; companions: the docs-budget gate beside documentation, `tests/helpers/timing-baseline.json` lines of tests the item touches, the test file the criteria's proofs live in (new when no base file holds them), tests importing a planned module or its barrel, single `web/` files a web-UI criterion describes. Paths are judged singly; the approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`--wait` reads the outcome). `master create`/`requirements` plan the proofs' test file and docs-budget gate up front. One decider per request (an executor holding `approve-scope`, else the loop); repeats get the standing decision. A request belongs to its attempt: when that ends (submit, release, lease lapse, rework, a requirements revision) an open or refused request closes with reason `attempt ended` (`scope.closed`) and the next attempt asks afresh; `master unblock GY-N` closes one whose attempt already ended, naming it in the unblock's history. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
@@ -33,7 +33,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-Protection reconciles via `master protection --apply`; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
+Protection reconciles via `master protection --apply`; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile.
 
 | Flow | Effect |
 | --- | --- |
@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where only a page exists,
 | `installation-accept` | Accepts pending requests |
 | `protection` | Reconciles branch protection |
 
-Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `.graphyard/master-actions/` `record.json`, appending `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
 
 ## Harness permissions
 
@@ -53,7 +53,7 @@ Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `re
 
 A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`, its claim time; the server wakes the item's observation job, answering `observed`, `observedAt` and its `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. Unobserved, the claim fails at once with `no observation newer than the claim was saved` and its job's condition, then backs off. A job that is scheduled with no hold or error is a wait in progress: its failures stall the row only once they span thirty minutes, the bound any wait on an event is given; a held, failed or missing job stalls it after three. Row bookkeeping (claim, renew, settle) never refuses an observation read before it; other changes do.
 
-A `dispatch` or `request-review` whose launch finds a producer or reviewer session already answering the requested head completes on that session instead of failing. Three failures with an unchanged reason stall a row rather than retrying: once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+A `dispatch` or `request-review` whose launch finds a producer or reviewer session already answering the requested head completes on that session instead of failing. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
@@ -69,7 +69,7 @@ A dead supervisor fences its item; `containment` lists each surviving process's 
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 
-`master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
+`master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ## Fault classes
 
