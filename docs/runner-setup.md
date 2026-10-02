@@ -9,7 +9,7 @@ graphyard runner snapshot selected-files.json > oracle-source.json
 graphyard runner bundle-digest ./oracle
 ```
 
-The bundle (specs, helpers, lockfiles) is attestor-owned, not group- or world-writable; `validation define` pins `digest` and `runnerImageDigest` (image: `docker/runner/Dockerfile`). Specs read `GRAPHYARD_TARGET_URL`.
+Bundle (reviewed specs, helpers, lockfiles): attestor-owned, not group- or world-writable; `validation define` pins `digest`, `runnerImageDigest` (from `docker/runner/Dockerfile`). Specs read target `GRAPHYARD_TARGET_URL`.
 
 ## Run an attempt
 
@@ -28,7 +28,7 @@ Unscoped `worker` credential: `graphyard runner attempt runner.json`:
 }
 ```
 
-`runAsUser`: non-root container UID, boundary-group GID; target, digests, network and key come only from the grant. The attestor (`graphyard runner supervise`, own OS account) runs `enumerate` offline then `execute`, read-only, capability-free, signing what it saw.
+`runAsUser`: non-root container UID, boundary-group GID; target, digests, network, key only from the grant. Attestor (`graphyard runner supervise`, own OS account): `enumerate` offline, then `execute` read-only, capability-free; signs what it saw.
 
 ### The acknowledgement is retried, never repeated
 
@@ -46,11 +46,11 @@ install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/at
 setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
 ```
 
-Container writes, attestor and collector read; **never add the runner account**.
+Container writes; attestor, collector read; **never add the runner account to it**.
 
 ## Collect and publish
 
-With a proof-scoped `producer` credential and own boundary-group OS account, `graphyard runner collect collector.json`:
+Proof-scoped `producer` credential, own boundary-group OS account: `graphyard runner collect collector.json`:
 
 ```json
 {
@@ -78,4 +78,4 @@ With a proof-scoped `producer` credential and own boundary-group OS account, `gr
 }
 ```
 
-`grant`: the runner's output. The collector (`collection-authority`) verifies attestor signature and inventory, confirms both containers gone, keeps artifacts private seven days. `observations` must bracket the run, gaps under `maxGapMs`; a difference, gap or `unknown` measurement refuses; infrastructure faults publish `blocked`.
+`grant`: from runner output. Collector (`collection-authority`) verifies attestor signature, inventory, both containers gone; uploads artifacts privately seven days. `observations` bracket the run, gaps under `maxGapMs`; difference, gap or `unknown` measurement refuses; infrastructure faults publish `blocked`.

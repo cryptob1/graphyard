@@ -1,17 +1,17 @@
 <!-- page: Operate Graphyard | 5 | loop, dispatch, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes, merges, verifies deployments and administers GitHub without asking; it never implements, reviews or proves. Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it does the rest itself or via an approver.
+The master (`coordinator`) routes and administers GitHub unasked; never implements, reviews or proves. Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); the rest it does itself or via an approver agent, never asking a human to run what an agent may.
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge candidates passing every gate; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop); Railway: `productionEnvironment`). Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Cycle: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; close finished sessions; verify deployments (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop); Railway: `productionEnvironment`). Stop only when every in-scope item is Done or externally blocked (recorded in Graphyard) and every merge verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, proof setup never stop it. `controlPlane.production` flags main ahead of production.
 
-When `daemon.liveness` is `stalled` or `absent`, restart `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)): `systemctl --user restart graphyard-master`, never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
+`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` when unauthorized or without an operator agent.
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` when unauthorized or without an operator agent.
 
 ### Session liveness is reconciled, not trusted
 
@@ -22,11 +22,12 @@ that host's loop. `dispatch.sessionReconcile` reports closures (`sessions.unseen
 - **Vanished**: missed twice.
 - **Ended**: agentless pane or terminal state; `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+- **Superseded**: review/proof session for a head the item moved past; a delivered item is closed the same
   way as any other. Implementation sessions are left to the lease.
-- **Duplicate**: the older of two for a role and head.
+- **Duplicate**: older of two per role and head.
 
-A closure decides no gate, ends no lease, and stops no process. Concurrency is counted against live sessions only; a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, never closure.
+A closure decides no gate, ends no lease, and stops no process. Concurrency is counted against live
+sessions only; a name is busy only while a live session has it. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) a session raises attention, never closure.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
 that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
@@ -38,32 +39,29 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Machine-filed backlog
 
-With `run.research`, a feature (or `"research": true`) gets one read-only Pi brief per revision, which build follows; a differing answer reworks, failure never blocks, product questions go to a human.
+With `run.research`, a feature (or `"research": true`) gets one read-only Pi brief per revision for build to follow (differing answers rework; failure never blocks; product questions go to humans); Pi triages machine-filed items (legacy follow-ups, faults), 2 at once (`triageConcurrency`): release, approved close, or merge; untriaged past 24h raises attention (`machineUntriaged`, `operatorBacklog`). Approvals' [follow-ups](followups.md) stay unfiled on the approved item until `graphyard promote-followup`.
 
-Approvals' [follow-ups](followups.md) stay on the item until `graphyard promote-followup`. With `run.research`, Pi triages machine-filed items (legacy follow-ups, faults), `triageConcurrency` (default 2) at once: release, approved close, or merge (`machineUntriaged`, `operatorBacklog`).
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`): approved, its fix releases or the fault closes as duplicate; recurrences re-file.
 
 ## Automatic dispatch at submit
 
-Past the build gate a candidate gets (`autoDispatch`) a producer request per proof group (`unit`, `integration`; `manual` for `producerProofs`), then a review request once they pass. **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) up to `awaitReviewersMinutes` (default 8, 0 disables), skipping a bot that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
+Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then, once they pass, a review request (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launches await the head's bot reviews (`run.awaitReviewers`) up to `awaitReviewersMinutes` (default 8, 0 disables), skipping a bot that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart; lowering it drains first (`longestWaitMs`); ten starved minutes count in `counts.concurrencyStarved`.
-- **Requests always settle.** A `pane_not_found` pane is closed. No request outlives its own token: expired and unreported by Herdr, it settles `expired`, else counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere, 12 per request (`dispatch.abandoned`); an unposted reviewer is reminded first. Killed producer runs spend no attempt; exhausted ones raise `escalation:proof-exhausted`, then rework.
+- Requests always settle: `pane_not_found` panes close. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; pending ones count in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); unposted reviewers get a reminder first. Killed/vanished producer runs spend no attempt; exhausted ones raise `escalation:proof-exhausted`, then a quoting rework.
+- **Every role fails over on spent quota** or waits as one uncounted `capacity` line, relaunching oldest-first.
 
-The master never launches reviews or producers by hand (`master review GY-N [PROFILE]` only once the loop stops relaunching).
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after relaunching stops.
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"` (`criterion`, `behaviour`, `result`, `executed`): the proof rerun without the criterion's behaviour, which must fail with a case executed; otherwise the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`) and reworked, naming the surviving mutation. Unexercised `manual:` proofs re-attest with an approver-confirmed `exercise` that fails on base. Attestations carry only on a kept patch-id.
+A passing producer records `"exercise"` (`criterion`, `behaviour`, `result`, `executed`): rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Once all an automated group's remaining proofs are such findings, the next action is `request-rework` naming proof, criterion and surviving mutation (`master status`: awaiting rework). `decide attest` adds an approver-confirmed `exercise` failing on base; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
-## Guarded merges
+## Repair lane
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy; protocol skew refuses (`… deploy main first`).
+`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only when currently authorized for the exact head, base and policy; protocol skew refuses (`… deploy main first`). Only no-admin-bypass exceptions (head-bound, App's ruleset bypass):
 
-### Repair lane
+- A `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault; audited (`repair.merged`), flagged until a normal merge.
+- The main guard's [revert](github.md#optimistic-merges) on the base tip of a confirmed main required-suite failure's culprit, unless later merges touched its files (`optimistic.revert.*`); the item reopens as rework.
 
-The only admin-bypass merges (head-bound, via the App's ruleset bypass):
-
-- A `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes with checks passed, on an approver's `master decide GY-N repair-merge REASON` naming the fault; audited (`repair.merged`), flagged until a normal merge.
-- The main guard's [revert](github.md#optimistic-merges) of a confirmed required-suite failure's culprit, unless a later merge touched its files (`optimistic.revert.*`), reopening the item as rework.
-
-Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval lists each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
+Unresolved review threads (`reviewThreads`) are reviewer inputs, not merge blockers; approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

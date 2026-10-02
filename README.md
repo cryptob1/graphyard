@@ -20,4 +20,4 @@ node /path/to/graphyard/bin/graphyard.mjs install --provider railway --repo OWNE
 
 ## Contribute
 
-See [AGENTS.md](AGENTS.md) and the [development guide](docs/development.md). Apache 2.0.
+Read [AGENTS.md](AGENTS.md) and the [development guide](docs/development.md); run `npm run build` and `npm test`. Apache 2.0.

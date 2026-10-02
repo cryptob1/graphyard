@@ -1,47 +1,47 @@
 <!-- page: Start here | 1 | lifecycle and authority. -->
 # How Graphyard works
 
-Graphyard decides whether work advances; runtimes such as Herdr run sessions.
+Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## One trip from setup to Done
 
-1. **Ready**: released, unblocked, criteria naming proofs.
-2. **Build**: a worker claims a lease and worktree, submits a PR.
+1. **Ready**: released, unblocked, criteria name proofs.
+2. **Build**: a worker claims lease, worktree; submits a PR.
 3. **Review**: an independent reviewer approves the exact commit.
 4. **Test**: Graphyard observes CI.
-5. **Acceptance**: granted producers report the proofs its [lane](#risk-lanes) requires.
-6. **Done**: Graphyard rechecks every gate, merges, observes it.
+5. **Acceptance**: granted producers report proofs its [lane](#risk-lanes) requires.
+6. **Done**: Graphyard rechecks gates, merges, observes.
 
-A card stops at its first refusing gate, naming what is missing; nothing sets stages.
+Cards stop at the first refusing gate, naming what's missing; nothing sets stages.
 
 ## Risk lanes
 
-`src/model/policy.ts` assigns each item a **risk lane** from its changed paths (renames by both endpoints); `master status` shows its p50 target.
+`src/model/policy.ts` assigns a **risk lane** (`low`, `medium`, `high`) by changed paths (renames: both ends); `master status` shows it, p50 target; the landability verdict (`src/model/gates.ts`) requires facts by lane.
 
-- **High** (4 h): schema, persistence, auth, credentials, principals, public API, operator agent, proof grants, install, deploy; unobserved changes. Needs producer proofs, `manual:` attestations, a two-party decision per rework.
-- **Medium** (60 min): everything else; adds producer-run proofs (`unit:`, `integration:`).
-- **Low** (30 min): test-only, docs-only or single-module. Needs required CI and one approval.
+- **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential-loading bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework decisions.
+- **Medium** (60 min): the rest; adds producer-run `unit:`/`integration:`.
+- **Low** (30 min): test-only, docs-only, single-module (shared leading segments). Required CI, one approval; no producer proofs or `manual:` attestations.
 
-Every lane requires `e2e:` proofs and inherited bootstrap obligations; low and medium reworks need no approver (`graphyard-risk-lane`).
+All lanes require `e2e:` proofs, inherited bootstrap obligations; low/medium reworks need no approver (ledger: `graphyard-risk-lane`).
 
 ## Who holds which authority
 
-![Bootstrap versus normal operation: one supervised worker, then a fleet.](diagrams/bootstrap-vs-normal.svg)
+![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the operator supervises one worker while gates activate; then the master dispatches many, each with its own credential and worktree.
+Text equivalent: in bootstrap the human operator supervises one worker; later the master dispatches many, each own credential, worktree.
 
-![Authority held by the operator, Graphyard, Herdr sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
+![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the operator sends human-only decisions; Herdr hosts master, slice lead and worker; reviewer (a GitHub identity) and producer (a grant holder) each hold their own credential; merges take only the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: operator makes human-only decisions; Herdr hosts master (`coordinator`), slice lead, worker (epoch, worktree); reviewer, producer hold own credentials; merges only via the guarded path. Colours: [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
-![Control-plane components: callers, engine, Postgres, reconciliation worker and GitHub.](diagrams/control-plane-components.svg)
+![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: callers use the API; the engine applies each mutation in one locked Postgres transaction; the reconciliation worker syncs GitHub, publishes the required check, runs the guarded merge; webhooks only wake jobs.
+Text equivalent: callers use the API; the engine applies each mutation, with an event, in one locked Postgres transaction; reconciliation syncs GitHub, publishes the required check, merges; webhooks only wake jobs.
 
-- Gates check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates evidence.
-- Each claim bumps the epoch; old-epoch or expired-lease commands refuse.
-- Evidence belongs to its authenticated producer; the latest trusted record per proof and candidate wins, even a failure.
-- History is append-only (routine rows compacted after retention); a retry within a day replays its result.
-- Graphyard merges only the exact authorized candidate, once; any other merge is a permanent violation, and merge is not [delivery](delivery.md).
+- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; pushes, base changes invalidate evidence.
+- Claims bump the epoch; old-epoch or expired-lease commands refuse.
+- Evidence is its authenticated producer's; latest trusted record per proof and candidate wins, even failing.
+- Append-only history (routine rows compacted after retention); retries within a day replay.
+- Graphyard merges only the exact authorized candidate, once (else a permanent violation); merge isn't [delivery](delivery.md).
