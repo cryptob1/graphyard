@@ -27,7 +27,7 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 `test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips every pre-merge file (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).
 
-A check `main` fails too is no candidate's fault: the loop requests no rework or approver (an unreadable base log waits), raises one attention and P0 repair item per test and base head, and once the base is green reruns and refreshes the blocked candidates.
+A check `main` fails too is a [base failure](master-agent.md#base-failures): the loop requests no rework and refreshes candidates once repaired.
 
 ## Documentation
 

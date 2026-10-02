@@ -118,6 +118,17 @@ test('unit:base-failure-no-rework — a failing test the base head fails too req
   await runCycle(config(), waiting, effects(pending), () => pending.now);
   assert.deepEqual([pending.decided, pending.approvers], [[], []]);
   assert.match(waiting.actions['wait:base-failure:work-1'].detail, /rework waits for the base head .*'s own test run to complete with a readable log/);
+
+  // AC-5: The decision-fault instance decision-refused|GY-1033|2026-10-01T08:50:27.300Z (a rework the loop
+  // requested for a failure main shared, which the approver refused) is replayed against the base and shown
+  // not to recur: the loop does not request rework for GY-1033 once the base comparison finds the same failing test.
+  const gy1033 = candidate(1033, 11033);
+  gy1033.key = 'GY-1033';
+  const instanceWorld = world([gy1033], failedBase([timeBomb]), { 11033: [timeBomb] });
+  const instanceState = emptyDaemonState(config());
+  await runCycle(config(), instanceState, effects(instanceWorld), () => instanceWorld.now);
+  assert.equal(instanceWorld.decided.some(entry => entry.key === 'GY-1033'), false, 'decision-refused|GY-1033|2026-10-01T08:50:27.300Z does not recur: no rework requested');
+  assert.deepEqual(instanceWorld.approvers, [], 'no approver launched for GY-1033');
 });
 
 test('unit:base-failure-no-rework — the master\'s gh reads a coloured CI log, which gh refuses to print without --allow-escape-sequences, so a shared failure is judged a base failure in production', async () => {

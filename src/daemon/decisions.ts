@@ -160,9 +160,9 @@ export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerg
   return stopped.stopped ? { ...needed, input: situatedInput(needed), reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
 /**
-  * GY-568. Whether the evaluated build gate holds the head for the control plane's restore after a
-  * predecessor's ejection. Nothing read from such a head is the worker's: no rework is asked for it.
-  */
+ * GY-568. Whether the evaluated build gate holds the head for the control plane's restore after a
+ * predecessor's ejection. Nothing read from such a head is the worker's: no rework is asked for it.
+ */
 export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
   return (work.gates ?? []).some(gate => gate.name === 'build' && gate.reasons.some(reason => reason.startsWith(restoringAfterEjectionPrefix)));
 }

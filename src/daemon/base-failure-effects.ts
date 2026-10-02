@@ -40,8 +40,12 @@ export function baseFailureEffects(run: ChildRun, current: () => MasterConfig, a
     entry.catch(() => { if (logs.get(jobId) === entry) logs.delete(jobId); });
     return entry;
   };
+  // A check's latest completed run on the base head is cached per check to bound GitHub reads across cycles.
+  const baseChecks = new Map<string, { at: number; baseSha: string; result: BaseCheck }>();
   const baseCheck = async (check: string): Promise<BaseCheck> => {
     const config = current();
+    const cached = baseChecks.get(check);
+    if (cached && Date.now() - cached.at < 30_000) return cached.result;
     // Every page, one JSON array per line: past a hundred runs of the check the latest completed one
     // is still seen, so a repaired base is never read as failing. Runs are of the newest run's commit.
     const pages = String(await run('gh', ['api', '--paginate', `repos/${config.repository}/commits/${encodeURIComponent(config.baseBranch)}/check-runs?check_name=${encodeURIComponent(check)}&per_page=100`, '--jq', '[.check_runs[] | {id, head_sha, status, conclusion, html_url}] | @json']));
@@ -52,7 +56,9 @@ export function baseFailureEffects(run: ChildRun, current: () => MasterConfig, a
     const completed = runs.filter(entry => entry.status === 'completed').sort((a, b) => b.id - a.id)[0];
     if (!completed) return { check, baseSha, state: runs.length ? 'pending' : 'none', jobId: null, url: null, tests: null };
     const state = completed.conclusion === 'success' ? 'passed' : ['failure', 'timed_out'].includes(completed.conclusion) ? 'failed' : 'none';
-    return { check, baseSha, state, jobId: completed.id, url: completed.html_url ?? null, tests: state === 'failed' ? await failedTests(completed.id).catch(() => null) : null };
+    const result: BaseCheck = { check, baseSha, state, jobId: completed.id, url: completed.html_url ?? null, tests: state === 'failed' ? await failedTests(completed.id).catch(() => null) : null };
+    baseChecks.set(check, { at: Date.now(), baseSha, result });
+    return result;
   };
   const rerunJob = async (jobId: number) => { await run('gh', ['api', '--method', 'POST', `repos/${current().repository}/actions/jobs/${jobId}/rerun`]); };
   return {
