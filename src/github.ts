@@ -2936,9 +2936,14 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // replica that claims the poll need not be the one that made the refresh.
   // The band is read again at skip time (GY-1052): an item that entered the merge band since the
   // refresh is observed at the merge cadence, not left until the longer interval the refresh used.
-  const claimed = all.find(entry => entry.id === job.work_id);
-  const mergeBand = !!claimed && claimed.stage === 'merge' && (mergeAuthorized(claimed) || queuePlacement(claimed, all, Date.now())?.position === 0);
-  const refreshedUntil = !job.woken && !viaWebhook && !mergeBand && job.refreshed && job.refreshed_until ? new Date(job.refreshed_until).getTime() : null;
+  // A skip re-reads the fleet after the claim, so an item that entered the band between the
+  // pre-claim snapshot and `takeJob` is not deferred for one more interval.
+  const inMergeBand = (fleet: Work[]) => {
+    const claimed = fleet.find(entry => entry.id === job.work_id);
+    return !!claimed && claimed.stage === 'merge' && (mergeAuthorized(claimed) || queuePlacement(claimed, fleet, Date.now())?.position === 0);
+  };
+  const skippable = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until && !inMergeBand(all);
+  const refreshedUntil = skippable && !inMergeBand(await engine.store.list()) ? new Date(job.refreshed_until!).getTime() : null;
   if (refreshedUntil !== null) {
     await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
     return true;

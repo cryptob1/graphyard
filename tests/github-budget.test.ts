@@ -331,6 +331,20 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   assert.ok(api.requests.length > beforeMerge, 'and observed, not skipped');
   assert.doesNotMatch((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
 
+  // The band is re-read after the claim (GY-1052): an item that entered it between the pre-claim
+  // snapshot and `takeJob` is observed too. The first read shows it outside the band, the second inside.
+  await store!.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id<>$1", [woken.id]);
+  await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
+  const preClaim = await store!.list();
+  const merging = preClaim.map(entry => asMerging.find(other => other.id === entry.id && entry.id === woken.id) ?? entry);
+  let reads = 0;
+  t.mock.method(engine.store, 'list', async () => reads++ === 0 ? preClaim : merging, { times: 2 });
+  const beforeRace = api.requests.length;
+  assert.equal(await processJob(engine, github), true, 'the item was claimed');
+  assert.equal(reads, 2, 'the fleet was read again after the claim');
+  assert.ok(api.requests.length > beforeRace, 'and observed, not skipped');
+  assert.doesNotMatch((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
+
   // A worker's push to the pull-request branch names the item by its branch before its candidate names the new head.
   await deliver('push', { ref: `refs/heads/${polled.candidate!.branch}`, after: sha('pushed-head'), repository: { full_name: REPOSITORY } });
   assert.deepEqual(await replica.store.webhookDue(), [polled.id]);
