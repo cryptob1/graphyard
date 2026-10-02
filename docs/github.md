@@ -29,7 +29,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Workflow base syncs
 
-Worker tokens include Workflows write. Refused, `sync GY-N --push-via-control-plane COMMIT` has the control plane push a fast-forwarding merge of `origin/BASE` matching its workflow files (plannedFiles aside), else names differing paths; recorded as `sync.workflow-push` (worker, epoch).
+Worker tokens also request Workflows write ([push credential](protocol/leases.md#push-credential)). Refused, `sync GY-N --push-via-control-plane COMMIT` has the control plane push a fast-forwarding merge of an `origin/BASE` commit matching that commit's workflow files (plannedFiles aside; never a directory-level entry), else names differing paths; recorded as `sync.workflow-push` (worker, epoch).
 
 ## Require the check
 
@@ -47,7 +47,7 @@ Once gated, the candidate's speculative tip, pushed onto the candidate branch an
 
 Reviews and proofs bind one head, base and policy revision. On moved bases all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip over the same author head and patch, the App's own dismissal restoring when observed; never a person's, a moved head or a changed patch.
 
-Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), a fresh review is requested at once, and the entry yields the head until re-approved. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
+Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), a fresh review is requested at once, and the entry yields the head until re-approved. The same refusal past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) applied as requested in low or medium. Each action fires once per recovery phase (a re-bound carry starts one).
 
 ### Parallel tips
 
@@ -55,7 +55,7 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), so an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
+`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), so nothing touching one, or whose base changed one since its run, merges optimistically; `optimistic: false` turns the lane off.
 
 ### Pre-merge gate and release-candidate validation
 
