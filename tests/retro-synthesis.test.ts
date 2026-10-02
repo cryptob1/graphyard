@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { Intervention, InterventionPolicy } from '../src/model/interventions.js';
 import { cataloguedCause, classifyGateRefusals, detectRecurringCauses, draftPrevention, retroApprovalConflict, retroCause, retroCheckRefusals, retroStanding, runRetroCheck, type RetroArtefact } from '../src/model/retro-synthesis.js';
-import { judgeRetroArtefact, readAppliedRetroChecks, readRetroArtefacts, retroLedgerLimit, synthesizeRetro } from '../src/retro-synthesis.js';
+import { judgeRetroArtefact, readAppliedRetroChecks, readRetroArtefacts, retroLedgerLimit, retroReads, synthesizeRetro } from '../src/retro-synthesis.js';
 import { withRetroStanding } from '../src/cli/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -309,4 +309,13 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
   const read = await readRetroArtefacts(store.pool);
   assert.equal(read.find(artefact => artefact.id === waiting)?.state, 'drafted');
   assert.equal(read.filter(artefact => artefact.refusal?.reason === 'burst').length, retroLedgerLimit + 1);
+
+  // Over thousands of judged retro rows, the applied-check read and the unjudged-draft probe go by
+  // payload id through events_retro_id, never a scan of every retro row (follow-ups 18, 19, 22, 23).
+  await store.pool.query('ANALYZE events');
+  const plan = async (sql: string, params: unknown[] = []) => (await store.pool.query(`EXPLAIN ${sql}`, params)).rows.map(row => row['QUERY PLAN']).join('\n');
+  const applied = await plan(retroReads.appliedChecks);
+  assert.match(applied, /events_retro_id/, applied);
+  const artefacts = await plan(retroReads.artefacts, [['retro.drafted', 'retro.applied', 'retro.refused'], retroLedgerLimit]);
+  assert.match(artefacts, /events_retro_id/, artefacts);
 });

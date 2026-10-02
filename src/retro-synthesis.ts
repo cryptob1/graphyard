@@ -27,6 +27,17 @@ export const retroLedgerLimit = 5_000;
 const judgedIds = `SELECT payload->>'id' FROM events WHERE kind IN ('retro.applied', 'retro.refused') AND payload->>'id' IS NOT NULL`;
 /** NOT EXISTS, not NOT IN: one judgement without an id would make NOT IN NULL for every draft. */
 const unjudged = (draft: string) => `NOT EXISTS (SELECT 1 FROM events judged WHERE judged.kind IN ('retro.applied', 'retro.refused') AND judged.payload->>'id' = ${draft}.payload->>'id')`;
+/** The two retro reads, exported so a test can assert their plans use `events_retro_id`. */
+export const retroReads = {
+  artefacts: `SELECT seq, actor, kind, created_at, payload FROM events WHERE kind = ANY($1) AND (kind <> 'retro.drafted'
+      OR payload->>'id' IN (${judgedIds})
+      OR seq IN (SELECT seq FROM events draft WHERE kind = 'retro.drafted' AND ${unjudged('draft')} ORDER BY seq DESC LIMIT $2))
+    ORDER BY seq`,
+  appliedChecks: `SELECT seq, actor, kind, created_at, payload FROM events
+    WHERE kind IN ('retro.drafted', 'retro.applied') AND payload->>'id' IN (SELECT payload->>'id' FROM events WHERE kind = 'retro.applied')
+      AND (kind = 'retro.applied' OR payload->'draft'->>'kind' = 'mechanical-check')
+    ORDER BY seq`,
+};
 const foldRows = (rows: any[]) => foldRetroArtefacts(rows.map((row): RetroLedgerRow => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), payload: row.payload })));
 
 /**
@@ -36,25 +47,19 @@ const foldRows = (rows: any[]) => foldRetroArtefacts(rows.map((row): RetroLedger
  * drafts never pushes a draft still waiting for its judgement out of the reading.
  */
 export async function readRetroArtefacts(db: Db): Promise<RetroArtefact[]> {
-  const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM events WHERE kind = ANY($1) AND (kind <> 'retro.drafted'
-      OR payload->>'id' IN (${judgedIds})
-      OR seq IN (SELECT seq FROM events draft WHERE kind = 'retro.drafted' AND ${unjudged('draft')} ORDER BY seq DESC LIMIT $2))
-    ORDER BY seq`, [[...retroLedgerKinds], retroLedgerLimit]);
+  const result = await db.query(retroReads.artefacts, [[...retroLedgerKinds], retroLedgerLimit]);
   return foldRows(result.rows);
 }
 
 /**
  * Only the applied mechanical checks, for the submit transaction: their approvals and the drafts
  * they applied, never the whole retro ledger, so a submission's cost is bounded by the checks in
- * force rather than by every draft ever recorded. Its kind filters are answered by the
- * `events_kind_created` index, so it reads retro rows only; an expression index on the payload id
- * is an events schema change outside this module (GY-1048 follow-ups 18, 19, 22, declined here).
+ * force rather than by every draft ever recorded. The applied ids and the rows that carry them are
+ * both read through the `events_retro_id` index on (kind, payload id), as is the unjudged-draft
+ * probe above, so neither grows with the retro rows it does not return (GY-1048).
  */
 export async function readAppliedRetroChecks(db: Db): Promise<RetroArtefact[]> {
-  const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM events
-    WHERE kind IN ('retro.drafted', 'retro.applied') AND payload->>'id' IN (SELECT payload->>'id' FROM events WHERE kind = 'retro.applied')
-      AND (kind = 'retro.applied' OR payload->'draft'->>'kind' = 'mechanical-check')
-    ORDER BY seq`);
+  const result = await db.query(retroReads.appliedChecks);
   return foldRows(result.rows).filter(artefact => artefact.state === 'applied' && artefact.kind === 'mechanical-check');
 }
 
