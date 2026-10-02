@@ -19,9 +19,9 @@ test('the packaged release names one version everywhere it is stamped', () => {
   for (const marker of ['ARG GRAPHYARD_VERSION', 'ARG GRAPHYARD_BUILD_REVISION', 'ENV GRAPHYARD_VERSION=${GRAPHYARD_VERSION}', 'org.opencontainers.image.version="${GRAPHYARD_VERSION}"', 'org.opencontainers.image.revision="${GRAPHYARD_BUILD_REVISION}"']) assert.ok(dockerfile.includes(marker), marker);
   const release = read('.github/workflows/release.yml');
   assert.ok(release.includes("tags: ['v*.*.*']") && release.includes('scripts/verify-image-release.mjs') && release.includes('docker push'), 'tagged releases verify the image contract before publishing');
-  const ci = read('.github/workflows/ci.yml');
-  assert.ok(ci.includes('scripts/verify-image-release.mjs'), 'every candidate image is held to the release contract');
-  assert.ok(read('.github/workflows/helm.yml').includes('deploy/helm/exercise.sh'), 'the chart exercise runs in CI');
+  const candidate = read('.github/workflows/release-candidate.yml');
+  assert.ok(candidate.includes('scripts/verify-image-release.mjs'), 'every release-candidate image is held to the release contract');
+  assert.ok(candidate.includes('deploy/helm/exercise.sh'), 'the chart exercise runs in release-candidate validation');
   accessSync(resolve('deploy/helm/exercise.sh'), constants.X_OK);
   // The running process reports the package version unless the image stamped one.
   assert.equal(releaseInfo().version, process.env.GRAPHYARD_VERSION || packageVersion);

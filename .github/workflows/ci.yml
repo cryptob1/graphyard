@@ -12,44 +12,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name != 'pull_request' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  container-acceptance:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with: { persist-credentials: false }
-      - uses: actions/setup-node@v4
-        with: { node-version: '24' }
-      - name: Build candidate image as the release process would
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$GITHUB_SHA" --tag graphyard-ci .
-      - name: Exercise container over HTTP with an isolated database
-        # Validation only: this PR-controlled job has no evidence-producer credential.
-        run: |
-          echo '{}' > "$RUNNER_TEMP/candidate.json"
-          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/acceptance.json"
-      - name: Exercise the merge-authorization contract against the container
-        # Validation only: this PR-controlled job has no evidence-producer credential.
-        run: node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/merge-authorization.json" integration:merge-authorization
-      - name: Verify the release contract, backup and restore with the shipped image
-        run: node scripts/verify-image-release.mjs graphyard-ci "$(node -p "require('./package.json').version")" "$GITHUB_SHA"
-  container-recovery:
-    runs-on: ubuntu-latest
-    # The recovery contract waits out the shipped two-minute lease and launch fences.
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with: { persist-credentials: false }
-      - uses: actions/setup-node@v4
-        with: { node-version: '24' }
-      - name: Build candidate image
-        run: docker build --tag graphyard-ci .
-      - name: Recover an expired lease on a second machine identity
-        # Validation only: this PR-controlled job has no evidence-producer credential.
-        run: |
-          echo '{}' > "$RUNNER_TEMP/candidate.json"
-          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/recovery.json" integration:herdr-recovery
+  # The pre-merge gate runs only fast, deterministic checks (GY-1093): typecheck and the test
+  # aggregate below are the required set, every job of it bounded so the set finishes in under ten
+  # minutes. The soak, the timing-budget suites, container acceptance, container recovery and the
+  # chart run only against a release-candidate SHA, in release-candidate.yml.
   secrets:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +49,7 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -90,21 +57,15 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run docs:check
-  # The Node suite, split over a matrix of shard jobs (GY-499). Each shard runs the files
-  # scripts/ci-tests.mjs assigns it, balanced by the per-file durations recorded in
+  # The Node suite's pre-merge files, split over a matrix of shard jobs (GY-499). Each shard runs
+  # the files scripts/ci-tests.mjs assigns it, balanced by the per-file durations recorded in
   # tests/helpers/timing-baseline.json; the shard count is this matrix's length (default 4). On a
   # pull request's own run only the test files its change affects are selected; pushes to main,
-  # merge-queue tips and any change the dependency map cannot place run the full suite.
+  # merge-queue tips and any change the dependency map cannot place run every pre-merge file.
   test-shard:
     name: test shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # The confinement soak (GY-888) runs the launcher's real mount namespace on every simulated
-    # launch, so its file alone takes about twenty minutes on a runner — far past what its
-    # baseline entry records — and the shard that holds it needs this bound to fit the file as it
-    # runs, not as it was last balanced. The file has since grown to about 30 minutes on a runner
-    # (32.6 on main in run 36862781727), and runner variance alone pushes it past 35, so the bound
-    # keeps headroom over that.
-    timeout-minutes: 50
+    timeout-minutes: 6
     strategy:
       fail-fast: false
       matrix:
@@ -138,7 +99,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/timing"
           # Test files run in parallel, each with its own Postgres on a per-file port offset. Two
           # files share offset 25; this gives one of them a free port so neither fails on scheduling.
-          GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
+          GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
       - name: Summarise this shard's timing-dependent assertions
         if: always()
         run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_RECORD" > /dev/null
@@ -150,7 +111,7 @@ jobs:
           if-no-files-found: ignore
   test-browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -165,6 +126,7 @@ jobs:
     # Not always(): a run cancelled for a superseded head reports nothing rather than a failure.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - uses: actions/download-artifact@v4
         with:

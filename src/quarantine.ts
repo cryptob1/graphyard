@@ -168,6 +168,13 @@ export const containmentVerificationSchema = z.object({
     processes: z.array(z.number().int().positive()).max(200),
     /** Members that descend from a live supervisor of a different work key or epoch. */
     attributed: z.array(z.number().int().positive()).max(200).default([]),
+    /**
+     * Present only when a list above held more than its bound (GY-890): the first entries are
+     * recorded, these are the full counts, and the scope is judged live, never proven stopped.
+     */
+    truncated: z.literal(true).optional(),
+    processesTotal: z.number().int().min(0).optional(),
+    attributedTotal: z.number().int().min(0).optional(),
   }).strict()).max(50),
   /**
    * Every process reported above as holding the fence — a surviving supervisor or workspace
@@ -201,8 +208,41 @@ export const containmentVerificationSchema = z.object({
   /** Privileged host processes outside every containment scope that withheld inspection. */
   inaccessible: z.number().int().min(0),
   unverifiable: z.array(z.string().min(1).max(500)).max(50),
+  /** Full counts of the top-level lists that held more than their bound; absent when none did (GY-890). */
+  truncated: z.object({ processes: z.number().int().min(0).optional(), scopes: z.number().int().min(0).optional(), held: z.number().int().min(0).optional(), unverifiable: z.number().int().min(0).optional() }).strict().optional(),
 }).strict();
 export type ContainmentVerification = z.infer<typeof containmentVerificationSchema>;
+
+/** The bounds the verification schema sets on its lists. */
+export const containmentVerificationBounds = { processes: 200, scopes: 50, scopeProcesses: 200, held: 400, unverifiable: 50 } as const;
+type UnboundedScope = { unit: string; activeState: string; processes: number[]; attributed?: number[] };
+/**
+ * Cuts every list a host probe reports to the schema's bound and records the full count beside it
+ * (GY-890), so no list's length can make the verification invalid: one supervisor scope holding
+ * hundreds of processes refused every quarantine settlement on the host. Lists within their
+ * bound are recorded exactly as before; a truncated scope is judged live by the settlement check.
+ */
+export function boundContainmentVerification<T extends { processes: unknown[]; scopes: UnboundedScope[]; held?: unknown[]; unverifiable: string[] }>(probe: T): T {
+  const bounds = containmentVerificationBounds;
+  const totals: Record<string, number> = {};
+  const cut = <V>(name: 'processes' | 'scopes' | 'held' | 'unverifiable', list: V[]) => {
+    if (list.length > bounds[name]) totals[name] = list.length;
+    return list.slice(0, bounds[name]);
+  };
+  // The scope list is counted before it is cut, so a host with more scopes than the bound records
+  // the full count and the settlement check refuses on the unrecorded ones.
+  const scopes = cut('scopes', probe.scopes).map(scope => {
+    const attributed = scope.attributed ?? [];
+    if (scope.processes.length <= bounds.scopeProcesses && attributed.length <= bounds.scopeProcesses) return scope;
+    return {
+      ...scope, processes: scope.processes.slice(0, bounds.scopeProcesses), attributed: attributed.slice(0, bounds.scopeProcesses), truncated: true as const,
+      ...scope.processes.length > bounds.scopeProcesses ? { processesTotal: scope.processes.length } : {},
+      ...attributed.length > bounds.scopeProcesses ? { attributedTotal: attributed.length } : {},
+    };
+  });
+  const bounded = { ...probe, processes: cut('processes', probe.processes), scopes, unverifiable: cut('unverifiable', probe.unverifiable), ...probe.held ? { held: cut('held', probe.held) } : {} };
+  return Object.keys(totals).length ? { ...bounded, truncated: totals } : bounded;
+}
 
 export const containmentAttestation = (key: string) =>
   `Confirm the previous worker is stopped and use the operator attestation path: rework ${key} --previous-worker-stopped REASON, or recover-containment ${key} --previous-worker-stopped REASON once the work is delivered`;
@@ -383,7 +423,8 @@ function idlePaneShell(work: Pick<Work, 'containmentQuarantine' | 'sessions'>, v
   if (!shell || shell.pid !== process.pid || shell.foregroundGroup !== process.pid) return false;
   const found = verification.held.find(entry => entry.pid === process.pid);
   if (!found || found.unit !== null || found.children !== 0 || found.stdinTerminal !== true || !isInteractiveShell(found.command)
-    || verification.scopes.some(scope => scope.processes.includes(process.pid) || scope.attributed.includes(process.pid))) return false;
+    || verification.scopes.some(scope => scope.truncated || scope.processes.includes(process.pid) || scope.attributed.includes(process.pid))
+    || verification.truncated?.scopes !== undefined) return false;
   const recorded = verification.recordedScope;
   const scopeEnded = !!quarantine.scope && recorded?.unit === quarantine.scope.unit && recorded.pid === quarantine.scope.pid && endedScopeStates.includes(recorded.activeState);
   // GY-189: the recorded session's pane, beside the recorded scope that ended.
@@ -458,7 +499,15 @@ export function containmentSettlementRefusals(
     if (idlePaneShell(work, verification, process)) continue;
     refusals.push(`Process ${process.pid} of the contained worker is still present on ${verification.host} (matched by ${process.evidence === 'command' ? 'supervisor command line' : 'assigned workspace'})${heldDetail(verification, process.pid)}`);
   }
-  for (const scope of verification.scopes.filter(entry => entry.processes.length))
-    refusals.push(`Containment scope ${scope.unit}${quarantine.scope?.unit === scope.unit ? ` (the scope epoch ${quarantine.epoch} was launched in)` : ''} is ${scope.activeState} and still holds ${scope.processes.length} process(es) that are not attributed to another assignment${scope.processes.map(pid => heldDetail(verification, pid)).join('')}`);
+  // A scope whose lists were truncated is judged live: the unrecorded members cannot be proven
+  // gone or attributed, so it fences when it is this quarantine's own scope or still holds any.
+  for (const scope of verification.scopes) {
+    const own = quarantine.scope?.unit === scope.unit;
+    if (!scope.processes.length && !(scope.truncated && own)) continue;
+    const held = scope.processesTotal ?? scope.processes.length;
+    refusals.push(`Containment scope ${scope.unit}${own ? ` (the scope epoch ${quarantine.epoch} was launched in)` : ''} is ${scope.activeState} and still holds ${held} process(es) that are not attributed to another assignment${scope.truncated ? ` (the verification recorded only the first ${scope.processes.length} and judges the scope live)` : ''}${scope.processes.map(pid => heldDetail(verification, pid)).join('')}`);
+  }
+  if (verification.truncated?.scopes !== undefined)
+    refusals.push(`Host verification found ${verification.truncated.scopes} containment scopes and recorded only ${verification.scopes.length}, so the unrecorded ones cannot be proven stopped`);
   return refusals;
 }

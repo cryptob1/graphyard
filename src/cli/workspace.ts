@@ -16,6 +16,7 @@ import { superviseSessionCredential, type MintedPushCredential } from '../worker
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
+import { restoreAndReport } from './sync-restore.js';
 import { defineCommands, workMutation } from './registry.js';
 
 export { installUnderLease };
@@ -53,7 +54,7 @@ async function agentsRenderers(cwd: string) {
 
 const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
 
-async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) {
+async function syncWork({ api, print, base: serverUrl, args }: CliContext, work: any) {
   // The canonical way to take the base branch: a merge keeps the worker's history and makes every
   // resolution visible, and the same classifier the control plane applies at complete runs here,
   // against the fetched tip, before anything is pushed. Files the repository declares generated
@@ -127,9 +128,12 @@ async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) 
   const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
   const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? []);
   const refused = findings.filter(finding => finding.refused);
+  // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR.
+  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path) });
+
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
     files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
-    next: refused.length ? `Restore each listed file to origin/${baseBranch} (git checkout ${baseTip.slice(0, 12)} -- PATH; for a rename, restore the original path), commit, and rerun sync ${work.key}. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
+    next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so a plain push updates the PR; a force push is never needed or allowed. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
       : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
   if (refused.length) process.exitCode = 1;
 }
@@ -140,11 +144,14 @@ export const workspaceCommands = defineCommands([
     name: 'sync',
     scope: 'work',
     help: [
-      '  sync GY-N                     Merge origin/BASE (never rebase), regenerate generated files',
+      '  sync GY-N [--restore]         Merge origin/BASE (never rebase), regenerate generated files',
       '                                (docs indexes, AGENTS.md blocks) instead of hand-merging them,',
       '                                name the shipped items behind each remaining conflict, and',
       '                                list every file outside plannedFiles that no longer matches',
       '                                the base; run before every push',
+      '  sync GY-N --restore           The same, then restore every such file to the base in one new',
+      '                                commit naming them; push it plainly. A force push is never',
+      '                                needed or allowed',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
