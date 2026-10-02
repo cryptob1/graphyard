@@ -557,7 +557,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === rerun.sha && entry.check === rerun.check && entry.failedRunId === rerun.failedRunId);
