@@ -157,9 +157,11 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // and triage rather than with sessions working in the coordinator checkout.
   // The diagnostician reads the repository from the same scratch checkout: it too is a session the
   // loop launches, and without the scratch it does not run at all.
-  const scratchRoot = coordinatorCheckoutRoot(config.cliPath);
+  // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
+  const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
+  const scratchRoot = needsScratch ? coordinatorCheckoutRoot(config.cliPath) : '';
   let scratch: Awaited<ReturnType<typeof allocateManagedCheckout>> | null = null, scratchDirectory: string | null = null, releaseScratch = () => {};
-  if (raw.research || 'diagnostician' in raw) {
+  if (needsScratch) {
     try {
       scratch = await allocateManagedCheckout(scratchRoot, config, 'approval', 'loop-scratch', raw.loadedRelease?.commit ?? '0'.repeat(40), randomUUID());
       scratchDirectory = scratch.directory;
