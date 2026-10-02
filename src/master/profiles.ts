@@ -379,7 +379,12 @@ export type MasterConfig = z.infer<typeof masterConfigSchema>;
  * concurrency; every other profile keeps the default of one.
  */
 export const automaticReviewerConcurrency = 4;
-/** The config as the reviewer launchers and their readers count sessions: the automatic profile's unset concurrency read as `automaticReviewerConcurrency`. */
+/**
+ * The config as the reviewer launchers and their readers count sessions: the automatic profile's unset
+ * concurrency read as `automaticReviewerConcurrency`. `loadMasterConfig` applies it once at load
+ * (GY-1075) and writers read `loadStoredMasterConfig`, so the default is never written back; it is
+ * idempotent, so a caller handed a config built elsewhere may still apply it.
+ */
 export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 'run'>>(config: T): T {
   const automatic = config.run.reviewerProfile;
   if (!automatic || !config.reviewers.some(profile => profile.name === automatic && profile.concurrency === undefined)) return config;
