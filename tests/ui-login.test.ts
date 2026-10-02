@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createElement, isValidElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { HELPER_TEXT, LoginView, REJECTED_NOTICE, VERIFY_TIMEOUT_MS, verifyToken, type LoginState, type LoginViewProps, type VerifyClock, type VerifyOutcome } from '../web/pages/login.js';
+import { HELPER_TEXT, LOGIN_USERNAME, LoginView, REJECTED_NOTICE, VERIFY_TIMEOUT_MS, offerToSavePassword, verifyToken, type LoginState, type LoginViewProps, type VerifyClock, type VerifyOutcome } from '../web/pages/login.js';
 
 // GY-198: the sign-in page. One column with one left edge, a verifying state that shows progress and always
 // resolves (accepted, rejected, or unreachable after VERIFY_TIMEOUT_MS), and "Use another token" as an escape
@@ -102,7 +102,7 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     assert.deepEqual(buttons(page).map(text), ['Use another token']);
     check.cancel();
   }
-  // Timeout: 10 seconds without a status reply → can't reach the control plane, with Retry and a secondary escape.
+  // Timeout: VERIFY_TIMEOUT_MS without a status reply → can't reach the control plane, with Retry and a secondary escape.
   {
     const clock = fakeClock(), network = fakeFetch();
     const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock).result);
@@ -133,7 +133,7 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     const page = tree({ kind: 'form' }, REJECTED_NOTICE);
     const alert = all(page).find(host => host.props.role === 'alert')!;
     assert.equal(text(alert), 'That token was not accepted');
-    const input = all(page).find(host => host.type === 'input')!;
+    const input = all(page).find(host => host.type === 'input' && host.props.type === 'password')!;
     assert.equal(input.props.autoFocus, true, 'the token input takes focus');
     assert.deepEqual(buttons(page).map(text), ['Open control plane ↗']);
   }
@@ -147,7 +147,7 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     await clock.advance(VERIFY_TIMEOUT_MS);
     assert.deepEqual(seen(), { kind: 'accepted', status: { actor: { role: 'admin' } } }, 'the outcome does not change afterwards');
   }
-  // Accepted waits for the dashboard's first read, under the same deadline; its failures resolve too.
+  // Accepted waits for the dashboard's first read; the deadline covers only reaching the server, and the read's failures resolve too.
   const ok = () => new Response(JSON.stringify({ actor: { role: 'admin' } }), { status: 200 });
   {
     const clock = fakeClock(), network = fakeFetch(); let loaded: unknown = null; let finish: () => void = noop;
@@ -158,12 +158,18 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
     assert.deepEqual(loaded, { actor: { role: 'admin' } }); assert.deepEqual(seen(), { kind: 'accepted', status: { actor: { role: 'admin' } } });
   }
   {
-    const clock = fakeClock(), network = fakeFetch(); let signal: AbortSignal | null = null;
-    const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock, (_, abort) => { signal = abort; return new Promise(noop); }).result);
+    // A server that answered /api/status is reachable: a slow dashboard read keeps the page verifying
+    // past the deadline instead of reporting the control plane unreachable, and still lands accepted.
+    const clock = fakeClock(), network = fakeFetch(); let signal: AbortSignal | null = null; let finish: () => void = noop;
+    const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock, (_, abort) => { signal = abort; return new Promise<void>(resolve => { finish = resolve; }); }).result);
     network.reply(ok()); await settle(); await settle();
-    await clock.advance(VERIFY_TIMEOUT_MS);
-    assert.deepEqual(seen(), { kind: 'unreachable' }, 'a first read that never answers ends in unreachable'); assert.ok(signal!.aborted);
+    assert.equal(clock.pending(), 0, 'the reachability deadline is cleared once the server answers');
+    await clock.advance(VERIFY_TIMEOUT_MS * 2);
+    assert.equal(seen(), null, 'a slow first read is still verifying, never unreachable'); assert.ok(!signal!.aborted, 'the first read is not aborted');
+    finish(); await settle();
+    assert.deepEqual(seen(), { kind: 'accepted', status: { actor: { role: 'admin' } } });
   }
+  assert.ok(VERIFY_TIMEOUT_MS >= 30_000, 'the status reply gets at least 30 s: its tail ran 10-15 s on 2026-09-30');
   for (const [failure, expected] of [[new Error('Unable to load dashboard (502).'), 'unreachable'], [Object.assign(new Error(REJECTED_NOTICE), { unauthorized: true }), 'rejected']] as const) {
     const clock = fakeClock(), network = fakeFetch();
     const seen = await outcomeOf(verifyToken('token-1', network.fetcher, clock, async () => { throw failure; }).result);
@@ -172,7 +178,28 @@ test('unit:login-verify-states verifying shows progress and resolves as pending,
   }
 });
 
-test('unit:login-secondary-escape while verifying, Use another token is a link-styled secondary action and no primary button shows', () => {
+test('unit:login-password-manager-saves-token the form is a username/password login a password manager saves, and an accepted token is offered to the browser password store', () => {
+  const page = tree({ kind: 'form' });
+  const form = all(page).find(host => host.type === 'form')!;
+  const inputs = all(form).filter(host => host.type === 'input');
+  const username = inputs.find(host => host.props.autoComplete === 'username');
+  const password = inputs.find(host => host.props.type === 'password');
+  assert.ok(username, 'a username field pairs with the token, so 1Password and the browser offer to save it');
+  assert.equal(username!.props.value, LOGIN_USERNAME); assert.equal(username!.props.name, 'username');
+  assert.equal(username!.props.tabIndex, -1, 'the username is never a tab stop'); assert.equal(username!.props['aria-hidden'], 'true');
+  assert.equal(password!.props.autoComplete, 'current-password', 'the token is a saveable, fillable password, never autocomplete=off');
+  assert.equal(password!.props.name, 'password');
+  assert.ok(inputs.indexOf(username!) < inputs.indexOf(password!), 'the username precedes the password, as password managers expect');
+  // The browser's own password store is offered the accepted token where it exists, and skipped where it does not.
+  const stored: unknown[] = [];
+  class FakeCredential { constructor(readonly data: { id: string; password: string; name?: string }) {} }
+  const scope = { PasswordCredential: FakeCredential, navigator: { credentials: { store: async (credential: unknown) => { stored.push(credential); } } } };
+  assert.equal(offerToSavePassword('token-1', scope), true);
+  assert.deepEqual((stored[0] as FakeCredential).data, { id: LOGIN_USERNAME, password: 'token-1', name: 'Graphyard control plane' });
+  assert.equal(offerToSavePassword('token-1', {}), false, 'a browser without the Credential Management API is left to the extension');
+});
+
+test('unit:login-secondary-escapewhile verifying, Use another token is a link-styled secondary action and no primary button shows', () => {
   const page = tree({ kind: 'verifying' });
   const escape = named(page, 'Use another token')!;
   assert.ok(escape, 'the escape is offered');
