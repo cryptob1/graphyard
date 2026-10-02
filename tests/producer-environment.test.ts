@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster } from '../src/master.js';
 import { emptyDispatchCursor, runDispatchTick, dispatchFailureLimit, dispatchRetryMaxMs, dispatchRetryMinMs, type DispatchEffects } from '../src/auto-dispatch.js';
-import { launchProducer, missingProducerEnv, needsProducerEnv, parseEnvValue, producerSecretsPrefix, readProducerEnvironment, readProducerLedger } from '../src/producer.js';
+import { ClosedQuestionsDecided, launchProducer, missingProducerEnv, needsProducerEnv, parseEnvValue, producerSecretsPrefix, readProducerEnvironment, readProducerLedger } from '../src/producer.js';
 import { clearRuns } from '../src/runner/registry.js';
 import type { RunOptions, Runner } from '../src/runner/types.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
@@ -159,6 +159,21 @@ test('integration:producer-environment a live-install launch on a host without i
     const item = work('GY-73', 'manual', ['manual:install-hetzner-live']), calls: string[][] = [];
     await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable }),
       /refuses to launch the GY-73 manual proofs .*HCLOUD_TOKEN is not set in .*\.env.*docs\/install\.md/);
+    assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
+    assert.deepEqual((await readProducerLedger(root)).producers, []);
+  } finally { await cleanup(); }
+});
+
+test('integration:producer-environment a live-install proof a closed question decides needs no .env, and one it leaves is still refused', async () => {
+  const { root, cleanup } = await installation();
+  try {
+    const item = work('GY-73', 'manual', ['manual:install-hetzner-live']), calls: string[][] = [], config = (await loadMasterConfig(root)).producers[0];
+    (item as any).closedQuestions = [{ criterion: 'AC-1', proof: 'manual:install-hetzner-live', question: 'Installed?', criteria: ['yes', 'no'], pass: 'yes', state: [{ kind: 'criterion' }] }];
+    const launch = (verdict: 'decided' | 'escalated') => launchProducer(root, item, item.autoDispatch!.producers[0] as any, config, [], new Date().toISOString(),
+      { run: herdr(calls), filesystem: durable, judge: async () => ({ verdict }) });
+    // No .env on this host: a decided proof launches no session, so it is not refused for want of a credential.
+    await assert.rejects(launch('decided'), (error: Error) => error instanceof ClosedQuestionsDecided && !/HCLOUD_TOKEN/.test(error.message));
+    await assert.rejects(launch('escalated'), /refuses to launch the GY-73 manual proofs .*HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are not set/);
     assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
     assert.deepEqual((await readProducerLedger(root)).producers, []);
   } finally { await cleanup(); }
