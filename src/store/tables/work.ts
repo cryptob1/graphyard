@@ -63,7 +63,12 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS held_on text;
 -- item is raised at, reset by the next observation that is saved.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS unobserved int NOT NULL DEFAULT 0;
 -- Why an observation job was deferred rather than spent, recorded beside the deferral itself (GY-506).
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deferred_reason text;`,
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS deferred_reason text;
+-- GY-806: when an observation webhook made the job due (claimed ahead of polled jobs until its
+-- claim), and until when a webhook-driven observation refreshed it (a poll before then is skipped).
+-- Kept on the job so every replica sharing the database sees them.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS webhook_at timestamptz;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS refreshed_until timestamptz;`,
 });
 export const webhookReceipts = defineTable({
   name: 'webhook_receipts', orderBy: 'id',
