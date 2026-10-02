@@ -235,6 +235,13 @@ test('unit:stale-observation-refusal-keeps-position — a prioritized wake (GY-1
   const claims: string[] = [];
   for (let index = 0; index < 3; index++) claims.push(byId.get((await store.takeJob([head.id], 1))!.work_id)!);
   assert.deepEqual(claims, ['GY-PREFUSED', 'GY-PHEAD', 'GY-POLD'], 'the prioritized wake is claimed first');
+  // Prioritized wakes are claimed oldest first: a repeated wake keeps the stamp it already holds.
+  for (const work of [head, old, refused]) await store.pool.query('UPDATE jobs SET locked_until=NULL, available_at=now() WHERE work_id=$1', [work.id]);
+  await store.transaction(async db => { await wakeJob(db, old.id, true); });
+  await store.pool.query("UPDATE jobs SET webhook_at=webhook_at - interval '30 seconds' WHERE work_id=$1", [old.id]);
+  await store.transaction(async db => { await wakeJob(db, refused.id, true); });
+  await store.transaction(async db => { await wakeJob(db, old.id, true); });
+  assert.deepEqual(await store.webhookDue(), [old.id, refused.id], 'the earlier wake keeps its place');
 });
 
 test('unit:parallel-observation-jobs — twenty due jobs whose observations each take a second are processed in about five seconds at concurrency four, and no item is ever observed twice at once', async t => {

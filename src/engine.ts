@@ -1627,7 +1627,10 @@ export class Engine {
       const standing = await this.enqueueRequest(work.id, db);
       if (!standing || standing.sha !== request.sha || standing.baseSha !== request.baseSha || standing.policyRevision !== request.policyRevision)
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'merge.enqueue.requested', JSON.stringify({ details: request })]);
-      await wakeJob(db, work.id);
+      // The enqueue is the observation job's, and the authorization holds only while the
+      // observation is under two minutes old: the wake is claimed ahead of the polled backlog, so a
+      // candidate observed on request is not left to go stale again behind it (GY-1099).
+      await wakeJob(db, work.id, true);
       const result = { key: work.key, revision: work.revision, enqueue: standing && standing.sha === request.sha && standing.baseSha === request.baseSha && standing.policyRevision === request.policyRevision ? standing : request };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;

@@ -72,7 +72,11 @@ test('unit:stale-observation-refusal-keeps-position — a repeated refusal whose
   const mergeKey = 'merge:work-806:aaaa';
 
   // Stale only: observed ahead of the backlog, never reported as a refusal, the queue position kept.
-  for (const work of [item(gates([staleObservationReason])), item(gates([staleObservationReason]), 0, { observation: null } as Partial<Work>)]) {
+  // With no observation at all the merge gate also carries the unverified-protection reason gates.ts
+  // adds, since only an observation verifies protection: the same missing observation, still observed.
+  const unverified = 'Required Graphyard check and merge-queue branch protection have not been verified';
+  for (const work of [item(gates([staleObservationReason])), item(gates([staleObservationReason]), 0, { observation: null } as Partial<Work>),
+    item(gates([staleObservationReason, unverified]), 0, { observation: null } as Partial<Work>)]) {
     const { state, calls, cycle, advance } = harness();
     await actOnRepeatedRefusal(cycle, work, mergeKey, reason, since);
     assert.deepEqual(calls, { refused: [], observed: ['GY-806'] });
@@ -89,14 +93,31 @@ test('unit:stale-observation-refusal-keeps-position — a repeated refusal whose
     assert.deepEqual(calls, { refused: [], observed: ['GY-806', 'GY-806'] });
   }
 
-  // A failed request is recorded and retried; nothing is ejected meanwhile.
+  // A failed request is recorded and asked again in the next observation window, not every cycle;
+  // nothing is ejected meanwhile.
   {
-    const { state, calls, cycle } = harness();
-    (cycle.effects as { observeCandidate: unknown }).observeCandidate = async () => { throw new Error('control plane unavailable'); };
-    await actOnRepeatedRefusal(cycle, item(gates([staleObservationReason])), mergeKey, reason, since);
+    const { state, calls, cycle, advance } = harness();
+    let attempts = 0;
+    (cycle.effects as { observeCandidate: unknown }).observeCandidate = async () => { attempts++; throw new Error('control plane unavailable'); };
+    const work = item(gates([staleObservationReason]));
+    await actOnRepeatedRefusal(cycle, work, mergeKey, reason, since);
     assert.equal(state.actions[`${mergeKey}:repeated:observe`].state, 'failed');
-    assert.match(state.actions[`${mergeKey}:repeated:observe`].detail, /retried on the next refusal: control plane unavailable/);
+    assert.match(state.actions[`${mergeKey}:repeated:observe`].detail, /asked again in the next observation window while the refusal stands: control plane unavailable/);
+    advance(60_000);
+    await actOnRepeatedRefusal(cycle, work, mergeKey, reason, since);
+    assert.deepEqual([attempts, state.actions[`${mergeKey}:repeated:observe`].attempts, cycle.performed.length], [1, 1, 1], 'a failed request is not repeated inside its window');
+    advance(60_000);
+    await actOnRepeatedRefusal(cycle, work, mergeKey, reason, since);
+    assert.deepEqual([attempts, state.actions[`${mergeKey}:repeated:observe`].attempts], [2, 2], 'it is asked again once the window passes');
     assert.deepEqual(calls.refused, []);
+  }
+  // A loop without the effect records that once per window too.
+  {
+    const { state, cycle, advance } = harness();
+    delete (cycle.effects as { observeCandidate?: unknown }).observeCandidate;
+    const work = item(gates([staleObservationReason]));
+    for (let minute = 0; minute < 3; minute++) { await actOnRepeatedRefusal(cycle, work, mergeKey, reason, since); advance(60_000); }
+    assert.deepEqual([state.actions[`${mergeKey}:repeated:observe`].state, state.actions[`${mergeKey}:repeated:observe`].attempts, cycle.performed.length], ['failed', 2, 2]);
   }
 
   // Every other repeated refusal follows GY-831 unchanged: marked for rework, never observed instead.
@@ -105,6 +126,8 @@ test('unit:stale-observation-refusal-keeps-position — a repeated refusal whose
     item(gates([staleObservationReason], { review: ['Independent approval of the current commit is required'] })),
     item(gates([]), 150_000),
     item(gates([staleObservationReason]), 150_000, { violations: [{ kind: 'unauthorized-merge' }] } as unknown as Partial<Work>),
+    // An observation that reported protection unverified is a reason of its own, not a missing observation.
+    item(gates([staleObservationReason, unverified])),
   ];
   for (const work of others) {
     const { state, calls, cycle } = harness();
