@@ -6,7 +6,7 @@ Every endpoint except `/healthz` requires `Authorization: Bearer TOKEN` ([roles]
 Create with `POST /api/work` ([example](../../examples/work.json)): `title` and `criteria` are required; `dependencies`, `exclusiveResources`, `plannedFiles` and `producerProofs` (`manual:` proofs a producer may run) optional. Other commands are `POST /api/work/KEY/COMMAND`:
 
 - `requirements`: the whole document with `expectedPolicyRevision` and `reason`; `admin`, or additively an operator agent.
-- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`).
+- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`). `graphyard master unblock` rereads and retries a stale-revision refusal, at most three writes, while the same blocker stands; a cleared or changed blocker is reported instead.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; a human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` for an explained `lease-loss`.
 - `rework`, `recover`: `{"reason":…, "previousWorkerStopped":true}`; `admin` (`recover` for a delivered quarantine).
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason":…}` (null clears). `release` `"failure":{"message":…}` records `workspace.failed`; an untouched claim keeps its epoch.
