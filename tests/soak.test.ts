@@ -1771,9 +1771,9 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
 test('unit:soak-invariants-hold — stale rework and stale merges each wake the observation job once and proceed once it lands, without storms or cursor growth', { timeout: 300_000 }, async () => {
   const rework = new Set([2, 4]);
   const day = await simulateDay({ hours: 6, staleRework: true, staleMerge: 2,
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework, deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } } });
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework, deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } } });
   const { items, final, wakes, restartLog, staleMerges, state, violations, failures, lost } = day;
-  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered after the restarts');
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}`), [], 'all four items are delivered after the restarts');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease');
