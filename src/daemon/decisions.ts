@@ -270,14 +270,17 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
 }
-/** The build gate's refusals of a head that changes files outside its plannedFiles, or would revert them where it lands (regression-guard.ts). */
-const scopeRegression = /^(Candidate changes \d+ files? outside its planned files|Landing the candidate on \S+, the commit it would merge onto, would revert)/;
+/**
+ * The build gate's refusal of a head whose own diff changes files outside its plannedFiles (regression-guard.ts).
+ * A landing refusal is not one: it clears on its own once GitHub answers the merge base truly (GY-839).
+ */
+const scopeRegression = /^Candidate changes \d+ files? outside its planned files/;
 /**
  * GY-1084. The rework a head the build gate refuses for out-of-scope changes calls for, or null. The
  * next action is already `request-rework`, and the refusal says what the worker does (sync, restore
  * each file from the base, push), but nothing asked for the round: on 2026-10-01 GY-971 was owed it
  * as a judgment for a master session, a decision fault every cycle. A worker who needs the files asks
- * for them with scope-request in that round. The binding names the head and the base it was judged against.
+ * for them with scope-request in that round. The binding names the head.
  */
 export function scopeRegressionRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
@@ -287,7 +290,7 @@ export function scopeRegressionRework(work: Work): { reason: string; binding: st
   const refused = reasons.filter(reason => scopeRegression.test(reason));
   if (!refused.length) return null;
   return { reason: `${work.key}: ${refused.join('; ')}. Only the worker can restore them, so the item returns to a worker; a file the change does need is asked for with scope-request in that round.`.slice(0, 1800),
-    binding: `${candidate.sha}:outside-scope:${observation.baseTip ?? candidate.baseSha}` };
+    binding: `${candidate.sha}:outside-scope` };
 }
 /**
  * GY-496. A producer request the loop stopped attempting: every automatic session it launched for
