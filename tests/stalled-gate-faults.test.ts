@@ -1,0 +1,262 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { Observation, Work } from '../src/model.js';
+import type { ActionRecord, ActionRow } from '../src/model/actions.js';
+import { reconcileActions } from '../src/model/actions.js';
+import { actionStall } from '../src/model/action-progress.js';
+import { resyncUnobservedPrefix } from '../src/model/action-kinds.js';
+import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { evaluate } from '../src/model/gates.js';
+import { stalledActionAttention } from '../src/cli/master-status.js';
+import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
+// The executor process as it runs in production: its modules loaded by its own entry point, one
+// `tsImport` each, and its effects built by the same function (scripts/graphyard-executor.mjs).
+// @ts-expect-error The standalone executor is a dependency-free entry point script.
+import { controlPlaneEffects, load } from '../scripts/graphyard-executor.mjs';
+import { startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GY-1090 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 61
+// stalled-gate faults in 24 hours on 1 October 2026 — an item holding a failing gate with nothing
+// moving it. Every instance was the same misreading: something WAS moving it, a handoff the control
+// plane had already made, and the reading could not see it.
+//
+//   - resync: the claim woke the item's observation job, which was due and queued for a worker; three
+//     claims inside the minutes the job takes failed with one reason and read as a stall;
+//   - dispatch: the loop's own producer session already answered the requested head, and the
+//     executor's check for exactly that (GY-415) never matched — its process loads producer.ts twice,
+//     so `instanceof` compared two different classes;
+//   - request-review: the loop's reviewer session already answered the requested head, and the
+//     executor had no check for it at all;
+//   - actorless: a `request-rework` row was open for the verdict standing on the head, or Graphyard had
+//     just restored the branch and its observation was owed, and neither counted as an actor.
+//
+// Each instance the item lists is replayed here from the ledger, as it stood at the instant the loop
+// recorded it (tests/fixtures/gy-1090-stalled-gate.json, read from `graphyard events`), and asserted
+// not to recur. Against the base each subtest fails: the instance reproduces.
+
+interface Instance {
+  id: string; at: string; kind: 'stalled-action' | 'actorless'; subject: string;
+  /**
+   * For a stalled action: the row's kind, its unchanged reason, and the instant of every failure in
+   * the run the instance belongs to, oldest first — up to the instant the loop recorded it
+   * (`detected` of them) and on until the run ended, so no point of the run is left unreplayed.
+   */
+  action?: 'resync' | 'dispatch' | 'request-review'; reason?: string; failures?: string[]; detected?: number;
+  /** For a session already answering: the full head the request and the session are bound to, and the proofs asked for. */
+  sha?: string; group?: string; proofs?: string[];
+}
+const instances: Instance[] = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1090-stalled-gate.json', import.meta.url)), 'utf8'));
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+const base = '55193b8c5915665695b2205451be306005418a6d';
+const shift = (at: string, ms: number) => new Date(Date.parse(at) + ms).toISOString();
+// Written out rather than imported, so this file loads against the base and each instance there
+// fails on its own assertion: the clause a scheduled, unheld, error-free job is named by, and the
+// bound its wait keeps (src/model/action-kinds.ts).
+const observationJobScheduled = 'its observation job is scheduled and records no error, yet saved no observation';
+const observationWaitBoundMs = 30 * 60_000;
+
+test('manual:fault-class-stalled-gate — the item lists 61 instances, and every one is replayed below', () => {
+  assert.equal(instances.length, 61);
+  assert.equal(new Set(instances.map(instance => instance.id)).size, 61);
+  const shapes = instances.map(instance => instance.kind === 'actorless' ? 'actorless' : instance.action);
+  assert.deepEqual([...new Set(shapes)].sort(), ['actorless', 'dispatch', 'request-review', 'resync']);
+});
+
+// ---- resync: an observation job the claim woke, queued for a worker -------------------------------
+
+/** The resync row as the ledger records it: requested, then each claim and its failure. */
+function resyncRow(instance: Instance): ActionRow {
+  const failures = instance.failures!;
+  const history: ActionRecord[] = [{ at: shift(failures[0], -90_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: `${instance.subject} is waiting on a fresh reading of its pull request` }];
+  failures.forEach((at, index) => history.push(
+    { at: shift(at, -20_000), event: 'claimed', requester: 'graphyard', executor: 'graphyard-master@vishrog/1', result: null, reason: `attempt ${index + 1} claimed by graphyard-master@vishrog/1 on vishrog` },
+    { at, event: 'failed', requester: 'graphyard', executor: 'graphyard-master@vishrog/1', result: 'failed', reason: instance.reason! }));
+  return { id: `resync-${instance.id}`, kind: 'resync', work: `work-${instance.subject}`, key: instance.subject, gate: 'merge', refusal: 'GitHub observation missing or older than two minutes',
+    reason: `${instance.subject} is waiting on a fresh reading of its pull request`, binding: 'resync', inputs: { kind: 'resync', pr: 1, sha: null, baseSha: null, baseTip: null, observedAt: null },
+    requestedBy: 'graphyard', requestedAt: history[0].at, state: 'pending', claim: null, attempts: failures.length, history, result: 'failed', resolution: instance.reason, resolvedAt: failures.at(-1) } as ActionRow;
+}
+
+for (const instance of instances.filter(entry => entry.action === 'resync')) {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: a resync waiting on the observation job its claim woke is not a stall inside the job's bound`, () => {
+    assert.ok(instance.reason!.startsWith(`${instance.subject}: ${resyncUnobservedPrefix}; ${observationJobScheduled};`), 'the recorded reason names a scheduled job with no hold and no error');
+    // At the instant the loop recorded it, master status raises nothing for the row.
+    const detected = resyncRow({ ...instance, failures: instance.failures!.slice(0, instance.detected) });
+    const work = { id: detected.work, key: instance.subject, title: instance.subject, stage: 'merge', actionQueue: { actions: [detected], history: [] } } as unknown as Work;
+    assert.deepEqual(stalledActionAttention({ work: [work], now: instance.at }).filter(entry => entry.subject === instance.subject), [], 'master status raises no stalled-action attention');
+    // Nor at any later failure of the same run, up to the observation that ended it.
+    for (let count = 1; count <= instance.failures!.length; count++) {
+      const failures = instance.failures!.slice(0, count);
+      assert.equal(actionStall(resyncRow({ ...instance, failures })), null, `${count} failure(s) over ${Math.round((Date.parse(failures.at(-1)!) - Date.parse(failures[0])) / 1000)}s are a wait in progress`);
+    }
+    // Not weakened: the same row, still unobserved once the run outlasts the bound, is a stall.
+    const outlasted = resyncRow({ ...instance, failures: [shift(instance.failures!.at(-1)!, -observationWaitBoundMs), ...instance.failures!.slice(1)] });
+    assert.ok(actionStall(outlasted), 'a woken job that saves nothing for longer than the bound still stalls the row');
+  });
+}
+
+// ---- dispatch and request-review: a session the loop launched already answers the head -------------
+
+const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
+
+/** The item as submitted and observed at `at` — now, for a launch, whose candidate must be freshly observed. */
+function submitted(instance: Instance, extra: Partial<Work> = {}, at = new Date(Date.now() - 60_000).toISOString()): Work {
+  const pr = 500 + instances.indexOf(instance);
+  const candidate = { sha: instance.sha!, baseSha: base, pr, branch: `graphyard/${instance.subject.toLowerCase()}-1`, author: 'implementer' };
+  const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at,
+    prState: 'open', draft: false, baseTip: base, baseTree: base, baseTipContained: true } as unknown as Observation;
+  return { id: `work-${instance.id}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: instance.proofs ?? ['unit:x'] }], producerProofs: (instance.proofs ?? []).filter(proof => proof.startsWith('manual:')), policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 1, policyRevision: 1,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: `/w/${instance.subject}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }],
+    candidate, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null,
+    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }], violations: [], ...extra } as unknown as Work;
+}
+
+// Loaded once, as the executor process loads them once at its start.
+let executorModules: ReturnType<typeof load> | undefined;
+let reviewerKey: string | undefined;
+/** A coordinator checkout with one producer profile and a bound reviewer App, as the executor host has. */
+async function executorHost() {
+  const root = await temporaryDirectory('gy-1090'), credentials = await temporaryDirectory('gy-1090-credentials');
+  execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  const modules = await (executorModules ??= load());
+  const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+  await modules.master.setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, status as typeof fetch);
+  const credential = join(credentials, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  await modules.master.saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-claude-1', kind: 'claude', credentialFile: credential, concurrency: 4 },
+    async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'manual:*'] } }));
+  const privateKey = reviewerKey ??= generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
+  await modules.reviewer.bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') },
+    async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
+  await modules.reviewer.saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', concurrency: 2 });
+  const loaded = await modules.master.loadMasterConfig(root);
+  const config = { ...loaded, run: { ...loaded.run, reviewerProfile: 'claude-reviewer' } };
+  const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+  return { root, modules, config, mint, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
+}
+
+/** The executor's handlers over one item, wired exactly as `scripts/graphyard-executor.mjs` wires them. */
+function executorHandlers(host: Awaited<ReturnType<typeof executorHost>>, item: Work) {
+  const snapshot = async () => ({ work: [item], now: new Date().toISOString() });
+  const effects = controlPlaneEffects(host.modules, { root: host.root, current: () => host.config, run: herdr, snapshot, mutate: async () => ({}), mergeExecutor: {} });
+  return host.modules.executor.controlPlaneHandlers(() => host.config, { ...effects, agents: async () => [], recordSession: undefined,
+    producerCredentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])) });
+}
+const executor = { id: 'graphyard-master@vishrog/1', host: 'vishrog' };
+
+for (const instance of instances.filter(entry => entry.action === 'dispatch')) {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: the executor's proof dispatch settles on the producer session the loop launched on ${instance.sha!.slice(0, 7)}`, async () => {
+    assert.match(instance.reason!, new RegExp(`^A producer session for ${instance.subject} ${instance.group} proofs is already pending on ${instance.sha!.slice(0, 7)};`));
+    const host = await executorHost();
+    try {
+      const item = submitted(instance);
+      reconcileAutoDispatch(item, [item], new Date());
+      const request = item.autoDispatch!.producers.find(entry => entry.group === instance.group)!;
+      assert.equal(request.sha, instance.sha);
+      // The loop's tick launches the session first, from its own process.
+      await host.modules.producer.launchProducer(host.root, item, request, host.config.producers[0], [], new Date().toISOString(), { run: herdr });
+      const handlers = executorHandlers(host, item);
+      const action = { id: `row-${instance.id}`, key: item.key, work: item.id, kind: 'dispatch', gate: 'test', state: 'claimed', attempts: 1, history: [],
+        inputs: { kind: 'dispatch', target: 'proof', group: request.group, proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
+      // Every claim the instance recorded as a failure settles on that session instead.
+      for (const _failure of instance.failures!) assert.match(String(await handlers.dispatch!(action, executor)), new RegExp(`${instance.subject}'s ${instance.group} proofs on ${instance.sha!.slice(0, 12)} are left to producer session \\S+ already pending on that head`));
+      assert.equal((await host.modules.producer.readProducerLedger(host.root)).producers.length, 1, 'no second session was launched');
+    } finally { await host.cleanup(); }
+  });
+}
+
+for (const instance of instances.filter(entry => entry.action === 'request-review')) {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: the executor's request-review settles on the reviewer session the loop launched on ${instance.sha!.slice(0, 7)}`, async () => {
+    assert.match(instance.reason!, new RegExp(`^A reviewer session for ${instance.subject} is already pending on ${instance.sha!.slice(0, 7)} .*one review request is answered by one session`));
+    const host = await executorHost();
+    try {
+      // A review is requested once the head's mechanical proofs pass (GY-115).
+      const item = submitted(instance, { evidence: [{ id: 'evidence-1', proof: 'unit:x', sha: instance.sha!, baseSha: base, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: new Date().toISOString() }] } as Partial<Work>);
+      reconcileAutoDispatch(item, [item], new Date());
+      const request = item.autoDispatch!.review!;
+      assert.equal(request.sha, instance.sha);
+      // The loop's tick launches the session first, from its own process.
+      await host.modules.reviewer.launchReview(host.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdr, mint: host.mint, requestId: request.id });
+      const handlers = executorHandlers(host, item);
+      const action = { id: `row-${instance.id}`, key: item.key, work: item.id, kind: 'request-review', gate: 'review', state: 'claimed', attempts: 1, history: [],
+        inputs: { kind: 'request-review', provider: 'github', requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
+      for (const _failure of instance.failures!) assert.match(String(await handlers['request-review']!(action, executor)), new RegExp(`${instance.subject}'s review of ${instance.sha!.slice(0, 12)} is left to reviewer session \\S+ already answering that head`));
+      assert.equal((await host.modules.reviewer.readReviewLedger(host.root)).reviews.length, 1, 'no second session was launched');
+    } finally { await host.cleanup(); }
+  });
+}
+
+test('manual:fault-class-stalled-gate — a session pending on a superseded head is still a refusal, not an answer', async () => {
+  const host = await executorHost();
+  try {
+    const old = { id: 'superseded', at: new Date().toISOString(), kind: 'stalled-action', subject: 'GY-9', sha: 'a'.repeat(40) } as Instance;
+    const stale = submitted(old);
+    reconcileAutoDispatch(stale, [stale], new Date());
+    await host.modules.producer.launchProducer(host.root, stale, stale.autoDispatch!.producers[0], host.config.producers[0], [], new Date().toISOString(), { run: herdr });
+    const item = submitted({ ...old, sha: 'b'.repeat(40) });
+    reconcileAutoDispatch(item, [item], new Date());
+    const request = item.autoDispatch!.producers[0];
+    const action = { id: 'row-superseded', key: item.key, work: item.id, kind: 'dispatch', gate: 'test', state: 'claimed', attempts: 1, history: [],
+      inputs: { kind: 'dispatch', target: 'proof', group: 'unit', proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
+    await assert.rejects(Promise.resolve(executorHandlers(host, item).dispatch!(action, executor)), /already pending on aaaaaaa; reconcile it with master status/);
+  } finally { await host.cleanup(); }
+});
+
+// ---- actorless: a step the control plane already named --------------------------------------------
+
+const reviewerBot = 'graphyard-reviewer[bot]';
+/** A submitted item as the record held it at the instant: gates evaluated, dispatch and action queue reconciled. */
+function recorded(work: Work, at: string) {
+  const now = new Date(at);
+  Object.assign(work, evaluate(work, [work], now, [15368]));
+  reconcileAutoDispatch(work, [work], now);
+  reconcileActions(work, [work], now);
+  return work;
+}
+
+for (const instance of instances.filter(entry => entry.kind === 'actorless')) {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: the submission is not actorless while the step it owes is already named`, () => {
+    const verdictAt = shift(instance.at, -6 * 60_000);
+    const work = instance.subject === 'GY-971'
+      // Ejected from the merge queue, the branch restored to its own head off the speculative tip the
+      // record still names; the observation the restore woke has not run yet.
+      ? (() => {
+        const tip = '424d5a53da9b'.padEnd(40, '0'), own = '5c7065bcf08a357ff8b50ddba402c2bc1f9d491b';
+        const item = submitted({ ...instance, sha: tip, proofs: ['unit:mechanical-findings-auto-fixed', 'unit:mechanical-mislabel-caught'] }, {}, shift(instance.at, -15 * 60_000));
+        item.observation!.at = shift(instance.at, -5 * 60_000 - 13_000);
+        item.baseRefresh = { from: { sha: tip, baseSha: base }, base, baseTree: base, policyRevision: 1, at: shift(instance.at, -5 * 60_000 + 6_000), head: own, conflict: null, carry: null,
+          restore: { contaminated: tip, foreign: ['GY-1'], own, cause: 'ejection', requested: null, reason: `ejected from the merge queue: Landing speculative tip ${tip.slice(0, 12)} on ${base.slice(0, 12)} would revert work outside its planned files`, performedAt: shift(instance.at, -5 * 60_000 + 6_000), outcome: 'restored' } } as Work['baseRefresh'];
+        Object.assign(item, evaluate(item, [item], new Date(instance.at), [15368]));
+        // As the instance recorded it: no request of any kind raised for the tip, and no row queued.
+        item.autoDispatch = { review: null, producers: [], history: [] };
+        return item;
+      })()
+      // A verdict standing against the head: the control plane raises the request-rework it owes.
+      : (() => {
+        const sha = (instance.subject === 'GY-887' ? '4ff8cfd4f689' : 'c64cc36e7a65').padEnd(40, '0');
+        const item = submitted({ ...instance, sha }, { evidence: [{ id: 'evidence-1', proof: 'unit:x', sha, baseSha: base, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: shift(verdictAt, -10 * 60_000) }] } as Partial<Work>, shift(verdictAt, -20 * 60_000));
+        item.observation!.reviews = [{ reviewer: reviewerBot, sha, state: 'CHANGES_REQUESTED', submittedAt: verdictAt }];
+        item.observation!.at = verdictAt;
+        return recorded(item, verdictAt);
+      })();
+    const named = actorlessSubmissions([work], new Date(instance.at));
+    assert.deepEqual(named, [], `${instance.subject} has its next step named: ${(work.actionQueue?.actions ?? []).map(row => row.kind).join(', ') || 'the observation its published head is owed'}`);
+    if (instance.subject !== 'GY-971') assert.deepEqual(work.actionQueue!.actions.map(row => row.kind), ['request-rework'], 'the step named is the request-rework the verdict owes');
+  });
+}
+
+test('manual:fault-class-stalled-gate — a submission with nothing named for it is still actorless', () => {
+  const instance = { id: 'nothing-named', at: '2026-10-01T14:04:32.793Z', kind: 'actorless', subject: 'GY-9', sha: 'c'.repeat(40) } as Instance;
+  const work = submitted(instance, {}, shift(instance.at, -30 * 60_000));
+  // Its proofs pending and no producer request raised for them, and no row on its queue.
+  work.autoDispatch = { review: null, producers: [], history: [] };
+  const named = actorlessSubmissions([work], new Date(instance.at));
+  assert.equal(named.length, 1);
+  assert.match(named[0].text, /no review request, no producer request, no rework request and no named wait/);
+});

@@ -8,7 +8,7 @@ import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approve
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
@@ -133,6 +133,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       Object.assign(watch, { agentName: null, pane: null, capacity: `held behind another decision's capacity-waiting relaunch still on the launcher; its approver is launched once that settles`.slice(0, 500) });
       await effects.persist(state);
       return `held behind another decision's capacity-waiting relaunch on the launcher; its approver is launched once that settles`;
+    }
+    // A headless approver run that was lost (GY-453: killed from outside, recording no exit) judged
+    // nothing, so its launch is given back, up to `maxLostApproverRuns` per decision: past that a
+    // lost run spends its launch, so an approver killed over and over still ends in the escalation.
+    if (!listed && watch.run?.result?.ok === false && watch.run.result.reason === 'lost') {
+      const refunded = lostRunRefunded(watch);
+      watch.ended = [...watch.ended, `approver run ${watch.agentName ?? name} was lost${refunded ? '' : `, past the ${maxLostApproverRuns} lost runs given back`}: ${watch.run.result.detail}`.slice(0, 300)].slice(-10);
+      Object.assign(watch, refunded ? { launches: Math.max(0, watch.launches - 1), lostRuns: watch.lostRuns + 1, run: null } : { run: null });
     }
     Object.assign(watch, { launches: watch.launches + 1, agentName: name, pane: listed?.pane_id ?? null, launchedAt: stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null });
     // GY-920: adopting a session that is already judging the decision ends any capacity wait the
@@ -558,8 +566,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A producer request whose attempts are used up calls for a rework once its escalation has stood
   // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
-  // A needed decision with no watch is requested once its failed attempt may retry, or escalated
-  // with the commands that request it by hand when this loop runs without the decision effects.
+  // A needed decision with no watch is requested once its failed attempt may retry, or escalated with the commands that request it by hand.
   const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
     const previous = state.actions[key];
     if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
@@ -608,11 +615,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // request path adopts the decision it left standing and launches an approver for it.
     await requestNeeded(item, decision, key);
   });
-  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to
-  //      its exact head, one at a time; the cleanup below withdraws one a head change overtook.
+  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
-    const attestations = attestDecisions(item, snapshot.work, clock);
-    let judging = false;
+    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);

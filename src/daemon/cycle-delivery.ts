@@ -137,6 +137,15 @@ export async function shepherdStep(cycle: Cycle) {
       return;
     }
     if (previous && (previous.state === 'done' || previous.attempts >= maxProofAttempts || !readyToRetry(previous, state.cycle))) return;
+    // A push to the candidate already runs every automatable proof through pull_request_target, so a
+    // dispatch is only the fallback for a run that never produced the evidence: it waits a grace
+    // period from when the loop first saw the head waiting, rather than queueing a duplicate run.
+    const graceMs = (config.run.proofDispatchGraceMinutes ?? 0) * 60_000;
+    if (graceMs > 0) {
+      const seenKey = `${key}:awaiting-push-run`;
+      if (!state.actions[seenKey]) await record(state, seenKey, { kind: 'proof', work: item.key, principal: null, state: 'done', detail: `${item.key}: waiting for the push-triggered acceptance run on ${item.candidate!.sha.slice(0, 12)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+      if (clock - Date.parse(state.actions[seenKey].at) < graceMs) return;
+    }
     if (!config.run.proofWorkflow) {
       if (previous?.state !== 'failed') performed.push(await record(state, key, { kind: 'proof', work: item.key, principal: null, state: 'failed', detail: `${item.key} needs trusted evidence for ${automatable.join(', ')}; configure master run --proof-workflow so the loop can request it from the trusted producer workflow`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return;
@@ -170,8 +179,17 @@ export async function mergeStep(cycle: Cycle) {
   // The cycle snapshot is 30-45 s old by now, and observations and bookkeeping write to the item
   // throughout. The merge is invoked on the item as it stands immediately before the call, under
   // the same action key; one whose candidate or queue turn moved is left to the next cycle.
-  const readMergeItem = async (item: Work, key: string) => {
-    const current = (await effects.snapshot()).work.find(candidate => candidate.id === item.id);
+  // The step reads the ledger once for all its candidates, not once each (GY-1088): a read per
+  // candidate made a merge step over sixteen of them twenty seconds of whole-ledger reads. The
+  // guarded merge re-reads and re-binds the item itself, and a candidate that lost a race to a
+  // write — a sibling's enqueue among them — is read afresh before it is retried.
+  let fresh: Promise<Map<string, Work>> | null = null;
+  const readFresh = (again: boolean) => {
+    if (again || !fresh) fresh = effects.snapshot().then(read => new Map(read.work.map(candidate => [candidate.id, candidate])), error => { fresh = null; throw error; });
+    return fresh;
+  };
+  const readMergeItem = async (item: Work, key: string, again = false) => {
+    const current = (await readFresh(again)).get(item.id);
     return current && current.stage === 'merge' && !mergedWithoutAuthorization(current) && !waitingInMergeQueue(current) && candidateKey('merge', current) === key ? current : null;
   };
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
@@ -217,7 +235,7 @@ export async function mergeStep(cycle: Cycle) {
         // retried at once on a fresh read, and never counted toward the backoff (GY-192).
         const race = transientMergeRace(error);
         if (race && retries < mergeRaceRetries) {
-          const reread = await readMergeItem(item, key);
+          const reread = await readMergeItem(item, key, true);
           if (reread) { target = reread; continue; }
         }
         // A refusal is the gate working, not a daemon fault: record it (no fault kind, so it is no
