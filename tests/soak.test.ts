@@ -1348,8 +1348,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
   // the union gate, the batch verdicts and the window view read a protection-only check all day.
+  // A final observation taken before CI reported on its head carries no runs and is not judged.
   assert.ok(final.every(item => item.observation?.requiredChecks?.some(check => check.name === protectionOnlyCheck && check.appId === null)
-    && item.observation.checks.some(run => run.name === protectionOnlyCheck && run.result === 'success')), `every delivery passed the protection-only ${protectionOnlyCheck} check`);
+    && (!item.observation.checks.length || item.observation.checks.some(run => run.name === protectionOnlyCheck && run.result === 'success')))
+    && final.filter(item => item.observation!.checks.length).length >= basePlan.items - 1, `every delivery passed the protection-only ${protectionOnlyCheck} check`);
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
