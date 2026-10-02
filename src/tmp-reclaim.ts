@@ -173,8 +173,6 @@ export interface TmpReclaimOptions {
   workMs?: number;
   /** The live-holder set, when the caller has one; a fresh /proc scan runs when omitted. */
   held?: Set<string>;
-  /** Whose entries the pass considers; this process's uid by default (a test names another to prove the filter). */
-  uid?: number;
 }
 /** The age an entry of this name must reach before the default pass removes it, or null when the name is not the pass's. */
 const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : /^tsx-\d+$/.test(name) ? tmpReclaimMinAgeMs : null;
@@ -194,7 +192,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   const minAge = options.prefixes
     ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) ? options.maxAgeMs ?? tmpReclaimMinAgeMs : null
     : (name: string) => { const age = defaultMinAge(name); return age === null ? null : options.maxAgeMs ?? age; };
-  const uid = options.uid ?? process.getuid?.();
+  const uid = process.getuid?.();
   const dirents = await readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
   // A marker goes with its directory, never as an entry of its own; a symlink is never followed or taken.
   const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && minAge(entry.name) !== null;

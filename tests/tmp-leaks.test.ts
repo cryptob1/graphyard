@@ -154,8 +154,12 @@ test('unit:loop-sweeps-stale-test-temp — the pass considers only this user\'s 
   const stale = [join(tmp, 'graphyard-other-user'), join(tmp, 'pg-password-other-user')];
   await mkdir(stale[0]); await writeFile(stale[1], 'x');
   for (const path of stale) await backdate(path, testTempMinAgeMs + 30 * 60_000);
-  // The same entries as another uid would own them: the filter alone keeps them out of the pass.
-  const other = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set(), uid: (process.getuid?.() ?? 0) + 1 });
+  // The same entries as another uid would own them: the pass reads its uid from the process, so for
+  // one pass the process reports another, and the filter alone keeps the entries out.
+  const getuid = process.getuid!, realUid = getuid();
+  let other;
+  process.getuid = () => realUid + 1;
+  try { other = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set() }); } finally { process.getuid = getuid; }
   assert.deepEqual({ scanned: other.scanned, removed: other.removed.length, errors: other.errors }, { scanned: 0, removed: 0, errors: [] });
   for (const path of stale) assert.equal(existsSync(path), true, `${path} is not this pass's to remove`);
   // As this user's entries, the same pass removes them.
