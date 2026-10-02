@@ -1215,7 +1215,7 @@ const keyReuseRefusal = 'Idempotency key reused with different input';
  * different body: the approval's key and the hash of the body sent, so a retry of this very body
  * returns the item it made, and no two bodies share a key (GY-598).
  */
-export const followUpBodyKey = (createKey: string, item: FollowUpItem) =>
+export const followUpBodyKey = (createKey: string, item: unknown) =>
   `${createKey.slice(0, 183)}:${createHash('sha256').update(JSON.stringify(item)).digest('hex').slice(0, 16)}`;
 /**
  * The follow-up item an approval already filed, found by its parent and the approval's id: it
@@ -1243,6 +1243,22 @@ async function createResolvingKeyReuse(payload: FollowUpItem, key: string, creat
   }
 }
 
+/**
+ * An append whose key was used before with a different body is resolved the same way (GY-1091): two
+ * ledger records of one approval — the reviewed head's and the head it was carried onto — share the
+ * approval's key but name different heads in the reason, so the second record's append was refused on
+ * every retry until the retry stopped. The control plane keeps only the findings an item does not hold
+ * yet, so the body is sent again under a key of its own, which adds nothing the first append added.
+ */
+async function appendResolvingKeyReuse(append: AppendFollowUpFindings, target: string, findings: Parameters<AppendFollowUpFindings>[1], reason: string, key: string, resolved: () => void) {
+  try { return await append(target, findings, reason, key); }
+  catch (error) {
+    if (!(error instanceof Error ? error.message : String(error)).includes(keyReuseRefusal)) throw error;
+    const made = await append(target, findings, reason, followUpBodyKey(key, { target, findings, reason }));
+    resolved(); return made;
+  }
+}
+
 /** One approval's follow-up filing, or its reopen check once filed; the outcome is left on `record.followUps`. */
 async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<ReviewRecord['verdict']>, reviewer: string, repository: string, work: Work[], run: ChildRun, create: CreateFollowUpItem, store: ReturnType<typeof followUpCreateStore>, now: Date, events: string[], append: AppendFollowUpFindings | undefined, filed: Map<string, string>) {
   const previous = record.followUps?.reviewId === verdict.reviewId ? record.followUps : undefined;
@@ -1265,12 +1281,13 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
   if (previous && previous.attempts >= threadResolutionAttempts && (previous.item || now.getTime() - Date.parse(previous.at) < followUpExhaustedRetryMs)) return;
   let keyReuse = previous?.keyReuse;
   const resolving: CreateFollowUpItem = (payload, key) => createResolvingKeyReuse(payload, key, create, () => existingFollowUpItem(work, item, verdict.reviewId), resolved => { keyReuse = resolved; });
+  const appending: AppendFollowUpFindings | undefined = append && ((target, findings, reason, key) => appendResolvingKeyReuse(append, target, findings, reason, key, () => { keyReuse = 'rekeyed'; }));
   // One follow-up item per parent (GY-402): the parent's open one, which this approval appends to —
   // unless it is this approval's own earlier item, which a retried create links instead (GY-598).
   const existing = existingFollowUpItem(work, item, verdict.reviewId) ? undefined
     : filed.get(record.key) ?? openFollowUpItem(work, record.key)?.key;
   const filedNow = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
-    ...(existing && append ? { existing, append } : {}),
+    ...(existing && appending ? { existing, append: appending } : {}),
     ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, resolving, now);
   if (filedNow.item) filed.set(record.key, filedNow.item);
   const outcome = { ...filedNow, ...(keyReuse && filedNow.item ? { keyReuse } : {}) };
