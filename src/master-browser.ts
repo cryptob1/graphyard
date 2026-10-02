@@ -26,7 +26,7 @@ export type BrowserFlow = typeof browserFlows[number];
 // What the control-plane App must hold for every path Graphyard exercises: contents write for
 // published speculative queue tips, checks write for the gate check, administration read for
 // protection observation, and pull-request write plus issue read for review dispatch.
-export const controlPlanePermissions: Record<string, 'read' | 'write'> = { metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' };
+export const controlPlanePermissions: Record<string, 'read' | 'write'> = { metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read', workflows: 'write' };
 const level = (value: unknown) => value === 'write' ? 2 : value === 'read' ? 1 : 0;
 /** Permissions still below what the control plane needs. */
 export function missingPermissions(actual: Record<string, unknown> | null | undefined, desired = controlPlanePermissions) {
