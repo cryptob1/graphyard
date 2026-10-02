@@ -632,6 +632,8 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /** Settled terminal commit statuses per head commit sha and context name (GY-1060). */
+  private terminalStatuses = new Map<string, { name: string; result: string; appId: 0; source: 'status' }>();
   /**
    * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
    * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
@@ -1221,18 +1223,38 @@ export class GitHub {
    * only when such a context exists that no configured CI app's run reports (another app's run
    * never hides the status, which `requiredCheckRun` prefers to it), as entries of app 0 marked
    * `status`, which no policy check's trusted CI apps include. Every page of the combined status is
-   * read, so a context past the first hundred is still seen. An error state is a failure; an
-   * unreadable answer adds nothing.
+   * read, so a context past the first hundred is still seen. An error state is a failure; a settled
+   * terminal status per head is cached to save re-reading; a read error is not swallowed.
    */
   private async requiredStatuses(sha: string, required: { name: string; appId: number | null }[], policy: readonly string[], runs: { name: string; app?: { id?: number } }[], ciAppIds: readonly number[]): Promise<Observation['checks']> {
     const names = new Set(required.filter(check => check.appId === null && check.name !== CHECK_NAME && !policy.includes(check.name)
       && !runs.some(run => run.name === check.name && ciAppIds.includes(run.app?.id as number))).map(check => check.name));
     if (!names.size) return [];
-    try {
-      const statuses = await this.pages(`/commits/${sha}/status`, 'statuses');
-      return statuses.filter((status: any) => typeof status?.context === 'string' && names.has(status.context))
-        .map((status: any) => ({ name: status.context, result: status.state === 'error' ? 'failure' : String(status.state), appId: 0, source: 'status' as const }));
-    } catch { return []; }
+    const missing = [...names].filter(name => !this.terminalStatuses.has(`${sha}:${name}`));
+    if (!missing.length) return [...names].map(name => this.terminalStatuses.get(`${sha}:${name}`)!);
+    const statuses = await this.pages(`/commits/${sha}/status`, 'statuses');
+    const seen = new Set<string>();
+    for (const status of statuses) {
+      if (typeof status?.context === 'string' && names.has(status.context) && !seen.has(status.context)) {
+        seen.add(status.context);
+        if (['success', 'failure', 'error'].includes(status.state)) {
+          this.terminalStatuses.set(`${sha}:${status.context}`, {
+            name: status.context,
+            result: status.state === 'error' ? 'failure' : String(status.state),
+            appId: 0,
+            source: 'status' as const,
+          });
+          if (this.terminalStatuses.size > ancestryEntries) this.terminalStatuses.delete(this.terminalStatuses.keys().next().value!);
+        }
+      }
+    }
+    return [...names].flatMap(name => {
+      const cached = this.terminalStatuses.get(`${sha}:${name}`);
+      if (cached) return [cached];
+      const fresh = statuses.find((s: any) => s?.context === name);
+      if (!fresh) return [];
+      return [{ name, result: fresh.state === 'error' ? 'failure' : String(fresh.state), appId: 0, source: 'status' as const }];
+    });
   }
   /**
    * One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`,
@@ -1443,7 +1465,7 @@ export class GitHub {
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
     // only while protection still requires conversation resolution (drift, which GitHub enforces).
     const requiredChecks = mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]);
-    const statuses = await this.requiredStatuses(pr.head.sha, requiredChecks, work.policy.checks, checks, ciAppIdsOf(work));
+    const statuses = pr.state === 'open' && !pr.merged ? await this.requiredStatuses(pr.head.sha, requiredChecks, work.policy.checks, checks, ciAppIdsOf(work)) : [];
     const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);

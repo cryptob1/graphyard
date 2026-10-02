@@ -76,7 +76,7 @@ test('GY-1060: a required status context is read as a commit status, and protect
   const reads = (pattern: RegExp) => f.calls.filter(call => pattern.test(call.path)).length;
   assert.equal(reads(/\/protection$/), 1, 'the second observation reuses the protection read');
   assert.equal(reads(/^\/rules\/branches\//), 1, 'and the ruleset read');
-  assert.equal(reads(/\/status\?/), 2, 'statuses are per head, read on each observation');
+  assert.equal(reads(/\/status\?/), 1, 'a settled terminal status is cached per head and reused across observations');
   await f.github.protection(); await f.github.protection();
   assert.equal(reads(/\/protection$/), 3, 'a direct protection read is never shared');
 });
@@ -97,6 +97,52 @@ test('GY-1060: every page of the combined status is read, and another app\'s run
   assert.deepEqual(obs.checks.filter(check => check.name === 'ci/legacy').map(check => [check.appId, check.result, check.source]), [[4242, 'queued', undefined], [0, 'success', 'status']],
     'the status on the second page is read beside the stray run');
   assert.equal(f.calls.filter(call => call.path.startsWith(`/commits/${head}/status?`)).length, 2);
+});
+test('GY-1060: pending statuses re-read, finished PRs skip status reads, and status read errors fail observation', async () => {
+  // 1. Pending statuses are re-read across observations (not cached as terminal)
+  {
+    const f = fixture(), request = f.github.request.bind(f.github);
+    f.github.request = async (path, method, body) => {
+      if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+      if (path.startsWith('/rules/branches/')) return [];
+      if (path === `/commits/${head}/status?per_page=100&page=1`) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'pending' }] }; }
+      return request(path, method, body);
+    };
+    const obs1 = await f.github.observe(f.work);
+    assert.deepEqual(obs1.checks.filter(c => c.name === 'ci/legacy'), [{ name: 'ci/legacy', result: 'pending', appId: 0, source: 'status' }]);
+    await f.github.observe(f.work);
+    const reads = (pattern: RegExp) => f.calls.filter(call => pattern.test(call.path)).length;
+    assert.equal(reads(/\/status\?/), 2, 'a pending status is re-read on the next observation');
+  }
+  // 2. Gated on open and unmerged PRs (Finding 20)
+  {
+    const f = fixture(), request = f.github.request.bind(f.github);
+    f.github.request = async (path, method, body) => {
+      if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+      if (path.startsWith('/rules/branches/')) return [];
+      if (path.startsWith('/pulls/') && !path.includes('/reviews') && !path.includes('/files')) {
+        const pr = await request(path, method, body);
+        return { ...pr, state: 'closed', merged: true };
+      }
+      if (path.startsWith(`/commits/${head}/status?`)) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'success' }] }; }
+      return request(path, method, body);
+    };
+    const obs = await f.github.observe(f.work);
+    const reads = (pattern: RegExp) => f.calls.filter(call => pattern.test(call.path)).length;
+    assert.equal(reads(/\/status\?/), 0, 'a closed or merged PR skips requiredStatuses reads');
+    assert.equal(obs.checks.some(c => c.name === 'ci/legacy'), false);
+  }
+  // 3. Status read errors are not swallowed (Finding 23)
+  {
+    const f = fixture(), request = f.github.request.bind(f.github);
+    f.github.request = async (path, method, body) => {
+      if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+      if (path.startsWith('/rules/branches/')) return [];
+      if (path.startsWith(`/commits/${head}/status?`)) throw new Error('GitHub status endpoint 502 Bad Gateway');
+      return request(path, method, body);
+    };
+    await assert.rejects(f.github.observe(f.work), /GitHub status endpoint 502 Bad Gateway/, 'status read errors fail the observation rather than being swallowed');
+  }
 });
 test('GitHub adapter retains retry history in deterministic check-run identity order', async () => {
   const f = fixture(), request = f.github.request.bind(f.github);
