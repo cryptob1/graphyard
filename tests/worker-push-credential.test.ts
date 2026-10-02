@@ -433,6 +433,29 @@ test('unit:mint-requests-granted-subset — when the installation lacks a wanted
   }
 });
 
+test('unit:push-mint-falls-back-without-workflows — an installation that has not accepted workflows still mints the contents and pull_requests credential instead of refusing every launch', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+    const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 5678, privateKey });
+    const asked: Record<string, string>[] = [];
+    // No merge-queue ruleset, so the bypass check (GY-1066) passes and the mint itself is what is judged.
+    (github as any).request = async () => [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      // GY-1100: the installation's grants are read first, so the mint never asks for what it lacks.
+      if (String(url).endsWith('/app/installations/5678')) return new Response(JSON.stringify({ permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' } }), { status: 200 });
+      if (!String(url).endsWith('/access_tokens')) return realFetch(url, init);
+      const { permissions } = JSON.parse(String(init!.body));
+      asked.push(permissions);
+      if (permissions.workflows) return new Response(JSON.stringify({ message: 'The permissions requested are not granted to this installation.' }), { status: 422 });
+      return new Response(JSON.stringify({ token: token('fallback'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions }), { status: 201 });
+    }) as typeof fetch;
+    const minted = await github.mintPushToken();
+    assert.deepEqual(asked, [{ contents: 'write', pull_requests: 'write' }], 'only the granted subset is asked, with no refused round trip');
+    assert.deepEqual(minted.permissions, { contents: 'write', pull_requests: 'write' });
+  } finally { globalThis.fetch = realFetch; }
+});
+
 // ---- GY-1066: the review follow-ups of GY-999 ----------------------------------------------------
 
 test('GY-1066 — no worker token from a merge-queue bypass App, the lease checked again after the mint, and a token kept until GitHub confirms its revocation', async () => {
