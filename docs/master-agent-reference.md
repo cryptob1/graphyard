@@ -19,7 +19,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 #### A contaminated branch
 
-Listed under `branches.contaminated` (`master repair GY-42 REASON`):
+Listed under `branches.contaminated`; run `master repair GY-42`:
 
 | Command | Purpose
 | --- | ---
@@ -37,7 +37,7 @@ or the worker runs `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, record `record.json` under `.graphyard/master-actions/` and append `ledger.json`. Approving GitHub Mobile's *Confirm access* code (in `master status`) on the device is human-only. The master never stores the profile's cookies and must never use a merge bypass, push code or read worker credentials.
+Flows read `GET /api/github/installation` (App credential, not gh), record `record.json` under `.graphyard/master-actions/` and append `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 If a harness classifier refuses routine administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
@@ -47,17 +47,21 @@ One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-
 
 A `resync` completes only on an observation newer than its claim: `POST /api/work/:id/resync` with `{ since }` (claim time) wakes the item's observation job and reports whether it observed (`wake: false` only reads); unobserved, it fails and backs off, stalling after repeated failures.
 
-A `dispatch` or `request-review` finding a session already answering the head completes on it. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. An item's throw fails only its `isolated:KIND:ITEM-ID` action.
+A `dispatch` or `request-review` finding a session already answering the head completes on it. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. An item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
-## Resources, disk and recovery
+## Resources and disk
 
 `resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `run.worktreeRemovalLimit` per cycle) and stale, unheld [test temp entries](operations-reference.md#control-plane-resources) in `/tmp`; `disk` attention below `run.diskThresholdGb`. Review and proof checkouts: `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
 
-A dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd. `settleable: true` → `master settle-containment GY-N REASON`; else stop the recorded scope unit (`containment.scope`), request `rework`.
+## Recovery
+
+A dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; else stop the recorded scope unit (`containment.scope`), request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-Faults carry `faultClass` (`master status` `faults`); a recurring class files one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes; scope requests count past 15 minutes open, or refused with no approver left. Sandbox or `workflows`-permission refusal blockers are `configuration`.
+## Fault classes
+
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity). Scope requests count past 15 minutes open, or refused with no approver left. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
 
 ## Pipeline speed
 
