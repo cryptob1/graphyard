@@ -12,7 +12,7 @@ import { selectFleetSession } from '../fleet.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { piRunner } from '../runner/pi.js';
 import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
-import { doctorSettingsSchema, type DoctorSettings } from '../master/profiles.js';
+import { doctorSettingsSchema, type DoctorSettings } from '../master/doctor-settings.js';
 import { z } from 'zod';
 import type { Runner } from '../runner/types.js';
 import { readyToRetry } from './sessions.js';

@@ -8,7 +8,7 @@ import { approverSessionName } from '../src/master/autonomy.js';
 import { clearDoctorRuns, clearCoveredBlockers, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorTool } from '../src/daemon/doctor.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
-import { doctorSettingsSchema } from '../src/master/profiles.js';
+import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import graphyardExtension, { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
 import { statusRoutes, doctorFindingEvent, doctorRunEvent } from '../src/server/routes/status.js';
 import type { Runner } from '../src/runner/types.js';
