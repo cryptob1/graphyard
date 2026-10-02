@@ -1,6 +1,6 @@
 // Concern: containment quarantines — their phase against the lease, and verifying a supervisor is gone.
 import type { Work } from '../model.js';
-import { type ContainmentVerification, containmentGraceMs, containmentAttestation, containmentVerificationSchema, containmentSettlementRefusals } from '../quarantine.js';
+import { type ContainmentVerification, containmentGraceMs, containmentAttestation, containmentVerificationSchema, containmentSettlementRefusals, boundContainmentVerification } from '../quarantine.js';
 import { type SupervisorProbe, probeSupervisorAbsence } from '../containment-probe.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -88,7 +88,7 @@ export async function verifyContainmentDeath(
   // scope still contains and attribute a neighbour's scope to its own live supervisor.
   const probe = await (options.probe ?? probeSupervisorAbsence)({ key: work.key, epoch: quarantine.epoch, workspacePath: workspace.path, scope: quarantine.scope ?? null });
   const localNow = options.localNow ?? new Date();
-  const verification = containmentVerificationSchema.parse({ ...probe, host: options.hostId, observedAt: localNow.toISOString(), clockOffset: options.clockOffset });
+  const verification = containmentVerificationSchema.parse({ ...boundContainmentVerification(probe), host: options.hostId, observedAt: localNow.toISOString(), clockOffset: options.clockOffset });
   // Judged at the control-plane time of the probe, not of the snapshot the cycle began with: the probe
   // runs late in a cycle that can take tens of seconds, and measuring it against the snapshot's time
   // refused every automatic settlement as "dated after the control-plane clock" (2026-09-26).
