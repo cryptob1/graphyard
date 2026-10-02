@@ -2,9 +2,11 @@
 // aggregating job over a matrix of shard jobs (.github/workflows/ci.yml); each shard runs the files
 // this module assigns it, balanced by the per-file durations recorded in
 // tests/helpers/timing-baseline.json. On a pull request's own CI only the test files the change can
-// affect run; pushes to main, merge-queue tips and any change this module cannot map run everything.
+// affect run; pushes to main, merge-queue tips and any change this module cannot map run every
+// pre-merge file. The release-candidate suites (`releaseCandidateTests`) never run here.
 //
 //   node scripts/ci-tests.mjs select --out FILE           the files this CI run executes, one per line
+//   node scripts/ci-tests.mjs release-candidate --out FILE  the long suites only release-candidate validation runs
 //   node scripts/ci-tests.mjs shards [N]                  the balanced shards of the full suite
 //   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs
 //   node scripts/ci-tests.mjs durations RECORD.jsonl...   write measured per-file durations into the baseline
@@ -28,6 +30,27 @@ export const speculativeTipSubject = /^Graphyard speculative tip for /;
 /** Every test file of the Node suite, as `npm test` runs it by default. */
 export function listTestFiles(root = repositoryRoot) {
   return readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
+}
+
+/**
+ * The suites the pre-merge gate never runs (GY-1093): the soak, and every test whose verdict is a
+ * wall-clock budget, so it measures the runner as much as the change. They run only against a
+ * pinned release-candidate SHA (.github/workflows/release-candidate.yml), beside the container
+ * acceptance, container recovery and chart jobs, never as a required pull-request check.
+ */
+export const releaseCandidateTests = {
+  'tests/soak.test.ts': 'soak',
+  'tests/work-snapshot-latency.test.ts': 'timing-budget',
+  'tests/cycle-latency.test.ts': 'timing-budget',
+  'tests/server-scale.test.ts': 'timing-budget',
+  'tests/healthz-bounded.test.ts': 'timing-budget',
+  'tests/interventions-scale.test.ts': 'timing-budget',
+};
+export const isReleaseCandidateTest = file => Object.hasOwn(releaseCandidateTests, file);
+
+/** The test files the required `test` check runs: every file except the release-candidate suites. */
+export function preMergeTestFiles(root = repositoryRoot) {
+  return listTestFiles(root).filter(file => !isReleaseCandidateTest(file));
 }
 
 // ---- Shards ------------------------------------------------------------------------------------
@@ -227,18 +250,22 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (command === 'select') {
     const context = runContext();
     const needsMap = context.event === 'pull_request' && context.changed && context.queued === false && !speculativeTipSubject.test(context.headSubject ?? '');
-    const selection = selectForRun({ ...context, map: needsMap ? dependencyMap() : new Map(), tests });
+    // The map reaches through every test file; the selection keeps only the pre-merge ones.
+    const selection = selectForRun({ ...context, map: needsMap ? dependencyMap() : new Map(), tests: preMergeTestFiles() });
     const out = option('--out');
     if (out) writeFileSync(out, selection.files.map(file => `${file}\n`).join('')); else console.log(selection.files.join('\n'));
     const summary = `### Test selection\n\n${selection.mode === 'full' ? 'Full suite' : 'Affected tests only'}: ${selection.reason}.\n\n${selection.files.length} test file(s) selected.\n`;
     console.error(summary);
     if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, summary, { flag: 'a' });
+  } else if (command === 'release-candidate') {
+    const files = tests.filter(isReleaseCandidateTest), out = option('--out');
+    if (out) writeFileSync(out, files.map(file => `${file}\n`).join('')); else console.log(files.join('\n'));
   } else if (command === 'shards') {
-    const shards = shardFiles(tests, readDurations(), Number(args[0] ?? defaultShardCount));
+    const shards = shardFiles(preMergeTestFiles(), readDurations(), Number(args[0] ?? defaultShardCount));
     shards.forEach((shard, at) => console.log(`shard ${at + 1}: ${shard.files.length} files, ${Math.round(shard.durationMs / 1000)}s recorded`));
     console.log(`imbalance ${(shardImbalance(shards) * 100).toFixed(1)}%`);
   } else if (command === 'affected') {
-    const selection = selectAffected(args, dependencyMap(), tests);
+    const selection = selectAffected(args, dependencyMap(), preMergeTestFiles());
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.mode === 'affected') console.log(selection.files.join('\n'));
   } else if (command === 'durations') {
     if (!args.length) throw new Error('Usage: ci-tests durations RECORD.jsonl...');
@@ -247,6 +274,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
     console.log(`Recorded durations for ${Object.keys(merged.files).length} of ${tests.length} test files in ${relative(process.cwd(), file)}`);
   } else {
-    throw new Error('Usage: ci-tests select [--out FILE] | shards [N] | affected FILE... | durations RECORD.jsonl...');
+    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--out FILE] | shards [N] | affected FILE... | durations RECORD.jsonl...');
   }
 }
