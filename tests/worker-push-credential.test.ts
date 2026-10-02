@@ -88,8 +88,8 @@ test('unit:worker-session-scoped-push-credential — a worker launched under its
     const issued = await issuePushCredential(services(leased()), worker, 'GY-999', { epoch: 4 }, now);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, 'https://api.github.com/app/installations/5678/access_tokens');
-    assert.deepEqual(requests[0].body, { repositories: ['project'], permissions: { contents: 'write', pull_requests: 'write' } }, 'one repository, and only the two permissions a push and its pull request need');
-    assert.deepEqual(workerPushPermissions, { contents: 'write', pull_requests: 'write' });
+    assert.deepEqual(requests[0].body, { repositories: ['project'], permissions: { contents: 'write', pull_requests: 'write', workflows: 'write' } }, 'one repository, and only the permissions a push, its pull request and a base sync that touched a workflow need');
+    assert.deepEqual(workerPushPermissions, { contents: 'write', pull_requests: 'write', workflows: 'write' });
     const leaseBound = Date.parse(claimedAt) + roleSessionMaximumMs.implementation;
     assert.equal(issued.leaseBound, new Date(leaseBound).toISOString());
     assert.ok(Date.parse(issued.expiresAt) <= leaseBound, 'the credential expires no later than the lease bound');
