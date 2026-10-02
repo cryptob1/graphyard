@@ -9,7 +9,7 @@ Register the exact branch, path and host ID (`graphyard register GY-1 workspace.
 
 ## `watch`
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials from the child and on lease loss sends SIGTERM, then SIGKILL, to the process group; it is no sandbox. A contained launch first records a **quarantine** naming its systemd scope unit. If the supervisor dies, the item is fenced until `POST /api/work/UUID/autosettle` (`coordinator` or `admin`) proves authority expired 120 seconds ago and no supervisor, workspace process or scope member is alive, or an operator attests the stop. Settlement excuses only the recorded pane's idle, childless shell, which the loop closes.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials from the child and on lease loss sends SIGTERM, then SIGKILL, to the process group; it is no sandbox. A contained launch first records a **quarantine** naming its systemd scope unit. If the supervisor dies, the item is fenced until `POST /api/work/UUID/autosettle` (`coordinator` or `admin`) proves authority expired 120 seconds ago and no supervisor, workspace process or scope member is alive, or an operator attests the stop. The host verification records each process list up to its bound (200 per scope) with the full count and `truncated: true`; a truncated scope is judged live, so it fences its own quarantine and any quarantine it still holds processes for, while other quarantines in the same verification settle normally. A host with more than 50 containment scopes records the first 50 and the full count, and refuses every settlement, because an unrecorded scope cannot be proven stopped. Settlement excuses only the recorded pane's idle, childless shell, which the loop closes.
 
 ### Push credential
 
