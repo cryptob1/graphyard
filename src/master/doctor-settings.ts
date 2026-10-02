@@ -1,3 +1,4 @@
+// Concern: the schema of `run.doctor` in .graphyard/master.json — the pipeline doctor's schedule, models and time limit (GY-711).
 import { z } from 'zod';
 
 /**
