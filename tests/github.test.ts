@@ -65,7 +65,7 @@ test('GY-1060: a required status context is read as a commit status, and protect
   f.github.request = async (path, method, body) => {
     if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
     if (path.startsWith('/rules/branches/')) { f.calls.push({ path, method: method ?? 'GET', body }); return [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'secrets', integration_id: 77 }] } }]; }
-    if (path === `/commits/${head}/status?per_page=100`) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'error' }, { context: 'unrequired', state: 'failure' }] }; }
+    if (path === `/commits/${head}/status?per_page=100&page=1`) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'error' }, { context: 'unrequired', state: 'failure' }] }; }
     return request(path, method, body);
   };
   const obs = await f.github.observe(f.work);
@@ -79,6 +79,24 @@ test('GY-1060: a required status context is read as a commit status, and protect
   assert.equal(reads(/\/status\?/), 2, 'statuses are per head, read on each observation');
   await f.github.protection(); await f.github.protection();
   assert.equal(reads(/\/protection$/), 3, 'a direct protection read is never shared');
+});
+test('GY-1060: every page of the combined status is read, and another app\'s run of a required context does not hide its status', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  const filler = Array.from({ length: 100 }, (_, index) => ({ context: `other/${index}`, state: 'success' }));
+  f.github.request = async (path, method, body) => {
+    if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+    if (path.startsWith('/rules/branches/')) return [];
+    if (path.startsWith(`/commits/${head}/status?`)) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: path.endsWith('&page=1') ? filler : [{ context: 'ci/legacy', state: 'success' }] }; }
+    if (path.includes('/check-runs') && !path.includes('check_name=')) {
+      const runs = await request(path, method, body);
+      return { check_runs: [...runs.check_runs, { id: 30, name: 'ci/legacy', status: 'queued', conclusion: null, app: { id: 4242 } }] };
+    }
+    return request(path, method, body);
+  };
+  const obs = await f.github.observe(f.work);
+  assert.deepEqual(obs.checks.filter(check => check.name === 'ci/legacy').map(check => [check.appId, check.result, check.source]), [[4242, 'queued', undefined], [0, 'success', 'status']],
+    'the status on the second page is read beside the stray run');
+  assert.equal(f.calls.filter(call => call.path.startsWith(`/commits/${head}/status?`)).length, 2);
 });
 test('GitHub adapter retains retry history in deterministic check-run identity order', async () => {
   const f = fixture(), request = f.github.request.bind(f.github);

@@ -47,6 +47,10 @@ test('unit:required-checks-followups — a check bound to no app prefers the con
   assert.deepEqual(testGate(status('failure')).reasons, ['Required check ci/legacy failed on the current candidate']);
   assert.equal(routineDecision(status('failure'), { autoMerge: true }, now.getTime())?.binding, `${head}:ci:ci/legacy`);
   assert.deepEqual(testGate(status('pending')).reasons, ['Required CI check ci/legacy has not passed on the current candidate']);
+  // Another app's stray run of the context's name never hides its commit status (finding 19).
+  const strayed = item([...passing, { name: 'ci/legacy', result: 'queued', appId: 4242 }, { name: 'ci/legacy', result: 'success', appId: 0, source: 'status' }], [{ name: 'ci/legacy', appId: null }]);
+  assert.equal(requiredCheckRun({ name: 'ci/legacy', policy: false, appId: null }, strayed.observation!.checks, ciAppIds)?.source, 'status');
+  assert.equal(testGate(strayed).passed, true);
   // A status never satisfies a policy check: app 0 is no configured CI app.
   assert.equal(testGate(item([{ name: 'test', result: 'success', appId: 0, source: 'status' }, { name: 'typecheck', result: 'success' }], [])).passed, false);
 });
@@ -57,6 +61,10 @@ test('unit:required-checks-followups — a published tip failing only a protecti
   assert.match(ejectionReason(failing, ciAppIds) ?? '', /Required CI check secrets did not pass/);
   // Not yet reported: no verdict, not a pass.
   assert.equal(tipVerdict(published(passing), ciAppIds), undefined);
+  // The merge gate names the check the tip still waits on, so the wait is never anonymous (findings 12, 15).
+  const waiting = published(passing);
+  assert.deepEqual(evaluate(waiting, [waiting], now, ciAppIds).gates.find(gate => gate.name === 'merge')!.reasons,
+    [`Merge queue is validating speculative tip ${head.slice(0, 12)}: Required CI check secrets has not passed on the current candidate`]);
   assert.deepEqual(tipVerdict(published([...passing, { name: 'secrets', result: 'skipped' }]), ciAppIds), { result: 'pass' }, 'GitHub accepts a skipped protection-only check');
 });
 

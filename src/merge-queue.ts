@@ -990,21 +990,23 @@ export function requiredChecksOf(work: Pick<Work, 'policy' | 'observation'>): Re
  * as ever; a protection-only check's from the app protection binds it to. One bound to no app is
  * satisfied on GitHub by any source's run or commit status of that name; Graphyard prefers the
  * configured CI apps' runs whenever one reports it (GY-1060), so another app with checks:write can
- * neither pass it nor fail it beside CI, and reads any other source only when no CI app reports it.
+ * neither pass it nor fail it beside CI, then the commit status, so a stray run of another app
+ * cannot hide the status that answers a classic context, and reads another app's run only last.
  */
 export function requiredCheckRun(check: RequiredCheck, checks: Observation['checks'], ciAppIds: readonly number[] | null): Observation['checks'][number] | undefined {
   const named = checks.filter(run => run.name === check.name);
   if (check.policy) return latestCheck(named.filter(run => !ciAppIds || ciAppIds.includes(run.appId)));
   if (check.appId !== null) return latestCheck(named.filter(run => run.appId === check.appId));
   const trusted = ciAppIds ? named.filter(run => ciAppIds.includes(run.appId)) : [];
-  return latestCheck(trusted.length ? trusted : named);
+  const statuses = named.filter(run => run.source === 'status');
+  return latestCheck(trusted.length ? trusted : statuses.length ? statuses : named);
 }
 /** Whether a counting run failed: a policy check by the queue's conclusions, as ever; a protection-only one by the failed-CI rework rule's (GY-430). */
 export function requiredRunFailed(check: RequiredCheck, run: Observation['checks'][number] | undefined): boolean {
   return !!run && (check.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result));
 }
 /** The test gate's trusted CI apps as last recorded on the item; legacy snapshots use the engine's historical GitHub Actions default. */
-export const ciAppIdsOf = (work: Pick<Work, 'gates'>): readonly number[] => work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
+export const ciAppIdsOf = (work: Pick<Work, 'gates'>): readonly number[] => work.gates?.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
 /** Whether a run satisfies its required check: success, or for a protection-only check any conclusion GitHub accepts (neutral, skipped). */
 export function requiredCheckPassed(check: RequiredCheck, run: Observation['checks'][number] | undefined): boolean {
   return !!run && (run.result === 'success' || !check.policy && ['neutral', 'skipped'].includes(run.result));
