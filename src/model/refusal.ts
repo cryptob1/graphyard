@@ -22,4 +22,13 @@ export function requireCurrent(value: unknown, message: string): asserts value {
 export function demand(value: unknown, message: string, status = 409): asserts value {
   if (!value) throw new Refusal(message, status);
 }
+/**
+ * The machine-readable code on the refusal of a command against a work item the server does not
+ * have (GY-448). A bare 404 can come from a mis-routed proxy during a deploy, so a client treats it
+ * as transient; one carrying this code is the control plane's own answer that the item is gone.
+ */
+export const unknownWorkCode = 'work-not-found';
+export function demandWork<T>(work: T | undefined | null): asserts work is T {
+  if (!work) throw new Refusal('Work item not found', 404, { code: unknownWorkCode });
+}
 export function admin(actor: Principal) { demand(actor.role === 'admin', 'Operator permission required', 403); }

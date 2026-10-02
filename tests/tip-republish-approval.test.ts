@@ -1,8 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -11,6 +8,7 @@ import { GitHub, processJob } from '../src/github.js';
 import { dismissedApproval, predictQueue, queueRef, reviewDismissal, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { carriedApproval, type Observation, type Principal, type Work } from '../src/model.js';
 import { buildMasterStatus } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed case
 // per required proof: unit:unobserved-approval-carried-on-republish (GY-519 AC-1),
@@ -40,7 +38,7 @@ const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TIP_REPUBLISH_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 450);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-tip-republish-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('tip-republish'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;

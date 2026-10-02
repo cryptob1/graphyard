@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -13,7 +11,13 @@ import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } fr
 import { carriedApproval, carryRefusal, currentCarry, decideCarry, describeQueueBinding, evaluate, evidenceBindsCandidate, type CarryInput, type Evidence, type Observation, type Principal, type TipMerge, type Work } from '../src/model.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
 import { diagnose } from '../src/coordination.js';
-import { buildMasterStatus, repostCarriedApproval, type MasterConfig } from '../src/master.js';
+import { buildMasterStatus, refuseStaleCarry, repostCarriedApproval, StaleCarriedApprovalError, type MasterConfig } from '../src/master.js';
+import { mergeStep, repeatedMergeRefusalMs } from '../src/daemon/cycle-delivery.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import { neededDecision } from '../src/daemon/decisions.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { refreshedCarriedApproval } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
 // case per required proof.
@@ -145,7 +149,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 500;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_QUEUE_CARRY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 16);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-queue-carry-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('queue-carry'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
@@ -354,3 +358,223 @@ test('integration:queue-carry-refusals — a revoked original proof withdraws it
   assert.match(second.queueEjection!.reason, /Proof unit:queue was revoked on speculative tip/);
   assert.equal(evaluate(second, [second], new Date(), [15368]).queue, null, 'the ejected tip cannot re-enter');
 });
+
+// ---- GY-831: a queue head whose carried approval is stale is re-reviewed or re-bound ----------
+
+/** A queued tip over reviewed head H whose carried approval names review 800 of an earlier pull request's commit. */
+const OLD = sha40('0d1');
+function staleCarry(reviews: Observation['reviews'] = []) {
+  const carry = decideCarry(input());
+  carry.approval = { carried: true, provider: 'github', reviewer: 'graphyard-reviewer[bot]', sha: OLD, reviewId: 800, originalSha: OLD, reason: 'carried from the earlier pull request' };
+  const speculation: QueueSpeculation = { ref: queueRef('GY-470'), tip: TIP, base: P, baseTree: sha40('7e'), predecessors: ['GY-1'], policyRevision: 1, publishedAt: at, merge: authored(), reviewedHead: H, carry };
+  const candidate = { sha: TIP, baseSha: P, pr: 371, branch: 'graphyard/gy-470-2', author: 'worker' };
+  return { key: 'GY-470', candidate, policyRevision: 1, policy: { checks: ['test'], review: true }, queue: { sequence: 1, enqueuedAt: at, policyRevision: 1, speculation },
+    observation: { candidate, reviews, checks: [], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], scopeFiles: [], at, prState: 'open', draft: false } } as unknown as Work;
+}
+
+test('unit:carried-approval-rebinds — a carried binding from an earlier pull request is re-posted as the bound reviewer\'s current approval of the head the tip was built from, and a newer approval of that head refreshes the binding', async () => {
+  const work = staleCarry(), carried = carriedApproval(work)!;
+  assert.equal(carried.originalSha, OLD);
+  // GitHub holds no review 800 on this pull request: only the reviewer's approval of the reviewed head H.
+  let reviews: any[] = [{ id: 5327788286, user: { login: 'graphyard-reviewer[bot]' }, commit_id: H, state: 'APPROVED' }];
+  const posted: any[] = [];
+  const fetcher = (async (_url: string, init: any) => { const body = JSON.parse(init.body); posted.push(body); return new Response(JSON.stringify({ id: 5327788300, state: 'APPROVED', commit_id: body.commit_id, user: { login: 'graphyard-reviewer[bot]' } })); }) as unknown as typeof fetch;
+  const dependencies = { run: () => JSON.stringify(reviews), mint: async () => ({ token: 'reviewer-token' }), fetcher };
+  const result = await repostCarriedApproval(reviewerConfig, work, carried, dependencies);
+  assert.deepEqual([result.posted, result.reviewId], [true, 5327788300]);
+  assert.match(result.reason, new RegExp(`re-posted the carried approval of ${H.slice(0, 12)} \\(review 5327788286, re-bound from the reviewed head\\)`));
+  assert.deepEqual([posted.length, posted[0].commit_id, posted[0].event], [1, TIP, 'APPROVE'], 'the approval is re-posted on the tip');
+  assert.match(posted[0].body, new RegExp(`approval of ${H} \\(review 5327788286\\) to Graphyard-authored merge-queue tip ${TIP}`));
+  assert.doesNotMatch(posted[0].body, new RegExp(`approval of ${OLD}`), 'the stale binding is not what is re-posted');
+  // An approval of another commit is not the reviewed head's: nothing may be re-posted, and the refusal is typed as stale.
+  reviews = [{ id: 5327788286, user: { login: 'graphyard-reviewer[bot]' }, commit_id: sha40('0e1'), state: 'APPROVED' }];
+  await assert.rejects(repostCarriedApproval(reviewerConfig, work, carried, dependencies), (error: Error) => error instanceof StaleCarriedApprovalError && /is no longer on the pull request, and graphyard-reviewer\[bot\] has not approved the reviewed head/.test(error.message));
+  // A changed verdict is never replaced.
+  reviews = [{ id: 5327788286, user: { login: 'graphyard-reviewer[bot]' }, commit_id: H, state: 'APPROVED' }, { id: 5327788290, user: { login: 'graphyard-reviewer[bot]' }, commit_id: H, state: 'CHANGES_REQUESTED' }];
+  await assert.rejects(repostCarriedApproval(reviewerConfig, work, carried, dependencies), /requested changes after approving/);
+  assert.equal(posted.length, 1);
+
+  // The record refreshes the binding as soon as an observation shows the newer approval of H,
+  // dismissed by GitHub on the tip push or not; a later change request refreshes nothing.
+  const dismissed = staleCarry([{ id: 5327788286, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'DISMISSED', dismissal: { verdict: 'approved', mergeBase: true } } as Observation['reviews'][number]]);
+  const refreshed = refreshedCarriedApproval(dismissed)!;
+  assert.deepEqual([refreshed.carried, refreshed.reviewer, refreshed.reviewId, refreshed.originalSha, refreshed.sha], [true, 'graphyard-reviewer[bot]', 5327788286, H, H]);
+  assert.match(refreshed.reason, new RegExp(`approval of ${H.slice(0, 12)} by graphyard-reviewer\\[bot\\] \\(review 5327788286\\), the head tip ${TIP.slice(0, 12)} was built from, replaces the carried approval of ${OLD.slice(0, 12)}`));
+  // A dismissal that is not from mergeBase (manually dismissed) does not refresh the binding.
+  assert.equal(refreshedCarriedApproval(staleCarry([{ id: 5327788286, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'DISMISSED', dismissal: { verdict: 'approved', mergeBase: false } } as Observation['reviews'][number]])), null, 'a deliberately dismissed approval does not re-bind');
+  assert.equal(refreshedCarriedApproval(staleCarry([{ id: 5327788286, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }, { id: 5327788290, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'CHANGES_REQUESTED' }])), null);
+  assert.equal(refreshedCarriedApproval(staleCarry([{ id: 700, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }])), null, 'an older approval is not newer than the binding');
+  assert.equal(refreshedCarriedApproval(staleCarry([{ id: 5327788286, reviewer: 'someone-else', sha: H, state: 'APPROVED' }])), null, 'only the carried reviewer re-binds its own approval');
+  // Once refreshed, the re-post finds the binding's own review and needs no fallback.
+  const bound = { ...carried, ...refreshed };
+  reviews = [{ id: 5327788286, user: { login: 'graphyard-reviewer[bot]' }, commit_id: H, state: 'DISMISSED' }];
+  const again = await repostCarriedApproval(reviewerConfig, work, bound, dependencies);
+  assert.equal(again.posted, true); assert.match(posted[1].body, new RegExp(`approval of ${H} \\(review 5327788286\\)`));
+});
+
+test('unit:stale-carried-approval-rereviewed — one refused re-post clears the carried approval, the review gate requests a fresh review of the tip, and the next entry heads the queue', async () => {
+  await clearQueue();
+  const main = sha40('51'), headA = sha40('52'), headB = sha40('53'), tipB = sha40('54'), mergedA = sha40('55'), headC = sha40('56'), tipC = sha40('57');
+  let first = await submitted('Stale head'), second = await submitted('Stale carried'), third = await submitted('Stale follower');
+  first = await validated(first, { sha: headA, baseSha: main }); second = await validated(second, { sha: headB, baseSha: main }); third = await validated(third, { sha: headC, baseSha: main });
+  await onlyJob(first);
+  await processJob(engine, adapter(work => tip(work, { sha: headA, baseSha: main }), (work, placement) => published(work, placement, headA, null)).github);
+  await onlyJob(second);
+  await processJob(engine, adapter(work => tip(work, { sha: headB, baseSha: main }), (work, placement) => published(work, placement, tipB, { from: headB, parents: [headB, headA], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/head.ts'] })).github);
+  const dismissed = [{ id: 41, reviewer: 'graphyard-reviewer[bot]', sha: headB, state: 'DISMISSED' }];
+  second = await engine.observe(second.id, (await reload(second)).revision, tip(second, { sha: tipB, baseSha: headA }, { baseTip: main, reviews: dismissed }));
+  first = await mergeHead(first, { sha: headA, baseSha: main }, mergedA);
+  assert.equal(first.stage, 'done');
+  second = await engine.observe(second.id, (await reload(second)).revision, tip(second, { sha: tipB, baseSha: headA }, { baseTip: mergedA, baseTree: treeOf(headA), reviews: dismissed }));
+  assert.ok(second.gates.every(entry => entry.passed), second.gates.flatMap(entry => entry.reasons).join('; '));
+  assert.equal(carriedApproval(second)?.reviewId, 41, 'the head stands on a carried approval');
+  await onlyJob(third);
+  await processJob(engine, adapter(work => tip(work, { sha: headC, baseSha: main }), (work, placement) => published(work, placement, tipC, { from: headC, parents: [headC, tipB], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/head.ts'] })).github);
+  assert.equal((await placementOf(second)).position, 0, 'the carried item heads the queue');
+  assert.equal((await placementOf(third)).position, 1, 'the next entry waits behind it');
+
+  // The re-post finds neither the carried review nor an approval of the reviewed head on the pull request.
+  second = await reload(second);
+  const failure = await repostCarriedApproval(reviewerConfig, second, carriedApproval(second)!, { run: () => '[]', mint: async () => ({ token: 'reviewer-token' }), fetcher: (async () => { throw new Error('nothing may be posted'); }) as unknown as typeof fetch }).catch(error => error);
+  assert.ok(failure instanceof StaleCarriedApprovalError, String(failure));
+  const reported: string[] = [];
+  const mutation = async (path: string, data: unknown, requestId?: string) => { reported.push(path); return engine.execute(coordinator, 'mergerefused', second.id, data, requestId ?? randomUUID()); };
+  await assert.rejects(refuseStaleCarry(second, failure, mutation, (item, step) => `${item.id}:${step}`), /Graphyard cleared the carried approval: the review gate requests a fresh review of tip .*, and the next queue entry heads the queue meanwhile/);
+  assert.deepEqual(reported, [`work/${second.id}/mergerefused`], 'one refused re-post is reported once');
+
+  second = await reload(second);
+  assert.equal(carriedApproval(second), null, 'the carried approval is cleared');
+  assert.deepEqual(second.mergeRefusal?.approval, { reviewer: 'graphyard-reviewer[bot]', reviewId: 41, originalSha: headB }, 'the refusal names the review it could not re-post');
+  assert.equal(gate(second, 'review').passed, false);
+  assert.deepEqual([second.autoDispatch?.review?.state, second.autoDispatch?.review?.sha], ['requested', tipB], 'the review gate requests a fresh review of the tip at once');
+  assert.deepEqual([second.mergeRefusal?.action, second.mergeRefusal?.sha], ['rereview', tipB]);
+  assert.equal(second.queue, null, 'the refused item leaves the queue head');
+  assert.equal((await placementOf(third)).position, 0, 'the next entry heads the queue');
+  // The same dismissed review is not restored over the refusal on the next observation.
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: tipB, baseSha: headA }, { baseTip: mergedA, baseTree: treeOf(headA), reviews: dismissed }));
+  assert.equal(carriedApproval(second), null);
+  assert.equal(second.queue, null, 'and the entry stays out of the queue');
+  // A fresh approval of the tip answers the refusal: the entry re-enters, behind the new head.
+  second = await engine.observe(second.id, second.revision, tip(second, { sha: tipB, baseSha: headA }, { baseTip: mergedA, baseTree: treeOf(headA), reviews: [...dismissed, { id: 99, reviewer: 'graphyard-reviewer[bot]', sha: tipB, state: 'APPROVED' }] }));
+  assert.equal(gate(second, 'review').passed, true);
+  assert.ok(second.queue, 'the answered entry re-enters the queue');
+  assert.ok(second.queue!.sequence > (await reload(third)).queue!.sequence, 'at the back, behind the entry that took the head');
+  // Nor is a merge refusal reported for a candidate that has since moved.
+  await assert.rejects(engine.execute(coordinator, 'mergerefused', second.id, { sha: headB, baseSha: main, policyRevision: 1, reason: 'stale' }, randomUUID()), /candidate changed since the refused merge/);
+});
+
+test('unit:repeated-merge-refusal-acted — a guarded merge refused for the same reason past ten minutes raises attention naming the reason and the next step, and the loop acts on it once', async () => {
+  await clearQueue();
+  const main = sha40('61'), headA = sha40('62');
+  let item = await submitted('Repeated refusal');
+  item = await validated(item, { sha: headA, baseSha: main });
+  // The loop's view: every gate passes, so the guarded merge is retried on its short pause.
+  const view = (work: Work) => ({ ...work, stage: 'merge', gates: work.gates.map(entry => ({ ...entry, passed: true, reasons: [] })), violations: [] }) as Work;
+  let clock = Date.parse('2031-03-01T09:00:00Z');
+  const master = { url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig;
+  const state = emptyDaemonState(master);
+  const reported: { reason: string; since: string }[] = [];
+  let reason = 'the base branch main advanced outside the merge queue';
+  const effects = {
+    snapshot: async () => ({ work: [view(await reload(item))], now: new Date(clock).toISOString() }),
+    persist: async () => {},
+    merge: async () => { throw new Error(`${item.key} merge refused: ${reason}`); },
+    refuseMerge: async (work: Work, text: string, since: string) => { reported.push({ reason: text, since }); return engine.execute(coordinator, 'mergerefused', work.id, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: text, since }, randomUUID()); },
+  };
+  const cycle = async () => {
+    state.cycle++;
+    const open = [view(await reload(item))], performed: Cycle['performed'] = [];
+    await mergeStep({ config: master, state, effects, now: () => clock, performed, open, isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    return performed;
+  };
+  const repeated = () => Object.entries(state.actions).filter(([key]) => key.includes(':repeated')).map(([, action]) => action);
+  const start = clock;
+  // A changed reason restarts the count.
+  await cycle(); clock += 61_000; reason = 'the pull request changed on GitHub before merge'; const restart = clock;
+  while (clock - restart < repeatedMergeRefusalMs - 61_000) { await cycle(); clock += 61_000; }
+  assert.deepEqual([reported.length, repeated().length], [0, 0], 'nothing is acted on inside ten minutes of the same reason');
+  assert.ok(clock - start >= repeatedMergeRefusalMs, 'though the refusals together have run past ten minutes');
+  while (!reported.length && clock - restart < 2 * repeatedMergeRefusalMs) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 1, 'the loop acts without a hand action');
+  assert.match(reported[0].reason, /merge refused: the pull request changed on GitHub before merge/);
+  assert.equal(reported[0].since, new Date(restart).toISOString(), 'the refusal is dated from the first attempt that gave this reason');
+  const [attention] = repeated();
+  assert.equal(attention.kind, 'escalation'); assert.equal(attention.state, 'done');
+  assert.match(attention.detail, new RegExp(`${item.key}: the guarded merge has refused candidate ${headA.slice(0, 12)} on every attempt for 1\\d minutes with the same reason: .*changed on GitHub before merge\\. Next step: Graphyard marks candidate ${headA.slice(0, 12)} for a rework decision the approver judges, and the next queue entry heads the queue meanwhile\\.`));
+  // The control plane recorded it, and the loop's own decision step now asks for the rework.
+  item = await reload(item);
+  assert.deepEqual([item.mergeRefusal?.action, item.mergeRefusal?.sha, item.mergeRefusal?.since], ['rework', headA, new Date(restart).toISOString()]);
+  const decision = neededDecision(item, { autoMerge: true });
+  assert.deepEqual([decision?.action, decision?.binding], ['rework', `${headA}:merge-refused`]);
+  assert.match(decision!.reason, /refused candidate .* on every attempt since .* with the same reason: .*changed on GitHub before merge/);
+  // Acted on once per candidate and reason.
+  for (let pass = 0; pass < 3; pass++) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 1);
+});
+
+test('unit:repeated-merge-refusal-acted — a rereview that a fresh approval answers re-arms the same refusal, and the loop then takes the rework action', async () => {
+  await clearQueue();
+  const main = sha40('71'), headA = sha40('72'), headB = sha40('73'), tipB = sha40('74'), mergedA = sha40('75');
+  let first = await submitted('Re-arm first'), item = await submitted('Re-arm carried');
+  first = await validated(first, { sha: headA, baseSha: main }); item = await validated(item, { sha: headB, baseSha: main });
+  await onlyJob(first);
+  await processJob(engine, adapter(work => tip(work, { sha: headA, baseSha: main }), (work, placement) => published(work, placement, headA, null)).github);
+  await onlyJob(item);
+  await processJob(engine, adapter(work => tip(work, { sha: headB, baseSha: main }), (work, placement) => published(work, placement, tipB, { from: headB, parents: [headB, headA], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/head.ts'] })).github);
+  const dismissed = [{ id: 42, reviewer: 'graphyard-reviewer[bot]', sha: headB, state: 'DISMISSED' }];
+  item = await engine.observe(item.id, (await reload(item)).revision, tip(item, { sha: tipB, baseSha: headA }, { baseTip: main, reviews: dismissed }));
+  first = await mergeHead(first, { sha: headA, baseSha: main }, mergedA);
+  item = await engine.observe(item.id, (await reload(item)).revision, tip(item, { sha: tipB, baseSha: headA }, { baseTip: mergedA, baseTree: treeOf(headA), reviews: dismissed }));
+  assert.ok(item.gates.every(entry => entry.passed), item.gates.flatMap(entry => entry.reasons).join('; '));
+  assert.equal(carriedApproval(item)?.reviewId, 41, 'the candidate stands on a carried approval');
+
+  // The loop's view: every gate passes, so the guarded merge is retried on its short pause, and
+  // refuses with one unchanged reason.
+  const view = (work: Work) => ({ ...work, stage: 'merge', gates: work.gates.map(entry => ({ ...entry, passed: true, reasons: [] })), violations: [] }) as Work;
+  let clock = Date.parse('2031-04-01T09:00:00Z');
+  const master = { url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig;
+  const state = emptyDaemonState(master);
+  const reported: { reason: string; since: string }[] = [];
+  const reason = `${item.key} merge refused: the pull request changed on GitHub before merge`;
+  const effects = {
+    snapshot: async () => ({ work: [view(await reload(item))], now: new Date(clock).toISOString() }),
+    persist: async () => {},
+    merge: async () => { throw new Error(reason); },
+    refuseMerge: async (work: Work, text: string, since: string) => { reported.push({ reason: text, since }); return engine.execute(coordinator, 'mergerefused', work.id, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: text, since }, randomUUID()); },
+  };
+  const cycle = async () => {
+    state.cycle++;
+    const open = [view(await reload(item))], performed: Cycle['performed'] = [];
+    await mergeStep({ config: master, state, effects, now: () => clock, performed, open, isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    return performed;
+  };
+  const repeated = () => Object.entries(state.actions).filter(([key]) => key.includes(':repeated')).map(([key, action]) => [key, action] as const);
+  const start = clock;
+  // Phase one: the refusal runs past ten minutes and the loop clears the carried approval.
+  while (!reported.length && clock - start < 3 * repeatedMergeRefusalMs) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 1, 'the loop acts on the repeated refusal without a hand action');
+  item = await reload(item);
+  assert.deepEqual([item.mergeRefusal?.action, item.mergeRefusal?.sha], ['rereview', tipB], 'the first action is the rereview');
+  assert.equal(carriedApproval(item), null, 'the carried approval is cleared');
+  assert.equal(repeated().length, 1, 'one phase marker stands');
+  assert.match(repeated()[0][1].detail, /clears the carried approval/);
+
+  // The rereview is answered: a fresh approval of the same candidate arrives. The refusal
+  // persists, its since is preserved — and the handling re-arms: the next action is the rework
+  // the first phase's done marker must not absorb.
+  item = await engine.observe(item.id, item.revision, tip(item, { sha: tipB, baseSha: headA }, { baseTip: mergedA, baseTree: treeOf(headA), reviews: [...dismissed, { id: 99, reviewer: 'graphyard-reviewer[bot]', sha: tipB, state: 'APPROVED' }] }));
+  assert.equal(gate(item, 'review').passed, true, 'the fresh approval answers the rereview');
+  while (reported.length < 2 && clock - start < 6 * repeatedMergeRefusalMs) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 2, 'the loop re-arms and takes the rework action');
+  assert.equal(reported[1].since, reported[0].since, 'the refusal has stood since the first attempt that gave this reason');
+  item = await reload(item);
+  assert.deepEqual([item.mergeRefusal?.action, item.mergeRefusal?.sha, item.mergeRefusal?.since], ['rework', tipB, new Date(start).toISOString()]);
+  assert.equal(repeated().length, 2, 'one phase marker per action');
+  assert.match(repeated().find(([, action]) => action.detail.includes('rework decision'))![1].detail, /marks candidate .* for a rework decision the approver judges/);
+  const decision = neededDecision(item, { autoMerge: true });
+  assert.deepEqual([decision?.action, decision?.binding], ['rework', `${tipB}:merge-refused`]);
+  // And the rework phase, too, is acted on once for this candidate and reason.
+  for (let pass = 0; pass < 3; pass++) { await cycle(); clock += 61_000; }
+  assert.equal(reported.length, 2);
+});
+

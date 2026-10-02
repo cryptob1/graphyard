@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cycleCost, daemonSummary, deploymentListingPages, deploymentPageSize, emptyDaemonState, loopAttention, loopLiveness, maxDeploymentRequests, observeDeployment, runCycle, type ContainmentRetention, type CycleSteps, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, masterSettingsFromArgs, type MasterConfig, type MasterRun } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * What the loop's deployment step costs. Containment — "does the release production serves contain
@@ -52,7 +52,7 @@ function delivery(key: string, mergeSha: string, mergedAt: string): Work {
  * object store exactly as it does on the coordinator host.
  */
 async function deliveredHistory(commits: number) {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-deployment-cost-'));
+  const directory = await temporaryDirectory('deployment-cost');
   const origin = join(directory, 'origin'), checkout = join(directory, 'checkout');
   execFileSync('git', ['init', '-q', '-b', 'main', origin]);
   git(origin, 'config', 'user.email', 'loop@graphyard.example');
@@ -200,7 +200,7 @@ function cycleEffects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
 }
 
 test('integration:cycle-time-attributed — the cycle reports where its time went, and a deployment step that outgrows the interval is named as that step rather than reported as a stalled loop', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-cycle-cost-'));
+  const directory = await temporaryDirectory('cycle-cost');
   try {
     const token = join(directory, 'coordinator.token');
     await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });

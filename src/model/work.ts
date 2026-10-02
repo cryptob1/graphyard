@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import type { BaseRefresh, LandingCheck, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
-import { criterionSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
+import type { BaseRefresh, LandingCheck, MergeRefusal, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
+import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
@@ -10,7 +10,7 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { namedPaths, pathScope, pathScopeContains, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathScopeContains, plannedCompanions, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -38,7 +38,7 @@ export const createSchema = z.object({
   dependencies: z.array(z.string().uuid()).max(50).default([]),
   criteria: z.array(criterionSchema).min(1).max(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
-  plannedFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
+  plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),
   slice: z.enum(sliceIds).optional(),
   // Manual proofs a launched producer session may run on the item's behalf. Unit and
@@ -112,10 +112,9 @@ export interface Observation {
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
-  // GitHub computed a merge conflict with the base (`pr.mergeable === false`), as distinct from
-  // `mergeable` being false while GitHub is still computing it. A conflicting head is the one a
-  // behind-base candidate is withheld and sent back for (GY-191).
-  conflicting?: boolean;
+  // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
+  // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
+  conflicting?: boolean; disproved?: { mergeable: boolean; conflicting: boolean; reading: string };
   // The real base-branch head and its tree, read from refs/heads/<base> (never from the pull
   // request's cached base) and recorded separately from the candidate's bound base so a
   // speculative binding never hides where the managed branch actually points.
@@ -123,7 +122,7 @@ export interface Observation {
   // The head contains that base tip: by ancestry, or as a published queue tip whose bound base
   // is tree-identical to it. A review is only requested for a head that does.
   baseTipContained?: boolean;
-  protected: boolean; files: string[]; at: string;
+  protected: boolean; files: string[]; at: string; requiredChecks?: { name: string; appId: number | null }[]; // base protection's and rulesets' required checks bar `Graphyard / merge` (GY-430); appId null = any source
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
   /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see merge-queue.ts LandingCheck. */
@@ -186,7 +185,7 @@ export interface Work extends Create {
    * under it, or refused to because the merge conflicts. Decided and written by Graphyard
    * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
    */
-  baseRefresh?: BaseRefresh | null;
+  baseRefresh?: BaseRefresh | null; mergeRefusal?: MergeRefusal | null; // mergeRefusal: the guarded merge's refusal of this candidate (GY-831, merge-queue.ts)
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
@@ -227,7 +226,7 @@ export interface Work extends Create {
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
-  gates: Gate[]; violations: string[];
+  gates: Gate[]; violations: string[]; lane?: Lane; speedTarget?: number; // risk lane and its speed target (GY-883, model/policy.ts), stamped by the last evaluation
 }
 // One scope rule for every scoped read and mutation, so a route cannot answer
 // with data its own authorization would have refused.
@@ -247,7 +246,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 
 // ---- plannedFiles derived from the criteria (GY-140) ---------------------------------------------
 
-interface CriterionText { id: string; text: string }
+interface CriterionText { id: string; text: string; proofs?: readonly string[] }
 const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i;
 const testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/;
 const sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
@@ -280,9 +279,9 @@ export interface PlannedFilesDerivation {
  * resolved against the tree of the base branch the item will be worked on, and every file a
  * criterion names that the tree holds is carried in. Only criteria are read — a path the
  * description mentions in prose is not a requirement and adds nothing — and only exact files
- * are carried: a criterion naming a directory widens nothing on its own.
+ * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
-export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[] }, tree: ReadonlySet<string>): PlannedFilesDerivation {
+export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null }, tree: ReadonlySet<string>): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria));
   const added: PlannedFilesDerivation['added'] = [];
@@ -290,6 +289,7 @@ export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; cri
     if (!tree.has(path) || planned.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path)) continue;
     added.push({ path, criterion: criterion.id });
   }
+  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria }, tree, itemDocumentationPaths(item))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
   return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
 }
 export function plannedFilesRefusal(missing: readonly string[], base: string) {
@@ -298,10 +298,10 @@ export function plannedFilesRefusal(missing: readonly string[], base: string) {
 
 /**
  * GY-140 AC-3: per open item, every scope request — open, or the last one decided — whose paths a
- * criterion already names. Such a request should never have been needed: the file belonged in
+ * criterion already names, or that is a companion the item's record implies (GY-955). Such a request should never have been needed: the file belonged in
  * plannedFiles at authoring time. Counted, so the authoring fault is measured rather than recalled.
  */
-export function impliedScopeRequests(work: readonly Pick<Work, 'key' | 'stage' | 'criteria' | 'scopeRequest' | 'scopeDecision'>[]) {
+export function impliedScopeRequests(work: readonly (Pick<Work, 'key' | 'stage' | 'criteria' | 'scopeRequest' | 'scopeDecision'> & Partial<Pick<Work, 'plannedFiles' | 'documentation'>>)[]) {
   const items = work.filter(item => item.stage !== 'done').flatMap(item => {
     const requests = [
       ...(item.scopeRequest ? [{ state: 'open' as const, paths: item.scopeRequest.paths, requestedBy: item.scopeRequest.requestedBy, requestedAt: item.scopeRequest.at }] : []),
@@ -309,8 +309,8 @@ export function impliedScopeRequests(work: readonly Pick<Work, 'key' | 'stage' |
     ];
     return requests.flatMap(request => {
       const named = request.paths.flatMap(path => {
-        const criterion = item.criteria.find(entry => namedPaths(entry.text).some(scope => pathScopeContains(scope, path)));
-        return criterion ? [{ path, criterion: criterion.id }] : [];
+        const criterion = item.criteria.find(entry => namedPaths(entry.text).some(scope => pathScopeContains(scope, path)))?.id ?? (companionGround(path, item, request.paths, itemDocumentationPaths(item)) ? 'companion' : null);
+        return criterion ? [{ path, criterion }] : [];
       });
       return named.length ? [{ key: item.key, ...request, named }] : [];
     });

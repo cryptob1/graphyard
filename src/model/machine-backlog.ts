@@ -36,6 +36,39 @@ export type ReviewFollowUpsOrigin = z.infer<typeof reviewFollowUpsOriginSchema>;
 /** What `POST /api/work/ID/followups` appends: the findings of one approval of the parent. */
 export const followUpAppendSchema = z.object({ findings: z.array(entry).min(1).max(200), reason: z.string().trim().min(1).max(2000) }).strict();
 
+/** What `POST /api/work/ID/promote` takes: the 1-based index of the batch finding to promote (GY-896). */
+export const followUpPromoteSchema = z.object({ index: z.number().int().min(1).max(followUpEntriesMax) }).strict();
+/**
+ * One finding of an item's follow-up batch as it is read back (GY-896): its 1-based index, the pull
+ * request and head the approval that recorded it named, when, and the item it was promoted to.
+ */
+export interface FollowUpBatchFinding extends FollowUpEntry { index: number; pr: number | null; sha: string | null; recordedAt: string | null; promoted: string | null }
+/** An item's follow-up batch: every finding the approvals of the item recorded on its own record. */
+export interface FollowUpBatch { key: string; title: string; stage: Work['stage']; pr: number | null; findings: FollowUpBatchFinding[] }
+/** The ledger rows a batch is folded from, oldest first (`followups.recorded` and `followups.promoted`). */
+export interface FollowUpBatchRow { kind: string; details: { pr?: number | null; sha?: string | null; findings?: FollowUpEntry[]; index?: number; key?: string } | null; at: string }
+export const followUpRecordedEvent = 'followups.recorded', followUpPromotedEvent = 'followups.promoted';
+/**
+ * Fold an item's follow-up batch from its ledger (GY-896). A legacy follow-up item (GY-402) starts
+ * from the findings its origin holds; any other item from none. Each recorded approval adds the
+ * findings the batch does not hold yet, by path and finding text, and each promotion marks its finding.
+ */
+export function foldFollowUpBatch(work: Pick<Work, 'key' | 'title' | 'stage' | 'description'> & { origin?: Work['origin']; candidate?: { pr: number } | null }, rows: readonly FollowUpBatchRow[]): FollowUpBatch {
+  const findings: FollowUpBatchFinding[] = (followUpParent(work) ? followUpEntries(work) : [])
+    .map((finding, index) => ({ ...finding, index: index + 1, pr: null, sha: null, recordedAt: null, promoted: null }));
+  for (const row of rows) {
+    if (row.kind === followUpRecordedEvent) {
+      const { added } = mergeFollowUpEntries(findings, row.details?.findings ?? []);
+      for (const finding of added.slice(0, Math.max(0, followUpEntriesMax - findings.length)))
+        findings.push({ ...finding, index: findings.length + 1, pr: row.details?.pr ?? null, sha: row.details?.sha ?? null, recordedAt: row.at, promoted: null });
+    } else if (row.kind === followUpPromotedEvent) {
+      const target = findings[(row.details?.index ?? 0) - 1];
+      if (target && !target.promoted && row.details?.key) target.promoted = row.details.key;
+    }
+  }
+  return { key: work.key, title: work.title, stage: work.stage, pr: findings.find(finding => finding.pr !== null)?.pr ?? work.candidate?.pr ?? null, findings };
+}
+
 /** The title every review follow-up item carries (src/review-threads.ts followUpItem). */
 const followUpTitle = /^Follow-ups from the approved review of ([A-Z][A-Z0-9]*-\d+)\b/;
 const faultTitle = /^Recurring \S+ faults:/;

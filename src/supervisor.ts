@@ -6,6 +6,7 @@ import { homedir, tmpdir, userInfo } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
+import { unknownWorkCode } from './model/refusal.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -243,14 +244,25 @@ export const renewalSafetyMarginMs = 15_000;
  * deploy is transient, and the lease that is still running is what decides whether the worker
  * stops. So is any other 4xx (GY-392): a 401 or 403 from an expired or rotated token, or a 404
  * from a mis-routed proxy, says nothing about the lease, so the worker keeps it until it lapses.
+ * The one 404 that is definite is the server's own refusal of an item it does not have (GY-448),
+ * which carries `unknownWorkCode` in its body: that item has no lease left to keep.
  * An error that carries no status falls back to the client's own classification of the refusal.
  */
 export function definiteRenewalRefusal(error: unknown) {
   if (!error || typeof error !== 'object') return false;
   const { confirmedRefusal, status, definite } = error as { confirmedRefusal?: unknown; status?: unknown; definite?: unknown };
   if (definite === true) return true;
+  if (status === 404) return confirmedRefusal === true && refusalCode(error) === unknownWorkCode;
   if (typeof status === 'number') return status === 409;
   return confirmedRefusal === true;
+}
+
+/** The `code` a refused response carried, read from the error the client threw with the body as its message. */
+function refusalCode(error: object) {
+  const body = (error as { body?: unknown }).body;
+  if (body && typeof body === 'object') return (body as { code?: unknown }).code;
+  if (!(error instanceof Error)) return undefined;
+  try { return JSON.parse(error.message)?.code; } catch { return undefined; }
 }
 
 /**

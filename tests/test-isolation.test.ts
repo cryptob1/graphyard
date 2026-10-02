@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,9 +14,10 @@ import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/com
 import { ensureWorktreeDependencies, installMatchesLockfile } from '../src/repository-setup.js';
 import { installUnderLease } from '../src/cli/workspace.js';
 import { runTests } from './helpers/run-tests.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const repository = new URL('..', import.meta.url);
-const scratch = (prefix: string) => mkdtemp(join(tmpdir(), `graphyard-isolation-${prefix}-`));
+const scratch = (prefix: string) => temporaryDirectory(`isolation-${prefix}`);
 const listen = (port = 0) => new Promise<{ port: number; close(): Promise<void> }>((resolve, reject) => {
   const server = createServer();
   server.once('error', reject);
@@ -87,7 +88,9 @@ import { createServer } from 'node:net';
 test('holds its database port', async () => {
   // Harness controls the caller set on purpose (CI's timing record) pass; nothing else of the session's does.
   const controls = new Set(${JSON.stringify(passedTestControls)});
-  assert.deepEqual(Object.keys(process.env).filter(name => /^(GRAPHYARD|HERDR)_/.test(name) && !controls.has(name)).sort(), ['GRAPHYARD_EVENTS_TEST_PORT', 'GRAPHYARD_TEST_PORT']);
+  assert.deepEqual(Object.keys(process.env).filter(name => /^(GRAPHYARD|HERDR)_/.test(name) && !controls.has(name)).sort(), ['GRAPHYARD_DATA_HOME', 'GRAPHYARD_EVENTS_TEST_PORT', 'GRAPHYARD_TEST_PORT']);
+  // Managed checkouts go inside the tree under test, the one place a worker's sandbox can write (GY-498).
+  assert.equal(process.env.GRAPHYARD_DATA_HOME, process.cwd() + '/.graphyard/test-data');
   const port = Number(process.env.GRAPHYARD_TEST_PORT) + 7;
   const server = createServer();
   await new Promise<void>((ok, fail) => { server.once('error', fail); server.listen({ port, host: '127.0.0.1', exclusive: true }, () => ok()); });

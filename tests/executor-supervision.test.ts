@@ -2,9 +2,8 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -24,9 +23,11 @@ import { inspectProfileAccounts, masterConfigSchema, workerPrompt, type MasterCo
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { executorDeclarationFile, executorSlotUndeclaredExit, executorSupervisionStatus, executorUnit, executorUnitTemplate, installExecutorSupervision, readExecutorDeclaration, renderExecutorUnit, setupRepository, writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
 import { executorFleet } from '../src/cli/executor-report.js';
+import { readExecutorRegistrations } from '../src/executor-fleet.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
 import WorkDetails from '../web/pages/work-details.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-105: nothing brought executors back. The fleet stopped at a reboot or a crash until a person
@@ -54,8 +55,8 @@ const json = (res: ServerResponse, status: number, body: unknown) => { res.statu
 
 /** A coordinator checkout for the executor to run in: master.json, its credential, and the shipped scripts beside it. */
 async function coordinatorCheckout(url: string, declaration: { count: number; kinds: ('resync' | 'merge')[] | null; intervalSeconds: number }) {
-  const checkout = await mkdtemp(join(tmpdir(), 'graphyard-executor-checkout-'));
-  const credentials = await mkdtemp(join(tmpdir(), 'graphyard-executor-credentials-'));
+  const checkout = await temporaryDirectory('executor-checkout');
+  const credentials = await temporaryDirectory('executor-credentials');
   git(checkout, 'init', '-q'); git(checkout, 'remote', 'add', 'origin', `https://github.com/${repository}.git`);
   const credentialFile = join(credentials, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -149,7 +150,7 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
   const plane = fakeControlPlane(3000);
   await new Promise<void>(resolve => plane.http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(plane.http.address() as { port: number }).port}`;
-  const { checkout, credentials } = await coordinatorCheckout(url, { count: 1, kinds: ['resync'], intervalSeconds: 1 });
+  const { checkout, credentials, credentialFile } = await coordinatorCheckout(url, { count: 1, kinds: ['resync'], intervalSeconds: 1 });
   // systemd's keep-alive channel, recorded: the executor speaks to it only because NOTIFY_SOCKET is set.
   const notifications = join(credentials, 'notify.log'), bin = join(credentials, 'bin');
   await mkdir(bin); await writeFile(join(bin, 'systemd-notify'), `#!/bin/sh\necho "$@" >> '${notifications}'\n`); await chmod(join(bin, 'systemd-notify'), 0o755);
@@ -187,6 +188,10 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
       const second = supervisor.current();
       assert.notEqual(second.pid, first.pid);
       assert.deepEqual(supervisor.exits.map(exit => exit.signal), ['SIGKILL']);
+      // The restarted executor records what the killed one was running (GY-646).
+      await until(async () => (await readExecutorRegistrations({ credentialFile })).some(entry => entry.pid === second.pid), 'the restarted executor to register');
+      const interrupted = (await readExecutorRegistrations({ credentialFile })).find(entry => entry.pid === second.pid)!.interrupted;
+      assert.deepEqual(interrupted && { id: interrupted.id, key: interrupted.key, kind: interrupted.kind, pid: interrupted.pid }, { id: plane.row.id, key: 'GY-1', kind: 'resync', pid: first.pid });
 
       // 3. The restarted executor takes the row the dead one held, as a further attempt of the same
       //    action; the handler now completes and the row settles. The claim was never stranded.
@@ -237,7 +242,7 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
     assert.deepEqual(installed.units, [{ slot: 1, unit: executorUnit(1), active: 'active' }]);
     assert.deepEqual(installed.disabled, [executorUnit(3)]);
     // A host without a coordinator credential installs nothing: it can run no executor.
-    const workerOnly = await mkdtemp(join(tmpdir(), 'graphyard-worker-only-'));
+    const workerOnly = await temporaryDirectory('worker-only');
     try { git(workerOnly, 'init', '-q'); assert.equal((await setupRepository(workerOnly, { url, cliPath: launcher, hostId: 'w' }, { executors: { run: runSystemctl, unitDirectory } })).executors, null); }
     finally { await rm(workerOnly, { recursive: true, force: true }); }
     // And a host without a systemd user manager keeps its declaration and is told what to copy by hand.
@@ -250,6 +255,53 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
     assert.deepEqual(status.units.map(unit => unit.active), ['inactive', 'inactive']);
     assert.equal(status.start, `systemctl --user start ${executorUnit(1)} ${executorUnit(2)}`);
   } finally {
+    await new Promise<void>(resolve => plane.http.close(() => resolve()));
+    await rm(checkout, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true });
+  }
+});
+
+test('unit:executor-stand-down-exits — an executor under the shipped unit whose checkout moves to a newer commit stands down by exiting with status 0 within 30s, and the unit\'s restart policy starts it again on the new commit (GY-646)', async () => {
+  const plane = fakeControlPlane(3000);
+  plane.state.holdResync = false;
+  await new Promise<void>(resolve => plane.http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(plane.http.address() as { port: number }).port}`;
+  const { checkout, credentials } = await coordinatorCheckout(url, { count: 1, kinds: ['resync'], intervalSeconds: 1 });
+  const commit = async (text: string) => {
+    await writeFile(join(checkout, 'README.md'), `${text}\n`);
+    git(checkout, 'add', 'README.md'); git(checkout, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', 'commit', '-q', '-m', text);
+    return git(checkout, 'rev-parse', 'HEAD');
+  };
+  const loaded = await commit('the release the executor loads');
+  const notifications = join(credentials, 'notify.log'), bin = join(credentials, 'bin');
+  await mkdir(bin); await writeFile(join(bin, 'systemd-notify'), `#!/bin/sh\necho "$@" >> '${notifications}'\n`); await chmod(join(bin, 'systemd-notify'), 0o755);
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, NOTIFY_SOCKET: '/run/user/0/systemd/notify-fixture', GRAPHYARD_TOKEN: undefined, GRAPHYARD_TOKEN_FILE: undefined, GRAPHYARD_URL: undefined };
+  const log: string[] = [];
+  const unit = parseUnit(renderExecutorUnit(await readFile(join(root, 'examples/master', executorUnitTemplate), 'utf8'), { root: checkout, node: process.execPath }), '1');
+  // The policy a clean exit relies on: status 0 is restarted, never held down.
+  assert.equal(unit.service.Restart, 'always');
+  assert.ok(!(unit.service.RestartPreventExitStatus ?? '').split(/\s+/).includes('0'), 'the unit restarts an executor that exits with status 0');
+  const supervisor = superviseLikeSystemd(unit, env, log);
+  try {
+    const first = supervisor.current();
+    await until(() => log.join('').includes(`runs ${loaded.slice(0, 12)}`) && /serving resync every 1s as slot 1 under systemd supervision/.test(log.join('')), `the executor to start on ${loaded.slice(0, 12)}\n${log.join('')}`, 90_000);
+    await until(() => plane.state.claims.length >= 2, `the executor to poll\n${log.join('')}`);
+
+    // The checkout moves on. The executor stands down at its next claim and exits cleanly, well
+    // inside the 30s bound, instead of idling until WatchdogSec aborts it.
+    const moved = await commit('a delivered fix');
+    const movedAt = Date.now();
+    await until(() => supervisor.exits.length === 1, `the standing-down executor to exit\n${log.join('')}`, 30_000);
+    assert.ok(Date.now() - movedAt < 30_000);
+    assert.deepEqual(supervisor.exits[0], { pid: first.pid!, code: 0, signal: null }, `the stand-down is a clean exit, not a signal or a failure\n${log.join('')}`);
+    assert.match(log.join(''), new RegExp(`stands down: this executor loaded ${loaded.slice(0, 12)} at startup and its checkout now holds ${moved.slice(0, 12)}; it claims nothing more.*; it exits so its supervisor restarts it on the current code`));
+
+    // The restart policy brings it back, on the new commit.
+    await until(() => supervisor.starts.length === 2, 'the unit to restart the executor', Number(unit.service.RestartSec) * 1000 + 30_000);
+    const second = supervisor.current();
+    await until(() => log.join('').includes(`[${second.pid}] [graphyard-executor] master@unit-host/1 runs ${moved.slice(0, 12)}`), `the restarted executor to run ${moved.slice(0, 12)}\n${log.join('')}`, 90_000);
+    assert.equal(second.exitCode, null, 'the restarted executor is running');
+  } finally {
+    await supervisor.stop();
     await new Promise<void>(resolve => plane.http.close(() => resolve()));
     await rm(checkout, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true });
   }
@@ -291,14 +343,14 @@ const dashboard = (work: Work[], status: any, selected: string | null = null): a
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_EXECUTOR_SUPERVISION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 30);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-executor-supervision-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('executor-supervision-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('supervision_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/supervision_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  home = await mkdtemp(join(tmpdir(), 'graphyard-executor-supervision-'));
+  home = await temporaryDirectory('executor-supervision');
   await mkdir(join(home, 'env-a'), { recursive: true });
   await writeFile(join(home, 'env-a/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-real-token', refreshToken: 'not-a-real-token' } }));
 });
@@ -355,7 +407,7 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
   assert.match(status.executors.attention[0].text, new RegExp(`^Nothing can run dispatch: ${item.key} has waited \\d+s for an executor that serves it, and the 1 live executor \\(${executorHost.id.replace(/[/@]/g, '\\$&')}\\) serves none of it\\. It is not queued behind other work — start an executor that serves dispatch`));
 
   // master status: the same fact, addressed to the master with this host's own unit to start.
-  const checkout = await mkdtemp(join(tmpdir(), 'graphyard-status-host-'));
+  const checkout = await temporaryDirectory('status-host');
   try {
     git(checkout, 'init', '-q');
     await mkdir(join(checkout, '.graphyard'), { mode: 0o700 });
@@ -436,7 +488,7 @@ test('integration:killed-worker-work-preserved: a worker killed outright keeps i
       // What the launcher does: claim under the worker, register the worktree, and — when the
       // launch is fenced — record the containment its supervisor created; then start the process.
       const claimed = await ok(workerA, 'POST', `work/${work.id}/claim`, {}) as Work;
-      const worktree = await mkdtemp(join(tmpdir(), 'graphyard-killed-worktree-')); worktrees.push(worktree);
+      const worktree = await temporaryDirectory('killed-worktree'); worktrees.push(worktree);
       const branch = `graphyard/${work.key.toLowerCase()}-${claimed.epoch}`;
       git(worktree, 'init', '-q', '-b', branch); await writeFile(join(worktree, 'README.md'), 'base\n');
       git(worktree, 'add', '-A'); git(worktree, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'base');

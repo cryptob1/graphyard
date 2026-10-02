@@ -1,10 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
 import { PRIVATE_KEY_CONTAINER_PATH, composeAdapter, type AdapterContext } from '../src/install/adapters.js';
 import { fakeTransport, localTransport, sshTransport, type Transport } from '../src/install/transport.js';
@@ -12,6 +10,7 @@ import { Vault } from '../src/install/secrets.js';
 import { CHECK_NAME } from '../src/install/github.js';
 import type { Provider } from '../src/install/types.js';
 import { harness, satisfiedProtection, GRAPHYARD_APP_ID, CI_APP_ID, RAILWAY_WORKSPACES, appKey, type Harness } from './install-harness.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const skipWithoutDocker = await (async () => {
   try { return (await localTransport().exec('docker', ['version', '--format', '{{.Server.Version}}'], { allowFailure: true, timeout: 30_000 })).code === 0 ? false : 'docker is not usable on this machine'; }
@@ -286,7 +285,7 @@ test('the SSH transport ends the key write with chown and refuses a remote user 
 
 test('a uid-1000 container reads the key a real transport wrote, through a real bind mount', { skip: skipWithoutDocker }, async () => {
   const docker = localTransport();
-  const workdir = await mkdtemp(join(tmpdir(), 'graphyard-key-mount-'));
+  const workdir = await temporaryDirectory('key-mount');
   try {
     const context: AdapterContext = {
       provider: 'compose', repository: 'owner/project', installId: 'key-mount', service: 'graphyard-key-mount',

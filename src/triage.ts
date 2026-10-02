@@ -25,7 +25,7 @@ import type { Run, RunResult, Runner } from './runner/types.js';
 export const triageTool = 'graphyard_triage_decision';
 /** The role the Pi extension registers the triage tool for. */
 export const triageRole = 'triage';
-/** How many triage runs one loop process keeps in flight at once. */
+/** How many triage runs one loop process keeps in flight at once, unless `run.research.triageConcurrency` says otherwise. */
 export const triageConcurrency = 2;
 /** How long after a failed run the item is judged again. */
 export const triageRetryMs = 60 * 60_000;
@@ -81,7 +81,7 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
   if (!input.settings.enabled) return actions;
   const waiting = input.work.filter(item => untriaged(item) && !live.has(item.id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const work of waiting) {
-    if (live.size >= triageConcurrency) break;
+    if (live.size >= (input.settings.triageConcurrency ?? triageConcurrency)) break;
     const failed = failedAt.get(work.id);
     if (failed !== undefined && input.clock - failed < triageRetryMs) continue;
     const run = input.runner.start(triagePrompt(input.config, work, input.work), {

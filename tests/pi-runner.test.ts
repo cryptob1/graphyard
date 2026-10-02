@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { decidePayloadSchema, graphyardTools } from '../src/runner/payloads.js';
 import { piArgs, piRunner, runEnvironment } from '../src/runner/pi.js';
 import { runRecord, runRecordSchema, type RunEvent } from '../src/runner/types.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-169 AC-1, proof unit:runner-pi-events. The Pi runner is driven against a fake Pi: a node
 // process that prints recorded Pi JSONL (the records `pi --mode json` emits) and then exits,
@@ -37,7 +37,7 @@ const recorded = [
 const settled = [{ line: { type: 'agent_end', messages: [], willRetry: false } }, { line: { type: 'agent_settled' } }];
 
 async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-pi-runner-'));
+  const directory = await temporaryDirectory('pi-runner');
   const script = join(directory, 'fake-pi.mjs');
   await writeFile(script, fakePi);
   let count = 0;

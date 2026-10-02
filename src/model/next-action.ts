@@ -1,6 +1,6 @@
 import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
-import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed, type ProducerGroupDecision } from './dispatch.js';
-import { mechanicalProof } from './mechanical-proofs.js';
+import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed } from './dispatch.js';
+import { mechanicalProof, unexercisedRework } from './mechanical-proofs.js';
 import { producerLaunchStop } from './action-progress.js';
 import { standingEscalations } from './escalation.js';
 import { deliveryState } from './delivery.js';
@@ -55,7 +55,6 @@ export type { CarriedConcern, HumanNeeded, HumanNeededRow, OpenAction } from './
  * silence it replaces — a state nobody wrote a rule for is reported, not answered.
  */
 
-
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'none';
 
 const canonical = (value: unknown) => JSON.stringify(value, (_key, entry) =>
@@ -80,21 +79,22 @@ const dispatchInputs = (work: Work): NextActionInputs => ({ kind: 'dispatch', ta
  *
  * - `dispatch` — a group the reconciler requests, holding its open request. Nothing else is a
  *   proof dispatch, so every one an executor claims has a request to launch against.
- * - `failed` — trusted evidence failed for a group: this head can never pass, whatever else is
- *   still unproven on it, so the step is a new head (or the operator, for a manual proof).
+ * - `failed` — trusted evidence failed for a group, or all a mechanical group has left is proofs recorded as not exercising
+ *   their criterion (GY-817): this head can never pass, so the step is a new head (or the operator, for a manual proof).
  * - `wait` — a group is left to prove but no request is open for it: the reconciler opens one on
  *   the next reading, or no request may stand for the head yet. Nobody's action, never a dispatch.
  * - `stopped` — every group left to prove holds a request whose launch an executor was refused for
  *   good (`producerLaunchStop`): no executor launches it again, so the step is the attestation.
  * - null — every proof left is one no producer session may run.
  */
-type ProofStep = { step: 'dispatch'; inputs: NextActionInputs } | { step: 'failed'; decision: ProducerGroupDecision } | { step: 'wait'; detail: string } | { step: 'stopped'; detail: string };
+type ProofStep = { step: 'dispatch'; inputs: NextActionInputs } | { step: 'failed'; detail: string; mechanical: boolean } | { step: 'wait'; detail: string } | { step: 'stopped'; detail: string };
 function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
   if (!work.candidate) return null;
   const candidate = work.candidate;
   const decisions = producerGroupDecisions(work, all, now);
   const failed = decisions.find(decision => decision.state === 'failed');
-  if (failed) return { step: 'failed', decision: failed };
+  const detail = failed?.reason ?? unexercisedRework(work, decisions);
+  if (detail) return { step: 'failed', detail, mechanical: !failed || failed.failed.every(entry => mechanicalProof(entry.proof)) };
   let stopped: string | null = null;
   for (const decision of decisions.filter(entry => entry.state === 'request')) {
     const request = openProducerRequest(work, decision.group);
@@ -212,7 +212,7 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
 
   // A worker that asked for scope is idle until it is answered, whatever the gates say. A request
   // the rule has already decided is not waiting on anybody: an approved one is applied and gone,
-  // and a refused one carries its refusal as the item's blocker, which the ready gate reports.
+  // and a refused one carries its refusal as the item's blocker, which the ready gate reports. The executor claiming this row is its one decider (GY-955, executorDecidesScope).
   const scope = work.scopeRequest;
   if (scope && !scope.decision && liveLease && work.lease!.epoch === scope.epoch) {
     return make('approve-scope', `${scope.requestedBy} needs files outside plannedFiles for ${key}: ${scope.paths.join(', ')} — ${scope.reason}`,
@@ -252,8 +252,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         // A failed proof holds the head at this gate for good: a unit or integration failure is the
         // worker's to fix on a new head, and a manual one is the operator's judgement to make.
         if (proof.step === 'failed') {
-          const detail = proof.decision.reason;
-          if (proof.decision.failed.every(entry => mechanicalProof(entry.proof))) return make('request-rework', `${key} needs a new head: ${detail}`,
+          const detail = proof.detail;
+          if (proof.mechanical) return make('request-rework', `${key} needs a new head: ${detail}`,
             { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
           return make('escalate', `${key} failed a proof no producer session may re-run on this head: ${detail}`,
             { kind: 'escalate', trigger: 'operator-proof', detail }, binding, failing.name, refusal);

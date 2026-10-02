@@ -1,9 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, wakeJob } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -12,6 +9,7 @@ import { evaluate, type Principal, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { observationConcurrency, observationWorkers } from '../src/server/main.js';
 import { observationThroughputStatus } from '../src/cli/master-status.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-492. Each test is named for the proof it produces: unit:job-claim-priority,
 // unit:parallel-observation-jobs, unit:observation-lag-visible.
@@ -45,7 +43,7 @@ class Api {
     match = /^\/pulls\/(\d+)\/reviews$/.exec(route);
     if (match) return params.get('page') !== '1' ? [] : this.pulls.get(Number(match[1]))!.approved ? [{ id: 40 + Number(match[1]), user: { login: 'independent-reviewer' }, commit_id: this.pulls.get(Number(match[1]))!.head, state: 'APPROVED', submitted_at: '2026-09-21T10:05:00Z' }] : [];
     match = /^\/pulls\/(\d+)\/files$/.exec(route);
-    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
+    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/server/routes/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
     match = /^\/commits\/([a-f0-9]{40})\/check-runs$/.exec(route);
     if (match) {
       if (params.get('check_name')) return { check_runs: [] };
@@ -91,7 +89,7 @@ const observed = (work: Work, at = new Date(Date.now() - 30_000).toISOString(), 
   candidate: work.candidate!, checks: ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: CI, id: index + 1 })),
   reviews: approved ? [{ reviewer: 'independent-reviewer', sha: work.candidate!.sha, state: 'APPROVED', id: 900, submittedAt: at }] : [],
   merged: false, mergeSha: null, mergeable: true, prState: 'open' as const, draft: false,
-  baseTip: work.candidate!.baseSha, baseTipContained: true, protected: true, files: ['src/feature.ts'], at,
+  baseTip: work.candidate!.baseSha, baseTipContained: true, protected: true, files: ['src/server/routes/feature.ts'], at,
   scopeFiles: [{ path: 'src/feature.ts', status: 'modified' as const, sha: sha(`scope-${work.key}`), additions: 3, deletions: 1, binary: false }],
 });
 
@@ -109,7 +107,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let port = 0, databases = 0;
 before(async () => {
   port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 492;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-observation-throughput-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('observation-throughput'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start();
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
@@ -126,7 +124,7 @@ const insert = async (works: Work[]) => {
   for (const work of works) await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [work.id, work]);
 };
 /** When each job became due: the head last, its queue behind it, the waiting item and the backlog before it. */
-const dueAt = (position: number) => new Date(Date.now() - (position === 0 ? 1_000 : (120 - position) * 60_000));
+const dueAt = (position: number) => new Date(Date.now() - (position === 0 ? 1_000 : (15 - position / 3) * 60_000));
 
 test('unit:job-claim-priority — thirty due jobs with the head due last are claimed head first: the queue head and its band, then a submission never observed, then the item a review waits on, then the backlog by availability, which is what availability alone still claims', async () => {
   await freshStore();
@@ -307,4 +305,32 @@ test('unit:observation-lag-visible — master status reports what the workers ac
   const durations = [12_000, 4_000, 8_000, 16_000].map((ms, index) => ({ at: now - index * 60_000, ms }));
   assert.deepEqual(observationThroughput(durations, now), { windowMs: 600_000, count: 4, jobsPerMinute: 0.4, medianDurationMs: 12_000, p90DurationMs: 16_000 });
   assert.deepEqual(observationThroughput([{ at: now - 700_000, ms: 5_000 }], now), { windowMs: 600_000, count: 0, jobsPerMinute: 0, medianDurationMs: null, p90DurationMs: null }, 'durations past the window are not throughput');
+});
+
+test('unit:stale-reading-named — an item whose next step is a resync of a stale reading is named in the claim order, so its job is not left behind every named one', async () => {
+  const base = sha('main-stale');
+  const work = item('GY-STALE', 530, sha(`head-stale-${base}`), base);
+  // An approved, green candidate whose only reading is three hours old: its gate refuses only the stale
+  // reading (2026-09-26: GY-615, GY-646, GY-710 sat in merge for hours; GY-393, GY-430 in test for three).
+  const stale = { ...work, observation: observed(work, new Date(Date.now() - 3 * 3_600_000).toISOString()) as Work['observation'] } as Work;
+  const evaluated = { ...stale, ...evaluate(stale, [stale], new Date(), [CI]) } as Work;
+  assert.equal(nextAction(evaluated, [evaluated], new Date())?.kind, 'resync', 'its next step is a fresh reading');
+  assert.ok(!firstObservationOwed(evaluated));
+  assert.ok(waitsOnObservation(evaluated, [evaluated]));
+  assert.ok(observationClaimOrder([evaluated], 1).includes(evaluated.id), 'its job is named for claiming');
+});
+
+test('unit:starved-job-aging — a job starved past three bounds is claimed oldest first, ahead of named jobs that keep coming due, so no named job waits without bound', async () => {
+  await freshStore();
+  const base = sha('main-aging');
+  // 2026-09-26: 55 named jobs were due and each came back starved within five minutes of its last
+  // claim, so the named jobs at positions 43-47 (GY-615, GY-646, GY-710, GY-713 in merge) waited 100 minutes.
+  const early = Array.from({ length: 4 }, (_, index) => item(`GY-E${index}`, 540 + index, sha(`early-${index}-${base}`), base));
+  const late = item('GY-LATE', 550, sha(`late-${base}`), base);
+  await insert([...early, late]);
+  for (const work of early) await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [work.id, new Date(Date.now() - 6 * 60_000)]);
+  await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [late.id, new Date(Date.now() - 100 * 60_000)]);
+  const order = [...early.map(work => work.id), late.id];
+  const first = await store.takeJob(order, 0);
+  assert.equal(first?.work_id, late.id, 'the job starved 100 minutes goes before named jobs starved six');
 });

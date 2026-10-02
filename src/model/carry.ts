@@ -18,7 +18,8 @@ import type { Work } from './work.js';
  * Where that is not shown — the diff changed, or a side of it could not be read completely — a
  * binding carries only as far as the predecessor's changes let it: an approval when the
  * predecessor touched none of the reviewed files, and a proof when its declared scope is disjoint
- * from those changes. Everything else is re-required with the reason recorded. The decision is
+ * from those changes. An attestation (GY-615) declares no scope: it carries only on the first
+ * ground, never over a changed patch. Everything else is re-required with the reason recorded. The decision is
  * made once, at publication, from facts the control plane observed itself; it is never asserted by
  * a worker, a producer, or a reviewer.
  */
@@ -56,7 +57,11 @@ export interface CarryGround { rule: 'diff unchanged' | 'diff changed' | 'files'
 /** The identity behind an exact-commit approval, as the review gate accepted it. */
 export interface ApprovalIdentity { provider: ReviewProvider; reviewer: string; sha: string; reviewId?: number; reviewerApp?: string }
 export interface CarriedApproval extends ApprovalIdentity { carried: true; originalSha: string; reason: string }
-export interface RequiredApproval { carried: false; reason: string }
+/**
+ * A binding that is not carried. `refused` names the carried approval the guarded merge could not
+ * re-post (GY-831), so the same dismissed review is never restored over the refusal.
+ */
+export interface RequiredApproval { carried: false; reason: string; refused?: { reviewer: string; reviewId?: number; originalSha: string; at: string } }
 export interface CarriedProof { proof: string; carried: boolean; evidenceId?: string; producer?: string; reason: string }
 export interface QueueCarry {
   from: { sha: string; baseSha: string }; to: { sha: string; baseSha: string }; policyRevision: number; at: string;
@@ -98,6 +103,8 @@ export function describeGround(ground: CarryGround | null | undefined): string |
   if (ground.rule === 'diff changed') return `diff changed (patch-id ${ground.patchId!.slice(0, 12)} became ${ground.tipPatchId!.slice(0, 12)}); files rule`;
   return 'files rule (the diff could not be compared)';
 }
+/** How a carry reason names the attest decision behind a record, or nothing for a producer's. */
+const attested = (evidence: Pick<Evidence, 'attestation'>) => evidence.attestation ? ` (attest decision ${evidence.attestation.decision}, approved by ${evidence.attestation.approvedBy})` : '';
 const list = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join(', ')} and ${paths.length - 6} more` : paths.join(', ');
 
 /** The one reason that refuses every binding at once, or null when the tip qualifies for per-binding decisions. */
@@ -133,7 +140,7 @@ export function decideCarry(input: CarryInput): QueueCarry {
     const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
       : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `${approvedBy(input.approval)} carried to Graphyard-authored tip ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` };
     const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => !evidence ? { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` }
-      : { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` });
+      : { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer}${attested(evidence)} carried to ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` });
     return { ...base, approval, evidence, ground };
   }
   const ground: CarryGround = diff?.reviewed && diff.tip ? { rule: 'diff changed', patchId: diff.reviewed, tipPatchId: diff.tip } : { rule: 'files', patchId: diff?.reviewed ?? null, tipPatchId: diff?.tip ?? null };
@@ -144,6 +151,9 @@ export function decideCarry(input: CarryInput): QueueCarry {
     : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `${approvedBy(input.approval)} carried to Graphyard-authored tip ${short(to.sha)}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
   const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
     if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` };
+    // An attestation judged the patch its decision named, not a declared scope: it carries only
+    // across an unchanged patch-id, whatever the base changed (GY-615).
+    if (evidence.attestation) return { proof, carried: false, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id}${attested(evidence)} carries only across an unchanged patch-id of the item's own diff, which ${ground.rule === 'diff changed' ? 'changed' : 'could not be compared'}; a fresh attestation for ${short(to.sha)} is required` };
     // A predicted base that changed nothing relative to the bound base leaves the tested tree
     // untouched, so no declared scope is needed to show the proof still applies.
     if (!changed.length) return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: ${who} changed no file relative to ${short(from.baseSha)}` };
@@ -158,7 +168,7 @@ export function decideCarry(input: CarryInput): QueueCarry {
   return { ...base, approval: note(approval), evidence: evidence.map(note), ground };
 }
 
-export type CarryBearer = Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision'>;
+export type CarryBearer = Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision' | 'mergeRefusal'>;
 /**
  * The carry decision that applies to the current candidate, under the current policy: the one
  * decided for the published merge-queue tip the candidate is, or the one decided when the control
@@ -173,7 +183,11 @@ export function currentCarry(work: CarryBearer): QueueCarry | null {
   const speculation = work.queue?.speculation;
   if (speculation?.tip === candidate.sha) { const carried = applies(speculation.carry); if (carried) return carried; }
   const refresh = work.baseRefresh;
-  return refresh?.head === candidate.sha ? applies(refresh.carry) : null;
+  if (refresh?.head === candidate.sha) { const carried = applies(refresh.carry); if (carried) return carried; }
+  // A candidate the guarded merge refused leaves the queue with its tip's record (GY-831); the
+  // refusal kept that decision, approval re-required, so its carried proofs still bind the tip.
+  const refusal = work.mergeRefusal;
+  return refusal?.sha === candidate.sha && refusal.baseSha === candidate.baseSha ? applies(refusal.carry) : null;
 }
 /**
  * True when a trusted evidence record binds the current candidate: exactly, or carried across a
@@ -211,3 +225,39 @@ export function bindingApproval(work: Work): ApprovalIdentity | null {
   const { carried: _carried, originalSha, reason: _reason, ...identity } = carried;
   return { ...identity, sha: originalSha };
 }
+/**
+ * The commit the current candidate was built from, whose review the carried approval stands for
+ * (GY-831): a queue tip's own reviewed head, or the head the carry decision replaced.
+ */
+export function carriedReviewedHead(work: CarryBearer): string | null {
+  const carry = currentCarry(work);
+  if (!carry) return null;
+  const speculation = work.queue?.speculation;
+  if (speculation?.carry === carry) return speculation.reviewedHead ?? speculation.merge?.from ?? carry.from.sha;
+  return carry.from.sha;
+}
+/**
+ * The carried approval re-bound to a newer approval of the tip's reviewed head (GY-831), or null
+ * when the observation shows none. The carried binding can name a review GitHub no longer holds —
+ * one given on an earlier pull request of the item — while the same reviewer has since approved
+ * the very head the tip was built from; that newer approval is what the re-post must use. Only
+ * the carried reviewer's own approval counts (a dismissed one when its recorded verdict was an
+ * approval), never one that reviewer followed with a change request.
+ */
+export function refreshedCarriedApproval(work: Work): CarriedApproval | null {
+  const carried = carriedApproval(work), head = carriedReviewedHead(work), observation = work.observation, candidate = work.candidate;
+  if (!carried || carried.provider !== 'github' || !head || !observation || !candidate || observation.candidate.sha !== candidate.sha) return null;
+  const reviewer = carried.reviewer.toLowerCase(), baseline = work.formalReviewBaseline;
+  const own = (observation.reviews ?? []).filter(review => review.reviewer.toLowerCase() === reviewer && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review.state));
+  const approved = (review: NonNullable<Work['observation']>['reviews'][number]) => review.state === 'APPROVED'
+    || review.state === 'DISMISSED' && (review as { dismissal?: { verdict?: string; mergeBase?: boolean } }).dismissal?.verdict === 'approved' && (review as { dismissal?: { mergeBase?: boolean } }).dismissal?.mergeBase;
+  const latest = own.at(-1);
+  if (!latest || latest.state === 'CHANGES_REQUESTED') return null;
+  const newest = own.filter(review => review.sha === head && approved(review) && Number.isSafeInteger(review.id)
+    && (!work.formalReviewResetRequired || baseline?.pr === candidate.pr && baseline.policyRevision === work.policyRevision && !baseline.reviewIds.includes(review.id!))).at(-1);
+  if (!newest || carried.reviewId !== undefined && newest.id! <= carried.reviewId) return null;
+  if (carried.reviewId === newest.id && carried.originalSha === head) return null;
+  return { ...carried, sha: head, originalSha: head, reviewId: newest.id!,
+    reason: `approval of ${short(head)} by ${carried.reviewer} (review ${newest.id}), the head tip ${short(candidate.sha)} was built from, replaces the carried ${approvedBy({ ...carried, sha: carried.originalSha })} as the approval carried to the tip` };
+}
+
