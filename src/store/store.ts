@@ -260,8 +260,12 @@ export async function wakeFromWebhook(db: Pick<pg.PoolClient, 'query'>, subjects
   return woken.rows.map(row => String(row.work_id));
 }
 
-export async function wakeJob(db: pg.PoolClient, id: string) {
-  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
+/**
+ * `prioritized` also stamps the job's webhook wake, so `takeJob` claims it ahead of the polled
+ * backlog as it would a webhook's (GY-1099: a merge refused only for a stale observation).
+ */
+export async function wakeJob(db: Pick<pg.PoolClient, 'query'>, id: string, prioritized = false) {
+  await db.query(`INSERT INTO jobs(work_id${prioritized ? ',webhook_at' : ''}) VALUES($1${prioritized ? ',now()' : ''}) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1${prioritized ? ',webhook_at=now()' : ''}`, [id]);
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {

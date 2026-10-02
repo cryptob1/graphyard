@@ -157,7 +157,7 @@ const actionSettleSchema = z.object({ executor: executorName.optional(), result:
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
-const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional() }).strict();
+const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 // The merge request names the executor instance that recorded it — one daemon process or one
 // interactive `master merge` request — bound here to the principal that authenticates it (GY-92).
@@ -1570,7 +1570,8 @@ export class Engine {
     const wake = data.wake !== false;
     // The observation job only exists for an item with a candidate to observe; waking it for one
     // without a submission would schedule a read of nothing.
-    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
+    // `prioritized` claims the job ahead of the polled backlog, as a webhook wake is (GY-1099).
+    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id, data.prioritized === true); });
     if (wake) await this.reconcile();
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
     // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.

@@ -221,6 +221,22 @@ test('unit:wake-keeps-seniority — waking a job already due keeps its due time,
   assert.ok(woken.getTime() <= Date.now() + 1_000, 'a wake still brings a later job forward');
 });
 
+test('unit:stale-observation-refusal-keeps-position — a prioritized wake (GY-1099) is claimed ahead of the queue-head band and the backlog, as a webhook wake is', async () => {
+  await freshStore();
+  const base = sha('main-prioritized');
+  const head = item('GY-PHEAD', 540, sha(`head-ph-${base}`), base);
+  const old = item('GY-POLD', 541, sha(`head-po-${base}`), base);
+  const refused = item('GY-PREFUSED', 542, sha(`head-pr-${base}`), base);
+  await insert([head, old, refused]);
+  for (const [work, ageMs] of [[head, 1_000], [old, 2_000], [refused, 0]] as [Work, number][])
+    await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [work.id, new Date(Date.now() - ageMs + (work === refused ? 5 * 60_000 : 0))]);
+  await store.transaction(async db => { await wakeJob(db, refused.id, true); });
+  const byId = new Map([head, old, refused].map(work => [work.id, work.key]));
+  const claims: string[] = [];
+  for (let index = 0; index < 3; index++) claims.push(byId.get((await store.takeJob([head.id], 1))!.work_id)!);
+  assert.deepEqual(claims, ['GY-PREFUSED', 'GY-PHEAD', 'GY-POLD'], 'the prioritized wake is claimed first');
+});
+
 test('unit:parallel-observation-jobs — twenty due jobs whose observations each take a second are processed in about five seconds at concurrency four, and no item is ever observed twice at once', async t => {
   await freshStore();
   const api = new Api();

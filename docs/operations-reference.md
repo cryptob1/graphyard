@@ -64,6 +64,8 @@ Immutable, per-cycle and webhook-driven reads: [not repeated](protocol/github-we
 
 A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
 
+A merge refused for ten minutes is reworked or re-reviewed (GY-831), except one stalled only on observation freshness, every other gate passing: it is observed, not reworked or ejected. The loop keeps its queue position and requests a prioritized observation (`POST /api/work/:id/resync` with `prioritized: true`), recorded as a `refresh` action.
+
 ### Reading the budget
 
 `graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also in `master status`): `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`; the 2026-09-26 mix replays at 54%.
