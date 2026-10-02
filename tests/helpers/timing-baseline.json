@@ -256,6 +256,7 @@
     "tests/ci-proofs-trust.test.ts": 3574,
     "tests/ci-proofs.test.ts": 855,
     "tests/ci-shards.test.ts": 1181,
+    "tests/ci-workflow-split.test.ts": 277,
     "tests/cli-request-timeout.test.ts": 912,
     "tests/cli.test.ts": 65775,
     "tests/close-work.test.ts": 2254,
