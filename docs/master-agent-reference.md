@@ -37,7 +37,7 @@ or the worker runs `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then
 | `installation-accept` | Accept pending requests |
 | `protection` | Reconcile protection |
 
-Permission flows read `GET /api/github/installation` (App credential, not gh); each records `record.json` under `.graphyard/master-actions/` and appends to `ledger.json`. Approving the *Confirm access* GitHub Mobile code (in `master status`) on the device is human-only. The master never stores the profile's cookies and must never use a merge bypass, push code or read a worker credential.
+Permission flows read `GET /api/github/installation` (App credential, not gh), recording `record.json` under `.graphyard/master-actions/` and `ledger.json`. Approving the *Confirm access* GitHub Mobile code (in `master status`) on the device is human-only. The master never stores cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 A harness classifier refuses routine administration; `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
@@ -45,9 +45,9 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); the last and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their own credential; `master executors restart` moves them to the current release. After a verified deployment a clean detached checkout moves to the base tip (else `upgrade` attention), restarting executors, then the loop, on `src/`, `scripts/`, `bin/` or `package.json` changes; `releaseLag` flags a >1-delivery lag past 10 minutes.
 
-A `resync` completes only on an observation newer than its claim (`POST /api/work/:id/resync` with `{ since }`; `wake: false` only reads), else fails (`no observation newer than the claim was saved`) and backs off.
+A `resync` completes only on an observation newer than its claim: `POST /api/work/:id/resync` with `{ since }` wakes the observation job, answering `observed`, `observedAt` and its `job` (hold, error, attempts); `wake: false` only reads. Unobserved, it fails (`no observation newer than the claim was saved`) and backs off; a scheduled job with no hold or error stalls the row only after thirty minutes, a held, failed or missing one after three failures. Row bookkeeping never refuses an observation read before it.
 
-Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, with no count and no list): it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it; ticks requeue ownerless items (`liveness.violations`). A failed cycle waits min(interval, 30 s), doubling; one item's throw fails only its `isolated:KIND:ITEM-ID` action.
+A `dispatch` or `request-review` finding a session already answering the head completes on it. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, with no count and no list): it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it; ticks requeue ownerless items (`liveness.violations`). A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling; one item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
 ## Resources and disk
 
@@ -55,11 +55,11 @@ Three failures with an unchanged reason mark a row stalled rather than retrying 
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists surviving processes' pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists surviving processes' pid, cmdline and cwd. If `settleable: true`, `master settle-containment GY-N REASON`; else stop the recorded scope (`containment.scope`) and request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-Faults carry `faultClass` (`faults`); a recurring class files one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes. Failed status sections list in `unavailable`. `Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approval releases its fix or closes it as duplicate; recurrences re-file.
+Faults carry `faultClass` (`faults`); a recurring class files one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes; failed status sections list in `unavailable`. `Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`) whose fix approval releases or closes as duplicate.
 
 ## Pipeline speed
 

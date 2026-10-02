@@ -27,7 +27,7 @@ With `GRAPHYARD_INTERVENTION_PATTERNS=1`, recurring refusal and rework causes be
 
 ## Flaky CI check
 
-A failing required check [reruns once](github.md#merge-queue) per sha, keeping position, approval and proofs (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
+A failing required check [reruns once](github.md#merge-queue) per sha, keeping position, approval and proofs with no rework however long it waits for a runner (`check.rerun.waiting`, *waiting for a runner*); one GitHub accepted but never created is requested again (`check.rerun.rerequested`); a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
 
 ## Accepted evidence turns out to be wrong
 

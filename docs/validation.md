@@ -13,6 +13,6 @@ Define environment, runner registration (local `unix://` Docker socket, attestor
 
 ## Requests
 
-Requests (candidate, runner, collector, `deadline`, `maxAttempts`) bind the observed target; another manifest supersedes. Runners `ack` within 30 s, heartbeat every 20 s until `collection-authority`. A pass needs a measured whole-run `matched` target, verified artifacts, settled execution. Recover: `cancel`, `settle` (stop evidence), `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+Requests (candidate, runner, collector, `deadline`, `maxAttempts`) bind the observed target; another manifest supersedes. Runners `ack` within 30 s and heartbeat every 20 s until `collection-authority`; a pass needs a whole-run `matched` target, verified artifacts and settled execution. Recover: `cancel`, `settle` (stop evidence), `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
 
 Formats: `graphyard-playwright-v1` (default; each offline-enumerated test passed once) or `junit-xml-v1` (each inventory identity `sha256(suitePath ␟ classname ␟ name)` passed once; counts agree). Skips, retries, timeouts, miscounts fail; preview: `graphyard runner verify-report junit-xml-v1 inventory.json report.xml`.

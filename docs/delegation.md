@@ -3,7 +3,7 @@
 
 ## Authority boundaries
 
-An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): it coordinates workers, rules on plans, sends work back and escalates, but cannot implement, claim, submit evidence, review its slice, change requirements or merge (`lead.action.refused`). `reject-plan` and `send-back` record a **lead hold** on the merge gate, cleared only by that lead's `approve-plan` with `"supersedes": "RULING-ID"`, or by `rework`, respectively.
+An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): it coordinates workers, rules on plans, sends work back and escalates, never implementing, claiming, submitting evidence, reviewing its slice, changing requirements or merging (`lead.action.refused`). `reject-plan` and `send-back` hold the merge gate (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"`, or `rework`, respectively.
 
 Producers ever assigned the item or in its slice are refused (`evidence.producer.refused`). Limits: [deployment variables](deployment.md#variables).
 
@@ -16,7 +16,7 @@ Producers ever assigned the item or in its slice are refused (`evidence.producer
 | `security-concern` | A lead's `escalate` ruling. |
 | `requirement-weakening` | A revision retires a criterion or narrows proofs. |
 
-An unresolved trigger drops merge authorization; raising one dequeues the head. An explained lapse is `lease.expired` with its [cause](protocol/leases.md#how-a-lease-ends), e.g. `blocked-awaiting-operator` or `stopped-by-attestation`. A later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). A replacement may claim; delivery waits.
+An unresolved trigger drops merge authorization; raising one dequeues the head. An explained lapse is `lease.expired` with its [cause](protocol/leases.md#how-a-lease-ends) (`blocked-awaiting-operator`, `stopped-by-attestation`); a later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). A replacement may claim; delivery waits.
 
 ### Who may settle what
 

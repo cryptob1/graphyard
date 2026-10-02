@@ -32,7 +32,9 @@ Require `Graphyard / merge` from the control-plane App on the base branch: `stri
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (Actions: write; expires unstarted after 15 minutes). The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects the entry; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+A failed required check reruns once on the unchanged head (newest configured-CI-App run; without Actions: write preflight diagnoses it and requests hold), lapsing after 15 runless minutes. Its workflow run queued or in progress is a runner wait (no new head owed); one not found is requested again.
+
+The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects the entry; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
 ### Bindings and carry
 
@@ -42,11 +44,15 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass; `1` restores batching. A failing tip ejects its entry once those ahead pass, rebuilding later tips. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget; those ahead still merge ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass (`1` batches); a failing tip ejects its entry once those ahead pass, rebuilding later ones. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget; those ahead still merge ([development](development.md#documentation)).
 
 ### Optimistic merges
 
 `mergeQueue.optimistic` (default on, `false` disables): a green entry disjoint from base changes lands unqueued unless it, or its base since its run, touched a `mergeQueue.optimisticExclude` (shared-infrastructure) glob; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
+
+### Pre-merge gate and release-candidate validation
+
+The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): build, docs check, Node and browser suites, bounded to finish in under ten minutes. Soak and timing-budget files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance and recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them on one pinned SHA (its `sha` input or a pushed `rc-*` tag).
 
 ### Proofs in CI
 
