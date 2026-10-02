@@ -91,7 +91,8 @@ export interface NextAction {
  * beginning `resyncUnobservedPrefix` and naming the job's condition (`describeObservationJob`),
  * worded without instants or counters so that the same condition gives the same reason on every
  * claim: the third such claim in a row marks the row stalled (`actionStall`), and `master status`
- * raises its attention item naming the item and that condition.
+ * raises its attention item naming the item and that condition — at once for a held, failed or
+ * missing job, and for a job merely scheduled only once the run outlasts `observationWaitBoundMs`.
  */
 export const resyncUnobservedPrefix = 'no observation newer than the claim was saved';
 /** The item's durable observation job, as `POST /api/work/:id/resync` reports it. */
@@ -99,10 +100,38 @@ export interface ObservationJobState {
   availableAt: string | null; lockedUntil: string | null; attempts: number;
   error: string | null; heldUntil: string | null; heldReason: string | null;
 }
+/** The clause for a job the claim woke that is scheduled with no hold and no error: due, and waiting for an observation worker. */
+export const observationJobScheduled = 'its observation job is scheduled and records no error, yet saved no observation';
 /** The observation job's condition in one clause, identical for as long as the condition stands. */
 export function describeObservationJob(job: ObservationJobState | null | undefined, now: number): string {
   if (!job) return 'the item has no observation job, so nothing observes it';
   if (job.heldUntil && Date.parse(job.heldUntil) > now) return `its observation job is held${job.heldReason ? `: ${job.heldReason}` : ''}`;
   if (job.error) return `its observation job last failed: ${job.error}`;
-  return 'its observation job is scheduled and records no error, yet saved no observation';
+  return observationJobScheduled;
+}
+
+/**
+ * How long a woken observation job may take to save its observation before a `resync` waiting on
+ * it is stalled rather than waiting (GY-1090).
+ *
+ * The claim that wakes the job makes it due at once, and the observation workers claim a job due
+ * for longer than `observationStarvedAfterMs` (src/store/store.ts) ahead of every other priority;
+ * how fast they get through the queue is the observation pipeline's own reading (`githubBudget.
+ * throughput`, the queue head's observation lag), not this row's. Every resync row that failed on a
+ * job scheduled with no hold and no error on 1 October 2026 — 44 of the 61 stalled-gate faults
+ * GY-1090 was filed for — completed on the observation it woke, the slowest thirteen minutes after
+ * its first claim, yet three identical failures inside those minutes read as a stall. The bound is
+ * the one the liveness rules give any wait on an event (`livenessWaitBoundMs`, src/model/liveness.ts):
+ * a wait that outlasts it is a stall again, whatever it waits for.
+ */
+export const observationWaitBoundMs = 30 * 60_000;
+
+/**
+ * The bound of a failure reason that names a handoff still in progress — the attempt did its part
+ * and waits for the effect another component is bound to deliver — or null for any other reason.
+ * A run of such failures is a stall only once it outlasts the bound (`actionStall`); a held job, a
+ * failed job or a missing one is not in progress, and stalls on the ordinary threshold.
+ */
+export function handoffWaitBound(reason: string): number | null {
+  return reason.includes(`${resyncUnobservedPrefix}; ${observationJobScheduled};`) ? observationWaitBoundMs : null;
 }
