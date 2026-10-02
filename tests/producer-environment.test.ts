@@ -75,6 +75,16 @@ test('unit:producer-environment the secrets file is private and exports each val
   } finally { await cleanup(); }
 });
 
+test('unit:producer-environment a secret holding a line break is refused before any file is written', async () => {
+  const { directory, cleanup } = await scratch();
+  try {
+    for (const value of ['a\nexport X=1', 'a\rb', 'a\0b']) {
+      await assert.rejects(producerSecretsPrefix(directory, { HCLOUD_TOKEN: value }), (error: Error) => /HCLOUD_TOKEN/.test(error.message) && !error.message.includes(value), 'refused, naming the variable but never its value');
+      await assert.rejects(stat(join(directory, 'producer.env')), { code: 'ENOENT' }, 'nothing is written');
+    }
+  } finally { await cleanup(); }
+});
+
 test('unit:producer-environment a live-install proof names each .env value it lacks; other proofs need none', () => {
   assert.deepEqual(missingProducerEnv(['manual:install-hetzner-live'], {}), ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY']);
   assert.deepEqual(missingProducerEnv(['manual:install-hetzner-live'], { HCLOUD_TOKEN: 'x' }), ['HETZNER_SPEND_CAP_USD_MONTHLY']);

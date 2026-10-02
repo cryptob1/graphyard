@@ -96,10 +96,14 @@ export async function readProducerEnvironment(root: string): Promise<Record<stri
  * The directory is the session directory, beside its git checkout (`checkout/`), never inside it,
  * so no `git add -A` or `git stash -u` in the checkout can stage the file; it is removed with the
  * session. The file is always created new (O_EXCL), so its first byte is written under 0600: a
- * file already there is removed first rather than rewritten under whatever mode it had.
+ * file already there is removed first rather than rewritten under whatever mode it had. A value
+ * holding a line break is refused before anything is written: the file is sourced one assignment
+ * per line, so such a value would end its quote on a later line the shell reads as a command.
  */
 export async function producerSecretsPrefix(directory: string, env: Record<string, string>): Promise<string[]> {
   if (!Object.keys(env).length) return [];
+  // The value is never named: the refusal says which variable, not what it holds.
+  for (const [name, value] of Object.entries(env)) if (/[\r\n\0]/.test(value)) throw new Error(`producer secret ${name} contains a line break or NUL; a producer secret must be a single line`);
   const file = resolve(directory, 'producer.env');
   await rm(file, { force: true });
   await writeFile(file, Object.entries(env).map(([name, value]) => `${name}='${value.replaceAll("'", "'\\''")}'\n`).join(''), { mode: 0o600, flag: 'wx' });
