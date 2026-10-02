@@ -142,6 +142,19 @@ test('unit:workflow-sync-push-guarded — a base sync that only carries main\'s 
     const hidden = { ...tampered, entries: tampered.entries.filter(entry => !entry.path.startsWith('.github/')) };
     await rejects(controlPlaneSyncPush(withGitHub(item()), worker, 'GY-1098', hidden), /the entries do not describe the commit/);
     assert.equal(remote(), pushed);
+    // GitHub applies a directory-level entry to its whole subtree, so deleting or replacing
+    // `.github/workflows` or `.github` is a workflow change, refused even with every workflow file
+    // planned; a path GitHub might resolve elsewhere is refused before it is judged.
+    const allPlanned = item({ plannedFiles: ['src/feature.ts', '.github/workflows/ci.yml', '.github/workflows/rc.yml'] });
+    for (const entry of [{ path: '.github/workflows', mode: '100644', type: 'blob', sha: null }, { path: '.github', mode: '160000', type: 'commit', sha: pushed }] as const) {
+      ({ events, engine } = store(allPlanned));
+      await rejects(controlPlaneSyncPush({ engine, github }, worker, 'GY-1098', { ...request, entries: [...request.entries, entry] }), new RegExp(`outside plannedFiles, so it is not a pure base sync: ${entry.path.replace('.', '\\.')}$`));
+      assert.deepEqual(events[0].payload.workflowPaths, [entry.path]);
+    }
+    for (const path of ['.github/./workflows/ci.yml', '.github//workflows/ci.yml', 'src/../.github/workflows/ci.yml', '/.github/workflows/ci.yml']) {
+      await rejects(controlPlaneSyncPush(withGitHub(allPlanned), worker, 'GY-1098', { ...request, entries: [...request.entries, { path, mode: '100644', type: 'blob', sha: null }] }), /entries that are not file-level paths/);
+    }
+    assert.equal(remote(), pushed);
     // A workflow path in plannedFiles is the item's own change, so that same commit is allowed.
     ({ events, engine } = store(item({ plannedFiles: ['src/feature.ts', '.github/workflows/ci.yml'] })));
     const own = await controlPlaneSyncPush({ engine, github }, worker, 'GY-1098', tampered);

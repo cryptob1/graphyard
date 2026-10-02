@@ -102,7 +102,8 @@ export function attributeConflicts(paths: string[], all: Work[], landed: (sha: s
  * second parent is in origin/BASE, and whose workflow files are byte-identical to that parent
  * except for paths in plannedFiles. The control plane rebuilds the commit from the base tree plus
  * the listed entries through GitHub's Git Data API and refuses unless the rebuilt tree and commit
- * are the named ones, so an entry list that hides a workflow change cannot produce the commit.
+ * are the named ones, so an entry list that hides a workflow change cannot produce the commit; entries
+ * must be file-level paths, and one at `.github/workflows` or an ancestor of it is a workflow change.
  */
 export const workflowsDirectory = '.github/workflows/';
 const sha40 = z.string().regex(/^[a-f0-9]{40}$/);
@@ -117,8 +118,15 @@ export type SyncPushRequest = z.infer<typeof syncPushRequest>;
 /** The slice of the GitHub client the guarded push uses; `GitHub` satisfies it. */
 export interface GitDataApi { config: { base: string }; request(path: string, method?: string, body?: unknown): Promise<any> }
 
-/** The workflow paths a sync commit changes against the base it merged that plannedFiles do not cover. */
-export const workflowPaths = (entries: readonly { path: string }[]) => entries.map(entry => entry.path).filter(path => path.startsWith(workflowsDirectory)).sort();
+/**
+ * The workflow paths a sync commit changes against the base it merged. GitHub's create-tree API
+ * applies an entry at a directory path to that whole subtree, so `.github/workflows` itself and its
+ * ancestors (`.github`) count as workflow changes too, whatever the entry's sha, mode or type.
+ */
+const touchesWorkflows = (path: string) => path.startsWith(workflowsDirectory) || workflowsDirectory.startsWith(`${path}/`);
+export const workflowPaths = (entries: readonly { path: string }[]) => entries.map(entry => entry.path).filter(touchesWorkflows).sort();
+/** A file-level path as `git diff-tree -r` writes it: no empty, `.` or `..` segment that GitHub might resolve elsewhere. */
+const fileLevelPath = (path: string) => path.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..');
 export function workflowSyncRefusal(input: { request: Pick<SyncPushRequest, 'commit' | 'parents' | 'entries'>; branch: string; baseBranch: string; branchHead: string | null; baseContains: boolean; plannedFiles: string[] }): string | null {
   const { request, branch, baseBranch, branchHead, baseContains, plannedFiles } = input;
   const commit = request.commit.slice(0, 12);
@@ -126,7 +134,10 @@ export function workflowSyncRefusal(input: { request: Pick<SyncPushRequest, 'com
   if (!branchHead) return `${branch} does not exist on GitHub; push the branch's own commits first, then ask for the base sync`;
   if (request.parents[0] !== branchHead) return `${commit} does not fast-forward ${branch}: its first parent is ${request.parents[0].slice(0, 12)} but the branch is at ${branchHead.slice(0, 12)}; push the branch's own commits first with a plain git push, then ask again`;
   if (!baseContains) return `${commit} does not merge origin/${baseBranch}: its second parent ${request.parents[1].slice(0, 12)} is not in origin/${baseBranch}`;
-  const differing = workflowPaths(request.entries).filter(path => !inPlannedScope(plannedFiles, path));
+  const malformed = request.entries.map(entry => entry.path).filter(path => !fileLevelPath(path));
+  if (malformed.length) return `${commit} lists entries that are not file-level paths, so the workflow guard cannot judge them: ${malformed.join(', ')}`;
+  // A directory-level entry replaces or deletes every workflow file at once: never a pure base sync, plannedFiles or not.
+  const differing = workflowPaths(request.entries).filter(path => !path.startsWith(workflowsDirectory) || !inPlannedScope(plannedFiles, path));
   if (differing.length) return `${commit} changes workflow files beyond origin/${baseBranch} outside plannedFiles, so it is not a pure base sync: ${differing.join(', ')}`;
   return null;
 }

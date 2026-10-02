@@ -34,9 +34,9 @@ export const controlPlanePermissions: readonly PermissionRequirement[] = [
  * A reviewer App reads code and writes pull request comments. It deliberately never gains
  * `contents: write`, `checks`, or `administration`: a reviewer can neither publish Graphyard's
  * own gate check, change protection, nor write source code. Worker identities are not Apps
- * at all; they push their own branches with a credential narrowed to `contents` and
- * `pull_requests` (worker-credential.ts), never `workflows`: a base sync carrying the base
- * branch's workflow changes is pushed by the control plane instead (sync.ts, GY-1098).
+ * at all; they push their own branches with a credential narrowed to `workerPushPermissions`
+ * (worker-credential.ts). When an installation still refuses a worker push of the base branch's
+ * workflow changes, the control plane pushes that base sync instead (sync.ts, GY-1098).
  */
 export const reviewerPermissions: readonly PermissionRequirement[] = [
   { permission: 'metadata', level: 'read', feature: 'repository', reason: 'read the managed repository' },
