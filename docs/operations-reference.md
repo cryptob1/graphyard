@@ -118,7 +118,7 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token (budget above reserve, less others' spend, to reset). Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed, five-minute-due, review/rework waits, running sessions, `available_at`; tight, idle items await webhooks. `observationThroughput`: budget, pace, head lag, oldest unobserved (`github` past 120s). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
+`GRAPHYARD_DB_{,LEASE_,REPORT_}POOL_MAX` (30/6/4) size pools, `GRAPHYARD_RECONCILE_BATCH_MS` (250) reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (4, ≤ half-pool) share one pace per token (budget above reserve, less others' spend, to reset). Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed, five-minute-due, review/rework waits, running sessions, `available_at`; tight, idle items await webhooks. `observationThroughput`: budget, pace, head lag, oldest unobserved (`github` past 120s). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
 Reconcile reads each live item once per pass, not per batch, and locks only its batch rows, so mutations on other items never wait. Contended batches back off, then defer to the next tick; deferrals and ticks over 5 s log warnings.
 
