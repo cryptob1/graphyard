@@ -1,0 +1,6 @@
+[
+{"id": "timing-failure|GY-1036|2026-10-01T14:45:37.007Z", "at": "2026-10-01T14:45:37.007Z", "kind": "timing-failure", "subject": "GY-1036", "name": "cycle-within-interval.duration", "test": "integration:cycle-within-interval", "measuredMs": 20989, "budgetMs": 20000},
+{"id": "timing-failure|GY-612|2026-10-01T15:18:08.655Z", "at": "2026-10-01T15:18:08.655Z", "kind": "timing-failure", "subject": "GY-612", "name": "cycle-within-interval.duration", "test": "integration:cycle-within-interval", "measuredMs": 23033, "budgetMs": 20000},
+{"id": "timing-failure|GY-1078|2026-10-01T18:16:21.643Z", "at": "2026-10-01T18:16:21.643Z", "kind": "timing-failure", "subject": "GY-1078", "name": "cycle-within-interval.duration", "test": "integration:cycle-within-interval", "measuredMs": 21722, "budgetMs": 20000},
+{"id": "timing-failure|GY-957|2026-10-01T22:00:07.766Z", "at": "2026-10-01T22:00:07.766Z", "kind": "timing-failure", "subject": "GY-957", "name": "cycle-within-interval.duration", "test": "integration:cycle-within-interval", "measuredMs": 20754, "budgetMs": 20000}
+]
