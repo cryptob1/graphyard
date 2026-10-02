@@ -311,6 +311,7 @@
     "tests/exited-worker-pane.test.ts": 1768,
     "tests/failed-launch-pane.test.ts": 1877,
     "tests/failed-manual-proof-rework.test.ts": 1485,
+    "tests/fault-class-configuration.test.ts": 649,
     "tests/fault-classes.test.ts": 2268,
     "tests/retro-synthesis.test.ts": 1200,
     "tests/fleet-sessions.test.ts": 1150,
