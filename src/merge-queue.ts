@@ -1083,8 +1083,8 @@ export function ejectingCheck(work: Work, ciAppIds: readonly number[]): { name: 
 export const failedCheckEjectionPrefix = (check: string) => `Required CI check ${check} did not pass on speculative tip `;
 /**
  * GY-1095. The passing rerun that lifts a standing CI ejection: the ejection was made for required
- * check C failing on tip T, T is still the observed candidate, the newest counted run of C on T now
- * passes, and no other required check's newest run on T failed. The entry then re-enters at its
+ * check C failing on tip T, T is still the observed candidate, the newest counted run of C on T is a
+ * rerun after the failed one and passes, and no other required check's newest run on T failed. The entry then re-enters at its
  * place, with the speculation it held, and no new candidate is needed. Null when the ejection
  * stands: another kind of ejection, a changed tip or policy, a rerun that failed again or has not
  * concluded, another failing required check, or a tip built behind an entry that left the queue
@@ -1100,7 +1100,12 @@ export function ejectedCheckLift(work: Work, all: Work[], ciAppIds: readonly num
   const check = required.find(entry => entry.name === failed.name);
   if (!check) return null;
   const run = requiredCheckRun(check, observation.checks, ciAppIds);
-  if (!requiredCheckPassed(check, run) || (failed.runId !== null && run!.id === failed.runId)) return null;
+  if (!requiredCheckPassed(check, run)) return null;
+  // Only a rerun lifts: a run GitHub created after the failed one (check-run ids increase), or for a
+  // run recorded without an id, one observed after a failed run of the check that is still retained.
+  const rerun = failed.runId !== null ? run!.id !== undefined && run!.id > failed.runId
+    : observation.checks.slice(0, observation.checks.indexOf(run!)).some(entry => entry.name === check.name && failedCheckResults.includes(entry.result));
+  if (!rerun) return null;
   if (required.some(entry => requiredCheckFailed(entry, requiredCheckRun(entry, observation.checks, ciAppIds)))) return null;
   const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
   const departed = (predicted?.predecessors ?? []).some(key => { const item = all.find(entry => entry.key === key); return !item || (item.stage !== 'done' && !item.queue); });

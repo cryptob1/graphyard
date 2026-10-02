@@ -155,6 +155,9 @@ test('unit:ejection-lifts-on-passing-rerun — the ejection stands when the reru
   assert.equal(ejectedCheckLift(changed, [changed], [15368]), null, 'a changed tip keeps the ejection');
   const unchanged = { ...work, observation: seen(work, { sha: work.candidate!.sha, baseSha: main }, rerunPassed) } as Work;
   assert.equal(ejectedCheckLift(unchanged, [unchanged], [15368])?.check, 'secrets', 'the same record on the unchanged tip lifts');
+  // A passing run that is no rerun of the failed one — one GitHub created before it — lifts nothing.
+  const older = { ...work, observation: seen(work, { sha: work.candidate!.sha, baseSha: main }, [...passing().slice(0, 2), run('secrets', 99, 'success', 4242)]) } as Work;
+  assert.equal(ejectedCheckLift(older, [older], [15368]), null, 'a run older than the failed one');
   // An ejection for any other reason is never lifted by a passing check.
   const other = { ...unchanged, queueEjection: { ...unchanged.queueEjection!, check: null } } as Work;
   assert.equal(ejectedCheckLift(other, [other], [15368]), null);
