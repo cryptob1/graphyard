@@ -10,13 +10,12 @@ import { roleSessionMaximumMs } from './model/sessions.js';
  * helper (`gh auth git-credential`) has nothing valid to give a push. On 2026-09-30 eleven finished
  * items blocked on "could not read Username for 'https://github.com'" and held every worker slot
  * for hours. So a worker never pushes with the host's login: the launcher mints each session its
- * own installation token of the Graphyard App — this repository only, `contents`, `pull_requests`
- * and `workflows` write (a sync that merges a base which changed a workflow is otherwise refused,
- * 2026-10-01; the planned-files guard still refuses a candidate that changes one itself) — and writes it into a session GH_CONFIG_DIR that `gh` and git read
+ * own installation token of the Graphyard App — this repository only, `contents` and
+ * `pull_requests` write — and writes it into a session GH_CONFIG_DIR that `gh` and git read
  * directly, with every host credential helper switched off. The watch supervisor refreshes it
  * before GitHub's one-hour expiry while the attempt runs and withdraws it when the session ends.
  */
-export const workerPushPermissions = { contents: 'write', pull_requests: 'write', workflows: 'write' } as const;
+export const workerPushPermissions = { contents: 'write', pull_requests: 'write' } as const;
 
 /** What the control plane answers a lease holder's mint with; the token is the only secret in it. */
 export interface MintedPushCredential {
