@@ -314,6 +314,7 @@
     "tests/failed-launch-pane.test.ts": 1877,
     "tests/failed-manual-proof-rework.test.ts": 1485,
     "tests/fault-class-configuration.test.ts": 649,
+    "tests/fault-class-scope.test.ts": 1200,
     "tests/fault-classes.test.ts": 2268,
     "tests/proof-attempts.test.ts": 340,
     "tests/required-checks-gate.test.ts": 360,
