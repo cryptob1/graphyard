@@ -330,6 +330,7 @@
     "tests/github-rate-budget.test.ts": 7990,
     "tests/github.test.ts": 1363,
     "tests/hand-approver-relaunch.test.ts": 1996,
+    "tests/headless-restart.test.ts": 2606,
     "tests/healthz-bounded.test.ts": 22457,
     "tests/herdr-recovery.test.ts": 14889,
     "tests/hotspots.test.ts": 2046,

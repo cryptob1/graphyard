@@ -7,27 +7,41 @@ import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/l
 import { bwrapOnPath } from '../master/profiles.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
-import { endRun, liveRun, registerRun } from './registry.js';
+import { z } from 'zod';
+import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
-import { runRecord, type Run, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
+import { runRecord, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
 
 /**
- * A child-process spawner that starts every headless run inside the coordinator confinement
- * (GY-888): the launcher's headless roles (a `pi` approver or producer run) spawn their runtime
- * directly, with no pane command line to carry the wrapper, so the spawn itself is wrapped — the
- * bubblewrap words go before the runtime's command and arguments, and the run keeps its own
- * working directory, environment and streams. A spawn that cannot be confined fails the run
- * instead of starting it unconfined. The runner that takes this spawner always calls the
- * three-argument form, so the wrapper is honest at every call site.
+ * A child-process spawner that puts the coordinator confinement (GY-888) before a spawned command:
+ * the bubblewrap words go before the command and its arguments, which keep their own working
+ * directory, environment and streams. A spawn that cannot be confined throws instead of starting
+ * unconfined. Headless runs are not spawned through it: their runner confines Pi alone, inside the
+ * run's shell (`runConfinement`).
  */
 export function confiningSpawn(base: typeof spawn = spawn, options: { coordinatorRoot?: string | null; bwrap?: string | null } = {}): typeof spawn {
-  const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
-  if (!root) return base;
-  const confined = ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
-    const wrapper = headlessConfinementWrapper(root, typeof spawnOptions?.cwd === 'string' ? spawnOptions.cwd : undefined, options.bwrap !== undefined ? options.bwrap : bwrapOnPath());
+  const confine = runConfinement(options);
+  if (!confine) return base;
+  return ((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
+    const wrapper = confine(typeof spawnOptions?.cwd === 'string' ? spawnOptions.cwd : undefined);
     return base(wrapper[0], [...wrapper.slice(1), command, ...args], spawnOptions);
   }) as typeof spawn;
-  return confined;
+}
+
+/**
+ * The coordinator confinement of every headless run (GY-888), as the runner's `confine` option:
+ * the launcher's headless roles (a `pi` approver or producer run) start their runtime with no pane
+ * command line to carry the wrapper, so the runner puts the bubblewrap words before Pi's command
+ * itself, inside the run's shell (GY-453). The shell stays outside, because it writes the run's
+ * output and exit to its directory under the coordinator checkout, which the confinement binds
+ * read-only; and a run's transient scope stays outermost, because the confinement masks the user
+ * bus a `systemd-run` needs. A run that cannot be confined throws here, so it fails instead of
+ * starting unconfined.
+ */
+export function runConfinement(options: { coordinatorRoot?: string | null; bwrap?: string | null } = {}): ((cwd: string | undefined) => readonly string[]) | undefined {
+  const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
+  if (!root) return undefined;
+  return cwd => headlessConfinementWrapper(root, cwd, options.bwrap !== undefined ? options.bwrap : bwrapOnPath());
 }
 
 /**
@@ -43,7 +57,7 @@ export function narrowRunner(pi: unknown): Runner {
   const configured = piRuntimeSchema.parse(pi ?? {});
   // Every headless run is confined at its spawn (GY-888): the checkout the launcher runs from is
   // unwritable to the run, shell commands included, exactly as for a pane session.
-  return piRunner({ command: configured.command, model: configured.model, spawn: confiningSpawn() });
+  return piRunner({ command: configured.command, model: configured.model, confine: runConfinement() });
 }
 
 /**
@@ -80,7 +94,7 @@ export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' |
 /** A registry account's headless runner: every run reads the account's key afresh, into its own environment only, and every run is confined at its spawn (GY-888). */
 export function registryRunner(account: FleetLaunchAccount): Runner {
   const launch = registryHeadlessLaunch(account);
-  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, spawn: confiningSpawn() }).start(prompt, options) };
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement() }).start(prompt, options) };
 }
 /**
  * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,
@@ -100,28 +114,30 @@ export async function smokeRegistryAccount(account: FleetLaunchAccount, options:
 export const runOutcome = (record: RunRecord): 'result' | 'no-result' | undefined =>
   record.result?.ok ? 'result' : record.result?.reason === 'cancelled' ? undefined : 'no-result';
 
-export type Applied = RunRecord['applied'][number];
+export type { Applied } from './registry.js';
 const failure = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /**
  * Start a run for one role session, registered under its session name so the loop's supervision
  * sees it, and apply its submission when it ends. `settled` resolves to the record the session
  * keeps: the run's last events, its result, and what became of each submission.
+ *
+ * With the loop's `root` (GY-453) the run is recorded in the run registry on disk with its owner
+ * and the `context` its role needs to apply the result, so a restart that leaves the run going
+ * (it is detached) is followed by an adoption that applies it — once, whichever process sees it end.
  */
 export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>; checkout?: string;
-  apply: (result: RunResult<T>) => Promise<Applied[]> }) {
+  apply: (result: RunResult<T>) => Promise<Applied[]>; root?: string; context?: Record<string, unknown> }) {
   const live = liveRun(input.name);
   if (live) throw new Error(`A ${live.role} run named ${input.name} is already running for ${live.work}`);
-  const run = input.runner.start(input.prompt, input.options), startedAt = new Date().toISOString();
-  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, ...(input.checkout ? { checkout: input.checkout } : {}) });
-  const settled = run.result().then(async result => {
-    let applied: Applied[];
-    try { applied = await input.apply(result); }
-    catch (error) { applied = [{ subject: input.subject, outcome: 'refused', detail: failure(error) }]; }
-    const record = runRecord(input.runner.name, run, result, startedAt, new Date().toISOString(), applied);
-    endRun(input.name, record);
-    return record;
-  });
+  const startedAt = new Date().toISOString();
+  const run = input.runner.start(input.prompt, input.root ? { ...input.options, runs: runsDirectory(input.root) } : input.options);
+  if (run.directory) {
+    // Watched here from its start, so no adopter elsewhere takes it once its owner is on disk.
+    try { claimRunWatch(run.directory); writeRunOwner(run.directory, { name: input.name, role: input.role, work: input.work, subject: input.subject, context: input.context ?? {}, startedAt }); }
+    catch { /* the run is still watched here; only its adoption after a restart is lost */ }
+  }
+  const settled = superviseRun({ runner: input.runner, run, name: input.name, role: input.role, work: input.work, subject: input.subject, startedAt, apply: input.apply, ...(input.checkout ? { checkout: input.checkout } : {}) });
   return { run, settled, record: runRecord(input.runner.name, run, null, startedAt, null) };
 }
 
@@ -161,6 +177,25 @@ export const approverRunOptions = (cwd: string, decision: string, env: Record<st
   },
 });
 
+/** What an approver run's adoption after a restart needs (GY-453): never the token, which the adopter reads itself. */
+export const approverRunContext = (url: string, workId: string, decision: string, timeoutMs: number, checkout?: string) => ({ url, workId, decision, timeoutMs, ...(checkout ? { checkout } : {}) });
+const approverRunContextSchema = z.object({ url: z.string(), workId: z.string(), decision: z.string(), timeoutMs: z.number().int().positive(), checkout: z.string().optional() }).passthrough();
+/**
+ * How a restarted loop takes back a headless approver run (GY-453, registry.ts adoptRuns): its
+ * verdict is validated against the decision it was launched for and applied as the approver
+ * identity, exactly as the launch would have applied it. The managed directory it works in (GY-391)
+ * stays held while it lives and is settled, through `settle`, once it ends.
+ */
+export function approverRunAdopter(token: () => Promise<string>, fetcher?: typeof fetch, settle?: (checkout: string) => Promise<unknown>): RunAdopter {
+  return async owner => {
+    const context = approverRunContextSchema.parse(owner.context);
+    const checkout = context.checkout;
+    return { options: approverRunOptions('', context.decision, {}, context.timeoutMs),
+      apply: async result => result.ok ? [await applyDecision(context.url, await token(), { id: context.workId }, result.payload as DecidePayload, fetcher)] : [],
+      ...(checkout ? { checkout, settled: () => settle?.(checkout) } : {}) };
+  };
+}
+
 /** The producer's run options: each submission must be one of its proofs on its exact binding. */
 export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha: string; policyRevision: number; proofs: string[] }, env: Record<string, string>, timeoutMs: number): RunOptions<EvidencePayload> => ({
   cwd, env: { ...env, GRAPHYARD_PI_ROLE: 'producer' }, tool: graphyardTools.evidence, timeoutMs,
@@ -187,7 +222,7 @@ export function piProducerPrompt(config: { repository: string }, binding: { key:
   const attached = criteria.filter(criterion => criterion.proofs.some(proof => binding.proofs.includes(proof)));
   return `You are an independent Graphyard proof producer for ${config.repository}. Produce evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + `The criteria these proofs establish: ${attached.map(criterion => `${criterion.id} (${criterion.proofs.filter(proof => binding.proofs.includes(proof)).join(', ')}): ${criterion.text}`).join(' ')} `
-    + `Work in a detached worktree of the exact head at ${checkout.worktree}: git -C ${repository} fetch origin ${binding.sha} && git -C ${repository} worktree add --detach ${checkout.worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests named for it (grep the proof name under tests/) — with every GRAPHYARD_* and HERDR_* variable unset and a free GRAPHYARD_TEST_PORT. A proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed — that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
+    + `Work in a detached worktree of the exact head at ${checkout.worktree}: git -C ${repository} fetch origin ${binding.sha} && git -C ${repository} worktree add --detach ${checkout.worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests named for it (grep the proof name under tests/) — with every GRAPHYARD_* and HERDR_* variable unset and a free GRAPHYARD_TEST_PORT. A proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed — that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. For live install proofs, HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are available in your environment. `
     + 'Do not edit, commit, push, rebase or merge the candidate, and never weaken, skip or narrow a test to make a proof pass. '
     + `A proof that passes against an unchanged tree proves nothing, so for each proof also run it in a second detached worktree of the same head at ${stripped} (git -C ${repository} worktree add --detach ${stripped} ${binding.sha}) with the behaviour its criterion describes removed — revert or stub exactly the lines of the change that implement it. `
     + `Then call the graphyard_submit_evidence tool once per proof with proof, sha "${binding.sha}", baseSha "${binding.baseSha}", policyRevision ${binding.policyRevision}, result pass or fail, executed as the cases that actually ran, skipped, and exercise {criterion, behaviour, result, executed} as the stripped run's true outcome; a failing or incomplete run is submitted as result fail, never omitted. Graphyard submits it as your producer principal and its gates decide whether it is trusted. `
