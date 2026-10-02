@@ -305,7 +305,9 @@ test('the speculative tip is merged onto the candidate branch and published unde
   assert.equal(speculation.ref, 'refs/graphyard/queue/gy-41');
   assert.deepEqual(speculation.predecessors, ['GY-40']);
   const merge = f.calls.find(call => call.path === '/merges')!;
-  assert.deepEqual(merge.body, { base: 'graphyard/task', head: predictedBase, commit_message: 'Graphyard speculative tip for GY-41 behind GY-40' });
+  // Built on the scratch branch, then the candidate branch is moved to it in one push (GY-1087).
+  assert.deepEqual(merge.body, { base: 'graphyard-merge-check/gy-41', head: predictedBase, commit_message: 'Graphyard speculative tip for GY-41 behind GY-40' });
+  assert.deepEqual(f.calls.filter(call => call.path === '/git/refs/heads/graphyard/task').map(call => [call.method, call.body]), [['PATCH', { sha: speculativeTip, force: true }]]);
   const ref = f.calls.find(call => call.path === '/git/refs/graphyard/queue/gy-41')!;
   assert.equal(ref.method, 'PATCH'); assert.deepEqual(ref.body, { sha: speculativeTip, force: true });
 });
