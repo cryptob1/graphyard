@@ -1087,7 +1087,7 @@ export function ejectingCheck(work: Work, ciAppIds: readonly number[] | null): {
   const candidate = work.candidate, observation = work.observation;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha) return null;
   for (const required of requiredChecksOf(work)) {
-    const run = requiredCheckRun(required, observation.checks, ciAppIds);
+    const run = requiredCheckRun(required, observation.checks ?? [], ciAppIds);
     if (requiredRunFailed(required, run) && !holdingCheckRerun(work, candidate.sha, required.name, run)) return { name: required.name, run: run! };
   }
   return null;
