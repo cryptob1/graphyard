@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { readFile, statfs } from 'node:fs/promises';
+import { lstat, readdir, readFile, statfs } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { describeTmpReclaim, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import type { Work } from './model.js';
 
 /**
@@ -23,7 +24,7 @@ import type { Work } from './model.js';
  * the reclaim pass gives each one back; and `/healthz` reports the plane unhealthy while it cannot record.
  */
 
-export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk'] as const;
+export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] as const;
 export type ResourceId = typeof resourceIds[number];
 export type ResourceState = 'ok' | 'low' | 'exhausted' | 'unknown';
 
@@ -59,6 +60,21 @@ export interface ResourceInputs {
   loop: { lagMs: number | null; stalledAfterMs: number; detail: string } | null;
   revision: { behind: number; loaded: string; checkout: string } | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
+  /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
+  tmp?: TmpInodes | null;
+}
+export interface TmpInodes {
+  path: string; totalInodes: number; freeInodes: number;
+  /** What the last /tmp pass to remove anything removed, and when it was recorded. */
+  removed: number | null; removedAt: string | null;
+  /** The latest finished /tmp pass's own count, often 0 (GY-1081); null before any pass is recorded. */
+  latest?: { removed: number; at: string } | null;
+  /**
+   * This user's own top-level entries in the directory, and how many carry a test temp name
+   * (GY-1081): the per-user quota is not readable without quotactl, so this is what the reading can
+   * show of this user's share. `capped` when the count stopped at `ownEntriesScanBound`.
+   */
+  own?: { entries: number; testTemp: number; capped: boolean } | null;
 }
 
 export interface ResourceDefinition {
@@ -245,7 +261,32 @@ export const resourceRegistry: ResourceDefinition[] = [
     warnBelow: bound => bound, symptoms: [/ENOSPC|No space left on device|Disk quota exceeded/],
     read: input => [input.disk ? { id: '', used: input.disk.totalBytes - input.disk.freeBytes, bound: input.disk.totalBytes, detail: `${input.disk.path}`, reclaimable: 0 } : { id: '', used: null, bound: null, detail: 'free space could not be read', reclaimable: 0 }],
   },
+  {
+    id: 'tmp-inodes', title: 'Host /tmp inodes', unit: 'inodes',
+    // statfs reports the filesystem's free inodes, not what remains of this user's quota: a quota is
+    // not readable without quotactl, so the reading warns early rather than claiming to track it.
+    bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
+    usage: 'statfs of the host temporary directory (os.tmpdir())', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
+    reclaim: `the loop's reclaim pass removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
+    warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
+    read: input => [input.tmp
+      ? { id: '', used: input.tmp.totalInodes - input.tmp.freeInodes, bound: input.tmp.totalInodes, reclaimable: 0,
+        detail: describeTmpInodes(input.tmp) }
+      : { id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }],
+  },
 ];
+
+const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
+/** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
+function describeTmpInodes(tmp: TmpInodes) {
+  const parts = [`${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
+  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} at its top level are this user's (${tmp.own.testTemp} with test temp names); the per-user quota itself is not readable`);
+  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}`);
+  if (tmp.removed === null) parts.push('the loop has recorded no /tmp pass that removed anything');
+  else if (!tmp.latest || tmp.latest.at !== tmp.removedAt) parts.push(`the last pass to remove anything removed ${entries(tmp.removed)}${tmp.removedAt ? ` at ${tmp.removedAt}` : ''}`);
+  return parts.join('; ');
+}
 
 /**
  * What the loop consumes that the registry does not declare: a capped ledger schema no entry
@@ -412,6 +453,41 @@ export async function readDisk(root: string, config: MasterConfig) {
   return null;
 }
 
+/** The most top-level /tmp entries a reading stats for its owner: a status read stays bounded on a host with a backlog. */
+export const ownEntriesScanBound = 20_000;
+/** This user's own top-level entries in `path`, and how many carry a test temp name; null where there are no uids. */
+export async function countOwnEntries(path: string, uid = process.getuid?.()): Promise<TmpInodes['own']> {
+  if (uid === undefined) return null;
+  const names = await readdir(path);
+  let entries = 0, testTemp = 0;
+  for (const name of names.slice(0, ownEntriesScanBound)) {
+    let info;
+    try { info = await lstat(resolve(path, name)); } catch { continue; }
+    if (info.uid !== uid) continue;
+    entries++;
+    if (testTempPatterns.some(pattern => pattern.test(name))) testTemp++;
+  }
+  return { entries, testTemp, capped: names.length > ownEntriesScanBound };
+}
+
+/**
+ * The host temporary directory's inode headroom, this user's own entries in it, the latest /tmp
+ * pass's count and the count the last pass to remove anything removed, from the reclaim record
+ * (GY-1074, GY-1081). Null when the volume cannot be read, or reports no inode count (a filesystem
+ * without fixed inodes).
+ */
+export async function readTmpInodes(root: string, path = tmpdir(), volume: (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }> = statfs, uid = process.getuid?.()): Promise<TmpInodes | null> {
+  try {
+    const info = await volume(path);
+    const totalInodes = Number(info.files), freeInodes = Number(info.ffree);
+    if (!Number.isFinite(totalInodes) || totalInodes <= 0) return null;
+    const file = await readReclaimFile(root);
+    const last = file.reports.filter(report => report.tmp?.removed).at(-1);
+    const own = await countOwnEntries(path, uid).catch(() => null);
+    return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null, latest: file.tmpLatest ?? null, own };
+  } catch { return null; }
+}
+
 // ---- The reclaim pass --------------------------------------------------------------------------
 
 export interface ResourceReclaimReport {
@@ -419,16 +495,17 @@ export interface ResourceReclaimReport {
   reaped: { review: number; producer: number };
   closed: { name: string; pane: string; reason: string }[];
   released: { name: string; ledger: 'review' | 'producer'; reason: string }[];
-  /** The stale /tmp directories the pass removed and the bytes they freed (GY-421). */
+  /** The stale /tmp entries the pass removed and the bytes they freed (GY-421, GY-1074). */
   tmp: { removed: number; bytes: number };
   errors: string[];
 }
 export const resourceReportFile = (root: string) => resolve(root, '.graphyard/resource-reclaims.json');
 const retainedReports = 50;
 
-interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Record<string, string> }
+/** `tmpLatest`: the latest finished /tmp pass, recorded even when it removed nothing (GY-1081). */
+interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Record<string, string>; tmpLatest?: { removed: number; at: string } | null }
 async function readReclaimFile(root: string): Promise<ReclaimFile> {
-  try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {} }; }
+  try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {}, tmpLatest: body.tmpLatest ?? null }; }
   catch { return { version: 1, reports: [], seen: {} }; }
 }
 export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
@@ -568,8 +645,10 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
     report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
   }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
-  if (took || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
-    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen }); }
+  // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
+  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at } : file.tmpLatest ?? null;
+  if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
+    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen, tmpLatest }); }
     catch (error) { report.errors.push(`Recording the reclaim: ${error instanceof Error ? error.message : String(error)}`); }
   }
   return report;

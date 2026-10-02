@@ -61,8 +61,8 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   // Each former call site reads through lockedWork, naming the item it acts on.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
   assert.ok((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 10, 'the engine\'s commands read through the bounded read, naming their item');
-  assert.match(engineSource, /const rows = await lockedRows\(db, \[\], \{ after: cursor, limit \}\)/, 'each reconciliation batch reads its own rows whole through the bounded read');
-  assert.match(engineSource, /limit = Math\.min\(this\.reconcileBatchItems, limit \* 2\)/, 'a batch reads at most reconcileBatchItems of its own rows');
+  assert.match(engineSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
+  assert.match(engineSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
   assert.doesNotMatch(readFileSync(join(src, 'store/locked-read.ts'), 'utf8'), /settled IS NOT TRUE|NOT i\.settled/, 'the locked read does not read every open document whole');
 
@@ -106,10 +106,12 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
 /**
- * How long each coordination transaction held the lock, by the operation that took it, and which
+ * How long each transaction held the coordination lock, by the operation that took it, and which
  * documents its queries returned whole (a stand-in is returned as JSON text, a document as an object).
+ * A transaction opened without the lock (a reconciliation batch, GY-727) holds it only from a
+ * successful `pg_try_advisory_xact_lock` to its end; `locked` says whether it held it at all.
  */
-const holds: { label: string; ms: number; keys: string[] }[] = [];
+const holds: { label: string; ms: number; keys: string[]; locked: boolean }[] = [];
 let label = 'other', timing = false;
 const seededDelivered = (entry: { keys: string[] }) => entry.keys.filter(key => key.startsWith('DONE-')).length;
 const seededOpen = (entry: { keys: string[] }) => entry.keys.filter(key => key.startsWith('OPEN-')).length;
@@ -117,14 +119,15 @@ function timeTransactions() {
   if (timing) return; timing = true;
   const original = store.transaction.bind(store);
   store.transaction = (async (fn: any, options: any) => original(async (db, now) => {
-    const started = performance.now();
+    let started = options?.coordinationLock === false ? null as number | null : performance.now();
     const keys = new Set<string>();
     const counted = new Proxy(db, { get: (target, property) => property !== 'query' ? Reflect.get(target, property, target) : async (...args: unknown[]) => {
       const result = await (target.query as any)(...args);
+      if (started === null && String(args[0]).includes('pg_try_advisory_xact_lock') && result?.rows?.[0]?.ok) started = performance.now();
       for (const row of result?.rows ?? []) if (row.document && typeof row.document === 'object' && (row.document as Work).key) keys.add((row.document as Work).key);
       return result;
     } });
-    try { return await fn(counted, now); } finally { holds.push({ label, ms: performance.now() - started, keys: [...keys] }); }
+    try { return await fn(counted, now); } finally { holds.push({ label, ms: started === null ? 0 : performance.now() - started, keys: [...keys], locked: started !== null }); }
   }, options)) as typeof store.transaction;
 }
 async function held<T>(name: string, run: () => Promise<T>): Promise<{ result: T; ms: number; reads: typeof holds }> {
@@ -262,16 +265,17 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   const reread = batches.reduce((sum, entry) => sum + seededDelivered(entry), 0);
   const openRead = batches.map(seededOpen), opened_ = Number((await store.pool.query("SELECT count(*) FROM work_items WHERE document->>'key' LIKE 'OPEN-%'")).rows[0].count);
   console.log(`reconcile pass: ${batches.length} batches, ${total.toFixed(0)} ms of lock hold, longest ${longest.toFixed(0)} ms, ${reread} delivered and ${openRead.reduce((a, b) => a + b, 0)} open documents read whole (${opened_} open)`);
-  // Each batch reads its own open rows whole and every other item as its compact stand-in: not one
-  // of the 600 delivered documents is read under the lock in any batch, no batch reads more open
-  // documents whole than its own rows, and the pass reads each open document whole about once — not
-  // once per batch, as re-reading every open row in each batch would.
+  // The pass opens under the lock on every item's compact stand-in and reads no document whole
+  // there; each batch reads its own open rows whole: not one of the 600 delivered documents is read
+  // in any batch, and the pass reads each open document whole about once — not once per batch, as
+  // re-reading every open row in each batch would.
+  assert.ok(batches[0].locked, 'the opening read holds the coordination lock');
+  assert.deepEqual(batches[0].keys, [], 'the opening read reads no document whole');
   assert.equal(reread, 0, `${reread} delivered documents were read whole over ${batches.length} batches (${batches.map(seededDelivered).join(', ')})`);
   assert.ok(batches.length > 3, `${batches.length} batches`);
-  assert.ok(openRead.every(count => count <= engine.reconcileBatchItems), `a batch read ${Math.max(...openRead)} open documents whole against its ${engine.reconcileBatchItems} own rows`);
   assert.ok(openRead.reduce((a, b) => a + b, 0) < opened_ * 2, `the pass read ${openRead.reduce((a, b) => a + b, 0)} open documents whole for ${opened_} open items`);
   assert.ok(total < 5_000, `a full pass held the lock ${total.toFixed(0)} ms over ${batches.length} batches`);
-  // The budget counts from before the read: a batch overruns it by at most the one item it always completes.
+  // The opening read is the longest hold; a batch holds the lock only to commit what it wrote.
   assert.ok(longest < engine.reconcileBatchMs + 250, `the longest batch held the lock ${longest.toFixed(0)} ms against a ${engine.reconcileBatchMs} ms budget`);
   // A second pass changes nothing it does not need to and still reads no delivered document.
   const again = holds.length; label = 'reconcile';

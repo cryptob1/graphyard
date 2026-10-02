@@ -27,7 +27,8 @@ import { lockedWork } from './store/locked-read.js';
 // recommendation, marked provisional. A later answer is added to the brief; one that differs from
 // the recommendation an attempt already built on returns that head for rework. A run that fails,
 // times out or overruns its token budget is recorded as a failure, and the item is dispatched
-// without a brief. One run per item per requirements revision.
+// without a brief. One run per item per requirements revision, except that a run lost to its host
+// (killed from outside, with no result) is started again, at most `researchLostRestarts` times.
 // ---------------------------------------------------------------------------
 
 /**
@@ -59,6 +60,8 @@ export interface ResearchRecord {
   questions: ResearchQuestion[];
   failure: { reason: string; detail: string } | null;
   recordedBy: string;
+  /** How many runs at this revision were lost (their process gone without a result) and started again; absent before the first. */
+  restarts?: number;
 }
 
 /** The Graphyard Pi tool whose call is the research session's submission (integrations/pi). */
@@ -110,6 +113,15 @@ export function requirementsRevision(work: Pick<Work, 'title' | 'description' | 
 /** The record for the item's current requirements, or null when this revision was never researched. */
 export const currentResearch = (work: Pick<Work, 'title' | 'description' | 'criteria' | 'researchBrief'>) =>
   work.researchBrief && work.researchBrief.revision === requirementsRevision(work) ? work.researchBrief : null;
+/**
+ * How many times a research run that was lost — its process killed from outside, by OOM or a
+ * reboot, with no result — is started again at the same revision. Research spends no attempt, but
+ * each run spends research tokens, so a host that keeps killing it is not fed runs forever.
+ */
+export const researchLostRestarts = 2;
+/** Whether a revision's record is a lost run that may be started again (`researchLostRestarts`). */
+export const researchRestartable = (record: Pick<ResearchRecord, 'state' | 'failure' | 'restarts'>) =>
+  record.state === 'failed' && record.failure?.reason === 'lost' && (record.restarts ?? 0) < researchLostRestarts;
 /** How long past its timeout a run recorded as running still holds dispatch: the runner stops it at the timeout, and its failure is posted within this. */
 export const researchHoldGraceMs = 60_000;
 /**
@@ -143,9 +155,10 @@ export function applyResearchEvent(work: Work, input: ResearchEvent, actor: stri
   const existing = work.researchBrief?.revision === event.revision ? work.researchBrief : null;
   demand(event.revision === requirementsRevision(work), `${work.key}'s requirements are at revision ${requirementsRevision(work)}, not ${event.revision}; reload before recording research`);
   if (event.event === 'started') {
-    demand(!existing, `${work.key} was already researched at requirements revision ${event.revision} (${existing?.state}); one run per revision`);
+    demand(!existing || researchRestartable(existing), `${work.key} was already researched at requirements revision ${event.revision} (${existing?.state}); one run per revision, and a lost one restarted at most ${researchLostRestarts} times`);
     work.researchBrief = { revision: event.revision, state: 'running', startedAt: at, endedAt: null, runtime: event.runtime, model: event.model,
-      timeoutMs: event.timeoutMs, tokenBudget: event.tokenBudget, brief: null, questions: [], failure: null, recordedBy: actor };
+      timeoutMs: event.timeoutMs, tokenBudget: event.tokenBudget, brief: null, questions: [], failure: null, recordedBy: actor,
+      ...(existing ? { restarts: (existing.restarts ?? 0) + 1 } : {}) };
     return work.researchBrief;
   }
   demand(existing?.state === 'running', `${work.key} has no research run at revision ${event.revision} to record the end of`);
@@ -288,16 +301,21 @@ export interface ResearchStepInput {
  */
 export async function researchStep(input: ResearchStepInput): Promise<{ held: Set<string>; actions: ResearchStepAction[] }> {
   const held = new Set<string>(), actions: ResearchStepAction[] = [];
+  // The run registry on disk, read at most once a cycle however many items await adoption.
+  let onDisk: ReturnType<typeof listRunDirectories> | null = null;
+  const registry = () => onDisk ??= listRunDirectories(runsDirectory(input.cwd));
   for (const work of input.items) {
     if (!researchWanted(work) || !input.settings.enabled) continue;
     const revision = requirementsRevision(work), running = live.get(work.id);
     if (running?.revision === revision) { held.add(work.id); continue; }
     const record = currentResearch(work);
-    if (record) {
+    // A lost run (killed from outside, by OOM or a reboot) gave no brief through no fault of its
+    // own: it is started again, a bounded number of times, like a lost producer or approver run.
+    if (record && !researchRestartable(record)) {
       if (record.state !== 'running') continue;
       // A run this process is not watching may be one a restart left running (GY-453): it is
       // detached, so it is adopted from the run registry and its brief applied when it ends.
-      if (adoptResearch(input, work, revision)) {
+      if (adoptResearch(input, work, revision, registry)) {
         held.add(work.id);
         actions.push({ work: work.key, state: 'started', detail: `Adopted ${work.key}'s research run after a restart; dispatch waits for its brief` });
         continue;
@@ -322,12 +340,15 @@ export async function researchStep(input: ResearchStepInput): Promise<{ held: Se
     const startedAt = new Date().toISOString();
     const run = input.runner.start(researchPrompt(input.config, work, input.settings), {
       cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: researchRole }, tool: researchTool, timeoutMs, validate: payload => researchBriefSchema.parse(payload), runs: runsDirectory(input.cwd) });
+    // Watched here all the same when its owner cannot be written; only an adoption after a restart is lost, so the action says so.
+    let unowned = '';
     if (run.directory) {
       try { claimRunWatch(run.directory); writeRunOwner(run.directory, { name: `research:${work.key}`, role: 'research', work: work.id, subject: revision, context: {}, startedAt }); }
-      catch { /* watched here all the same; only an adoption after a restart is lost */ }
+      catch (error) { unowned = `; its owner could not be written, so a restart cannot adopt it: ${message(error)}`; }
     }
     followResearch(input, work, revision, run, startedAt);
-    actions.push({ work: work.key, state: 'started', detail: `Researching ${work.key} on ${input.settings.model} before build (at most ${input.settings.timeoutMinutes} minutes and ${input.settings.tokenBudget} tokens); dispatch waits for its brief` });
+    const again = record ? `again after ${record.restarts ? `${record.restarts + 1} lost runs` : 'a lost run'}, ` : '';
+    actions.push({ work: work.key, state: 'started', detail: `Researching ${work.key} ${again}on ${input.settings.model} before build (at most ${input.settings.timeoutMinutes} minutes and ${input.settings.tokenBudget} tokens); dispatch waits for its brief${unowned}` });
   }
   return { held, actions };
 }
@@ -346,9 +367,9 @@ function followResearch(input: ResearchStepInput, work: Work, revision: string, 
   live.set(work.id, { revision, run, settled });
 }
 /** Adopt the research run a restart left for this revision, when the registry on disk holds one. */
-function adoptResearch(input: ResearchStepInput, work: Work, revision: string) {
+function adoptResearch(input: ResearchStepInput, work: Work, revision: string, onDisk: () => ReturnType<typeof listRunDirectories>) {
   if (!input.runner.adopt) return false;
-  const found = listRunDirectories(runsDirectory(input.cwd)).find(entry => !entry.record && entry.owner.role === 'research' && entry.owner.work === work.id && entry.owner.subject === revision);
+  const found = onDisk().find(entry => !entry.record && entry.owner.role === 'research' && entry.owner.work === work.id && entry.owner.subject === revision);
   if (!found || !claimRunWatch(found.directory)) return false;
   const run = input.runner.adopt<ResearchBrief>(found.directory, { tool: researchTool, timeoutMs: input.settings.timeoutMinutes * 60_000, validate: payload => researchBriefSchema.parse(payload) });
   followResearch(input, work, revision, run, found.owner.startedAt);

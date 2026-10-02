@@ -102,3 +102,23 @@ export const coordinationTrimSql = (kept: string, keep: number) => `jsonb_build_
   'queueHistory', GREATEST(0, ${length("d.document->'queueHistory'")} - ${keep}),
   'actionHistory', GREATEST(0, ${length("d.document->'actionQueue'->'history'")} - ${keep}),
   'sessions', ${length("d.document->'sessions'")} - ${length(`${kept}->'sessions'`)})`;
+
+/** Items a pass reads whole after its opening stand-ins (GY-727, GY-1027): each batch's own items, and those that moved since. */
+export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS version, w.document FROM work_items w WHERE w.id = ANY($1::uuid[])';
+/**
+ * The versions of the rows a pass can be affected by, never their documents: the pass's own
+ * candidates (`$1`) and every row not settled now, which takes in an item created or reopened
+ * since. `xmin` changes with every write to the row, including the writes that bump no revision
+ * (a claim renewal), so a pass that compares it with what it read knows exactly which items moved
+ * since. A settled delivery that stays settled is never visited, so a batch's check grows with
+ * the live items, not with the history (GY-727).
+ */
+export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM work_items w
+  JOIN (SELECT unnest($1::uuid[]) AS id UNION SELECT i.id FROM work_index i WHERE NOT i.settled) live ON live.id = w.id`;
+/**
+ * One batch item's row lock, taken as the batch reaches it (GY-727), with the version of the row
+ * it locked: after waiting for a writer, the version is the one that writer committed, never the
+ * statement's older snapshot. Locked row by row, a batch holds only its own items, so a mutation
+ * on any other item commits while the batch holds its transaction.
+ */
+export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE';
