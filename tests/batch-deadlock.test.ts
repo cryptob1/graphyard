@@ -58,6 +58,9 @@ class Repo {
   adapter() {
     const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
     github.controlPlaneLogin = async () => APP;
+    // GitHub's push webhook for every move of main, as the route delivers it: it ends the adapter's shared base-ref read (GY-806).
+    const setRef = this.refs.set.bind(this.refs);
+    this.refs.set = (key: string, value: string) => { const result = setRef(key, value); if (key === 'heads/main') github.noteWebhook('push', { ref: 'refs/heads/main' }); return result; };
     github.request = async (rawPath: string, method = 'GET', body?: unknown) => {
       this.calls.push({ path: rawPath, method, body });
       const url = new URL(rawPath, 'http://api.test'); const path = url.pathname; const page = Number(url.searchParams.get('page') ?? 1);
@@ -134,12 +137,14 @@ async function onlyJob(work: Work) {
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [work.id]);
 }
+// GY-883: the fixtures change files under the public API (src/server/routes/), the high lane,
+// so the queue takes each candidate only once its producer proof stands, as these tests judge.
 /** One reconciliation of exactly this item through the real adapter. */
 async function cycle(github: GitHub, work: Work) { await onlyJob(work); await processJob(engine, github); return reload(work); }
 /** Leave the queue to the items this test creates: everything else live is delivered. */
 async function clearQueue() { await store.pool.query("UPDATE work_items SET document=(document-'queue')||jsonb_build_object('stage','done') WHERE document->>'stage' <> 'done'"); }
 async function submitted(repo: Repo, title: string, head: () => string) {
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:queue'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/server/routes/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:queue'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   const branch = `graphyard/${work.key.toLowerCase()}-1`;
@@ -165,8 +170,8 @@ test('unit:batch-tip-published-from-stale-state — the GY-438 state (batch test
   await clearQueue();
   const repo = new Repo(), github = repo.adapter();
   const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
-  let head = await submitted(repo, 'Deadlock head', () => repo.change([main], 'feat: head', ['src/head.ts']));
-  let behind = await submitted(repo, 'Deadlock behind', () => repo.change([main], 'feat: behind', ['src/behind.ts']));
+  let head = await submitted(repo, 'Deadlock head', () => repo.change([main], 'feat: head', ['src/server/routes/head.ts']));
+  let behind = await submitted(repo, 'Deadlock behind', () => repo.change([main], 'feat: behind', ['src/server/routes/behind.ts']));
   head = await validated(repo, github, head);
   behind = await validated(repo, github, behind);
   const headEntry = head.queue!, behindEntry = behind.queue!;
@@ -225,7 +230,7 @@ test('unit:no-observation-recorded — every claimed job that saves no observati
   await clearQueue();
   const repo = new Repo(), github = repo.adapter();
   const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
-  let work = await submitted(repo, 'Starved observation', () => repo.change([main], 'feat: starved', ['src/starved.ts']));
+  let work = await submitted(repo, 'Starved observation', () => repo.change([main], 'feat: starved', ['src/server/routes/starved.ts']));
   const head = repo.refs.get(`heads/${branchOf(work)}`)!;
   repo.approve(work.submission!.pr, head);
   work = await cycle(github, work);
@@ -271,7 +276,7 @@ test('unit:stuck-batch-dissolved — a batch in testing with no published tip fo
     const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
     const items: Work[] = [];
     for (const title of ['Stuck first', 'Stuck second', 'Stuck third', 'Stuck fourth']) {
-      let item = await submitted(repo, title, () => repo.change([main], `feat: ${title}`, [`src/${title.slice(6).toLowerCase()}.ts`]));
+      let item = await submitted(repo, title, () => repo.change([main], `feat: ${title}`, [`src/server/routes/${title.slice(6).toLowerCase()}.ts`]));
       items.push(await validated(repo, github, item));
     }
     const [first, second, third, fourth] = items;
@@ -319,11 +324,11 @@ test('unit:batch-view-stable — a re-derived batch view equal in content keeps 
   await clearQueue();
   const repo = new Repo(), github = repo.adapter();
   const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
-  let work = await submitted(repo, 'Stable batch view', () => repo.change([main], 'feat: stable', ['src/stable.ts']));
+  let work = await submitted(repo, 'Stable batch view', () => repo.change([main], 'feat: stable', ['src/server/routes/stable.ts']));
   const head = repo.refs.get(`heads/${branchOf(work)}`)!;
   repo.approve(work.submission!.pr, head);
   work = await cycle(github, work);
-  work = await engine.execute(producer, 'evidence', work.id, { proof: 'unit:queue', sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/stable.ts'] }, randomUUID());
+  work = await engine.execute(producer, 'evidence', work.id, { proof: 'unit:queue', sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/server/routes/stable.ts'] }, randomUUID());
   work = await reload(work);
   assert.ok(work.queue?.batch, 'the queued entry carries its derived batch');
   const stored = (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
@@ -340,8 +345,8 @@ test('unit:parallel-speculative-tips — publication wakes the next leased job b
   await clearQueue();
   const repo = new Repo(), github = repo.adapter();
   const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
-  let head = await submitted(repo, 'Parallel head', () => repo.change([main], 'feat: first', ['src/first.ts']));
-  let behind = await submitted(repo, 'Parallel successor', () => repo.change([main], 'feat: second', ['src/second.ts']));
+  let head = await submitted(repo, 'Parallel head', () => repo.change([main], 'feat: first', ['src/server/routes/first.ts']));
+  let behind = await submitted(repo, 'Parallel successor', () => repo.change([main], 'feat: second', ['src/server/routes/second.ts']));
   head = await validated(repo, github, head);
   behind = await validated(repo, github, behind);
   const request = github.request.bind(github);

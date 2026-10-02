@@ -121,7 +121,8 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
   const building2 = claimed('GY-185', ['src/'], 5 * 60_000);
   const inReview = notOpen(submitted('GY-166', [file], [file]));
   const first = work('GY-190', { plannedFiles: [file], createdAt: iso(-3 * hour), stageEnteredAt: iso(-10 * 60_000) });
-  const second = work('GY-191', { plannedFiles: [file, 'docs/coordination.md'], createdAt: iso(-2 * hour) });
+  // Neither waited past the starvation bound (dispatchStarvationMs), so the smallest-scope order decides.
+  const second = work('GY-191', { plannedFiles: [file, 'docs/coordination.md'], createdAt: iso(-2 * hour), stageEnteredAt: iso(-30 * 60_000) });
   const all = [building, building2, inReview, first, second];
   for (const item of [first, second]) assert.doesNotThrow(() => assertDispatchable(item, all, iso(0)), `${item.key} is dispatchable whatever it overlaps`);
   assert.equal(dispatchHold(first, all, new Date(clock)), null, 'the concern layer holds nothing for overlap either');

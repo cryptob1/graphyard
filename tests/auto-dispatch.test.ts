@@ -35,7 +35,8 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 
 function observation(candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
   return { candidate: { ...candidate, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-    files: ['src/a.ts'], scopeFiles: [], at, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
+    // GY-883: the observed scope rides the public API path, the high lane, whose full path demands all three proof groups this file binds.
+    files: ['src/server/routes/a.ts'], scopeFiles: [{ path: 'src/server/routes/a.ts', status: 'modified' as const, sha: sha40('s'), additions: 1, deletions: 1, binary: false }], at, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };

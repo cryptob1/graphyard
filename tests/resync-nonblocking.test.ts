@@ -9,7 +9,7 @@ import { runExecutor, type ExecutorEffects } from '../src/auto-dispatch.js';
 import { controlPlaneHandlers, watchdogEffects } from '../src/executor.js';
 import { executorFleetReport, executorRegistrar, readExecutorRegistrations, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import { actionStallThreshold } from '../src/model/action-progress.js';
-import { resyncUnobservedPrefix } from '../src/model/action-kinds.js';
+import { observationWaitBoundMs, resyncUnobservedPrefix } from '../src/model/action-kinds.js';
 import { claimAction, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
 
 /**
@@ -70,8 +70,9 @@ test('unit:resync-never-blocks-executor — a resync claim wakes the observation
   const run = (maxSteps: number) => runExecutor(executor, effects, { intervalMs: 1, now: () => clock, maxSteps });
   const longestGap = () => Math.max(...notified.slice(1).map((at, index) => at - notified[index]));
 
-  // Ten minutes of an observation that never arrives.
-  const until = clock + 10 * 60_000;
+  // An observation that never arrives, for longer than a woken job is bound to take (GY-1090):
+  // inside that bound the row is waiting, not stalled; past it, the run is a stall.
+  const until = clock + 2 * observationWaitBoundMs;
   const steps = [];
   while (clock < until) steps.push(...(await run(10)).steps);
   const ran = steps.filter(step => step.action);
@@ -85,7 +86,7 @@ test('unit:resync-never-blocks-executor — a resync claim wakes the observation
   assert.equal(waiting.state, 'pending');
   assert.equal(waiting.claim, null);
   assert.ok(waiting.retryAt && Date.parse(waiting.retryAt) > clock - intervalMs, 'the row waits out a backoff before it is offered again');
-  assert.ok(waiting.stall, `after ${actionStallThreshold} unobserved claims the row is stalled rather than retried on a steady beat`);
+  assert.ok(waiting.stall, `once ${actionStallThreshold} or more unobserved claims outlast the observation bound the row is stalled rather than retried on a steady beat`);
   assert.match(waiting.stall!.reason, new RegExp(`^GY-303: ${resyncUnobservedPrefix}; its observation job is scheduled and records no error, yet saved no observation; the claim woke it and leaves the row waiting for the observation$`));
   const first = waiting.history.find(entry => entry.event === 'claimed')!.at;
   assert.ok(requests.every(request => request.since === first), 'every claim in the run waits for an observation newer than the claim that first woke the job');

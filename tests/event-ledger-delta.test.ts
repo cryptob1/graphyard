@@ -106,7 +106,8 @@ test('unit:delta-diff-roundtrip — the diff and its application agree for arbit
 test('unit:delta-chain-bounded — a full snapshot recurs at least every snapshotEvery rows and whenever the delta would be large, so every row is one lookup from its document', async () => {
   const work: any = await seeded();
   await saveAs(work, 'create');
-  for (let n = 0; n < snapshotEvery * 2 + 10; n++) { work.lease.expiresAt = new Date(Date.now() + n).toISOString(); await saveAs(work, n % 2 ? 'heartbeat' : 'action.claimed'); }
+  // Non-routine kinds: a routine save is a delta however far from its base (GY-979, tests/ledger-compaction.test.ts).
+  for (let n = 0; n < snapshotEvery * 2 + 10; n++) { work.lease.expiresAt = new Date(Date.now() + n).toISOString(); await saveAs(work, n % 2 ? 'dispatch.sent' : 'loop.session'); }
   let rows = await raw(work.id);
   const position = new Map(rows.map((row, index) => [Number(row.seq), index]));
   const fulls = rows.map((row, index) => row.payload.work ? index : -1).filter(index => index >= 0);

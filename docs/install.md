@@ -19,7 +19,7 @@ A person is asked for four things: **Which provider** (and `--workspace` on mult
 
 Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=…`; `gh auth status` as repository admin (`repo,admin:repo_hook`).
 
-Worker and non-Actions unit-proof hosts need bubblewrap (`bwrap --unshare-all --ro-bind / / -- true`; Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true` (the probe Graphyard runs) must succeed (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 
 ### Providers
 
