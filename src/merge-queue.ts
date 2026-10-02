@@ -1934,13 +1934,33 @@ export interface CheckRerun {
   runId?: number;
   /** The check run of the rerun, once observed. */
   rerunId?: number;
+  /** The workflow run's attempt the rerun was requested from; GitHub's rerun is a later attempt (GY-1096). */
+  attempt?: number;
+  /**
+   * GY-1096: what GitHub last said of the rerun's workflow run once no new check run had appeared
+   * within `checkRerunVisibilityMs`: still `queued`, `waiting`, `in_progress` and the like is a
+   * runner-queue wait, which keeps holding the failure until the rerun concludes.
+   */
+  waiting?: { status: string; at: string };
+  /** When the workflow run was last read for this rerun (GY-1096). */
+  probedAt?: string;
+  /** When GitHub was asked a second time because no rerun was found at all (GY-1096); asked once only. */
+  rerequestedAt?: string;
   detail?: string;
   resolvedAt?: string;
 }
 /** The installation-ledger event recording the rerun count the master published (POST /api/merge-queue). */
 export const rerunFailedChecksEvent = 'merge-queue.rerun-failed-checks';
-/** An owed or accepted rerun with no new check run after this long no longer holds the failure. */
+/**
+ * An owed rerun with no new check run after this long no longer holds the failure. An accepted one
+ * is then asked of GitHub instead (GY-1096): a workflow run still queued or in progress is a wait,
+ * and a rerun not found at all is requested once more before it counts.
+ */
 export const checkRerunVisibilityMs = 15 * 60_000;
+/** How often an accepted rerun past `checkRerunVisibilityMs` with no check run has its workflow run read again. */
+export const checkRerunProbeMs = 5 * 60_000;
+/** An accepted rerun whose workflow run GitHub fails to return for this long no longer holds the failure. */
+export const checkRerunUnreadableMs = 2 * checkRerunVisibilityMs;
 /** Rerun records kept on an item; older ones remain on the ledger. */
 export const checkRerunLimit = 20;
 const holdingRerun = new Set<CheckRerun['state']>(['owed', 'requested']);
@@ -1972,6 +1992,10 @@ function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: rea
 }
 /** A transition of a rerun record, as the engine writes it to the item's ledger. */
 export interface CheckRerunTransition { kind: 'check.rerun.owed' | 'check.rerun.passed' | 'check.rerun.failed' | 'check.rerun.expired' | 'check.rerun.requested'; rerun: CheckRerun }
+/** The newest trusted run of `check` on the observed candidate. */
+function latestTrusted(observation: Observation, check: string, ciAppIds: readonly number[]) {
+  return latestCheck((observation.checks ?? []).filter(entry => entry.name === check && ciAppIds.includes(entry.appId)));
+}
 /**
  * Brings the rerun records up to the observation just taken, before the gates read it: a rerun
  * whose own run concluded is resolved with that conclusion, one that never appeared expires, and
@@ -1984,7 +2008,7 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
   const transitions: CheckRerunTransition[] = [];
   let reruns = checkReruns(work);
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return { reruns, transitions };
-  const latestOf = (name: string) => latestCheck((observation.checks ?? []).filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
+  const latestOf = (name: string) => latestTrusted(observation, name, ciAppIds);
   reruns = reruns.map(entry => {
     if (entry.sha !== candidate.sha || !holdingRerun.has(entry.state)) return entry;
     const run = latestOf(entry.check);
@@ -1995,6 +2019,9 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
       if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
       return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
     }
+    // An accepted rerun naming its workflow run is asked of GitHub by the integration job instead
+    // (GY-1096): queued behind busy runners it is a wait, not a failure, however long it takes.
+    if (entry.state === 'requested' && entry.runId !== undefined) return entry;
     if (now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
       const expired = { ...entry, state: 'expired' as const, detail: `${entry.state === 'owed' ? 'The rerun remained owed' : 'GitHub accepted the rerun'} but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
       transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
@@ -2017,8 +2044,44 @@ export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckR
   const observation = work.observation, candidate = work.candidate;
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
   return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'owed'
-    && latestCheck((observation.checks ?? []).filter(run => run.name === entry.check && ciAppIds.includes(run.appId)))?.id === entry.failedRunId);
+    && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId);
 }
+/**
+ * GY-1096: the accepted reruns on the current candidate whose new check run has not appeared within
+ * `checkRerunVisibilityMs` of the request, and whose workflow run is due to be read again: the
+ * integration job asks GitHub whether the run is queued, running, concluded or missing.
+ */
+export function dueCheckRerunProbes(work: Work, ciAppIds: readonly number[], now: Date): CheckRerun[] {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
+  return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'requested' && entry.runId !== undefined
+    && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId
+    && now.getTime() - Date.parse(entry.rerequestedAt ?? entry.at) >= checkRerunVisibilityMs
+    && (!entry.probedAt || now.getTime() - Date.parse(entry.probedAt) >= checkRerunProbeMs));
+}
+/** The workflow run GitHub reports for a rerun (GY-1096), or null when there is none. */
+export interface RerunWorkflowRun { status: string; conclusion: string | null; attempt: number | null }
+/** What an accepted rerun's workflow run says of it (GY-1096). */
+export type CheckRerunProbe =
+  | { kind: 'waiting'; status: string }
+  | { kind: 'failed'; conclusion: string }
+  | { kind: 'missing' };
+/**
+ * Classifies the workflow run read for an accepted rerun with no new check run: a run not yet
+ * completed is a runner-queue wait; a later attempt that concluded failing is the rerun failing;
+ * one that concluded otherwise holds until its check run is observed; no run, or no attempt after
+ * the one the rerun was requested from, is a rerun GitHub accepted but never created.
+ */
+export function classifyRerunRun(entry: Pick<CheckRerun, 'attempt'>, run: RerunWorkflowRun | null): CheckRerunProbe {
+  if (!run) return { kind: 'missing' };
+  if (run.status !== 'completed') return { kind: 'waiting', status: run.status };
+  const later = entry.attempt !== undefined && run.attempt !== null && run.attempt > entry.attempt;
+  if (!later) return { kind: 'missing' };
+  if (run.conclusion && failedConclusions.has(run.conclusion)) return { kind: 'failed', conclusion: run.conclusion };
+  return { kind: 'waiting', status: 'completed' };
+}
+const runnerWait = (entry: CheckRerun) => entry.waiting && entry.waiting.status !== 'completed'
+  ? `, waiting for a runner (its workflow run is ${entry.waiting.status.replace(/_/g, ' ')} in the runner queue)` : '';
 /** What the last rerun of `check` on `sha` came to, as a clause for the failure it did not clear. */
 function rerunOutcome(work: Work, sha: string, check: string): string {
   const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
@@ -2032,7 +2095,7 @@ export function checkRerunStatus(work: Work, check: string): string {
   const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
   if (!last) return '';
   const state = last.state === 'owed' ? 'one rerun of its failed jobs is owed'
-    : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}`
+    : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}${runnerWait(last)}`
     : last.state === 'failed' ? 'failed again after rerunning its failed jobs'
     : last.state === 'passed' ? 'passed'
     : `${last.state}: ${last.detail ?? 'no reason given'}`;
@@ -2042,5 +2105,5 @@ export function checkRerunStatus(work: Work, check: string): string {
 export function pendingCheckReruns(work: Work): string[] {
   const sha = work.candidate?.sha;
   return checkReruns(work).filter(entry => entry.sha === sha && holdingRerun.has(entry.state))
-    .map(entry => `${entry.sha.slice(0, 12)}: required CI check ${entry.check} failed and ${entry.state === 'owed' ? 'one rerun of its failed jobs is owed' : `its failed jobs are rerunning${entry.runId ? ` (workflow run ${entry.runId})` : ''}`}; the entry keeps its position and bindings until the rerun concludes`);
+    .map(entry => `${entry.sha.slice(0, 12)}: required CI check ${entry.check} failed and ${entry.state === 'owed' ? 'one rerun of its failed jobs is owed' : `its failed jobs are rerunning${entry.runId ? ` (workflow run ${entry.runId})` : ''}${runnerWait(entry)}`}; the entry keeps its position and bindings until the rerun concludes`);
 }
