@@ -15,7 +15,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -1959,11 +1959,22 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * An Actions check run's id is its job's id, which names the run; only the failed jobs rerun, on
    * the same sha, so the rerun's check run is the one the gates read next.
    */
-  async rerunFailedJobs(checkRunId: number): Promise<{ runId: number }> {
+  async rerunFailedJobs(checkRunId: number): Promise<{ runId: number; attempt?: number }> {
     const job = await this.request(`/actions/jobs/${checkRunId}`);
     demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
     await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
-    return { runId: job.run_id };
+    return { runId: job.run_id, ...(Number.isSafeInteger(job.run_attempt) ? { attempt: job.run_attempt } : {}) };
+  }
+  /**
+   * The workflow run a rerun was requested on (GY-1096): its status (`queued`, `waiting`,
+   * `in_progress`, `completed`, ...), conclusion and current attempt, or null when GitHub has none.
+   */
+  async rerunWorkflowRun(runId: number): Promise<RerunWorkflowRun | null> {
+    let run: any;
+    try { run = await this.request(`/actions/runs/${runId}`); }
+    catch (error) { if (error instanceof Refusal && /\(404\)/.test(error.message)) return null; throw error; }
+    demand(typeof run?.status === 'string', `GitHub did not return a readable workflow run ${runId}`, 502);
+    return { status: run.status, conclusion: typeof run.conclusion === 'string' ? run.conclusion : null, attempt: Number.isSafeInteger(run.run_attempt) ? run.run_attempt : null };
   }
   /**
    * The pull request's place in GitHub's merge queue (GY-258): whether the base branch has a queue,
@@ -2791,11 +2802,38 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       for (const owed of owedCheckReruns(work, engine.ciAppIds)) {
         const rerunHold = hold('check-rerun');
         if (rerunHold) { held ??= rerunHold; break; }
-        let outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string };
+        let outcome: { state: 'requested' | 'refused'; runId?: number; attempt?: number; detail?: string };
         if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
-        else try { outcome = { state: 'requested', runId: (await github.rerunFailedJobs(owed.failedRunId)).runId }; }
+        else try { const requested = await github.rerunFailedJobs(owed.failedRunId); outcome = { state: 'requested', runId: requested.runId, ...(requested.attempt !== undefined ? { attempt: requested.attempt } : {}) }; }
         catch (error) { outcome = { state: 'refused', detail: error instanceof Error ? error.message.slice(0, 300) : 'GitHub refused the rerun' }; }
         work = await engine.recordCheckRerun(work.id, job.token, owed, outcome);
+      }
+      // An accepted rerun with no new check run after the visibility bound is asked of GitHub
+      // (GY-1096): with runners queued its workflow run waits, and that is a wait, not a failure,
+      // so the candidate keeps its position and owes no new head. A rerun not found at all is
+      // requested once more; only one that concluded failing, or vanished twice, lets it stand.
+      for (const due of dueCheckRerunProbes(work, engine.ciAppIds, new Date())) {
+        const rerunHold = hold('check-rerun');
+        if (rerunHold) { held ??= rerunHold; break; }
+        let found: RerunWorkflowRun | null = null;
+        if (typeof github.rerunWorkflowRun === 'function') try { found = await github.rerunWorkflowRun(due.runId!); }
+        catch (error) {
+          // A read GitHub keeps failing holds for a bounded time only, measured from the last answer.
+          const reason = error instanceof Error ? error.message.slice(0, 300) : String(error);
+          if (Date.now() - Date.parse(due.probedAt ?? due.rerequestedAt ?? due.at) < checkRerunUnreadableMs) { console.error(`Graphyard could not read workflow run ${due.runId} for the ${due.check} rerun of ${work.key}: ${reason}`); continue; }
+          work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun but no new ${due.check} run appeared and its workflow run could not be read for ${checkRerunUnreadableMs / 60_000} minutes: ${reason}` });
+          continue;
+        }
+        const probe = classifyRerunRun(due, found);
+        if (probe.kind !== 'missing') { work = await engine.recordCheckRerunProbe(work.id, job.token, due, probe); continue; }
+        if (due.rerequestedAt) {
+          work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun twice but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes of either request` });
+          continue;
+        }
+        let outcome: Parameters<Engine['recordCheckRerunProbe']>[3];
+        try { const again = await github.rerunFailedJobs(due.failedRunId); outcome = { kind: 'rerequested', runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}) }; }
+        catch (error) { outcome = { kind: 'refused', detail: `GitHub accepted the rerun but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes, and the second request was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}` }; }
+        work = await engine.recordCheckRerunProbe(work.id, job.token, due, outcome);
       }
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
       // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
