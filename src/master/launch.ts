@@ -1,6 +1,6 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -421,6 +421,8 @@ export async function startAgentSession(name: string, kind: string, pane: string
   await herdrRun(['pane', 'run', pane, command], run);
   options.onRun?.();
   const log = options.log ?? (line => process.stderr.write(`${line}\n`));
+  const keyring = await keyringEndpointWarning(name, confinement);
+  if (keyring) log(keyring);
   let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
   try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
   catch (error) {
@@ -445,6 +447,24 @@ export async function startAgentSession(name: string, kind: string, pane: string
   return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
     confinement,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+}
+
+/**
+ * The line a launch logs when the session it confines reaches the keyring through an endpoint
+ * graphyard-secrets-bus.socket does not hold (GY-1039): an install that enabled the earlier
+ * graphyard-secrets-bus.service has its proxy listen at the path itself, so a restart of that proxy
+ * strands the session on a dead listener. The line names the endpoint and the migration, on every
+ * such launch, until the host is migrated. Null when the confinement binds no endpoint (an
+ * unconfined session, a runtime's own sandbox, a session with a credential of its own) or the
+ * endpoint is held or cannot be judged.
+ */
+export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath()): Promise<string | null> {
+  if (!confinement || !path) return null;
+  let endpoint: string;
+  try { endpoint = realpathSync(path); } catch { return null; }
+  if (!confinement.wrapper.includes(endpoint)) return null;
+  const problem = await secretsBusEndpointProblem(run, path);
+  return problem ? `graphyard: ${name}: ${problem.text}; migrate: ${problem.next}` : null;
 }
 
 /**

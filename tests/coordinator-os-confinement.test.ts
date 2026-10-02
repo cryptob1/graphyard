@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
 import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusMigration, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { createServer } from 'node:net';
-import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
+import { headlessConfinementWrapper, keyringEndpointWarning, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -222,7 +222,7 @@ test('unit:keyring-proxy-units — the shipped units keep the proxy read-only an
   assert.equal(secretsBusPath(1000, { XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/graphyard-secrets-bus', 'the launcher binds the socket unit\'s endpoint');
 });
 
-test('unit:keyring-endpoint-unheld-reported — an endpoint graphyard-secrets-bus.socket does not hold is named with its migration, and nothing is guessed (GY-1039)', async () => {
+test('unit:keyring-endpoint-unheld-reported — a launch that binds an endpoint graphyard-secrets-bus.socket does not hold names it with its migration, and nothing is guessed (GY-1039)', async () => {
   const base = await temporaryDirectory('confinement-endpoint-held');
   const server = createServer();
   try {
@@ -231,19 +231,27 @@ test('unit:keyring-endpoint-unheld-reported — an endpoint graphyard-secrets-bu
     await new Promise<void>(done => server.listen(endpoint, done));
     const asked: string[][] = [];
     const show = (output: string) => (command: string, args: string[]) => { asked.push([command, ...args]); return output; };
-    assert.equal(secretsBusEndpointProblem(show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint), null, 'the socket unit listening at the endpoint holds it');
+    assert.equal(await secretsBusEndpointProblem(show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint), null, 'the socket unit listening at the endpoint holds it');
     assert.deepEqual(asked[0], ['systemctl', '--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket']);
     // An earlier install enabled the service itself: xdg-dbus-proxy listens at the path and the socket unit is not loaded.
-    const unheld = secretsBusEndpointProblem(show('ActiveState=inactive\n'), endpoint);
+    const unheld = await secretsBusEndpointProblem(show('ActiveState=inactive\n'), endpoint);
     assert.ok(unheld && unheld.text.includes(endpoint) && unheld.text.includes('is inactive'), 'an endpoint the socket unit does not hold is named');
     assert.equal(unheld!.next, secretsBusMigration);
     assert.match(secretsBusMigration, /disable --now graphyard-secrets-bus\.service && systemctl --user enable --now graphyard-secrets-bus\.socket/);
-    assert.ok(secretsBusEndpointProblem(show('ActiveState=active\nListen=/run/user/1/graphyard-secrets-bus (Stream)\n'), endpoint)!.text.includes('listens at /run/user/1/graphyard-secrets-bus instead'), 'a socket unit listening elsewhere does not hold this endpoint');
-    assert.equal(secretsBusEndpointProblem(() => { throw new Error('Failed to connect to bus'); }, endpoint), null, 'no answering user manager judges nothing');
-    assert.equal(secretsBusEndpointProblem(show(''), endpoint), null, 'unreadable output judges nothing');
-    assert.equal(secretsBusEndpointProblem(show('ActiveState=inactive\n'), plain), null, 'a path that is no socket is not an endpoint');
-    assert.equal(secretsBusEndpointProblem(show('ActiveState=inactive\n'), join(base, 'missing')), null, 'no endpoint, nothing to migrate');
-    assert.equal(secretsBusEndpointProblem(show('ActiveState=inactive\n'), null), null);
+    assert.ok((await secretsBusEndpointProblem(show('ActiveState=active\nListen=/run/user/1/graphyard-secrets-bus (Stream)\n'), endpoint))!.text.includes('listens at /run/user/1/graphyard-secrets-bus instead'), 'a socket unit listening elsewhere does not hold this endpoint');
+    assert.equal(await secretsBusEndpointProblem(() => { throw new Error('Failed to connect to bus'); }, endpoint), null, 'no answering user manager judges nothing');
+    assert.equal(await secretsBusEndpointProblem(show(''), endpoint), null, 'unreadable output judges nothing');
+    assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), plain), null, 'a path that is no socket is not an endpoint');
+    assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), join(base, 'missing')), null, 'no endpoint, nothing to migrate');
+    assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), null), null);
+    // The launcher logs it for every session whose wrapper binds the endpoint, and for no other.
+    const bound = { mechanism: 'read-only-mount' as const, wrapper: ['bwrap', '--ro-bind', realpathSync(endpoint), '/run/user/1/bus', '--'], detail: '' };
+    const warning = await keyringEndpointWarning('gy-approver', bound, show('ActiveState=inactive\n'), endpoint);
+    assert.ok(warning && warning.startsWith('graphyard: gy-approver: ') && warning.endsWith(`migrate: ${secretsBusMigration}`), 'a session given the unheld endpoint is logged with the migration');
+    assert.equal(await keyringEndpointWarning('gy-approver', bound, show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint), null, 'a held endpoint logs nothing');
+    assert.equal(await keyringEndpointWarning('gy-worker', { ...bound, wrapper: ['bwrap', '--ro-bind', '/dev/null', '/run/user/1/bus', '--'] }, show('ActiveState=inactive\n'), endpoint), null, 'a session with its own credential is never given the endpoint');
+    assert.equal(await keyringEndpointWarning('gy-codex', { mechanism: 'runtime-sandbox', wrapper: [], detail: '' }, show('ActiveState=inactive\n'), endpoint), null, 'a runtime sandbox binds no endpoint');
+    assert.equal(await keyringEndpointWarning('gy-master', null, show('ActiveState=inactive\n'), endpoint), null, 'an unconfined session binds no endpoint');
   } finally {
     await new Promise<void>(done => server.close(() => done()));
     rmSync(base, { recursive: true, force: true });

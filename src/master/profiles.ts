@@ -1,10 +1,9 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { defaultChildRun } from '../child-runner.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { pathScopeContains } from '../model/scope.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
@@ -655,12 +654,12 @@ export const secretsBusMigration = 'copy deploy/systemd/graphyard-secrets-bus.so
  * leaving the session on a dead listener. Null when there is nothing to judge — no endpoint, a path
  * that is not a socket, or a systemd user manager that does not answer — never a guess.
  */
-export function secretsBusEndpointProblem(run: ((command: string, args: string[]) => string) | undefined, path: string | null = secretsBusPath()): { text: string; next: string } | null {
+export async function secretsBusEndpointProblem(run: ChildRun | undefined, path: string | null = secretsBusPath()): Promise<{ text: string; next: string } | null> {
   if (!path || !isAbsolute(path) || !isSocketPath(path)) return null;
   // The suite never asks the real user manager about the real runtime directory.
   if (!run && underTestRunner()) return null;
   let shown: string;
-  try { shown = (run ?? defaultSystemctl)('systemctl', ['--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket']); } catch { return null; }
+  try { shown = String(await (run ?? defaultChildRun)('systemctl', ['--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket'], { timeoutMs: 10_000 })); } catch { return null; }
   const lines = shown.split(/\r?\n/);
   const state = lines.find(line => line.startsWith('ActiveState='))?.slice('ActiveState='.length);
   if (!state) return null;
@@ -670,7 +669,6 @@ export function secretsBusEndpointProblem(run: ((command: string, args: string[]
   const held = state === 'active' ? `listens at ${listens.join(', ') || 'nothing'} instead` : `is ${state}`;
   return { text: `The keyring endpoint ${path} is a socket graphyard-secrets-bus.socket does not hold (the socket unit ${held}), so a restart of the proxy listening there replaces the socket confined sessions have bind-mounted and strands them on a dead listener`, next: secretsBusMigration };
 }
-const defaultSystemctl = (command: string, args: string[]) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }));
 /**
  * The host's own process-launch channels that exist here: the systemd manager directories and
  * session-bus sockets of the user's runtime directory (`/run/user/<uid>`, `$XDG_RUNTIME_DIR`) and
