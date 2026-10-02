@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL. Self-handled merge steps are no `merge` faults: a branch restore owed under 30 minutes, a restart-resumed merge.
 
 ### Perpetual master loop
 
