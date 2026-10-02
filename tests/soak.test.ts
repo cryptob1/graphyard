@@ -16,7 +16,8 @@ import { GitHubCacheStore } from '../src/github-cache.js';
 import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, assessContainment, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
+import { readControlPlaneClock } from '../src/master/containment.js';
+import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
@@ -2440,11 +2441,13 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     const settled = fenced.settled.filter(entry => entry.key === key);
     assert.equal(settled.length, 1, `${key}: the dead attempt's fence settled exactly once: ${JSON.stringify(fenced.settled)}`);
     assert.ok(settled[0].elapsed >= slowUntil && settled[0].elapsed <= slowUntil + 3 * minute, `${key}: it settled within the first cycles of fast reads (+${Math.round(settled[0].elapsed / minute)} min)`);
-    // Each cause of the standing fence was escalated once: the round trip a read measured changes
-    // every cycle, and a new number for the same cause is no new escalation.
+    // Each cause of the standing fence was escalated once: the round trip a read measured, and
+    // whether the timed or the snapshot read measured it, change from cycle to cycle, and neither
+    // is a new cause (GY-1044) — the failing and the slow reads are one unbounded clock.
     const escalated = escalations.filter(detail => detail.startsWith(`${key}: containment quarantine from epoch 1 `));
-    assert.ok(escalated.length >= 2 && escalated.length <= 4, `${key}: the standing fence was escalated once per cause, not once per cycle: ${escalated.length}`);
-    assert.equal(new Set(escalated.map(unmeasured)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
+    assert.ok(escalated.length >= 1 && escalated.length <= 3, `${key}: the standing fence was escalated once per cause, not once per cycle: ${escalated.length}`);
+    assert.ok(escalated.some(detail => /control-plane clock took \d+ms round trip/.test(detail)), `${key}: the unbounded clock was escalated: ${JSON.stringify(escalated)}`);
+    assert.equal(new Set(escalated.map(containmentRefusalCause)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
     assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key}: delivered by the attempt after the settled one`);
   }
 });
