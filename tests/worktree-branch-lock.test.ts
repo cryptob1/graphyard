@@ -399,7 +399,7 @@ function gitPath(cwd: string, name: string) {
 // The engine tests above run against a temporary real Postgres, isolated from every other file's.
 let database: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine;
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_BRANCH_LOCK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 187);
+  const port = Number(process.env.GRAPHYARD_BRANCH_LOCK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 860);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('branch-lock-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
