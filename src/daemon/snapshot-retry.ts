@@ -1,4 +1,4 @@
-// Concern: the coordination snapshot read the loop takes each cycle, retried once on a transient failure.
+// Concern: the coordination snapshot read's one jittered retry, so a single failed read never fails a cycle.
 import { setTimeout as delay } from 'node:timers/promises';
 
 /** The pause before the one retry of a failed snapshot read: a second or so, jittered so loops never retry in step. */
