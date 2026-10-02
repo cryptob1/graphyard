@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { Refusal, demand, itemLane, resolveEscalation, reworkNeedsApprover, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
-import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
+import { canonical, decisionRace, findDecisionSubject, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
@@ -56,6 +56,12 @@ export async function requestDecision(services: Services, caller: Principal, id:
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
+  // A lane-approved rework whose application was interrupted is resumed by the next request for
+  // the item, whatever its key (GY-1110). One that applied answers a new rework request in its
+  // place; one that failed no longer stands, so the new request is recorded and supersedes it.
+  const resumed = await resumeLaneReworks(services, id);
+  const answered = data.action === 'rework' ? resumed.find(decision => decision.state === 'applied') : undefined;
+  if (answered) return answerWith(services, caller, key, fingerprint, answered);
   // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): once recorded,
   // it is applied at once with the lane as its ground. A replayed request whose application was
   // interrupted resumes it; a high-lane rework waits for its independent approver as ever.
@@ -66,6 +72,33 @@ export async function requestDecision(services: Services, caller: Principal, id:
 
 /** The ledger's approver of a rework its lane applied without an approver decision (GY-883). */
 export const laneApprover = 'graphyard-risk-lane';
+
+/**
+ * Resume every rework on the item the risk lane approved but whose application recorded neither
+ * decision.applied nor decision.failed (GY-1110): its approval and its application are separate
+ * steps, and an interruption between them left it approved forever, refusing every later rework.
+ * The engine call is keyed by the decision, so a resumption never applies a rework twice.
+ */
+export async function resumeLaneReworks(services: Services, id: string): Promise<DecisionRecord[]> {
+  const work = await findDecisionSubject(services.engine.store.pool, id);
+  if (!work) return [];
+  const stranded = (await readDecisions(services.engine.store.pool, work)).filter(decision => decision.action === 'rework' && decision.state === 'approved' && decision.approvedBy === laneApprover);
+  const settled: DecisionRecord[] = [];
+  for (const decision of stranded) settled.push(await applyLaneRework(services, decision));
+  return settled;
+}
+
+/** A request answered by a resumed decision keeps its receipt, so its replay answers the same. */
+async function answerWith(services: Services, caller: Principal, key: string, fingerprint: string, decision: DecisionRecord) {
+  return services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller);
+    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+    const work = await findWork(db, decision.workId); demand(work, 'Work item not found', 404);
+    for (const capability of requiredDecisionCapabilities(decision.action, decision.input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(decision)]);
+    return decision;
+  });
+}
 
 async function applyLaneRework(services: Services, requested: DecisionRecord): Promise<DecisionRecord> {
   let applying: { decision: DecisionRecord; work: Work; reason: string } | null = null;
@@ -92,6 +125,9 @@ async function applyLaneRework(services: Services, requested: DecisionRecord): P
     outcome = { kind: 'decision.failed', details: { error: error.message } };
   }
   return services.engine.store.transaction(async db => {
+    // Two resumers may race; the first outcome settles the decision and the second records none.
+    const current = (await readDecisions(db, work)).find(entry => entry.id === decision.id)!;
+    if (current.state !== 'approved') return current;
     await record(db, work, laneApprover, outcome.kind, { id: decision.id, ...outcome.details });
     return (await readDecisions(db, work)).find(entry => entry.id === decision.id)!;
   });
