@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where only a page exists,
 | `installation-accept` | Accepts pending requests |
 | `protection` | Reconciles branch protection |
 
-Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `.graphyard/master-actions/` `record.json`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
+Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `.graphyard/master-actions/` `record.json`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 ## Harness permissions
 
@@ -53,7 +53,7 @@ Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `re
 
 A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }` (its claim time), waking the item's observation job and answering `observed`, `observedAt` and `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. Unobserved, the claim fails at once (`no observation newer than the claim was saved`, with the job's condition), then backs off. A scheduled job with no hold or error is a wait in progress, stalling the row only after thirty minutes of failures; a held, failed or missing job stalls it after three. Row bookkeeping (claim, renew, settle) never refuses an observation read before it; other changes do.
 
-A `dispatch` or `request-review` whose launch finds a producer or reviewer session already answering the requested head completes on that session instead of failing. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+A `dispatch` or `request-review` finding a session already answering the requested head completes on it. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
