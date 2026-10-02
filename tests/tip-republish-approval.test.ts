@@ -79,7 +79,8 @@ const transport = (async (path: string, method = 'GET', body?: any) => {
     if (from === to) return { status: 'identical', files: [] };
     return { status: 'ahead', files: [{ filename: 'src/tip.ts', status: 'modified', additions: 1, deletions: 0, changes: 1, patch: '@@ -1 +1 @@\n+const tip = true;' }] };
   }
-  if (path === '/merges' && method === 'POST') return state.nextMerge[body.base] === undefined ? null : { sha: state.nextMerge[body.base] };
+  // The tip is built on the item's scratch branch (GY-1087); the prepared merge is keyed by the item's pull-request branch.
+  if (path === '/merges' && method === 'POST') { const target = String(body.base).replace(/^graphyard-merge-check\/(.+)$/, 'graphyard/$1-1'); return state.nextMerge[target] === undefined ? null : { sha: state.nextMerge[target] }; }
   const reviews = /^\/pulls\/(\d+)\/reviews/.exec(path);
   if (reviews) return state.reviews[Number(reviews[1])] ?? [];
   if (method !== 'GET') return {};
@@ -198,7 +199,7 @@ test('unit:unobserved-approval-carried-on-republish — a republication reads th
   // The fresh read happened outside any coordination transaction, before the force-push it informed.
   const round = state.requests.slice(beforePublish);
   const read = round.findIndex(entry => entry.startsWith(`GET /pulls/${mine.submission!.pr}/reviews`));
-  const pushed = round.findIndex(entry => entry === 'POST /merges');
+  const pushed = round.findIndex(entry => entry === `PATCH /git/refs/heads/${branch.split('/').map(encodeURIComponent).join('/')}`);
   assert.ok(read >= 0 && pushed > read, 'the reviews were read before the tip was force-pushed');
   // Tip B: the unobserved approval of A was carried, not dropped.
   assert.equal(mine.queue!.speculation!.tip, B);
