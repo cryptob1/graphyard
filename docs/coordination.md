@@ -13,7 +13,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Review gate: verdicts, not threads
 
-Gate: reviewer approval of the exact head plus required CI; threads are inputs. Approvals mark each listed thread resolved, follow-up (backlog) or overridden, else are withdrawn; the loop resolves them. A filing refused for a reused idempotency key links that key's item (same parent, approval) or uses an approval-and-body-hash key. 10 consecutive identical 4xx failures stop retries with one attention item (step, error, item); after two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
+Gate: reviewer approval of the exact head plus required CI; threads are inputs. Approvals mark each listed thread resolved, follow-up (backlog) or overridden by thread ID or a comment ID the prompt shows (prose counts for nothing), else are withdrawn and the relaunch names missed threads; the loop resolves them by thread ID. A filing refused for a reused idempotency key links that key's item (same parent, approval) or uses an approval-and-body-hash key. 10 consecutive identical 4xx failures stop retries with one attention item (step, error, item); after two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 

@@ -27,7 +27,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Flaky CI check
 
-[Rerun](github.md#merge-queue) of a check failing on tip or head keeps position, approval, proofs (`check.rerun.waiting`, *waiting for a runner*; re-request: `check.rerun.rerequested`); second failure, concluded failing rerun or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+[Rerun](github.md#merge-queue) of a check failing on tip or head keeps position, approval, proofs (`check.rerun.waiting`, *waiting for a runner*; re-request: `check.rerun.rerequested`); second failure, concluded failing rerun or refusal ejects (`check.rerun.*`); a passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 
@@ -64,7 +64,7 @@ Rate-limit `403`/`429` pauses requests; gates read stale until lifted; nothing m
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`. Immutable, per-cycle and webhook-driven reads are [not repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Webhook liveness
 
@@ -72,7 +72,7 @@ Hour without deliveries: `master status` points to `https://github.com/settings/
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES` (bound if set; else data-volume size if the role reads `data_directory` on the same host; else advisory, warn-only 10 GiB).
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES` (bound if set; else data-volume size if the role reads `data_directory` on the same host; else advisory, warn-only 10 GiB). `tmp-inodes`: free `/tmp` inodes (filesystem-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`.
 
 ## Storage retention
 
@@ -113,8 +113,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): reconcile batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤half the pool) share one pace per token (above-reserve budget minus others' spend, until reset), claiming by `available_at`: head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed submissions, due jobs, review/rework waits, running sessions (earlier if tight; idle items then await webhooks). `observationThroughput`: budget, pace, head lag, oldest unobserved submission (`github` past two minutes). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures (raised past 5 s).
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): reconcile batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤half the pool) share one pace per token (above-reserve budget minus others' spend, until reset), claiming by `available_at`: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed submissions, due jobs, review/rework waits, running sessions (earlier if tight; idle items then await webhooks). `observationThroughput`: budget, pace, head lag, oldest unobserved submission (`github` past two minutes). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures (raised past 5 s).
 
 ### Concurrent reconciliation
 
-A stale snapshot retries after two seconds.
+Reconcile reads each live item once per pass and locks only its batch rows; contended batches back off, then defer to the next tick (warnings past 5 s). A stale snapshot retries after two seconds.

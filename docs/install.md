@@ -15,7 +15,7 @@ Ask only: **Which provider** (`--workspace` for multi-workspace Railway); **Prov
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts pass `bwrap --unshare-all --ro-bind / / -- true` (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts pass Graphyard's probe `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true` (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 
 ### Providers
 
