@@ -132,14 +132,21 @@ export async function baseText(root: string, baseBranch: string, path: string, r
 /**
  * How many files on the base branch mention `identifier` as a whole word, as `basePaths` last
  * fetched it: the base-tree search the criteria-implied rule (GY-438, model/criterion-scope.ts
- * criterionSymbolGround) weighs a phrase-spelled call by. A failed search is Infinity, which
+ * criterionSymbolGround) weighs a phrase-spelled call by, and the files holding a proof name
+ * (model/scope-companions.ts newProofTestGround). A failed search is Infinity, which
  * grounds nothing, never zero.
  */
 export async function baseMentions(root: string, baseBranch: string, identifier: string, run: ChildRun): Promise<number> {
-  if (!/^[A-Za-z_$][\w$]*$/.test(identifier)) return Infinity;
+  // An identifier, or a proof name (`unit:fleet-panel-renders-registry`) the companion rule (GY-955) asks which base file holds.
+  const proof = /^(?:unit|integration):[\w.-]+$/.test(identifier);
+  if (!/^[A-Za-z_$][\w$]*$/.test(identifier) && !proof) return Infinity;
   try {
     return String(await run('git', ['-C', root, 'grep', '-l', '-w', '-F', '-e', identifier, `origin/${baseBranch}`, '--'])).split('\n').filter(Boolean).length;
-  } catch { return Infinity; }
+  } catch (error) {
+    // git grep exits 1, saying nothing, when no file matches: for a proof name that is the answer (none holds it).
+    const failed = error as { status?: number | null; stderr?: string };
+    return proof && failed.status === 1 && !failed.stderr?.trim() ? 0 : Infinity;
+  }
 }
 
 /**
