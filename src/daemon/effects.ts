@@ -13,12 +13,11 @@ import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '.
 import { RefusedResponse } from '../model/refusal.js';
 import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
-import { readProducerLedger, saveProducerLedger, independentProducerProfiles, launchProducer, reclaimCheckouts } from '../producer.js';
+import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
-import { defaultAwaitReviewers, launchedSessionHandle, readDispatchCursor } from '../auto-dispatch.js';
-import type { DispatchRequest } from '../model/dispatch.js';
-import { registeredLaunch } from '../model/session-state.js';
+import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
+import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
@@ -40,6 +39,7 @@ import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome }
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
+import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
 import type { ResearchEvent } from '../research.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
@@ -239,6 +239,7 @@ export interface DaemonEffects {
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
   research?: { cwd: string; runner?: Runner };
+  adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
   /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
@@ -370,6 +371,7 @@ export const handlerSettleMs = 180_000;
  * stood for `blockedPromptFailMs` the session is closed as failed with the prompt as the reason.
  */
 export const blockedPromptFailMs = 5 * 60_000, blockedPromptAnswers = 2, blockedPromptSettleMs = 15_000;
+export { relaunchSession };
 export const promptDigest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 12);
 /**
  * Keep what a worker that died left behind, the same way an exhausted one's is kept (GY-105).
@@ -401,46 +403,6 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
 }
 
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
-
-/**
- * The quota failover's relaunch of a reviewer or producer session, registered like every other
- * launch (GY-172 AC-2). The session that ran out was ended on its ledger, but its record still
- * names its pane and its launch; it is closed with that reason, and the next session for the same
- * request is registered through `registeredLaunch` before its runtime starts and coordinated once
- * it has, so the relaunched session is observed and closed by the session report like the one it
- * replaces rather than running unrecorded while the report loses the old pane.
- */
-export async function relaunchSession(config: MasterConfig, session: LaunchedSession, work: Work, agents: HerdrAgent[], launch: {
-  review: (profile: MasterConfig['reviewers'][number], request: DispatchRequest, agents: HerdrAgent[]) => Promise<unknown>;
-  producer: (profile: MasterConfig['producers'][number], request: DispatchRequest, agents: HerdrAgent[]) => Promise<unknown>;
-  record?: (handle: SessionHandleInput) => Promise<unknown>;
-}): Promise<{ profile: string }> {
-  const request = session.role === 'reviewer' ? work.autoDispatch?.review : work.autoDispatch?.producers.find(entry => entry.id === session.requestId);
-  if (!request || request.id !== session.requestId || request.state !== 'requested') throw new Error(`${work.key} no longer requests this ${session.role} session`);
-  const kind = session.role === 'reviewer' ? 'review' as const : 'proof' as const;
-  const subject = kind === 'review' ? `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})` : `${work.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`;
-  const previous = work.sessions?.find(handle => handle.id === request.id && handle.state === 'running');
-  if (previous && launch.record) {
-    await launch.record({ id: previous.id, kind: previous.kind, runtime: previous.runtime, host: previous.host, subject: previous.subject, state: 'finished',
-      outcome: `ended on its provider's quota notice (${session.agentName} on profile ${session.profile}); its request is launched again on another account` }).catch(() => {});
-  }
-  // The profile that just ran out goes last: its other accounts are still its own failover.
-  const order = <P extends { name: string; agentName: string }>(profiles: P[]) => [...profiles.filter(profile => profile.name !== session.profile), ...profiles.filter(profile => profile.name === session.profile)].filter(profile => !agents.some(agent => agent.name === profile.agentName));
-  const skipped: string[] = [];
-  // As in the dispatcher: only skips that were all spent quota make this a wait for capacity.
-  let capacity = true;
-  const attach = (pane: string) => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`;
-  for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
-    try {
-      const principal = session.role === 'producer' ? (profile as MasterConfig['producers'][number]).principal : undefined;
-      await registeredLaunch(launch.record, launchedSessionHandle(kind, request, subject, config.hostId, undefined, profile.kind, config.herdrWorkspace, principal),
-        () => session.role === 'reviewer' ? launch.review(profile as MasterConfig['reviewers'][number], request, agents) : launch.producer(profile as MasterConfig['producers'][number], request, agents), undefined, attach);
-      return { profile: profile.name };
-    } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
-  }
-  if (!skipped.length) throw new Error(`no ${session.role} profile is free to take the request`);
-  throw Object.assign(new Error(skipped.join('; ')), { accountsExhausted: true, capacityExhausted: capacity });
-}
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
@@ -581,6 +543,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
+    adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
     migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
     launchedSessions: async () => [
