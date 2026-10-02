@@ -253,10 +253,19 @@ const bulk18 = [file(scopePlan.unrepresentable), ...Array.from({ length: scopePl
  * change that drops the confinement from the per-cycle launch fails the soak, not only the unit
  * suite.
  */
-let coordinatorBase: string | null = null, coordinatorRoot: string | null = null, soakWorktrees = 0;
+let coordinatorBase: string | null = null, coordinatorRoot: string | null = null, soakLaunches = 0;
+/**
+ * Fixture worktrees the day's launches take in turn (GY-957, review follow-up): every `git worktree
+ * add` scans each worktree already registered on the checkout, so one fresh worktree per launch made
+ * the file's cost grow with the square of its launches — about twenty minutes on a runner — while
+ * the confinement it exercises costs a millisecond. The pool is wider than the sessions a day keeps
+ * open at once, and each launch still confines against a real linked worktree of the checkout.
+ */
+const soakWorktreePool = 16;
 /** The session's own worktree: a linked worktree of the fixture checkout, as the launcher prepares them. */
 function soakSessionDirectory(): string {
-  const directory = join(coordinatorRoot!, '.graphyard', 'worktrees', `wt-${++soakWorktrees}`);
+  const directory = join(coordinatorRoot!, '.graphyard', 'worktrees', `wt-${soakLaunches++ % soakWorktreePool}`);
+  if (existsSync(directory)) return directory;
   mkdirSync(dirname(directory), { recursive: true });
   execFileSync('git', ['-C', coordinatorRoot!, 'worktree', 'add', '--detach', '--quiet', directory, 'HEAD'], { stdio: 'ignore' });
   return directory;
