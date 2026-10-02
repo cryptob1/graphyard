@@ -34,7 +34,7 @@ export const retryStopped = (run: ClientErrorRun | undefined) => !!run && run.co
 /** The one attention item a stopped retry raises: the step, the error and the item. */
 export function retryStopAttention(stop: { step: string; item: string; error: string; count: number; at: string }): AttentionItem {
   return {
-    subject: stop.item,
+    subject: stop.item, kind: 'retry-stopped',
     text: `The loop stopped retrying ${stop.step} for ${stop.item}: ${stop.count} consecutive attempts failed with the same client error, so another attempt would get the same answer — ${stop.error}`.slice(0, 1000),
     ...agentOwner('master', `Fix what the error names for ${stop.item}; the loop does not retry ${stop.step} on its own again (stopped ${stop.at})`),
   };
