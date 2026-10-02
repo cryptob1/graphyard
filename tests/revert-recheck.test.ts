@@ -41,7 +41,11 @@ function mergeText(base: string | undefined, left: string | undefined, right: st
 class Repository {
   commits = new Map<string, { tree: Tree; parents: string[]; message: string }>();
   pulls = new Map<number, any>();
-  main = '';
+  private mainTip = '';
+  /** Every adapter over this repository: each move of main reaches them as GitHub's push webhook (GY-806). */
+  private adapters: GitHub[] = [];
+  get main() { return this.mainTip; }
+  set main(tip: string) { this.mainTip = tip; for (const adapter of this.adapters) adapter.noteWebhook('push', { ref: 'refs/heads/main' }); }
   requests: string[] = [];
   commit(message: string, tree: Tree, parents: string[]) {
     const sha = hash(`commit:${message}:${JSON.stringify(tree)}:${parents.join(',')}`);
@@ -114,6 +118,7 @@ class Repository {
   }
   github() {
     const github = new GitHub({ repository: 'owner/project', base: 'main', appId: APP, installationId: 1, privateKey: 'not-used-by-the-adapter-under-test' });
+    this.adapters.push(github);
     github.controlPlaneLogin = async () => 'graphyard-owner-project[bot]';
     github.request = async (path: string, method = 'GET', body?: any) => {
       this.requests.push(`${method} ${path}`);
