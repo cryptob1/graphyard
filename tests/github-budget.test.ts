@@ -576,3 +576,25 @@ test('unit:github-immutable-cache — an entry whose write-behind flush is still
   assert.deepEqual(await cache.lookup('immutable', '/commits/abc'), { sha: 'abc' }, 'and the table answers once it is written');
   await cache.close();
 });
+
+test('unit:github-immutable-cache — a batch whose write fails is queued once more, then dropped if the retry fails too (GY-1052)', async () => {
+  const db = await database();
+  let failures = 1;
+  const cache = new GitHubCacheStore({ query: async (text: string, values?: unknown[]) => {
+    if (text.startsWith('INSERT') && failures-- > 0) throw new Error('connection reset');
+    return db.pool.query(text, values);
+  } } as any, `retry-${randomUUID()}`, { flushMs: 60_000 });
+  const error = console.error; console.error = () => {};
+  try {
+    cache.put('immutable', '/commits/abc', { sha: 'abc' });
+    await cache.flush();
+    assert.deepEqual(await cache.lookup('immutable', '/commits/abc'), { sha: 'abc' }, 'the failed entry is still queued, not lost');
+    await cache.flush();
+    assert.deepEqual(await cache.lookup('immutable', '/commits/abc'), { sha: 'abc' }, 'the retry wrote it');
+    failures = 2;
+    cache.put('immutable', '/commits/def', { sha: 'def' });
+    await cache.flush(); await cache.flush();
+    assert.equal(await cache.lookup('immutable', '/commits/def'), undefined, 'a second failure drops the entry');
+    await cache.flush();
+  } finally { console.error = error; await cache.close(); }
+});

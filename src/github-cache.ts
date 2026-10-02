@@ -38,7 +38,8 @@ export interface GitHubCacheMaps {
   immutable?: LoadableMap<unknown>;
 }
 export interface GitHubCacheOptions { flushMs?: number; pruneMs?: number; maxRows?: number; maxBytes?: number; maxValueBytes?: number; maxPending?: number; maxImmutableRows?: number; maxImmutableBytes?: number }
-type Pending = { kind: GitHubCacheKind; etag: string | null; value: string } | 'touch';
+/** `retried` marks an entry already re-queued once after a failed write; a second failure drops it. */
+type Pending = { kind: GitHubCacheKind; etag: string | null; value: string; retried?: true } | 'touch';
 
 export class GitHubCacheStore {
   readonly flushMs: number; readonly pruneMs: number; readonly maxRows: number; readonly maxBytes: number; readonly maxValueBytes: number; readonly maxPending: number;
@@ -49,6 +50,7 @@ export class GitHubCacheStore {
   private timer: NodeJS.Timeout | null = null;
   private flushing: Promise<void> | null = null;
   private prunedAt = 0;
+  private closed = false;
   private reportedAt = 0;
   /** The installation's billable charges across replicas (GY-806), on the same database and scope; the adapter attaches it with the cache. */
   readonly charges: GitHubChargeLedger;
@@ -126,7 +128,13 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
     this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, this.flushMs);
     this.timer.unref?.();
   }
-  /** Write the queued batch, one statement at a time; a failed chunk is dropped, not retried. Never throws. */
+  /**
+   * Write the queued batch, one statement at a time. A chunk that fails to write is queued again
+   * once, for the next batch (GY-1052), so a transient failure does not lose entries the hot layer
+   * may already have evicted; a second failure drops them, so a value the database keeps refusing
+   * cannot hold its neighbours back. A failed touch only loses recency and is
+   * dropped. Never throws.
+   */
   flush(): Promise<void> {
     if (this.flushing) return this.flushing.then(() => this.pending.size ? this.flush() : undefined);
     this.flushing = this.write().finally(() => { this.flushing = null; });
@@ -148,12 +156,21 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
 SELECT k, kd, e, v::jsonb, now() FROM unnest($1::text[], $2::text[], $3::text[], $4::text[]) AS t(k, kd, e, v)
 ON CONFLICT (key) DO UPDATE SET kind=EXCLUDED.kind, etag=EXCLUDED.etag, value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
         [chunk.map(([key]) => key), chunk.map(([, entry]) => entry.kind), chunk.map(([, entry]) => entry.etag), chunk.map(([, entry]) => entry.value)]);
-      } catch (error) { this.report('write', error); }
+      } catch (error) { this.report('write', error); this.requeue(chunk); }
     }
     for (let at = 0; at < touches.length; at += 2_000) {
       try { await this.pool.query('UPDATE github_cache SET updated_at=now() WHERE key = ANY($1::text[])', [touches.slice(at, at + 2_000)]); }
       catch (error) { this.report('write', error); }
     }
+  }
+  /** Queue a failed chunk's entries once more, unless a newer put replaced them or the queue is full or closed. */
+  private requeue(chunk: [string, Exclude<Pending, 'touch'>][]) {
+    if (this.closed) return;
+    for (const [id, entry] of chunk) {
+      if (entry.retried || this.pending.has(id) || this.pending.size >= this.maxPending) continue;
+      this.pending.set(id, { ...entry, retried: true });
+    }
+    if (this.pending.size) this.schedule();
   }
   /**
    * Delete entries past their bound, newest-used kept: whole immutable responses past `maxImmutableRows`
@@ -171,6 +188,7 @@ ON CONFLICT (key) DO UPDATE SET kind=EXCLUDED.kind, etag=EXCLUDED.etag, value=EX
   }
   /** Stop the timers and write what is queued. */
   async close() {
+    this.closed = true;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     await Promise.all([this.flush(), this.charges.close()]);
   }

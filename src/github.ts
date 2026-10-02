@@ -2787,10 +2787,10 @@ export const headObservationSeconds = 20;
  * narrower than the claim band (`max(mergeBatchSize, parallelTips)`), which orders claims only:
  * entries behind the head poll at the active cadence, and a skip defers them no longer than that.
  */
-async function inMergeBand(work: Work | undefined, queue: () => Promise<Work[]>) {
+async function inMergeBand(work: Work | undefined, queue: () => Promise<Work[]>, now = Date.now()) {
   if (!work || work.stage !== 'merge') return false;
   if (mergeAuthorized(work)) return true;
-  return !!work.queue && queuePlacement(work, await queue(), Date.now())?.position === 0;
+  return !!work.queue && queuePlacement(work, await queue(), now)?.position === 0;
 }
 export const idleObservationSeconds = 300;
 /**
@@ -2948,7 +2948,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
   // A job an observation webhook made due is claimed ahead of all of it by `takeJob` itself (GY-806).
   const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
-  const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
+  // One instant places the queue for both the claim order and the skip's band (GY-1052), so the two
+  // never disagree about an entry whose placement turns on a deadline.
+  const placedAt = Date.now();
+  const job = await engine.store.takeJob(observationClaimOrder(all, band, placedAt, budgetTight(github.budget?.())), observationHeadCount(all, band));
   if (!job) return false;
   const viaWebhook = job.webhook === true;
   // A poll of an item a webhook-driven observation refreshed within its poll interval is skipped
@@ -2961,8 +2964,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // the pre-claim snapshot and `takeJob` is not deferred for one more interval. The re-read is
   // targeted: the item by its id, and the live queue entries only when its queue position decides.
   const skippable = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until
-    && !await inMergeBand(all.find(entry => entry.id === job.work_id), async () => all);
-  const refreshedUntil = skippable && !await inMergeBand(await engine.store.workItem(job.work_id), () => engine.store.queuedWork())
+    && !await inMergeBand(all.find(entry => entry.id === job.work_id), async () => all, placedAt);
+  const refreshedUntil = skippable && !await inMergeBand(await engine.store.workItem(job.work_id), () => engine.store.queuedWork(), placedAt)
     ? new Date(job.refreshed_until!).getTime() : null;
   if (refreshedUntil !== null) {
     await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
