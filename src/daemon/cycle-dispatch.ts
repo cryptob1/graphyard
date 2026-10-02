@@ -33,7 +33,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const hot = hotspots(open, clock), hotFiles = new Set(hot.map(entry => entry.file));
   const offered = open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
-  }).sort((a, b) => dispatchOrder(a, b, hotFiles));
+  }).sort((a, b) => dispatchOrder(a, b, hotFiles, clock));
 
   // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
   // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this

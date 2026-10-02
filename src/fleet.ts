@@ -104,6 +104,13 @@ export const skipCause = (reason: string): AccountSkipCause =>
  * is read here, so a credential this host cannot read is the control plane being unaskable, not a
  * fleet decision. `httpFleetClient` and the connect-account worker (GY-409) both go through it.
  */
+/**
+ * How long a registry request may take. Registry writes (select, session end) run in a coordination
+ * transaction and queue behind the global lock; on 2026-10-01 45 of 46 selects were abandoned at the
+ * old 10 s bound while the server still completed them, so dispatches failed and the abandoned
+ * selections left phantom live sessions (GY-1027 removes the queueing itself).
+ */
+export const fleetRequestTimeoutMs = 30_000;
 export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, path: string, init: { method?: 'GET' | 'POST'; body?: unknown; fetch?: typeof fetch; timeoutMs?: number; idempotencyKey?: string } = {}): Promise<any> {
   let token: string;
   try { token = await readCredentialFile(config.credentialFile); }
@@ -112,7 +119,7 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
   let response: Response;
   try {
     const method = init.method ?? (body === undefined ? 'GET' : 'POST');
-    response = await (init.fetch ?? fetch)(`${config.url}/api/${path}`, { method, signal: AbortSignal.timeout(init.timeoutMs ?? 10_000),
+    response = await (init.fetch ?? fetch)(`${config.url}/api/${path}`, { method, signal: AbortSignal.timeout(init.timeoutMs ?? fleetRequestTimeoutMs),
       headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'POST' ? { 'Idempotency-Key': init.idempotencyKey ?? randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   } catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
   const text = await response.text();
@@ -121,7 +128,7 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
   return parsed;
 }
 
-export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = 10_000): FleetClient {
+export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
   const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
   return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); } };
 }
@@ -141,7 +148,7 @@ export type FleetRead = { managed: true; registry: AgentRegistry; client: FleetC
 /** Whether the registry decides `role` for this executor, and the registry when it does. */
 export async function readFleet(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}): Promise<FleetRead> {
   if (!probe.registry && (!config.url || !config.hostId)) return { managed: false, reason: 'this configuration names no control plane' };
-  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000);
+  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
   const now = probe.now?.() ?? Date.now(), failed = probe.registry ? undefined : unreachable.get(config.url!);
   let registry: AgentRegistry;
   try {
@@ -289,7 +296,7 @@ export function settledRecordSessions(role: 'reviewer' | 'producer', records: re
  */
 export async function reconcileFleetSessions(config: FleetConfig, runtime: RuntimeInventory, finished: ReadonlyMap<string, string>, probe: FleetProbe = {}) {
   if (!probe.registry && (!config.url || !config.hostId)) return [];
-  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000);
+  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
   const registry = await client.document(), now = probe.now?.() ?? Date.now(), ended: { session: string; role: FleetRoleName; work: string | null; account: string; reason: string }[] = [];
   for (const session of liveSessions(registry)) {
     const reason = finished.get(session.id) ?? runtimeSessionGone(session, runtime, config.hostId, now);
