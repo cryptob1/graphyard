@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Dialog from './dialog';
+import { flowWindowLabel } from '../src/flow-analytics';
 
 type Report = any;
 // Distributions are shown with their unit; an empty sample is an em dash, never a zero.
@@ -82,7 +83,7 @@ export default function AttributionSection({ request, days, canAudit, initialRep
     <div className="section-title"><h2 id="attribution-heading">Attribution</h2><span>CANDIDATE TO TARGET, FROM THE LEDGER</span></div>
     <p>Whether each validation ran against the exact manifest it was bound to, what Graphyard did when the target moved, and what that cost. {report ? report.trust : ''}</p>
     <div className="attribution-toolbar">
-      <span className="muted">Window {days} days — set with the Window filter above.</span>
+      <span className="muted">Window {flowWindowLabel(days)} — set with the Window filter above.</span>
       <button type="button" onClick={() => void load()} disabled={loading}>{loading ? 'Reloading attribution…' : 'Reload attribution'}</button>
     </div>
     {loading && <p role="status">Loading attribution…</p>}
@@ -105,7 +106,7 @@ export default function AttributionSection({ request, days, canAudit, initialRep
       </button>)}</div>
 
       <div className="flow-table-scroll" role="region" aria-label="Attribution metrics table" tabIndex={0}>
-        <table><caption>Attribution metrics for the last {days} days (UTC). Unknown is never zero; blocked is never success.</caption>
+        <table><caption>Attribution metrics for the last {flowWindowLabel(days)} (UTC). Unknown is never zero; blocked is never success.</caption>
           <thead><tr><th scope="col">Metric</th><th scope="col">State</th><th scope="col">Count</th><th scope="col">Average</th><th scope="col">Median</th><th scope="col">p90</th><th scope="col">n</th></tr></thead>
           <tbody>{metrics.map(metric => <tr key={metric.id}>
             <th scope="row">{metric.label}</th><td>{stateLabel[metric.state]}</td><td>{metric.state === 'unavailable' ? '—' : count(metric.count)}</td>

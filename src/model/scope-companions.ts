@@ -1,9 +1,10 @@
 // Inevitable scope companions (GY-955), apart from model/scope.ts so that module keeps its budget.
 //
 // A change carries files no criterion names: the new test file its own unit proofs live in, the
-// existing tests that import a module it changes, and the documentation-budget gate any documented
-// change must raise. Each was refused wholesale and approved minutes later by the approver as "the
-// feature implementation, not optional add-ons" (GY-945, GY-883). These rules ground them per path,
+// existing tests that import a module it changes, the documentation-budget gate any documented
+// change must raise, and the test-duration baseline a new test file is recorded in (GY-1085). Each
+// was refused wholesale and approved minutes later by the approver as "the feature implementation,
+// not optional add-ons" (GY-945, GY-883). These rules ground them per path,
 // so the loop grants them with no approver, and `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
 import { pathScope, pathScopeContains, testFile } from './scope.js';
@@ -18,6 +19,13 @@ export const criterionTestProofs = (criteria: readonly CompanionCriterion[]) =>
 
 /** The repository's documentation-budget gate: the test that counts the documentation's words (tests/docs-budget.test.ts). */
 export const documentationBudgetGate = (path: string) => testFile(path) && /(?:^|\/)docs?[-_.]?(?:word[-_.]?)?budget\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(path);
+/**
+ * The per-test-file duration record a sharded suite balances by (tests/helpers/timing-baseline.json): a
+ * coverage floor over it (tests/ci-shards.test.ts) fails the required test check unless a new test file
+ * gets its entry, so it is a companion of every test file a change plans or asks for (GY-1085).
+ */
+export const timingBaseline = (path: string) => !pathScope(path).prefix && /(?:^|\/)(?:tests?|__tests__)\/(?:[\w.-]+\/)*timing[-_.]?baseline\.json$/i.test(path);
+const testScope = (entry: string) => testFile(entry) || pathScope(entry).prefix && /(?:^|\/)(?:tests?|__tests__)\/$/.test(pathScope(entry).path);
 /** True when `path` is, or a scope that holds, documentation the item's repository configures. */
 export const documentationPath = (path: string, documentation: readonly string[]) =>
   documentation.some(scope => documentationGlobMatches(scope, path) || pathScope(path).prefix && pathScopeContains(path, pathScope(scope).path));
@@ -61,7 +69,7 @@ const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
 /**
  * The ground a requested path stands on as a companion the item's own record implies, or null. These
  * need no file read: the documentation-budget gate, when the ask or the plan holds documentation;
- * the test file named for the criteria's proofs (`proofTestFiles`); and a single file under `web/`
+ * the test-duration baseline, when it holds a test file; the test file named for the criteria's proofs (`proofTestFiles`); and a single file under `web/`
  * when a criterion describes a change in the web UI (GY-945's page and stylesheet). The engine's rule grants
  * these; what needs the base branch — imports, and which proofs a file already holds — is the
  * loop's (`importingTestGround`, `newProofTestGround`).
@@ -71,6 +79,10 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
   if (documentationBudgetGate(path)) {
     const documented = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && documentationPath(entry, documentation));
     if (documented) return `${path} is the documentation-budget gate a change to ${documented} must keep passing`;
+  }
+  if (timingBaseline(path)) {
+    const tested = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && testScope(entry) && !timingBaseline(entry));
+    if (tested) return `${path} is the test-duration baseline a change to ${tested} must keep covering`;
   }
   if (testFile(path)) {
     const directory = path.slice(0, path.lastIndexOf('/') + 1), extension = /\.(?:test|spec)\.[cm]?[jt]sx?$/.exec(path)?.[0];
@@ -157,9 +169,11 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
   const added: { path: string; criterion: string | null; why: string }[] = [];
   const covered = (path: string) => item.plannedFiles.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path);
   const layout = testLayout(tree);
-  if (!item.plannedFiles.some(entry => testFile(entry) || pathScope(entry).prefix && /(?:^|\/)(?:tests?|__tests__)\/$/.test(pathScope(entry).path)))
+  if (!item.plannedFiles.some(testScope))
     for (const entry of proofTestFiles(item.criteria, layout))
       if (!covered(entry.path)) added.push({ path: entry.path, criterion: entry.criterion.split(', ')[0], why: `the test file ${entry.criterion}'s proofs live in` });
+  if ([...item.plannedFiles, ...added.map(entry => entry.path)].some(entry => testScope(entry) && !timingBaseline(entry)))
+    for (const file of tree) if (timingBaseline(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the test-duration baseline a new test file must be recorded in' });
   if (item.plannedFiles.some(entry => documentationPath(entry, documentation)))
     for (const file of tree) if (documentationBudgetGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the documentation-budget gate a documented change must keep passing' });
   return added;
