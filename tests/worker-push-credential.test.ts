@@ -13,7 +13,8 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { dispatchWork, loadMasterConfig, masterConfigSchema, setupMaster, type CredentialMinter, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { hostProcessLaunchTargets, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { roleSessionMaximumMs } from '../src/model/sessions.js';
-import { credentialBlockedReason, credentialFailure, refreshWorkerCredential, revokeInstallationToken, withdrawWorkerCredential, superviseSessionCredential, sweepExpiredWorkerCredentials, workerCredentialDirectory, workerCredentialRoot, workerCredentialEnvironment, workerPushPermissions, writeWorkerCredential, type MintedPushCredential } from '../src/worker-credential.js';
+import { credentialBlockedReason, credentialFailure, grantedPushPermissions, refreshWorkerCredential, revokeInstallationToken, withdrawWorkerCredential, superviseSessionCredential, sweepExpiredWorkerCredentials, workerCredentialDirectory, workerCredentialRoot, workerCredentialEnvironment, workerPushPermissions, writeWorkerCredential, type MintedPushCredential } from '../src/worker-credential.js';
+import { installationOwner } from '../src/master/attention.js';
 import { environmentBlocker } from '../src/worker-sandbox.js';
 import { attemptRetryHold, maxFailedAttempts, retryBackoffMs } from '../src/daemon/reblocked-attempts.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -24,7 +25,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // bus bound to /dev/null, so `gh` could not reach the keyring the host's login lives in. Each worker
 // session now pushes with its own short-lived, repository-scoped credential. One case per proof:
 // unit:worker-session-scoped-push-credential, unit:sandboxed-worker-push-without-keyring,
-// unit:credential-block-releases-slot.
+// unit:credential-block-releases-slot. GY-1100 adds unit:mint-requests-granted-subset.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const token = (label: string) => `ghs_${label}`.padEnd(40, '0');
@@ -75,6 +76,7 @@ test('unit:worker-session-scoped-push-credential — a worker launched under its
     const requests: { url: string; body: any }[] = [];
     let minted = 0;
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (String(url).endsWith('/app/installations/5678')) return new Response(JSON.stringify({ permissions: { contents: 'write', pull_requests: 'write', workflows: 'write', metadata: 'read' } }), { status: 200 });
       if (String(url).includes('/rules/branches/')) return new Response('[]', { status: 200 });
       if (!String(url).endsWith('/access_tokens')) return realFetch(url, init);
       if (!init?.body) return new Response(JSON.stringify({ token: token('client'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: {} }), { status: 201 });
@@ -360,6 +362,100 @@ test('unit:credential-block-releases-slot — an attempt blocked only by a GitHu
   }
 });
 
+test('unit:mint-requests-granted-subset — when the installation lacks a wanted permission the mint asks for the granted subset and succeeds, and attention names the missing permission and installation-accept; when every wanted permission is granted the token carries all of them', async () => {
+  // GY-1100: hotfix 7ef4cb702d added workflows: write to the wanted set while installation
+  // 161493384 did not grant it; GitHub refused every mint with 422 and no worker could launch.
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const realFetch = globalThis.fetch;
+  let granted: Record<string, string> = { contents: 'write', pull_requests: 'write', metadata: 'read', checks: 'write', actions: 'write', issues: 'read', administration: 'read' };
+  const installationReads: string[] = [], mints: Record<string, string>[] = [];
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const path = String(url);
+    if (path.includes('/rules/branches/')) return new Response('[]', { status: 200 });
+    if (path.endsWith('/access_tokens') && !init?.body) return new Response(JSON.stringify({ token: token('client'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: {} }), { status: 201 });
+    if (path.endsWith('/app/installations/5678')) { installationReads.push(path); return new Response(JSON.stringify({ app_slug: 'graphyard-test', html_url: 'https://github.com/settings/installations/5678', permissions: granted }), { status: 200 }); }
+    if (path.endsWith('/access_tokens') && init?.body) {
+      const asked: Record<string, string> = JSON.parse(String(init.body)).permissions;
+      mints.push(asked);
+      // GitHub's own rule: one permission the installation lacks refuses the whole mint.
+      if (Object.entries(asked).some(([permission, level]) => granted[permission] !== level && !(granted[permission] === 'write' && level === 'read'))) return new Response('{"message":"The permissions requested are not granted to this installation."}', { status: 422 });
+      return new Response(JSON.stringify({ token: token(`mint${mints.length}`), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: { ...asked, metadata: 'read' } }), { status: 201 });
+    }
+    return realFetch(url, init);
+  }) as typeof fetch;
+  try {
+    const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 5678, privateKey });
+    const pushLine = (report: { attention: string[] } | null) => report?.attention.filter(line => /worker push credentials/.test(line)) ?? [];
+
+    // Lacking workflows, before any preflight: the installation is read and the subset minted.
+    const subset = await github.mintPushToken();
+    assert.deepEqual(mints.at(-1), { contents: 'write', pull_requests: 'write' }, 'only the granted subset is requested');
+    assert.deepEqual(subset.permissions, { contents: 'write', pull_requests: 'write', metadata: 'read' });
+    assert.equal(installationReads.length, 1);
+    const report = await github.preflight();
+    const [line] = pushLine(report);
+    assert.ok(line, 'the shortfall is raised as attention');
+    assert.match(line, /workflows: write/, 'attention names the missing permission');
+    assert.match(line, /master browser installation-accept/, 'attention names the installation-accept remedy');
+    assert.match(line, /https:\/\/github\.com\/settings\/installations\/5678/);
+    assert.match(installationOwner('app-permissions', line).next, /installation-accept/, 'the master owns it with the installation-accept step');
+    // After a preflight the mint reads its verified grants and spends no installation read.
+    const reads = installationReads.length;
+    await github.mintPushToken();
+    assert.deepEqual(mints.at(-1), { contents: 'write', pull_requests: 'write' });
+    assert.equal(installationReads.length, reads);
+    assert.equal(pushLine(github.permissionReport()).length, 1, 'the line is raised once, not once per mint');
+
+    // Everything granted: the token carries every wanted permission and no attention remains.
+    granted = { ...granted, workflows: 'write' };
+    const full = await github.preflight();
+    assert.deepEqual(pushLine(full), []);
+    const all = await github.mintPushToken();
+    assert.deepEqual(mints.at(-1), { ...workerPushPermissions });
+    for (const [permission, level] of Object.entries(workerPushPermissions)) assert.equal(all.permissions[permission], level, `the token carries ${permission}: ${level}`);
+
+    // Revoked since the last preflight: the 422 re-reads the installation once and mints the subset.
+    const { workflows: _revoked, ...withoutWorkflows } = granted; granted = withoutWorkflows;
+    const before = mints.length;
+    const recovered = await github.mintPushToken();
+    assert.deepEqual(mints.slice(before), [{ ...workerPushPermissions }, { contents: 'write', pull_requests: 'write' }]);
+    assert.equal(recovered.permissions.workflows, undefined);
+    assert.equal(pushLine(github.permissionReport()).length, 1, 'the re-read shortfall is raised at once');
+
+    // The pure rule: granted levels at most what is wanted; nothing granted at all is a shortfall per permission.
+    assert.deepEqual(grantedPushPermissions({ contents: 'admin', pull_requests: 'read' }), { permissions: { contents: 'write', pull_requests: 'read' }, missing: [{ permission: 'pull_requests', wanted: 'write', granted: 'read' }, { permission: 'workflows', wanted: 'write', granted: null }] });
+    // Without Contents: write a worker cannot push at all, so that mint is refused with the installation to fix.
+    granted = { pull_requests: 'write', metadata: 'read' };
+    await github.preflight();
+    await assert.rejects(github.mintPushToken(), /grants no Contents: write/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('unit:push-mint-falls-back-without-workflows — an installation that has not accepted workflows still mints the contents and pull_requests credential instead of refusing every launch', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+    const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 5678, privateKey });
+    const asked: Record<string, string>[] = [];
+    // No merge-queue ruleset, so the bypass check (GY-1066) passes and the mint itself is what is judged.
+    (github as any).request = async () => [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      // GY-1100: the installation's grants are read first, so the mint never asks for what it lacks.
+      if (String(url).endsWith('/app/installations/5678')) return new Response(JSON.stringify({ permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' } }), { status: 200 });
+      if (!String(url).endsWith('/access_tokens')) return realFetch(url, init);
+      const { permissions } = JSON.parse(String(init!.body));
+      asked.push(permissions);
+      if (permissions.workflows) return new Response(JSON.stringify({ message: 'The permissions requested are not granted to this installation.' }), { status: 422 });
+      return new Response(JSON.stringify({ token: token('fallback'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions }), { status: 201 });
+    }) as typeof fetch;
+    const minted = await github.mintPushToken();
+    assert.deepEqual(asked, [{ contents: 'write', pull_requests: 'write' }], 'only the granted subset is asked, with no refused round trip');
+    assert.deepEqual(minted.permissions, { contents: 'write', pull_requests: 'write' });
+  } finally { globalThis.fetch = realFetch; }
+});
+
 // ---- GY-1066: the review follow-ups of GY-999 ----------------------------------------------------
 
 test('GY-1066 — no worker token from a merge-queue bypass App, the lease checked again after the mint, and a token kept until GitHub confirms its revocation', async () => {
@@ -373,6 +469,7 @@ test('GY-1066 — no worker token from a merge-queue bypass App, the lease check
       const target = String(url);
       if (target.includes('/rules/branches/')) return new Response(JSON.stringify(rules), { status: 200 });
       if (/\/rulesets\/\d+$/.test(target)) return ruleset ? new Response(JSON.stringify(ruleset), { status: 200 }) : new Response('{"message":"unavailable"}', { status: rulesetStatus });
+      if (target.endsWith('/app/installations/5678')) return new Response(JSON.stringify({ permissions: { ...workerPushPermissions, metadata: 'read' } }), { status: 200 });
       if (target.endsWith('/installation/token')) { revocations.push(String((init?.headers as Record<string, string>).Authorization)); return new Response(null, { status: revokeStatus }); }
       if (!target.endsWith('/access_tokens')) throw new Error(`unexpected request ${target}`);
       if (!init?.body) return new Response(JSON.stringify({ token: token('client'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: {} }), { status: 201 });
