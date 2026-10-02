@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item, retrieved, promoted on demand. -->
 # Review follow-ups
 
-An approval's FOLLOW-UP findings stay on the approved item, never filed as work, until promoted.
+An approval's FOLLOW-UP findings stay on the approved item until promoted.
 
 ## Recorded on the item and the pull request
 

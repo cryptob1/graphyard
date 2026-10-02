@@ -9,13 +9,13 @@ The `admin` holder (`sessionKind: "human"`); alone decides goals, priorities, sp
 
 ### 2. AI agent
 
-A model acting through a runtime with its credential's authority only.
+A model acting with only its credential's authority.
 
 **Canonical usage:** the role's name.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One agent instance running in a runtime.
+One agent instance in a runtime.
 
 **Canonical usage:** *session*; *runtime* hosts it.
 
@@ -41,7 +41,7 @@ One agent instance running in a runtime.
 
 Server, database, dashboard, CLI.
 
-**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; never *runs* a session.
+**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; never *runs* sessions.
 
 ### 8. Herdr runtime
 
@@ -63,7 +63,7 @@ Launches sessions, reports liveness.
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements). Two-party decisions (`master decide GY-N ACTION REASON`, applied by another approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. The approver is never the requester, assignee, producer or grantee. Reviewers, producers and the merge gate decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) the item.
+The master applies non-weakening intent (create, release, unblock, add requirements). Two-party decisions (`master decide GY-N ACTION REASON`, applied by another approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. The approver is never the requester, assignee, producer or grantee. Reviewers, producers and the merge gate decide the rest; human-only ones [park](master-agent-reference.md#items-scope-and-human-waits) the item.
 
 ## Diagram legend
 

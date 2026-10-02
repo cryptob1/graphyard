@@ -25,4 +25,4 @@ Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*
 
 ## Insights
 
-**Flow**, [optimistic merges](github.md#optimistic-merges); **Show details**: shipping pulse, flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis)), **Validation**, **Releases**.
+**Flow**, [optimistic merges](github.md#optimistic-merges); **Show details**: shipping pulse, 24-hour to 90-day flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis)), **Validation**, **Releases**.
