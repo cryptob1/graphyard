@@ -13,7 +13,7 @@ Graphyard's own deployment runs one moving main, a frozen candidate, UAT, then t
 - `release promote ID` refuses unless that record passed on the candidate SHA, then deploys the SHA to production (leased on the last promoted SHA, so a hand-moved `release/production` is refused) and records `rc-production/ID`. `release verify --url URL` confirms production serves a promoted candidate; `master verify-deployment` then records that SHA on each delivery it carries.
 - A failed candidate files one follow-up item naming the failing suite and SHA (`release follow-up ID` retries a failed filing). Its deliveries stay delivered; fix forward, and the next cut carries both.
 
-`release status` lists every candidate with its UAT verdict and promotion. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, a `GRAPHYARD_UAT_TOKEN` for a principal in UAT's `GRAPHYARD_PRINCIPALS`, and a `GRAPHYARD_RELEASE_TOKEN` that may create work. Create `release/production` at production's current SHA before applying the Railway configuration.
+`release status` lists every candidate with its UAT verdict and promotion. `release GY-N EPOCH`, naming a work item, still gives up that item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, a `GRAPHYARD_UAT_TOKEN` for a principal in UAT's `GRAPHYARD_PRINCIPALS`, and a `GRAPHYARD_RELEASE_TOKEN` that may create work. Create `release/production` at production's current SHA before applying the Railway configuration.
 
 ## Who writes what
 
