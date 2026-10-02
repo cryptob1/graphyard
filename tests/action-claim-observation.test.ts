@@ -6,7 +6,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
-import { resyncUnobservedPrefix } from '../src/model/action-kinds.js';
+import { observationWaitBoundMs, resyncUnobservedPrefix } from '../src/model/action-kinds.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import type { MasterConfig } from '../src/master.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
@@ -22,7 +22,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * observation's read and its save leaves the observation saved; any other change still refuses it.
  * unit:resync-completes-on-fresh-observation — a `resync` completes only once an observation newer
  * than its claim is saved, never on a re-read that saves nothing, and three claims in a row without
- * one raise an attention item naming the item and its observation job's condition.
+ * one raise an attention item naming the item and its observation job's condition once they outlast
+ * the bound a scheduled job's wait keeps (GY-1090).
  */
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
@@ -104,7 +105,7 @@ test('unit:action-claim-keeps-observation — an action claimed, renewed and set
   await assert.rejects(engine.observe(item.id, read.revision, observation(read)), /Task changed while GitHub was being observed; retry/);
 });
 
-test('unit:resync-completes-on-fresh-observation — a resync completes only on an observation newer than its claim, and three unobserved claims raise attention naming the item and its observation job', async () => {
+test('unit:resync-completes-on-fresh-observation — a resync completes only on an observation newer than its claim, and three unobserved claims that outlast the observation bound raise attention naming the item and its observation job', async () => {
   // Satisfied by the observation it woke, even though its own claim saved the item after the read.
   const item = await submitted();
   await store.pool.query("UPDATE jobs SET available_at=now() + interval '1 hour' WHERE work_id=$1", [item.id]);
@@ -142,10 +143,18 @@ test('unit:resync-completes-on-fresh-observation — a resync completes only on 
     await settle(row, 'failed', refused!);
     const snapshot = { work: await store.list(), now: new Date().toISOString() };
     const raised = stalledActionAttention(snapshot).filter(entry => entry.subject === stale.key);
-    if (claim < 3) { assert.deepEqual(raised, [], `no attention after ${claim} unobserved claim(s)`); continue; }
-    assert.equal(raised.length, 1, 'three unobserved claims raise one attention item');
-    assert.match(raised[0].text, new RegExp(`^${stale.key}'s resync action is stalled`));
-    assert.match(raised[0].text, /its observation job is scheduled and records no error, yet saved no observation/);
+    // A job the claim woke and that is scheduled with no error is a wait in progress (GY-1090):
+    // the claims inside its bound raise nothing, whatever their count.
+    assert.deepEqual(raised, [], `no attention after ${claim} unobserved claim(s) inside the observation bound`);
+    if (claim < 3) continue;
+    // The same run, its first failure moved back past the bound, is a stall and raises attention.
+    const outlasted = structuredClone(snapshot);
+    const failures = outlasted.work.find(entry => entry.id === stale.id)!.actionQueue!.actions[0].history.filter(entry => entry.event === 'failed');
+    failures[0].at = new Date(Date.parse(failures.at(-1)!.at) - observationWaitBoundMs).toISOString();
+    const stalled = stalledActionAttention(outlasted).filter(entry => entry.subject === stale.key);
+    assert.equal(stalled.length, 1, 'three unobserved claims that outlast the bound raise one attention item');
+    assert.match(stalled[0].text, new RegExp(`^${stale.key}'s resync action is stalled`));
+    assert.match(stalled[0].text, /its observation job is scheduled and records no error, yet saved no observation/);
   }
   assert.equal((await reload(stale.id)).observation ?? null, null, 'nothing was observed');
 });

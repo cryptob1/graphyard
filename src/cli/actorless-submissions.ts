@@ -30,13 +30,31 @@ const missingActor: Record<ReviewState, { actor: string; next: (key: string) => 
   carried: { actor: 'nobody', next: key => `graphyard master status ${key}` },
 };
 
-/** The named wait that accounts for a submitted item nobody is otherwise acting for, or null. */
+/**
+ * The named wait that accounts for a submitted item nobody is otherwise acting for, or null.
+ *
+ * Two of them are handoffs the control plane has already made (GY-1090): an open typed action row
+ * is the step it named as owed — a `request-rework` after a verdict, a proof dispatch — which the
+ * stalled-action and idle-action readings watch from then on; and a head Graphyard itself published
+ * over the candidate (a base refresh or a branch restore) is owed the observation its job was woken
+ * for, until which the record's candidate is the head the branch no longer carries. Neither is an
+ * item nobody is acting for, and each read as one on 1 October 2026: GY-887 and GY-612 with a
+ * verdict standing against the head and the `request-rework` it raises, GY-971 restored off its
+ * ejected tip.
+ */
 function namedWait(work: Work, state: ReviewState, now: Date): string | null {
   if (work.blocker) return 'blocked';
   if (standingEscalations(work).length) return 'escalated';
   if (work.queue) return 'queued';
   if (work.lease && Date.parse(work.lease.expiresAt) > now.getTime()) return 'leased';
   if (pendingBaseRefresh(work)) return 'base refresh';
+  const open = (work.actionQueue?.actions ?? []).find(row => row.state !== 'done');
+  if (open) return `${open.kind} action`;
+  // Owed only until the first observation after the publication: that one reads the branch as it
+  // is, and a head GitHub does not show is then the record's to name, not a wait.
+  const refresh = work.baseRefresh, candidate = work.candidate, observedAt = Date.parse(work.observation?.at ?? '');
+  if (refresh?.head && candidate && refresh.head !== candidate.sha && (refresh.from.sha === candidate.sha || refresh.restore?.contaminated === candidate.sha)
+    && (!refresh.restore || refresh.restore.outcome === 'restored') && !(observedAt > Date.parse(refresh.at))) return 'observation of the published head';
   if (state === 'approved' || state === 'carried' || state === 'not-required') return 'reviewed';
   if (state === 'provider-dispatched') return 'provider review';
   return null;
