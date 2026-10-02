@@ -44,8 +44,9 @@ jobs:
     if: needs.cut.outputs.id != ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # The uat environment holds the UAT URL and the credential that files a failed candidate's
-    # follow-up item; it holds nothing that can write to the production repository's work.
+    # The uat environment holds the UAT URL, the token of a principal in UAT's own control plane that
+    # the api suite drives it with, and the credential that files a failed candidate's follow-up item;
+    # it holds nothing that can write to the production repository.
     environment: uat
     steps:
       # The suites run the candidate's own code, checked out at its exact SHA.
@@ -57,12 +58,15 @@ jobs:
       - name: Deploy the candidate's exact SHA to UAT
         run: node bin/graphyard.mjs release uat "${{ needs.cut.outputs.id }}"
       - name: Run the long suites against the UAT deployment and record the verdict
-        # The built-in endpoint suite probes UAT itself; every --suite command gets GRAPHYARD_UAT_URL and
-        # runs while UAT must keep serving the candidate SHA, which is checked again after the last one.
-        # A failure files one follow-up item naming the failing suite and the candidate SHA.
-        run: node bin/graphyard.mjs release validate "${{ needs.cut.outputs.id }}" --url "$UAT_URL" --wait 1200 --suite "long=npm test"
+        # Both suites drive the deployment itself, while UAT must keep serving the candidate SHA, which
+        # is checked again after the last one: `endpoints` probes /healthz?strict and /, and `api`
+        # creates, replays and lists a work item and reads the board and status through UAT's own API.
+        # A failure files one follow-up item naming the failing suite and the candidate SHA; only that
+        # filing uses GRAPHYARD_TOKEN, which no --suite command is given.
+        run: node bin/graphyard.mjs release validate "${{ needs.cut.outputs.id }}" --url "$UAT_URL" --wait 1200 --api
         env:
           UAT_URL: ${{ vars.UAT_URL }}
+          GRAPHYARD_UAT_TOKEN: ${{ secrets.GRAPHYARD_UAT_TOKEN }}
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
   promote:

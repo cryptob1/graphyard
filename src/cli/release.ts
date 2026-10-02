@@ -1,10 +1,10 @@
 import { defineCommands } from './registry.js';
 import {
-  assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
+  apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
   ledgerStatus, promote, readLedger, readServed, syncLedger, validateAndRecord, type CutTrigger, type Suite,
 } from '../release-candidate.js';
 
-const switches = new Set(['no-push']);
+const switches = new Set(['no-push', 'api']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -19,7 +19,7 @@ function flags(args: string[]) {
 }
 
 const workKey = (created: any) => String(created?.key ?? created?.work?.key ?? created?.id);
-const usage = 'Use release cut [--trigger schedule|manual] | release status | release uat ID | release validate ID --url URL [--check PATH]... [--suite NAME=COMMAND]... | release follow-up ID | release promote ID | release verify --url URL';
+const usage = 'Use release cut [--trigger schedule|manual] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... | release follow-up ID | release promote ID | release verify --url URL';
 
 /** Release candidates: cut from main, validated on UAT, the exact SHA promoted to production. */
 export const releaseCommands = defineCommands([
@@ -31,9 +31,10 @@ export const releaseCommands = defineCommands([
       '                                deliveries it carries; merges to main never pause',
       '  release status                Every candidate with its UAT verdict and production promotion',
       '  release uat ID|latest         Deploy the candidate to UAT: release/uat moves to its exact SHA',
-      '  release validate ID --url URL [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
+      '  release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
       '                                Run the suites against UAT serving the candidate and record the',
-      '                                verdict; a failure files one follow-up item naming suite and SHA',
+      '                                verdict; --api drives the deployed API with GRAPHYARD_UAT_TOKEN;',
+      '                                a failure files one follow-up item naming suite and SHA',
       '  release follow-up ID          File the follow-up of a failed candidate whose filing failed',
       '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA',
       '  release verify --url URL [--wait SECONDS]',
@@ -60,6 +61,11 @@ export const releaseCommands = defineCommands([
       if (id === 'validate') {
         if (!url) throw new Error(usage);
         const suites: Suite[] = [endpointSuite(options.all('check').length ? options.all('check') : ['/healthz?strict', '/'])];
+        if (options.one('api') !== undefined) {
+          const token = process.env.GRAPHYARD_UAT_TOKEN;
+          if (!token) throw new Error('--api needs GRAPHYARD_UAT_TOKEN, the token of a UAT principal, to drive the UAT API');
+          suites.push(apiSuite(token));
+        }
         for (const entry of options.all('suite')) {
           const [name, command] = entry.split(/=(.*)/s, 2);
           if (!name || !command) throw new Error(`--suite takes NAME=COMMAND, got ${entry}`);

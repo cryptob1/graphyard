@@ -8,8 +8,8 @@ import railway, { releaseBranches } from '../.railway/railway.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { commands } from '../src/cli/index.js';
 import {
-  assessProductionServing, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
-  uatBranch, validateAndRecord, type Suite,
+  apiSuite, assessProductionServing, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
+  servedRevision, uatBranch, validateAndRecord, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -38,16 +38,39 @@ function mergeItem(work: string, key: string, pr: number) {
 }
 const remoteRef = (origin: string, ref: string) => { try { return run(origin, 'rev-parse', '--verify', '-q', ref); } catch { return null; } };
 
-/** A UAT (or production) deployment that serves the given commits in turn. */
+/**
+ * A UAT (or production) deployment that serves the given commits in turn, answering `/healthz` in
+ * the server's real shape: the build commit in `commit`, and `revision` left `unknown` because a
+ * Railway build stamps no GRAPHYARD_BUILD_REVISION.
+ */
 function deployment(serving: (string | null)[]) {
   let probes = 0; const seen: string[] = [];
   const fetcher = (async (url: URL | string) => {
     const path = new URL(String(url)).pathname; seen.push(path);
-    if (path === '/healthz') { const sha = serving[Math.min(probes++, serving.length - 1)]; return new Response(JSON.stringify({ ok: true, revision: sha ?? 'unknown' })); }
+    if (path === '/healthz') { const sha = serving[Math.min(probes++, serving.length - 1)]; return new Response(JSON.stringify({ ok: true, version: '0.1.0', revision: 'unknown', schema: 3, commit: sha ?? 'unknown' })); }
     return new Response('ok');
   }) as typeof fetch;
   return { fetcher, seen };
 }
+/** A UAT control plane's work API, in memory: create (idempotent by key), list, board and status. */
+function uatApi(options: { dropFromList?: boolean } = {}) {
+  const work: any[] = []; const byKey = new Map<string, any>(); const calls: { method: string; path: string; auth: string | null; key: string | null }[] = [];
+  const fetcher = (async (url: URL | string, init: RequestInit = {}) => {
+    const path = new URL(String(url)).pathname, method = init.method ?? 'GET', headers = new Headers(init.headers);
+    calls.push({ method, path, auth: headers.get('authorization'), key: headers.get('idempotency-key') });
+    if (headers.get('authorization') !== 'Bearer uat-token') return new Response('{"error":"unauthorized"}', { status: 401 });
+    if (path === '/api/work' && method === 'POST') {
+      const key = headers.get('idempotency-key')!;
+      if (!byKey.has(key)) { const item = { id: `id-${work.length + 1}`, key: `UAT-${work.length + 1}`, ...JSON.parse(String(init.body)) }; work.push(item); byKey.set(key, item); }
+      return new Response(JSON.stringify(byKey.get(key)), { status: 201 });
+    }
+    if (path === '/api/work') return new Response(JSON.stringify(options.dropFromList ? [] : work));
+    if (path === '/api/board' || path === '/api/status') return new Response('{}');
+    return new Response('{}', { status: 404 });
+  }) as typeof fetch;
+  return { fetcher, work, calls };
+}
+const someCandidate = (sha = 'c'.repeat(40)): ReleaseCandidate => ({ id: '20261001T120000Z', sha, cutAt: '2026-10-01T12:00:00.000Z', trigger: 'manual', since: null, items: [] });
 const recordingSuite = (name: string, passed: boolean, urls: string[]): Suite => ({ name, run: async url => { urls.push(url); return { name, passed, detail: passed ? 'ok' : `${name} assertion failed` }; } });
 const at = (iso: string) => () => new Date(iso);
 const program = (environment: string) => railway(createRailwayContext({ environment }), project) as any;
@@ -77,6 +100,8 @@ test('integration:release-candidate-cut — a candidate is cut from main\'s tip 
 
   assert.deepEqual(itemsFromCommits([{ sha: 'a'.repeat(40), subject: 'GY-7: squash merged (#70)', body: '' }, { sha: 'b'.repeat(40), subject: 'docs touch', body: '' }]),
     [{ key: 'GY-7', mergeSha: 'a'.repeat(40), pr: 70 }], 'a commit naming no item is not a delivery');
+  assert.deepEqual(itemsFromCommits([{ sha: 'd'.repeat(40), subject: 'Merge pull request #80 from owner/graphyard/gy-8-1', body: 'Follows graphyard/gy-5-2' }]).map(item => item.key), ['GY-8'],
+    'the merged branch in the subject names the item, not a branch the body mentions');
 
   const release = commands.find(command => command.name === 'release');
   assert.ok(release?.help.some(line => line.includes('release cut')), 'graphyard release cut is a registered command');
@@ -106,10 +131,36 @@ test('integration:uat-deploys-candidate — the candidate SHA is deployed to Rai
   assert.equal(remoteRef(repo.origin, `refs/tags/rc-uat/${candidate.id}^{commit}`), sha);
   assert.equal(ledgerStatus(readLedger(repo.git))[0].uat?.result, 'passed');
 
-  // A command suite receives the UAT URL it must test.
+  // The deployment is read from the real /healthz shape: `commit`, not the unstamped `revision`.
+  assert.equal(servedRevision({ revision: 'unknown', commit: sha }), sha);
+  assert.equal(servedRevision({ revision: sha.toUpperCase() }), sha, 'a stamped revision counts only when no commit is reported');
+  assert.equal(servedRevision({ revision: 'unknown', commit: 'unknown' }), null);
+
+  // The api suite drives UAT's own API with a UAT principal: create, idempotent replay, list, board, status.
+  const api = uatApi();
+  const driven = await apiSuite('uat-token', api.fetcher).run('https://uat.example.test', candidate);
+  assert.equal(driven.passed, true, driven.detail);
+  assert.equal(api.work.length, 1, 'the replayed create returned the same item');
+  assert.match(api.work[0].title, new RegExp(`${candidate.id} at ${sha.slice(0, 12)}`));
+  assert.deepEqual(api.calls.map(call => `${call.method} ${call.path}`), ['POST /api/work', 'POST /api/work', 'GET /api/work', 'GET /api/board', 'GET /api/status']);
+  assert.ok(api.calls.every(call => call.auth === 'Bearer uat-token'));
+  assert.deepEqual([...new Set(api.calls.filter(call => call.method === 'POST').map(call => call.key))], [`release-candidate-uat:${candidate.id}`]);
+  const lost = await apiSuite('uat-token', uatApi({ dropFromList: true }).fetcher).run('https://uat.example.test', candidate);
+  assert.equal(lost.passed, false); assert.match(lost.detail, /does not list the created item/);
+  const refusedToken = await apiSuite('wrong', uatApi().fetcher).run('https://uat.example.test', candidate);
+  assert.equal(refusedToken.passed, false); assert.match(refusedToken.detail, /answered 401/);
+
+  // A command suite receives the UAT URL it must test, and never the release token that files follow-ups.
   const out = join(await temporaryDirectory('release-candidate-suite'), 'url');
-  const command = await commandSuite('cli', `printf %s "$GRAPHYARD_UAT_URL" > ${JSON.stringify(out)}`).run('https://uat.example.test');
-  assert.equal(command.passed, true); assert.equal(await readFile(out, 'utf8'), 'https://uat.example.test');
+  const previous = process.env.GRAPHYARD_TOKEN; process.env.GRAPHYARD_TOKEN = 'release-secret';
+  try {
+    const command = await commandSuite('cli', `printf '%s|%s' "$GRAPHYARD_UAT_URL" "\${GRAPHYARD_TOKEN:-}" > ${JSON.stringify(out)}`).run('https://uat.example.test', someCandidate());
+    assert.equal(command.passed, true); assert.equal(await readFile(out, 'utf8'), 'https://uat.example.test|');
+  } finally { if (previous === undefined) delete process.env.GRAPHYARD_TOKEN; else process.env.GRAPHYARD_TOKEN = previous; }
+  const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /release validate .* --api/, 'the workflow runs the api suite against UAT');
+  assert.match(workflow, /GRAPHYARD_UAT_TOKEN: \$\{\{ secrets\.GRAPHYARD_UAT_TOKEN \}\}/);
+  assert.doesNotMatch(workflow, /--suite "long=npm test"/, 'no suite runs against the runner\'s own checkout in UAT\'s name');
 
   // UAT that never serves the candidate is a failed validation, never a pass attributed to it.
   const other = await repository();
@@ -152,6 +203,14 @@ test('integration:promote-exact-sha — production deploys only a UAT-passed can
   const next = cut(repo.git, { base: 'main', trigger: 'schedule', now: new Date('2026-10-01T14:00:00Z'), push: true }) as any;
   assert.deepEqual(next.candidate.since, { id: candidate.id, sha });
   assert.deepEqual(next.candidate.items.map((item: any) => item.key), ['GY-32']);
+
+  // Promotion is leased on the last promoted SHA: a production branch moved by hand is refused, not overwritten.
+  deployToUat(repo.git, next.candidate.id, 'main');
+  await validateAndRecord(repo.git, next.candidate.id, 'https://uat.example.test', [recordingSuite('long', true, [])], { base: 'main', push: true, timeoutMs: 0, fetcher: deployment([newer]).fetcher });
+  const handMoved = run(repo.work, 'rev-list', '--max-parents=0', 'HEAD');
+  run(repo.work, 'push', '-q', '--force', 'origin', `${handMoved}:refs/heads/${productionBranch}`);
+  assert.throws(() => promote(repo.git, next.candidate.id, { base: 'main', push: true, now: new Date('2026-10-01T15:00:00Z') }), /stale info|rejected/);
+  assert.equal(remoteRef(repo.origin, `refs/heads/${productionBranch}`), handMoved);
 
   assert.equal((await serviceOf('production')).source.branch, releaseBranches.production, 'production no longer auto-deploys main');
   const config = await readFile(new URL('../.railway/railway.ts', import.meta.url), 'utf8');

@@ -9,11 +9,11 @@ Graphyard's own deployment runs one moving main, a frozen candidate, UAT, then t
 
 - `release cut [--trigger schedule|manual]` tags main's tip as `rc/ID`, recording the SHA and the delivered items it carries since the last promoted candidate. It writes a tag and nothing else, so merges never pause. `.github/workflows/release-candidate.yml` cuts every six hours or on demand.
 - `release uat ID` deploys the candidate to `uat`, which has its own Postgres and no `GITHUB_*` variable: it holds no credential that can write to the production repository and never merges, dispatches or spends the App's budget.
-- `release validate ID --url UAT_URL [--suite NAME=COMMAND]...` waits until UAT serves the candidate SHA, runs the endpoint checks and each suite (given `GRAPHYARD_UAT_URL`; the workflow runs `npm test`), confirms UAT still serves that SHA, and records `rc-uat/ID`.
-- `release promote ID` refuses unless that record passed on the candidate SHA, then deploys the SHA to production and records `rc-production/ID`. `release verify --url URL` confirms production serves a promoted candidate; `master verify-deployment` then records that SHA on each delivery it carries.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits until `/healthz` on UAT reports the candidate SHA as `commit`, runs the suites against that deployment, confirms it still serves that SHA, and records `rc-uat/ID`. `endpoints` probes `/healthz?strict` and `/`; `--api` drives UAT's own API with `GRAPHYARD_UAT_TOKEN`, creating, replaying and listing a work item and reading the board and status. The workflow runs both. A `--suite` command gets `GRAPHYARD_UAT_URL` but never `GRAPHYARD_TOKEN`.
+- `release promote ID` refuses unless that record passed on the candidate SHA, then deploys the SHA to production (leased on the last promoted SHA, so a hand-moved `release/production` is refused) and records `rc-production/ID`. `release verify --url URL` confirms production serves a promoted candidate; `master verify-deployment` then records that SHA on each delivery it carries.
 - A failed candidate files one follow-up item naming the failing suite and SHA (`release follow-up ID` retries a failed filing). Its deliveries stay delivered; fix forward, and the next cut carries both.
 
-`release status` lists every candidate with its UAT verdict and promotion. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, and a `GRAPHYARD_RELEASE_TOKEN` that may create work. Create `release/production` at production's current SHA before applying the Railway configuration.
+`release status` lists every candidate with its UAT verdict and promotion. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, a `GRAPHYARD_UAT_TOKEN` for a principal in UAT's `GRAPHYARD_PRINCIPALS`, and a `GRAPHYARD_RELEASE_TOKEN` that may create work. Create `release/production` at production's current SHA before applying the Railway configuration.
 
 ## Who writes what
 

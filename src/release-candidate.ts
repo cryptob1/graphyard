@@ -57,10 +57,10 @@ export function itemsFromCommits(commits: readonly CommitSummary[]): CandidateIt
   const items: CandidateItem[] = [];
   const seen = new Set<string>();
   for (const commit of commits) {
-    const text = `${commit.subject}\n${commit.body}`;
-    const branch = /\bgraphyard\/([a-z][a-z0-9]*-\d+)-\d+\b/i.exec(text);
-    const named = /^([A-Z][A-Z0-9]*-\d+):/m.exec(text);
-    const key = (branch?.[1] ?? named?.[1])?.toUpperCase();
+    // The subject names the merged branch; a body may mention other items' branches in passing.
+    const branchIn = (text: string) => /\bgraphyard\/([a-z][a-z0-9]*-\d+)-\d+\b/i.exec(text)?.[1];
+    const namedIn = (text: string) => /^([A-Z][A-Z0-9]*-\d+):/m.exec(text)?.[1];
+    const key = (branchIn(commit.subject) ?? namedIn(commit.subject) ?? branchIn(commit.body) ?? namedIn(commit.body))?.toUpperCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
     const pr = /#(\d+)\b/.exec(commit.subject);
@@ -144,10 +144,17 @@ export function assessProductionServing(servedSha: string | null, promoted: read
   return { verified: true as const, reason: latest.id === match.id ? null : `production serves candidate ${match.id}; candidate ${latest.id} is promoted and not yet serving`, candidate: match.id, sha: servedSha };
 }
 
-/** The commit a Graphyard deployment reports serving, from its `/healthz` body. */
+/**
+ * The commit a Graphyard deployment reports serving, from its `/healthz` body. The server reports
+ * the commit it was built from as `commit`; `revision` is the image's stamped build revision, which
+ * a Railway build leaves `unknown`, so it only counts when `commit` is absent and it is a full SHA.
+ */
 export const servedRevision = (health: any): string | null => {
-  const sha = String(health?.revision ?? health?.commit ?? '').toLowerCase();
-  return fullSha.test(sha) ? sha : null;
+  for (const value of [health?.commit, health?.revision]) {
+    const sha = typeof value === 'string' ? value.toLowerCase() : '';
+    if (fullSha.test(sha)) return sha;
+  }
+  return null;
 };
 
 // ——— Effects: the candidate ledger is the repository's own tags and branches. ———
@@ -186,8 +193,16 @@ export function writeRecord(git: Git, tag: string, sha: string, record: unknown,
   if (push) git(['push', 'origin', `refs/tags/${tag}`]);
 }
 
-/** Point an environment branch at the exact candidate SHA; the environment deploys that commit. */
-export const deployBranch = (git: Git, branch: string, sha: string) => { assertSha(sha, 'candidate'); git(['push', '--force', 'origin', `${sha}:refs/heads/${branch}`]); };
+/**
+ * Point an environment branch at the exact candidate SHA; the environment deploys that commit.
+ * Given the SHA the branch is expected to hold (the last candidate promoted there), the push is
+ * leased on it, so a branch someone moved by hand is refused rather than silently overwritten.
+ */
+export const deployBranch = (git: Git, branch: string, sha: string, expected?: string | null) => {
+  assertSha(sha, 'candidate');
+  if (expected) assertSha(expected, 'expected branch tip');
+  git(['push', expected ? `--force-with-lease=refs/heads/${branch}:${expected}` : '--force', 'origin', `${sha}:refs/heads/${branch}`]);
+};
 
 export function firstParentCommits(git: Git, tip: string, since: string | null): CommitSummary[] {
   const range = since ? [`${since}..${tip}`] : ['--max-count=200', tip];
@@ -210,10 +225,15 @@ export function cut(git: Git, options: { base: string; trigger: CutTrigger; now:
 }
 
 /** One suite run against the UAT deployment: a check the CLI performs, or a command it starts. */
-export interface Suite { name: string; run: (url: string) => Promise<SuiteResult> }
+export interface Suite { name: string; run: (url: string, candidate: ReleaseCandidate) => Promise<SuiteResult> }
 
+/**
+ * A command run with `GRAPHYARD_UAT_URL` set to the deployment. It never sees `GRAPHYARD_TOKEN`, the
+ * release credential that files a failed candidate's follow-up: only that filing step needs it.
+ */
 export const commandSuite = (name: string, command: string, timeoutMs = 3_600_000): Suite => ({ name, run: async url => {
-  const child = spawnSync('bash', ['-c', command], { stdio: 'inherit', timeout: timeoutMs, env: { ...process.env, GRAPHYARD_UAT_URL: url } });
+  const { GRAPHYARD_TOKEN: _release, ...env } = process.env;
+  const child = spawnSync('bash', ['-c', command], { stdio: 'inherit', timeout: timeoutMs, env: { ...env, GRAPHYARD_UAT_URL: url } });
   const passed = child.status === 0;
   return { name, passed, detail: passed ? `\`${command}\` passed` : `\`${command}\` exited ${child.status ?? child.signal}` };
 } });
@@ -225,6 +245,46 @@ export const endpointSuite = (paths: readonly string[], fetcher: typeof fetch = 
     catch (error) { failures.push(`${path} failed: ${error instanceof Error ? error.message : String(error)}`); }
   }
   return { name: 'endpoints', passed: !failures.length, detail: failures.length ? failures.join('; ') : `${paths.join(', ')} answered 2xx` };
+} });
+
+/**
+ * The long suite that drives the deployed UAT API end to end with a UAT-only principal's token: it
+ * creates a work item in UAT's own database, replays that create under the same idempotency key
+ * and expects the same item back, then finds the item through the work list and reads the board
+ * and status views every operator surface is built on. UAT has its own Postgres and no GitHub App,
+ * so the item it creates never reaches the production repository or production's work.
+ */
+export const apiSuite = (token: string, fetcher: typeof fetch = fetch): Suite => ({ name: 'api', run: async (url, candidate) => {
+  const failures: string[] = [];
+  const call = async (path: string, body?: unknown, requestId?: string) => {
+    const response = await fetcher(new URL(path, url), { method: body === undefined ? 'GET' : 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(requestId ? { 'Idempotency-Key': requestId } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`${body === undefined ? 'GET' : 'POST'} ${path} answered ${response.status}: ${text.slice(0, 200)}`);
+    return text ? JSON.parse(text) : null;
+  };
+  const requestId = `release-candidate-uat:${candidate.id}`;
+  const item = {
+    title: `UAT scenario for release candidate ${candidate.id} at ${candidate.sha.slice(0, 12)}`,
+    description: `Created by the release candidate api suite against UAT serving ${candidate.sha}.`,
+    type: 'chore', priority: 3,
+    criteria: [{ id: 'AC-1', text: `UAT accepts and serves work created against candidate ${candidate.id}`, proofs: ['manual:release-candidate-uat-scenario'] }],
+    policy: { checks: ['test'], review: true },
+  };
+  try {
+    const created = await call('/api/work', item, requestId);
+    const id = created?.id ?? created?.work?.id;
+    if (!id) throw new Error(`POST /api/work returned no item id: ${JSON.stringify(created).slice(0, 200)}`);
+    const replayed = await call('/api/work', item, requestId);
+    if ((replayed?.id ?? replayed?.work?.id) !== id) failures.push(`replaying the create under ${requestId} returned ${replayed?.id ?? replayed?.work?.id}, not ${id}`);
+    const listed = (await call('/api/work') as any[]).find(entry => entry.id === id);
+    if (!listed) failures.push(`GET /api/work does not list the created item ${id}`);
+    else if (listed.title !== item.title) failures.push(`GET /api/work lists ${id} titled ${JSON.stringify(listed.title)}`);
+    await call('/api/board');
+    await call('/api/status');
+  } catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+  return { name: 'api', passed: !failures.length, detail: failures.length ? failures.join('; ') : 'created, replayed and listed a work item, and read the board and status, on the UAT deployment' };
 } });
 
 export async function readServed(url: string, fetcher: typeof fetch = fetch) {
@@ -251,7 +311,7 @@ export async function validate(candidate: ReleaseCandidate, url: string, suites:
   const before = await awaitServing(url, candidate.sha, { timeoutMs: options.timeoutMs, fetcher: options.fetcher, sleep: options.sleep, now: () => clock().getTime() });
   if (before !== candidate.sha) return assessUat(candidate, { deployedSha: before, suites: [], now: clock() });
   const results: SuiteResult[] = [];
-  for (const suite of suites) results.push(await suite.run(url));
+  for (const suite of suites) results.push(await suite.run(url, candidate));
   const after = await readServed(url, options.fetcher);
   if (after !== candidate.sha) results.push({ name: 'deployment', passed: false, detail: `UAT moved from ${candidate.sha} to ${after ?? 'no observable commit'} while the suites ran` });
   return assessUat(candidate, { deployedSha: candidate.sha, suites: results, now: clock() });
@@ -294,7 +354,7 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   const candidate = findCandidate(ledger, id);
   const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
-  deployBranch(git, productionBranch, candidate.sha);
+  deployBranch(git, productionBranch, candidate.sha, ledger.production[0]?.sha ?? null);
   if (!ledger.production.some(record => record.id === candidate.id)) writeRecord(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
 }
