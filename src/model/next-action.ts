@@ -212,7 +212,7 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
 
   // A worker that asked for scope is idle until it is answered, whatever the gates say. A request
   // the rule has already decided is not waiting on anybody: an approved one is applied and gone,
-  // and a refused one carries its refusal as the item's blocker, which the ready gate reports.
+  // and a refused one carries its refusal as the item's blocker, which the ready gate reports. The executor claiming this row is its one decider (GY-955, executorDecidesScope).
   const scope = work.scopeRequest;
   if (scope && !scope.decision && liveLease && work.lease!.epoch === scope.epoch) {
     return make('approve-scope', `${scope.requestedBy} needs files outside plannedFiles for ${key}: ${scope.paths.join(', ')} — ${scope.reason}`,
