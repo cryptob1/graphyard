@@ -20,20 +20,38 @@ import { boundedSnapshot } from './store/bounded-snapshot.js';
  * named, so its instances never produce another draft.
  */
 type Db = { query: pg.Pool['query'] };
+/** Re-reads a persisted operator agent inside a transaction (operator-agent.ts `revalidate`). */
+type OperatorAuthorizer = (db: pg.PoolClient, now: Date, actor: Principal) => Promise<Principal>;
 /** The newest unjudged drafts a reading folds; a registry holds tens of entries, not thousands. */
 export const retroLedgerLimit = 5_000;
+const judgedIds = `SELECT payload->>'id' FROM events WHERE kind IN ('retro.applied', 'retro.refused')`;
+const foldRows = (rows: any[]) => foldRetroArtefacts(rows.map((row): RetroLedgerRow => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), payload: row.payload })));
 
 /**
  * Every judged artefact — its judgement and the draft it judged, however old — and the newest
- * drafts, so an applied requirement, check or catalogue entry never drops out of its registry and
- * a registry's revision never falls back as the ledger grows.
+ * unjudged drafts, so an applied requirement, check or catalogue entry never drops out of its
+ * registry, a registry's revision never falls back as the ledger grows, and a burst of judged
+ * drafts never pushes a draft still waiting for its judgement out of the reading.
  */
 export async function readRetroArtefacts(db: Db): Promise<RetroArtefact[]> {
   const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM events WHERE kind = ANY($1) AND (kind <> 'retro.drafted'
-      OR seq >= COALESCE((SELECT min(seq) FROM (SELECT seq FROM events WHERE kind = 'retro.drafted' ORDER BY seq DESC LIMIT $2) newest), 0)
-      OR payload->>'id' IN (SELECT payload->>'id' FROM events WHERE kind IN ('retro.applied', 'retro.refused')))
+      OR payload->>'id' IN (${judgedIds})
+      OR seq IN (SELECT seq FROM events WHERE kind = 'retro.drafted' AND payload->>'id' NOT IN (${judgedIds}) ORDER BY seq DESC LIMIT $2))
     ORDER BY seq`, [[...retroLedgerKinds], retroLedgerLimit]);
-  return foldRetroArtefacts(result.rows.map((row): RetroLedgerRow => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), payload: row.payload })));
+  return foldRows(result.rows);
+}
+
+/**
+ * Only the applied mechanical checks, for the submit transaction: their approvals and the drafts
+ * they applied, never the whole retro ledger, so a submission's cost is bounded by the checks in
+ * force rather than by every draft ever recorded.
+ */
+export async function readAppliedRetroChecks(db: Db): Promise<RetroArtefact[]> {
+  const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM events
+    WHERE kind IN ('retro.drafted', 'retro.applied') AND payload->>'id' IN (SELECT payload->>'id' FROM events WHERE kind = 'retro.applied')
+      AND (kind = 'retro.applied' OR payload->'draft'->>'kind' = 'mechanical-check')
+    ORDER BY seq`);
+  return foldRows(result.rows).filter(artefact => artefact.state === 'applied' && artefact.kind === 'mechanical-check');
 }
 
 /**
@@ -67,12 +85,21 @@ export async function synthesizeRetro(store: Store, policy: InterventionPolicy, 
  * An independent judgement of one drafted artefact. Approval applies it through its governed path
  * at the registry's next revision and records the pattern it closes; refusal records why. Only an
  * agent session (an AI admin or an operator agent) holding `decision:approve` judges — never a human
- * session, the identity that drafted it, or one that recorded the instances it was drafted from.
+ * session or one that declares no AI session, the identity that drafted it, or one that recorded the
+ * instances it was drafted from. The next revision is read and written under the coordination lock
+ * `store.transaction` takes, so concurrent approvals in one registry apply at distinct revisions.
  */
-export async function judgeRetroArtefact(store: Store, actor: Principal, repository: string, id: string, verdict: 'approve' | 'refuse', reason: string) {
+export async function judgeRetroArtefact(store: Store, actor: Principal, repository: string, id: string, verdict: 'approve' | 'refuse', reason: string, authorize?: OperatorAuthorizer) {
   demand(actor.role === 'admin' || actor.role === 'operator-agent', `Retro artefacts are judged by agent identities holding ${approveCapability}; ${actor.id} is a ${actor.role}`, 403);
   operatorCapability(actor, approveCapability, undefined, repository);
   return store.transaction(async (db, now) => {
+    // A persisted operator agent is read again under the lock the judgement commits under, so one
+    // revoked, expired or stripped of decision:approve since it authenticated judges nothing.
+    if (actor.role === 'operator-agent') {
+      demand(authorize, 'Operator-agent authorization is unavailable', 503);
+      actor = await authorize(db, now, actor);
+      operatorCapability(actor, approveCapability, undefined, repository);
+    }
     const artefacts = await readRetroArtefacts(db);
     const artefact = artefacts.find(entry => entry.id === id);
     demand(artefact, 'Retro artefact not found', 404);
