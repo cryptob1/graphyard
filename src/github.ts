@@ -1971,9 +1971,22 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // one request wide, the item is queued (a worker push at that point is a new head the queue
     // would eject for anyway), and the next observation reads the branch afresh, so the worker's
     // head is at worst reported as replaced rather than silently kept. Narrow, and accepted.
-    if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
-    const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
+    // The tip is built on the scratch branch and the pull request's branch is moved once, to it
+    // (GY-1087). Resetting the branch to the reviewed head and then merging onto it was two pushes:
+    // GitHub raised a pull_request event for each, both resolved to the tip, CI's per-PR concurrency
+    // cancelled one of the two runs, and when the later-created run was the one cancelled — before
+    // any job started — GitHub read the head's required checks as expected for good (GY-1063:
+    // "3 of 4 required status checks are expected"), so auto-merge never fired.
+    let merged: string | null;
+    try { merged = await this.mergeOnScratch(work.key, reviewedHead, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`); }
+    catch (error) {
+      // A conflicting tip still leaves the branch at the item's own reviewed head, never at the
+      // earlier tip and the predecessors it carries.
+      if (error instanceof SpeculativeConflict && reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
+      throw error;
+    }
     const tip = merged ?? reviewedHead;
+    if (tip !== pr.head.sha) await this.updateBranch(pr.head.ref, tip);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
@@ -2044,27 +2057,31 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // record is what lets a second attempt tell a lasting refusal from a transient one.
     const refused = (kind: RestoreFailureKind, reason: string): BaseRefresh => record({}, 'unpublished', kind, reason);
     await beforeWrite();
+    // The restored commit is built on the scratch branch and the pull request's branch is moved
+    // once, as a speculative tip is (GY-1087): one push, so one CI run binds to the restored head.
+    let merged: string | null, conflict: string | null = null;
+    try { merged = await this.mergeOnScratch(work.key, own, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
+    catch (error) {
+      if (error instanceof SpeculativeConflict) { merged = null; conflict = error.message; }
+      else if (!(error instanceof Refusal)) throw error;
+      else return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
+    }
+    // A conflicting restore still moves the branch to the item's own reviewed head; the merge is the worker's.
+    const produced = merged ?? own;
     // The same one-request window as in publishSpeculativeTip: a worker push between the head
     // check above and this forced update is overwritten by the restore. The head being restored
     // is one no worker may push over (a contaminated tip), the record names the head it moved
     // from, and the next observation reads the branch afresh.
-    try { await this.updateBranch(pr.head.ref, own); }
+    try { await this.updateBranch(pr.head.ref, produced); }
     catch (error) {
       if (!(error instanceof Refusal)) throw error;
-      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to the reviewed head ${own.slice(0, 12)}: ${error.message}`);
+      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to ${merged ? `the reviewed head ${own.slice(0, 12)} merged onto the base, ${produced.slice(0, 12)}` : `the reviewed head ${own.slice(0, 12)}`}: ${error.message}`);
     }
-    let merged: string | null;
-    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
-    catch (error) {
-      if (error instanceof SpeculativeConflict)
-        return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${error.message}`);
-      if (!(error instanceof Refusal)) throw error;
-      return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
-    }
+    if (conflict !== null)
+      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${conflict}`);
     // The restore is done only when GitHub itself shows the branch at the commit it produced
     // (GY-854): a push GitHub does not reflect has happened, and a record that claimed it anyway
     // left the item waiting at a head no observation would ever read.
-    const produced = merged ?? own;
     let shown: string;
     try { shown = await this.refHead(pr.head.ref); }
     catch (error) {
@@ -2120,16 +2137,26 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
-    const branch = mergeCheckBranch(key);
-    await this.publishRef(`refs/heads/${branch}`, head);
     try {
-      await this.mergeBranch(branch, base, `Graphyard merge check for ${key} [skip ci]`);
+      await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
       return null;
     } catch (error) {
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
-    } finally {
-      // A scratch branch left behind by a failed delete is overwritten by the next check, but it
+    }
+  }
+  /**
+   * Merges `base` onto `head` on the item's scratch branch and returns the merge commit, or null
+   * when `head` already contains `base`; a conflict throws SpeculativeConflict. No branch a pull
+   * request, a person or a check reads is written (GY-1087): the caller moves the pull request's
+   * branch to the result in one push, so GitHub starts one set of workflow runs for the new head.
+   */
+  async mergeOnScratch(key: string, head: string, base: string, message: string): Promise<string | null> {
+    const branch = mergeCheckBranch(key);
+    await this.publishRef(`refs/heads/${branch}`, head);
+    try { return await this.mergeBranch(branch, base, message); }
+    finally {
+      // A scratch branch left behind by a failed delete is overwritten by the next merge, but it
       // is visible in the repository until then, so the failure is named.
       await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(error => console.error(`Graphyard could not delete merge-check branch ${branch}: ${error instanceof Error ? error.message : String(error)}`));
     }
