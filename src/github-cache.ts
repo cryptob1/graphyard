@@ -44,6 +44,8 @@ export class GitHubCacheStore {
   readonly flushMs: number; readonly pruneMs: number; readonly maxRows: number; readonly maxBytes: number; readonly maxValueBytes: number; readonly maxPending: number;
   readonly maxImmutableRows: number; readonly maxImmutableBytes: number;
   private pending = new Map<string, Pending>();
+  /** The batch a flush is writing: out of `pending`, maybe not yet visible in the table. */
+  private writing = new Map<string, Exclude<Pending, 'touch'>>();
   private timer: NodeJS.Timeout | null = null;
   private flushing: Promise<void> | null = null;
   private prunedAt = 0;
@@ -113,6 +115,9 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
     const id = this.key(kind, key);
     const queued = this.pending.get(id);
     if (queued && queued !== 'touch') return JSON.parse(queued.value);
+    // A batch being written is not yet readable from the table (GY-1052): it answers from memory.
+    const writing = this.writing.get(id);
+    if (writing) return JSON.parse(writing.value);
     try { return (await this.pool.query('SELECT value FROM github_cache WHERE key = $1', [id])).rows[0]?.value; }
     catch (error) { this.report('lookup', error); return undefined; }
   }
@@ -130,6 +135,11 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
   private async write() {
     const batch = [...this.pending]; this.pending.clear();
     const puts = batch.filter((entry): entry is [string, Exclude<Pending, 'touch'>] => entry[1] !== 'touch');
+    this.writing = new Map(puts);
+    try { await this.writeBatch(puts, batch); } finally { this.writing = new Map(); }
+    if (Date.now() - this.prunedAt >= this.pruneMs) await this.prune();
+  }
+  private async writeBatch(puts: [string, Exclude<Pending, 'touch'>][], batch: [string, Pending][]) {
     const touches = batch.filter(([, entry]) => entry === 'touch').map(([key]) => key);
     for (let at = 0; at < puts.length; at += 500) {
       const chunk = puts.slice(at, at + 500);
@@ -144,7 +154,6 @@ ON CONFLICT (key) DO UPDATE SET kind=EXCLUDED.kind, etag=EXCLUDED.etag, value=EX
       try { await this.pool.query('UPDATE github_cache SET updated_at=now() WHERE key = ANY($1::text[])', [touches.slice(at, at + 2_000)]); }
       catch (error) { this.report('write', error); }
     }
-    if (Date.now() - this.prunedAt >= this.pruneMs) await this.prune();
   }
   /**
    * Delete entries past their bound, newest-used kept: whole immutable responses past `maxImmutableRows`

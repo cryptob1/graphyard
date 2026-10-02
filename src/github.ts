@@ -730,8 +730,8 @@ export class GitHub {
    * What one provider response says about the budget. A 304 costs nothing — GitHub does not charge
    * a conditional read it answers from the caller's own ETag — so it is counted as a request made
    * and not as budget spent, which is the whole reason an unchanged candidate is cheap to observe.
-   * Only installation requests report the budget this class is spending; App-level calls
-   * (`/app`, token refresh) are counted as requests against a different allowance.
+   * Only installation REST requests report and charge the budget this class is spending; App-level
+   * calls (`/app`, token refresh) and GraphQL are counted as requests against their own allowances.
    */
   private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true, token: string | null = null, method = 'GET') {
     const resource = response.headers.get('x-ratelimit-resource');
@@ -751,6 +751,9 @@ export class GitHub {
     if (response.status === 304 || !charged || response.status === 429 || response.status === 403 && remaining === 0) return;
     // A measured stretch is an observation job the pace started; every other request is spend the pace must leave room for.
     if (tracked && token !== null) this.budgets.charge(token, now, !!meter);
+    // The billable ledger is the REST core allowance the limit reads (GY-1052): GraphQL spends its
+    // own point budget and App-level calls their own allowance, so neither is charged against it.
+    if (!tracked || path === '/graphql' || resource && resource !== 'core') return;
     const charge = { at: now, kind: requestKind(path), endpoint: requestEndpoint(method, path) };
     this.charges.push(charge);
     this.chargeLedger?.charge(now, charge.endpoint, charge.kind);
@@ -1012,9 +1015,13 @@ export class GitHub {
   }
   private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
     if (method === 'GET' && immutableRead(path)) return this.immutableRequest(path);
-    // A ref this adapter moves itself ends the shared base-ref read (GY-806): the next observation reads the new tip.
-    if (method !== 'GET' && /\/(git\/refs|merges$|pulls\/\d+\/merge$)/.test(path)) this.sharedRef = null;
-    return this.send(path, method, body, true);
+    // A ref this adapter moves itself ends the shared base-ref read (GY-806), a head-bound GraphQL
+    // merge included (GY-1052): the next observation reads the new tip. It ends once the write has
+    // answered too, so an observation that read the ref while the write was in flight is not shared on.
+    const movesRef = method !== 'GET' && (/\/(git\/refs|merges$|pulls\/\d+\/merge$)/.test(path) || path === '/graphql' && (body as { query?: unknown } | undefined)?.query === headBoundMergeMutation);
+    if (movesRef) this.sharedRef = null;
+    try { return await this.send(path, method, body, true); }
+    finally { if (movesRef) this.sharedRef = null; }
   }
   /**
    * A commit by SHA or a compare of two exact SHAs (GY-806): asked of GitHub once, then served from
@@ -2888,7 +2895,11 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // (GY-806): nothing is asked of GitHub, and the job is due again when that interval ends. A job
   // woken by a state change or a webhook is never skipped. The refresh is the job row's, so the
   // replica that claims the poll need not be the one that made the refresh.
-  const refreshedUntil = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until ? new Date(job.refreshed_until).getTime() : null;
+  // The band is read again at skip time (GY-1052): an item that entered the merge band since the
+  // refresh is observed at the merge cadence, not left until the longer interval the refresh used.
+  const claimed = all.find(entry => entry.id === job.work_id);
+  const mergeBand = !!claimed && claimed.stage === 'merge' && (mergeAuthorized(claimed) || queuePlacement(claimed, all, Date.now())?.position === 0);
+  const refreshedUntil = !job.woken && !viaWebhook && !mergeBand && job.refreshed && job.refreshed_until ? new Date(job.refreshed_until).getTime() : null;
   if (refreshedUntil !== null) {
     await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
     return true;

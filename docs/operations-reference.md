@@ -66,7 +66,7 @@ A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges o
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also in `master status`): `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`; the 2026-09-26 mix replays at 54%.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also in `master status`): REST core `perHour` across replicas (`instances`; GraphQL and App calls excluded), `limit`, `share`, `target` 0.6, `byEndpoint`; the 2026-09-26 mix replays at 54%.
 
 ### Webhook liveness
 

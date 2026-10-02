@@ -13,6 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { GitHub, processJob } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
+import { GitHubChargeLedger } from '../src/github-charges.js';
 import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -1046,6 +1047,25 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   } });
   await immutableClient.attachCache(immutableCache);
   const immutable = { cycles: 0, peakLive: 0, peakRows: 0, peakBytes: 0, overBound: [] as string[], refetched: [] as string[], reads: 0 };
+  // GY-1052: the shared per-cycle reads on the real adapter, taken by every open item each cycle as an
+  // observation takes them: one base-ref read per cycle, protection every five minutes, each binding the
+  // current tip. And the cross-replica charge ledger over the day: two replicas charge what they ask of
+  // GitHub, the second restarting every three hours under a new instance id; the table must stay within
+  // two hours of rows, the restarted ids' included, and the fleet count must be the other replica's hour.
+  const cycleClient = new GitHub({ repository, base: 'main', appId: 1234, installationId: 2, privateKey: 'not-used' });
+  cycleClient.clock = () => clock.now();
+  const cycleSends = { ref: 0, protection: 0, commit: 0 };
+  Object.assign(cycleClient, { token: 'fixture-token', expires: Number.MAX_SAFE_INTEGER, send: async (path: string) => {
+    if (path.endsWith('/git/ref/heads/main')) { cycleSends.ref++; return { ref: 'refs/heads/main', object: { type: 'commit', sha: github.tip } }; }
+    if (path.endsWith('/protection') || path.endsWith('/rules/branches/main')) { cycleSends.protection++; return path.endsWith('/protection') ? { required_status_checks: { strict: false, checks: [] } } : []; }
+    cycleSends.commit++;
+    return { sha: path.slice(-40), parents: [], commit: { tree: { sha: sha(`tree-${path.slice(-40)}`) }, message: 'base' } };
+  } });
+  const shared = { cycles: 0, observations: 0, refReads: 0, protectionReads: 0, overRead: [] as string[], stale: [] as string[] };
+  const chargeInstallation = `soak-charges-${days}`, chargeOptions = { syncMs: 2 ** 31 - 1 };
+  const replicaA = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-a' });
+  let replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-b-0' }), restarts = 0;
+  const charged = { b: [] as number[], cycles: 0, peakRows: 0, instancesSeen: new Set<string>(), overBound: [] as string[], miscounted: [] as string[] };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
   // simulated minute, and a launch the cycle handed over settles before the position advances.
@@ -1187,6 +1207,27 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
             if ((immutableSends.get(`/repos/${repository}${path}`) ?? 0) > 1) immutable.refetched.push(`+${Math.round(elapsed / minute)} min ${pr.key} ${path.split('/').slice(-2).join('/')}`);
           }
         }
+        const openPrs = [...github.prs.values()].filter(pr => pr.open && !pr.merged), sent = { ...cycleSends };
+        for (const _pr of openPrs) {
+          const read = await cycleClient.cycleBaseBranch(); await cycleClient.branchProtection(false, true);
+          if (read.tip !== github.tip) shared.stale.push(`+${Math.round(elapsed / minute)} min ${read.tip.slice(0, 8)} for ${github.tip.slice(0, 8)}`);
+        }
+        if (openPrs.length) { shared.cycles++; shared.observations += openPrs.length; }
+        if (cycleSends.ref - sent.ref > 1) shared.overRead.push(`+${Math.round(elapsed / minute)} min ${cycleSends.ref - sent.ref} ref reads`);
+        shared.refReads = cycleSends.ref; shared.protectionReads = cycleSends.protection;
+        if (elapsed > 0 && elapsed % (3 * hour) < minute) { await replicaB.close(); replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: `replica-b-${++restarts}` }); }
+        for (let index = 0; index < cycleSends.ref - sent.ref; index++) replicaA.charge(now, 'GET /git/ref/heads/:branch', 'git');
+        for (let index = 0; index < cycleSends.protection - sent.protection; index++) replicaA.charge(now, 'GET /branches/:branch/protection', 'branches');
+        for (const _pr of openPrs) { replicaB.charge(now, 'GET /pulls/:n', 'pulls'); charged.b.push(now); }
+        await replicaB.sync(now); await replicaA.sync(now); charged.cycles++;
+        const since = Math.floor((now - hour) / minute) * minute, expected = charged.b.filter(at => Math.floor(at / minute) * minute >= since).length;
+        const counted = replicaA.fleet(now).rows.reduce((total, row) => total + row.requests, 0);
+        if (counted !== expected) charged.miscounted.push(`+${Math.round(elapsed / minute)} min counted ${counted} of ${expected}`);
+        const ledger = (await store.pool.query('SELECT count(*)::int AS n, min(minute) AS oldest, array_agg(DISTINCT instance) AS instances FROM github_charges WHERE installation=$1', [chargeInstallation])).rows[0];
+        charged.peakRows = Math.max(charged.peakRows, ledger.n);
+        for (const instance of ledger.instances ?? []) charged.instancesSeen.add(instance);
+        // Three endpoints, at most one row per endpoint, instance and minute, and every row within two hours.
+        if (ledger.n > 3 * (2 * 60 + 2) || ledger.oldest && now - ledger.oldest.getTime() > 2 * hour) charged.overBound.push(`+${Math.round(elapsed / minute)} min ${ledger.n} rows from ${ledger.oldest?.toISOString()}`);
         await immutableCache.flush(); await immutableCache.prune(); immutable.cycles++;
         const held = (await store.pool.query(`SELECT count(*)::int AS n, coalesce(sum(pg_column_size(value)), 0)::int AS bytes FROM github_cache WHERE kind = 'immutable' AND key LIKE $1`, [`${immutableScope}:%`])).rows[0];
         immutable.peakRows = Math.max(immutable.peakRows, held.n); immutable.peakBytes = Math.max(immutable.peakBytes, held.bytes);
@@ -1363,7 +1404,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mergeStallSightings, restoreLines, master, lanesSeen, laneApplications, approverWorks, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size } };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mergeStallSightings, restoreLines, master, lanesSeen, laneApplications, approverWorks, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts } };
 }
 
 /**
@@ -1421,6 +1462,18 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(immutable.overBound, [], 'immutable rows and bytes stayed within their bound every cycle');
   assert.deepEqual(immutable.refetched, [], 'no path still read was asked of GitHub twice');
   if (process.env.SOAK_TRACE) console.error(`immutable: ${JSON.stringify(immutable)}`);
+  // GY-1052: the shared per-cycle reads ran on the real adapter every cycle: one base-ref read per cycle
+  // however many items observed it, protection at most every five minutes, and every read bound the current tip.
+  const { shared, charges } = day;
+  assert.ok(shared.cycles > 0 && shared.observations > shared.cycles, `the shared reads ran every cycle: ${JSON.stringify(shared)}`);
+  assert.deepEqual(shared.overRead, [], 'no cycle read the base ref more than once');
+  assert.ok(shared.refReads <= shared.cycles, `one ref read per cycle at most (${shared.refReads} over ${shared.cycles})`);
+  assert.ok(shared.protectionReads <= 2 * (Math.ceil(hours * hour / (5 * minute)) + 1), `protection and branch rules every five minutes at most (${shared.protectionReads})`);
+  assert.deepEqual(shared.stale, [], 'every shared read bound the base branch as it was');
+  // GY-1052: the charge ledger stayed within two hours of rows across restarts, and the fleet count was the other replica's hour.
+  assert.ok(charges.cycles > 0 && charges.b > 0 && charges.restarts > 0, `the charge ledger ran all day across restarts: ${JSON.stringify({ ...charges, instancesSeen: charges.instancesSeen.length })}`);
+  assert.deepEqual(charges.overBound, [], 'github_charges stayed within its two-hour bound every cycle');
+  assert.deepEqual(charges.miscounted, [], 'every sync counted the other replica\'s last hour exactly');
   assert.ok(lanesSeen.size > 0, 'the day\'s items were evaluated into risk lanes, each checked against its change and its status row every cycle');
   // GY-883: the low-lane item's rework round ran with no approver session. Its first application
   // was refused, recorded failed and requested again on the retry interval; the second applied it,
