@@ -6,9 +6,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusMigration, secretsBusPath, secretsBusUnjudged, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusPath, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { createServer } from 'node:net';
-import { headlessConfinementWrapper, keyringEndpointWarning, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
+import { headlessConfinementWrapper, keyringEndpointWarning, secretsBusEndpointProblem, secretsBusMigration, secretsBusUnjudged, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

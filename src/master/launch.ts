@@ -1,7 +1,7 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusPath, secretsBusUnjudged, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -455,6 +455,34 @@ export async function startAgentSession(name: string, kind: string, pane: string
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
+const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
+/** secretsBusEndpointProblem's answer when the user manager could not judge the endpoint. */
+export const secretsBusUnjudged = 'unjudged' as const;
+export const secretsBusMigration = 'copy deploy/systemd/graphyard-secrets-bus.socket, graphyard-secrets-bus.service and graphyard-secrets-bus-filter.service to ~/.config/systemd/user/, then systemctl --user daemon-reload && systemctl --user disable --now graphyard-secrets-bus.service && systemctl --user enable --now graphyard-secrets-bus.socket';
+/**
+ * The keyring endpoint when `graphyard-secrets-bus.socket` does not hold it (GY-1039): an install
+ * that enabled the earlier `graphyard-secrets-bus.service` has `xdg-dbus-proxy` listen at the path
+ * itself, and every restart of that proxy replaces the socket a confined session has bind-mounted,
+ * leaving the session on a dead listener. Null when the socket unit holds it or there is nothing to
+ * judge — no endpoint, or a path that is not a socket. `secretsBusUnjudged` when the systemd user
+ * manager does not answer or its answer is unreadable: the endpoint may still be unheld, so a caller
+ * that remembers verdicts must ask again later rather than keep this one — never a guess.
+ */
+export async function secretsBusEndpointProblem(run: ChildRun | undefined, path: string | null = secretsBusPath()): Promise<{ text: string; next: string } | typeof secretsBusUnjudged | null> {
+  if (!path || !isAbsolute(path) || !isSocketPath(path)) return null;
+  // The suite never asks the real user manager about the real runtime directory.
+  if (!run && underTestRunner()) return null;
+  let shown: string;
+  try { shown = String(await (run ?? defaultChildRun)('systemctl', ['--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket'], { timeoutMs: 10_000 })); } catch { return secretsBusUnjudged; }
+  const lines = shown.split(/\r?\n/);
+  const state = lines.find(line => line.startsWith('ActiveState='))?.slice('ActiveState='.length);
+  if (!state) return secretsBusUnjudged;
+  const canonical = (candidate: string) => { try { return realpathSync(candidate); } catch { return candidate; } };
+  const listens = lines.filter(line => line.startsWith('Listen=')).map(line => line.slice('Listen='.length).replace(/ \([^)]*\)$/, ''));
+  if (state === 'active' && listens.some(listen => canonical(listen) === canonical(path))) return null;
+  const held = state === 'active' ? `listens at ${listens.join(', ') || 'nothing'} instead` : `is ${state}`;
+  return { text: `The keyring endpoint ${path} is a socket graphyard-secrets-bus.socket does not hold (the socket unit ${held}), so a restart of the proxy listening there replaces the socket confined sessions have bind-mounted and strands them on a dead listener`, next: secretsBusMigration };
+}
 /**
  * The line a launch logs when the session it confines reaches the keyring through an endpoint
  * graphyard-secrets-bus.socket does not hold (GY-1039): an install that enabled the earlier
