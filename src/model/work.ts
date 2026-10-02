@@ -10,7 +10,7 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { namedPaths, pathScope, pathScopeContains, plannedFilesMax, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathScopeContains, plannedCompanions, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -247,7 +247,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 
 // ---- plannedFiles derived from the criteria (GY-140) ---------------------------------------------
 
-interface CriterionText { id: string; text: string }
+interface CriterionText { id: string; text: string; proofs?: readonly string[] }
 const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i;
 const testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/;
 const sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
@@ -280,9 +280,9 @@ export interface PlannedFilesDerivation {
  * resolved against the tree of the base branch the item will be worked on, and every file a
  * criterion names that the tree holds is carried in. Only criteria are read — a path the
  * description mentions in prose is not a requirement and adds nothing — and only exact files
- * are carried: a criterion naming a directory widens nothing on its own.
+ * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
-export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[] }, tree: ReadonlySet<string>): PlannedFilesDerivation {
+export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null }, tree: ReadonlySet<string>): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria));
   const added: PlannedFilesDerivation['added'] = [];
@@ -290,6 +290,7 @@ export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; cri
     if (!tree.has(path) || planned.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path)) continue;
     added.push({ path, criterion: criterion.id });
   }
+  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria }, tree, itemDocumentationPaths(item))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
   return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
 }
 export function plannedFilesRefusal(missing: readonly string[], base: string) {
@@ -298,10 +299,10 @@ export function plannedFilesRefusal(missing: readonly string[], base: string) {
 
 /**
  * GY-140 AC-3: per open item, every scope request — open, or the last one decided — whose paths a
- * criterion already names. Such a request should never have been needed: the file belonged in
+ * criterion already names, or that is a companion the item's record implies (GY-955). Such a request should never have been needed: the file belonged in
  * plannedFiles at authoring time. Counted, so the authoring fault is measured rather than recalled.
  */
-export function impliedScopeRequests(work: readonly Pick<Work, 'key' | 'stage' | 'criteria' | 'scopeRequest' | 'scopeDecision'>[]) {
+export function impliedScopeRequests(work: readonly (Pick<Work, 'key' | 'stage' | 'criteria' | 'scopeRequest' | 'scopeDecision'> & Partial<Pick<Work, 'plannedFiles' | 'documentation'>>)[]) {
   const items = work.filter(item => item.stage !== 'done').flatMap(item => {
     const requests = [
       ...(item.scopeRequest ? [{ state: 'open' as const, paths: item.scopeRequest.paths, requestedBy: item.scopeRequest.requestedBy, requestedAt: item.scopeRequest.at }] : []),
@@ -309,8 +310,8 @@ export function impliedScopeRequests(work: readonly Pick<Work, 'key' | 'stage' |
     ];
     return requests.flatMap(request => {
       const named = request.paths.flatMap(path => {
-        const criterion = item.criteria.find(entry => namedPaths(entry.text).some(scope => pathScopeContains(scope, path)));
-        return criterion ? [{ path, criterion: criterion.id }] : [];
+        const criterion = item.criteria.find(entry => namedPaths(entry.text).some(scope => pathScopeContains(scope, path)))?.id ?? (companionGround(path, item, request.paths, itemDocumentationPaths(item)) ? 'companion' : null);
+        return criterion ? [{ path, criterion }] : [];
       });
       return named.length ? [{ key: item.key, ...request, named }] : [];
     });
