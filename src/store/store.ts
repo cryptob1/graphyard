@@ -87,14 +87,14 @@ export class Store {
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request' }: { lane?: StoreLane } = {}): Promise<T> {
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request', coordinationLock: takeCoordinationLock = true }: { lane?: StoreLane; coordinationLock?: boolean } = {}): Promise<T> {
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
-      // Serializes short coordination decisions across replicas, including dependency edits
-      // and cross-task workspace reservations. Never hold this lock during external I/O.
-      await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      // Serializes short coordination decisions across replicas, including dependency edits and cross-task workspace
+      // reservations; never held during external I/O. Reconciliation batches lock their own rows instead (GY-727).
+      if (takeCoordinationLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       const result = await fn(db, rows[0].now);
       await db.query('COMMIT');
@@ -147,13 +147,28 @@ export class Store {
    * for longer than `starvedAfterMs` is claimed before the rest of the named list, so a job the list
    * never names is still claimed within that bound (2026-09-26: an item whose only refusal was a stale
    * observation waited 40 minutes behind review-waiting items that came due again every cycle).
+   * A job an observation webhook made due within `webhookWakeTtlMs` (GY-806) comes before all of
+   * them, oldest delivery first; `webhook` says the claim is that wake, and the claim clears it.
+   * The wake lives on the job row, so a replica that did not receive the delivery claims it first too.
+   * `refreshed` says a webhook-driven observation refreshed the item until `refreshed_until`, still ahead.
    */
   async takeJob(order: string[] = [], headCount = 0, starvedAfterMs = observationStarvedAfterMs) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
-      UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation
-      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs)))]);
-    return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean } | undefined;
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken, webhook_at > now() - ($5::text||' milliseconds')::interval AS webhook, refreshed_until > now() AS refreshed FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN -1 WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN webhook_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+      UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation,webhook_at=NULL
+      FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken, picked.webhook IS TRUE AS webhook, picked.refreshed IS TRUE AS refreshed`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs))), String(webhookWakeTtlMs)]);
+    return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean; webhook: boolean; refreshed: boolean; refreshed_until: Date | null } | undefined;
+  }
+  /** The items an observation webhook made due and no claim has taken yet (GY-806), oldest delivery first. */
+  async webhookDue(): Promise<string[]> {
+    return (await this.pool.query(`SELECT work_id FROM jobs WHERE webhook_at > now() - ($1::text||' milliseconds')::interval ORDER BY webhook_at, work_id`, [String(webhookWakeTtlMs)])).rows.map(row => String(row.work_id));
+  }
+  /**
+   * A webhook-driven observation refreshed the item (GY-806): a poll claimed before `pollMs` has
+   * passed is skipped. Recorded on the job row, so the replica that claims the poll sees it.
+   */
+  async noteWebhookRefresh(id: string, token: string, pollMs: number) {
+    await this.pool.query(`UPDATE jobs SET refreshed_until=now()+($3::text||' milliseconds')::interval WHERE work_id=$1 AND token=$2`, [id, token, String(Math.max(0, Math.floor(pollMs)))]);
   }
   /**
    * Release a job with its next due time: a clean run at its observation cadence (`availableInMs`, GY-117), a failure after 45 seconds, a retry after two, a woken run at once.
@@ -220,6 +235,8 @@ export class Store {
   }
 }
 
+/** How long a webhook wake keeps its job ahead of polled jobs before it is dropped from the front (the job stays due). */
+export const webhookWakeTtlMs = 10 * 60_000;
 /** How long a due observation job may wait behind the claim-priority list before it is claimed first. */
 export const observationStarvedAfterMs = 5 * 60_000;
 
@@ -228,6 +245,21 @@ export const observationStarvedAfterMs = 5 * 60_000;
  * item saved every minute would otherwise look freshly due forever and never reach the starvation
  * bound `takeJob` claims ahead of the priority list (2026-09-26: items stuck for an hour on stale reads).
  */
+/**
+ * Wake the jobs a verified GitHub webhook delivery names (GY-806): every job when it moved the base
+ * branch or a merge-queue ref (`all`), else the items whose pull request, candidate or speculative
+ * tip SHA, or candidate branch it names. An observation event also stamps their webhook wake, which
+ * `takeJob` on any replica claims ahead of polled jobs. Returns the woken work ids.
+ */
+export async function wakeFromWebhook(db: Pick<pg.PoolClient, 'query'>, subjects: { all: boolean; prs: number[]; shas: string[]; branches: string[] }, observation: boolean): Promise<string[]> {
+  const woken = await db.query(`UPDATE jobs SET available_at=LEAST(available_at, now()),generation=generation+1,
+    webhook_at=CASE WHEN $4::boolean AND (webhook_at IS NULL OR webhook_at <= now() - ($5::text||' milliseconds')::interval) THEN now() ELSE webhook_at END
+    WHERE $1::boolean OR work_id IN (SELECT id FROM work_items
+    WHERE document->'submission'->>'pr' = ANY($2::text[]) OR document->'candidate'->>'sha' = ANY($3::text[]) OR document->'queue'->'speculation'->>'tip' = ANY($3::text[]) OR document->'candidate'->>'branch' = ANY($6::text[])) RETURNING work_id`,
+    [subjects.all, subjects.prs.map(String), subjects.shas, observation, String(webhookWakeTtlMs), subjects.branches]);
+  return woken.rows.map(row => String(row.work_id));
+}
+
 export async function wakeJob(db: pg.PoolClient, id: string) {
   await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
 }
