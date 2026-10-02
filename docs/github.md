@@ -34,7 +34,7 @@ Require `Graphyard / merge` from the control-plane App on the base branch: `stri
 
 A failed required check reruns once on the unchanged head (newest configured-CI-App run; lacking Actions: write, preflight diagnoses and holds requests), lapsing after 15 runless minutes. A queued or in-progress run is a runner wait; one not found is re-requested.
 
-The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects. An entry conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once its rerun passes and no other required check fails (`queue.ejection-lifted`). Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` with GitHub's blocker.
+The speculative tip, pushed onto the candidate branch once and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects. An entry conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once its rerun passes and no other required check fails (`queue.ejection-lifted`). Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` with GitHub's blocker.
 
 ### Bindings and carry
 

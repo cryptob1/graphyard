@@ -390,6 +390,7 @@
     "tests/merge-binding-race.test.ts": 2911,
     "tests/merge-delegation-clean.test.ts": 2427,
     "tests/merge-executor-owner.test.ts": 2825,
+    "tests/merge-fault-class.test.ts": 1500,
     "tests/merge-queue.test.ts": 969,
     "tests/merge-refusal-lift.test.ts": 600,
     "tests/merge-stall-attention.test.ts": 743,
@@ -556,6 +557,7 @@
     "tests/status-conflict-probe-bounded.test.ts": 2983,
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
-    "tests/tmp-cleanup.test.ts": 13603
+    "tests/tmp-cleanup.test.ts": 13603,
+    "tests/unblock-stale-revision.test.ts": 4873
   }
 }

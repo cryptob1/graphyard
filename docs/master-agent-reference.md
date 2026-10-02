@@ -15,7 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base (`baseRefresh.restore`: `restored` once GitHub shows it, else `unpublished`; twice, `escalated`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`). Another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
+**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base in one push (`baseRefresh.restore`: `restored` once GitHub shows it, else `unpublished`; twice, `escalated`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`). Another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
 
 #### A contaminated branch
 
@@ -43,15 +43,15 @@ Permission flows read `GET /api/github/installation`, recording `record.json` un
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); the last and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their own credential; `master executors restart` moves them to the current release. After a verified deployment a clean detached checkout moves to the base tip (else `upgrade` attention), restarting executors, then the loop, on runtime-code changes; `releaseLag` flags a >1-delivery lag past 10 minutes.
+Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); the last and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their own credential; `master executors restart` moves them to the current release. A verified deployment moves a clean detached checkout to the base tip (else `upgrade` attention), restarting executors, then the loop, on runtime changes; `releaseLag` flags lag past 10 minutes.
 
-A `resync` completes only on an observation newer than its claim: `POST /api/work/:id/resync` with `{ since }` wakes the observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, it fails (`no observation newer than the claim was saved`) and backs off; a scheduled job with no hold or error stalls the row only after thirty minutes, any other after three failures. Row bookkeeping (claim, renew, settle) never refuses an observation read before it.
+A `resync` completes only on an observation newer than its claim: `POST /api/work/:id/resync` with `{ since }` wakes the observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, it fails (`no observation newer than the claim was saved`) and backs off, stalling after thirty minutes for a scheduled job, else three failures.
 
-`dispatch`/`request-review` completes on a session already answering the head. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, with no count and no list): it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it; ticks requeue ownerless items (`liveness.violations`). A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling; one item's throw fails only its `isolated:KIND:ITEM-ID` action.
+`dispatch`/`request-review` completes on a session already answering the head. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, with no count and no list): it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it; ticks requeue ownerless items (`liveness.violations`). A failed cycle backs off (min(interval, 30 s), doubling); one item's throw fails only its own action.
 
 ## Resources and disk
 
-`resources` reports bounded resources (`resourceRegistry`; [remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `run.worktreeRemovalLimit` per cycle; `.graphyard/worktree-reclaim.jsonl`), idle `/tmp` test entries and `tsx-<uid>`, and agentless launch [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention fires below `run.diskThresholdGb`. Review and proof checkouts: `run.worktreeRoot` (`~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
+`resources` reports bounded resources (`resourceRegistry`; [remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `run.worktreeRemovalLimit` per cycle; `.graphyard/worktree-reclaim.jsonl`), idle `/tmp` test entries and `tsx-<uid>`, and agentless launch [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention fires below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot`.
 
 ## Recovery
 
@@ -59,7 +59,7 @@ A dead supervisor fences its item; `containment` lists surviving processes' pid,
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-Faults carry `faultClass` (`faults`); a recurring class files one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes; sandbox or `workflows`-permission refusal blockers are `configuration`; scope requests count past 15 minutes open, or refused with no approver left; failed status sections list in `unavailable`. Recurring-class and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`) whose fix approval releases or closes as duplicate.
+Faults carry `faultClass` (`faults`); a recurring class files one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes; sandbox or `workflows`-permission refusals are `configuration`; scope requests count past 15 minutes open or refused with no approver. Recurring-class and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`) whose fix approval releases or closes as duplicate. Restores owed under 30 minutes and restart-resumed merges are not `merge` faults.
 
 ## Pipeline speed
 

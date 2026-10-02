@@ -6,7 +6,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 `POST /api/work` ([example](../../examples/work.json)) requires `title`, `criteria`; optional `dependencies`, `exclusiveResources`, `plannedFiles`, `producerProofs` (producer-runnable `manual:` proofs). Others: `POST /api/work/KEY/COMMAND`:
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents: additively).
-- `ready`, `unblock`: `{"reason"}` (operator agents add `expectedRevision`).
+- `ready`, `unblock`: `{"reason"}` (operator agents add `expectedRevision`); `master unblock` retries stale-revision refusals (three writes) while the blocker stands.
 - `resolve`: `{"trigger","expectedRevision","reason"}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
 - `rework`, `recover` (delivered quarantine): `admin`, `{"reason","previousWorkerStopped":true}`.
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason"}` (null clears); `workspace` `{"epoch":1,"host","path","branch":"graphyard/gy-1-1"}`.
