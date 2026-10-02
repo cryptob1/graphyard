@@ -1,7 +1,7 @@
 // Concern: cycle step 4 — dispatch claimable work under capacity and report base refreshes.
 import type { Work } from '../model.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
-import { dispatchOrder } from '../coordination.js';
+import { dispatchSort } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
@@ -29,11 +29,14 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //    planned scope within a priority is offered first, and within a priority an item that
   //    touches no file two or more live attempts are already changing is offered before one that
   //    does (GY-882): the hot set is computed once from this cycle's snapshot and passed into the
-  //    comparator — never derived inside it — and the reorder still holds nothing.
+  //    comparator — never derived inside it — and the reorder still holds nothing. Both
+  //    preferences yield to starvation (GY-1036): within a priority, an item that has waited
+  //    `dispatchStarvationMs` or longer in its stage is offered before every item that has not,
+  //    whatever its scope or heat. `master status` reports this same order (dispatchSchedule).
   const hot = hotspots(open, clock), hotFiles = new Set(hot.map(entry => entry.file));
-  const offered = open.filter(item => {
+  const offered = dispatchSort(open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
-  }).sort((a, b) => dispatchOrder(a, b, hotFiles, clock));
+  }), hotFiles, clock);
 
   // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
   // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this
