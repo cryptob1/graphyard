@@ -8,6 +8,7 @@ import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
 import { openPatternItems } from '../interventions.js';
+import { synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
@@ -102,6 +103,8 @@ export async function main() {
     if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {
       patternsAt = Date.now();
       for (const work of (await step('openPatternItems', () => openPatternItems(engine, http.services.interventionPolicy))).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
+      // The same window read by cause (GY-970): drafts for independent approval, never work items.
+      for (const artefact of (await step('synthesizeRetro', () => synthesizeRetro(engine.store, http.services.interventionPolicy))).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
     }
     if (github) {
       const preflight = await step('github.preflight', () => github.preflightIfDue());

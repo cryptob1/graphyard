@@ -13,8 +13,8 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { apiRoutes } from '../src/server/index.js';
 import { ledgerTables } from '../src/store/schema.js';
-import { AgentRegistry } from '../src/agent-registry.js';
-import { discoverHostLogins, proposeFleet } from '../src/fleet.js';
+import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
+import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
@@ -568,4 +568,75 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   assert.deepEqual([runtime.data.runtime.name, runtime.data.runtime.launch.args, runtime.data.runtime.launch.modelFlag, runtime.data.runtime.launch.homeVariable], ['aider', ['--yes-always'], '--model', 'AIDER_HOME']);
   assert.deepEqual(written.filter(entry => entry.path === 'agent-registry/roles').map(entry => entry.data.role.name), ['worker', 'reviewer']);
   assert.deepEqual(written.find(entry => entry.data.role?.name === 'reviewer')!.data.role.policy, { args: [], tools: ['Read'], model: 'opus' });
+});
+
+// ---------------------------------------------------------------------------
+// GY-974 — a role's concurrency is counted from settled registry sessions
+// ---------------------------------------------------------------------------
+/**
+ * A stored registry holding the worker role's full concurrency: two worker sessions, past their
+ * launch grace, each launched for a work item leased to its principal. `lapse` expires those leases,
+ * as when their workers die without anyone ending the sessions.
+ */
+async function fullWorkerRole() {
+  await reset();
+  const homes = await temporaryDirectory('homes', scratch);
+  const home = await login(homes, 'claude-w', 'claude');
+  await ok('agent-registry/runtimes', operator, { runtime: runtimeNamed('claude'), reason: 'register' });
+  await ok('agent-registry/models', operator, { model: { name: 'opus', id: 'claude-opus-5', capability: { tier: 'frontier' } }, reason: 'model' });
+  await ok('agent-registry/accounts', operator, { account: { name: 'claude-w', runtime: 'claude', model: 'opus', credential: { host: HOST, home } }, reason: 'account' });
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['claude-w'], concurrency: 2 }, reason: 'role' });
+  const keys = [`GY-${++items + 900}`, `GY-${++items + 900}`];
+  for (const key of keys)
+    await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [randomUUID(), JSON.stringify({ ...readyWork(key), stage: 'build', epoch: 1, lease: { owner: 'implementer', epoch: 1, expiresAt: future() } })]);
+  for (const key of keys) assert.equal((await ok('agent-registry/select', coordinator, { role: 'worker', host: HOST, work: key, principal: 'implementer', observations: [] })).selected, true);
+  // Past their launch grace, so only the leases keep them live.
+  const stored = await readRegistry(store.pool), launched = new Date(Date.now() - launchGraceMs - 60_000).toISOString();
+  for (const session of stored.sessions.filter(entry => !entry.endedAt && keys.includes(entry.work!))) session.selectedAt = launched;
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['operator', 'agent-registry.fixture', JSON.stringify({ change: {}, registry: stored })]);
+  const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'claude' }]);
+  const probe = network({ 'claude-w-oauth-token': { five: 1, seven: 1 } });
+  const lapse = async () => { for (const key of keys) await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{lease,expiresAt}', to_jsonb($2::text)) WHERE document->>'key' = $1`, [key, new Date(Date.now() - 60_000).toISOString()]); };
+  const cleanup = () => store.pool.query("DELETE FROM work_items WHERE document->>'key' = ANY($1::text[])", [keys]);
+  return { keys, root, config, probe, lapse, cleanup };
+}
+
+test('unit:role-health-counts-settled-sessions — with a role\'s full concurrency of live worker sessions whose work items hold no live lease, fleetRoleHealth reports the role available (running 0) and the next dispatch selects an account; with live leases the role is still full', async () => {
+  const fleet = await fullWorkerRole();
+  try {
+    const full = (await fleetRoleHealth(fleet.config, 'worker', fleet.probe))!;
+    assert.deepEqual([full.available, full.running], [false, 2], 'two leased workers fill the role');
+    assert.match(full.reason!, /role worker is at its concurrency limit \(2 of 2 live\)/);
+    await fleet.lapse();
+    const health = (await fleetRoleHealth(fleet.config, 'worker', fleet.probe))!;
+    assert.deepEqual([health.available, health.running, health.reason], [true, 0, null], 'sessions whose leases lapsed hold no slot, with no launch in between');
+    const dispatched = await dispatch(fleet.root, fleet.config, 'worker-a', fleet.probe);
+    assert.equal(dispatched.account!.environment, 'claude-w');
+    assert.match((await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!.reason, /claude-w is the first eligible account for worker .*1 of 2 concurrent/);
+  } finally { await fleet.cleanup(); }
+});
+
+test('unit:settled-sessions-end-without-a-launch — the loop\'s registry read records the end of every session settleSessions ends, with its reason, in registry history, without any launch having been requested', async () => {
+  const fleet = await fullWorkerRole();
+  try {
+    const before = (await ok('agent-registry/history?limit=500', auditor)).length;
+    await fleetRoleHealth(fleet.config, 'worker', fleet.probe);
+    assert.equal((await ok('agent-registry/history?limit=500', auditor)).length, before, 'a read that ends nothing appends nothing');
+    await fleet.lapse();
+    // The read the loop makes each cycle, and nothing else: no select, no end, no dispatch.
+    await fleetRoleHealth(fleet.config, 'worker', fleet.probe);
+    const history = await ok('agent-registry/history?limit=500', auditor);
+    assert.deepEqual(history.slice(0, history.length - before).map((entry: any) => entry.kind), ['sessions-settled'], 'one settlement, and no selection or refusal');
+    const settled = history[0];
+    assert.equal(settled.actor, 'graphyard');
+    assert.deepEqual(settled.change.ended.map((entry: any) => [entry.role, entry.account, entry.work, entry.reason]).sort(),
+      fleet.keys.map(key => ['worker', 'claude-w', key, `${key} holds no live lease`]));
+    const stored = await readRegistry(store.pool);
+    for (const key of fleet.keys) {
+      const session = stored.sessions.find(entry => entry.work === key)!;
+      assert.ok(session.endedAt); assert.equal(session.endReason, `${key} holds no live lease`);
+    }
+    await fleetRoleHealth(fleet.config, 'worker', fleet.probe);
+    assert.equal((await ok('agent-registry/history?limit=500', auditor)).length, history.length, 'an ended session is recorded once');
+  } finally { await fleet.cleanup(); }
 });

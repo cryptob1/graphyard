@@ -5,6 +5,7 @@ import { leadHoldRefusal } from './delegation.js';
 import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
 import { ciCheckName, ciCheckRefusalPattern } from './ci-refusal.js';
+import { requiredCheckFailurePattern } from './required-check-refusal.js';
 
 /**
  * From a gate's refusal to the one action kind that answers it.
@@ -56,6 +57,8 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
   { gate: 'test', match: ciCheckRefusalPattern, kind: 'resync' },
+  // A check only the base branch's protection requires (GY-430) is named only once it failed.
+  { gate: 'test', match: requiredCheckFailurePattern, kind: 'request-rework' },
   // acceptance
   { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
   { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },

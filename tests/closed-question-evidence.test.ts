@@ -26,7 +26,7 @@ const token = (principal: Principal) => credentials.find(credential => credentia
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'decision:attest'] };
 const approver = { id: 'approver-agent', token: `approver-agent-${'a'.repeat(32)}`, capabilities: ['decision:approve'] };
 const head = 'e'.repeat(40), base = 'f'.repeat(40);
-const flagFile = 'src/cli/flags.ts', flagSource = "export const flags = ['--dry-run', '--json'];\n";
+const flagFile = 'src/server/routes/flags.ts', flagSource = "export const flags = ['--dry-run', '--json'];\n";
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let pr = 700;
 
@@ -73,7 +73,9 @@ function observation(work: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
     reviews: [{ reviewer: 'independent-reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
-    merged: false, mergeSha: null, files: [flagFile], scopeFiles: [], at: new Date().toISOString() };
+    merged: false, mergeSha: null,
+    // GY-883: the public API path keeps the item in the high lane, whose full path still demands the proofs the answers are judged against.
+    files: [flagFile], scopeFiles: [{ path: flagFile, status: 'modified' as const, sha: 'f'.repeat(40), additions: 1, deletions: 1, binary: false }], at: new Date().toISOString() };
 }
 async function claimed(title: string, extra: Record<string, unknown> = {}) {
   let work = await engine.execute(operator, 'create', null, input(title, extra), randomUUID());
