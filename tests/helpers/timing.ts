@@ -67,6 +67,8 @@ export interface TimingMeasurement {
   observationsAbove: number;
   distribution: { minMs: number; medianMs: number; maxMs: number };
   passed: boolean;
+  /** Set when the measurement went over its budget but inside the run's slack, so the assertion passed: the slack it passed within. */
+  toleratedBySlack?: number;
   at: string;
 }
 
@@ -108,13 +110,19 @@ export function recordTiming(measurement: TimingMeasurement, file = process.env[
 /**
  * Assert a wall-clock measurement against its budget. The measurement is recorded whether it
  * passes or fails, and a failure is a `TimingAssertionError` naming the measured value against
- * the budget, so nothing downstream has to guess that the red test was about time.
+ * the budget, so nothing downstream has to guess that the red test was about time. One the slack
+ * lets through is recorded with `toleratedBySlack`, so the timing report does not call a passing
+ * run over budget (GY-1040).
  */
 export function assertTiming(input: Parameters<typeof measureTiming>[0], file?: string) {
-  const measurement = recordTiming(measureTiming(input), file);
-  if (!measurement.passed && !withinSlack(measurement)) throw new TimingAssertionError(measurement);
+  const measured = measureTiming(input), slack = timingSlack();
+  const tolerated = !measured.passed && withinSlack(measured, slack);
+  const measurement = recordTiming(tolerated ? { ...measured, toleratedBySlack: slack } : measured, file);
+  if (!measurement.passed && !tolerated) throw new TimingAssertionError(measurement);
   return measurement;
 }
+/** Whether a recorded measurement failed its assertion: over budget and not let through by the slack. */
+export const failedTiming = (m: Pick<TimingMeasurement, 'passed' | 'toleratedBySlack'>) => !m.passed && m.toleratedBySlack === undefined;
 
 /**
  * How far a shared CI runner may run past a timing budget before the assertion fails:
