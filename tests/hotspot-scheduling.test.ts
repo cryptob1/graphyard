@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dispatchOrder, dispatchStarvationMs } from '../src/coordination.js';
+import { dispatchOrder, dispatchSort, dispatchStarvationMs, stageWaitMs } from '../src/coordination.js';
 import { hotBeside, hotFileSet, hotspots } from '../src/daemon/hotspots.js';
 import { dispatchKey } from '../src/daemon/reconcile.js';
-import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { dispatchSchedule, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 
@@ -153,4 +153,31 @@ test('unit:dispatch-ages-starving-items — a same-priority item waiting past th
   const urgentFresh = item('GY-3000', ['src/three.ts'], 1, -1);
   assert.deepEqual([broadStarving, olderStarving, urgentFresh, smallFresh].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key), ['GY-3000', 'GY-0900', 'GY-1023', 'GY-2001']);
   assert.equal(dispatchStarvationMs, 60 * 60_000);
+  // dispatchSort reads each wait once and gives the comparator's order.
+  const all = [broadStarving, olderStarving, urgentFresh, smallFresh];
+  assert.deepEqual(dispatchSort(all, hot, now).map(w => w.key), [...all].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key));
+  assert.deepEqual(all.map(w => w.key), ['GY-1023', 'GY-0900', 'GY-3000', 'GY-2001'], 'dispatchSort leaves its input in place');
+});
+
+test('unit:dispatch-ages-malformed-rows — an item whose stage time is unreadable falls back to its creation time, and one with neither readable still ages instead of never starving (GY-1040)', () => {
+  const now = Date.parse('2026-10-01T04:00:00Z'), longAgo = new Date(now - 3 * dispatchStarvationMs).toISOString();
+  const row = (key: string, stageEnteredAt: string | undefined, createdAt: string) => ({ key, priority: 0, plannedFiles: ['src/'], stageEnteredAt, createdAt } as unknown as Work);
+  assert.equal(stageWaitMs(row('GY-a', 'not a time', longAgo), now), 3 * dispatchStarvationMs, 'an unreadable stage time falls back to createdAt');
+  assert.equal(stageWaitMs(row('GY-b', undefined, longAgo), now), 3 * dispatchStarvationMs);
+  assert.equal(stageWaitMs(row('GY-c', 'garbage', 'garbage'), now), Infinity, 'neither readable: the wait is unbounded, never NaN');
+  const fresh = { ...row('GY-fresh', new Date(now).toISOString(), new Date(now).toISOString()), plannedFiles: ['src/one.ts'] } as Work;
+  const malformed = row('GY-bad', 'garbage', 'garbage');
+  assert.deepEqual(dispatchSort([fresh, malformed], new Set(), now).map(w => w.key), ['GY-bad', 'GY-fresh'], 'the malformed row is aged ahead of a fresh, narrower item');
+  assert.equal(dispatchOrder(malformed, malformed, new Set(), now), 0, 'the comparator stays defined (never NaN) on a malformed row');
+});
+
+test('unit:dispatch-schedule-follows-loop-order — master status reports the order the loop offers, with the hot set and the clock (GY-1040)', () => {
+  const live = claimed('GY-liveA', [hotFile]), other = claimed('GY-liveB', [hotFile]);
+  const hotSmall = work('GY-hotSmall', { plannedFiles: [hotFile] });
+  const coldBroad = work('GY-coldBroad', { plannedFiles: ['web/', 'scripts/'] });
+  const starvingBroad = work('GY-starving', { plannedFiles: ['web/', 'scripts/', 'docs/'], stageEnteredAt: iso(-2 * dispatchStarvationMs) });
+  const all = [live, other, hotSmall, coldBroad, starvingBroad];
+  const loopOrder = dispatchSort([hotSmall, coldBroad, starvingBroad], hotFileSet(all, clock), clock).map(w => w.key);
+  assert.deepEqual(loopOrder, ['GY-starving', 'GY-coldBroad', 'GY-hotSmall'], 'starving first, then cold before hot, whatever the scope');
+  assert.deepEqual(dispatchSchedule(all, clock).order.map(entry => entry.key), loopOrder);
 });
