@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
@@ -11,6 +12,7 @@ import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerPro
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
+import { readSavedApp, type SavedApp } from './manifest.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type Provider } from './types.js';
 
@@ -73,17 +75,49 @@ export interface InstallSession {
    * none), or the refusal a declared manifest that failed or did not parse produced.
    */
   generatedFiles: { assignment: GeneratedFilesAssignment | null; error: string | null };
+  /** The App registration this install reuses instead of the browser step, or why the named one cannot be. */
+  savedApp: { app: SavedApp | null; error: string | null };
 }
 
+const APP_HUMAN_STEP = 'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository.';
 const CORE_HUMAN_STEPS = [
   'Authenticate the provider CLI and GitHub CLI once (the installer prints the exact command when either is missing).',
-  'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository.',
   'Approve the printed plan before rerunning with --apply.',
 ];
 
 export function repositoryRoot(cwd: string) {
   try { return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
   catch { throw new Error('Run graphyard install from the checkout of the repository being managed'); }
+}
+
+/** The main checkout a linked worktree belongs to (the worktree itself otherwise), where github-setup saved the App. */
+function mainCheckout(root: string) {
+  try { return resolve(execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(), '..'); }
+  catch { return root; }
+}
+
+/**
+ * The App registration an install reuses, so one command needs no browser click when the operator
+ * already has the Graphyard App on this repository: the file named by --github-app, else this
+ * installation's own saved registration, else the one `graphyard github-setup` saved in the
+ * checkout. A registration for another repository is never reused; a named file that cannot be
+ * used is a preflight failure rather than a silent fallback to the browser.
+ */
+async function findSavedApp(root: string, directory: string, inputs: InstallInputs): Promise<InstallSession['savedApp']> {
+  const forRepository = (app: SavedApp | null) => !!app && (app.repository ?? '').toLowerCase() === inputs.repository.toLowerCase();
+  if (inputs.githubAppFile) {
+    const file = resolve(inputs.githubAppFile);
+    let app: SavedApp | null;
+    try { app = await readSavedApp(file); } catch (error: any) { return { app: null, error: `${file} is unreadable: ${error.code === 'ENOENT' ? 'no such file' : error.message}` }; }
+    if (!app) return { app: null, error: `${file} holds no complete control-plane App registration (appId, installationId and privateKey)` };
+    if (!forRepository(app)) return { app: null, error: `${file} registers the App for ${app.repository ?? 'no repository'}, not ${inputs.repository}` };
+    return { app, error: null };
+  }
+  for (const file of [resolve(directory, 'github-app.json'), resolve(root, '.graphyard', 'github-app.json'), resolve(mainCheckout(root), '.graphyard', 'github-app.json')]) {
+    const app = await readSavedApp(file).catch(() => null);
+    if (forRepository(app)) return { app, error: null };
+  }
+  return { app: null, error: null };
 }
 
 export async function prepareInstall(cwd: string, rawInputs: InstallInputs, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
@@ -156,10 +190,12 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
     context.host!.secretsUnreadable = stored.unreadable;
   }
   const materialized = tokens.size === principals.length && !!context.databasePassword;
+  const savedApp = await findSavedApp(root, directory, inputs);
+  if (savedApp.app) { vault.add(savedApp.app.facts.privateKey); if (savedApp.app.facts.webhookSecret) vault.add(savedApp.app.facts.webhookSecret); }
   const adapter = dependencies.adapter ?? (selfContained ? selfContainedAdapter(provider === 'host' ? existingMachineAdapter : adapterFor(provider)) : adapterFor(provider));
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
-    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles,
+    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, savedApp,
     reviewPolicy, requiredChecks: inputs.requiredChecks?.length ? inputs.requiredChecks : detected.proposedChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
@@ -292,6 +328,9 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   preflight.push(session.generatedFiles.error
     ? { name: 'Generated-file manifest', ok: false, detail: session.generatedFiles.error, fix: `Fix ${generatedManifestScript} so \`node ${generatedManifestScript} --manifest\` prints the generated files as JSON, then rerun` }
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
+  if (session.inputs.githubAppFile) preflight.push(session.savedApp.error
+    ? { name: 'GitHub App registration', ok: false, detail: session.savedApp.error, fix: 'Name the JSON the manifest flow saved for this repository with --github-app FILE, or omit --github-app to register the App in the browser' }
+    : { name: 'GitHub App registration', ok: true, detail: `reusing app ${session.savedApp.app!.facts.appId} from ${session.savedApp.app!.file}` });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
   const core = coreEnv(session);
@@ -324,12 +363,15 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   actions.push({ id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' });
 
   const appConfigured = !!record?.github;
-  actions.push({ id: 'github.app', target: 'github', state: appConfigured ? 'satisfied' : 'create', title: 'Register the Graphyard GitHub App through the manifest flow and install it on the managed repository', human: 'One browser confirmation: create the App, then choose the managed repository. GitHub returns the App ID, private key, and webhook secret directly to this machine.' });
+  const saved = session.savedApp.app;
+  actions.push(appConfigured || !saved
+    ? { id: 'github.app', target: 'github', state: appConfigured ? 'satisfied' : 'create', title: 'Register the Graphyard GitHub App through the manifest flow and install it on the managed repository', human: 'One browser confirmation: create the App, then choose the managed repository. GitHub returns the App ID, private key, and webhook secret directly to this machine.' }
+    : { id: 'github.app', target: 'github', state: 'update', title: `Reuse the Graphyard GitHub App ${saved.facts.slug} (app ${saved.facts.appId}, installation ${saved.facts.installationId}) saved in ${saved.file}, after an installation token minted from it proves it still works; no browser step` });
   actions.push({ id: 'github.env', target: 'provider', state: appConfigured ? 'satisfied' : 'create', title: 'Write the App ID, installation ID, private key, and webhook secret to the server', values: [
-    { name: 'GITHUB_APP_ID', value: record?.github ? String(record.github.appId) : '<from the App manifest flow>', secret: false },
-    { name: 'GITHUB_INSTALLATION_ID', value: record?.github ? String(record.github.installationId) : '<from the App installation>', secret: false },
+    { name: 'GITHUB_APP_ID', value: record?.github ? String(record.github.appId) : saved ? String(saved.facts.appId) : '<from the App manifest flow>', secret: false },
+    { name: 'GITHUB_INSTALLATION_ID', value: record?.github ? String(record.github.installationId) : saved ? String(saved.facts.installationId) : '<from the App installation>', secret: false },
     { name: 'GITHUB_PRIVATE_KEY', value: REDACTED, secret: true },
-    { name: 'GITHUB_WEBHOOK_SECRET', value: REDACTED, secret: true, ...(record?.github ? { fingerprint: record.github.webhookFingerprint } : { note: 'returned by the App manifest flow' }) },
+    { name: 'GITHUB_WEBHOOK_SECRET', value: REDACTED, secret: true, ...(record?.github ? { fingerprint: record.github.webhookFingerprint } : saved?.facts.webhookSecret ? { fingerprint: fingerprint(saved.facts.webhookSecret) } : { note: 'returned by the App manifest flow' }) },
   ] });
   actions.push({ id: 'github.webhook', target: 'github', state: appConfigured ? 'update' : 'create', title: `Point the App webhook at ${observation.url ? webhookUrlFor(observation.url) : '<service URL>/api/github/webhook'} with the shared secret the server holds` });
   actions.push({ id: 'github.ci-app-ids', target: 'github', state: record?.github?.ciAppIds.length ? 'satisfied' : 'create', title: `Detect the GitHub App IDs publishing checks on ${session.inputs.baseBranch} and set GITHUB_CI_APP_IDS`, values: record?.github?.ciAppIds.length ? [{ name: 'GITHUB_CI_APP_IDS', value: record.github.ciAppIds.join(','), secret: false }] : [] });
@@ -380,7 +422,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     installDirectory: session.directory, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy,
     domain: context.domain, url: observation.url ?? record?.url ?? null, existing, secretsRedacted: true,
     preflight, principals: session.principals, actions, drift,
-    humanSteps: [...CORE_HUMAN_STEPS, ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
+    humanSteps: [CORE_HUMAN_STEPS[0], ...(saved && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
       ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : [])],
     ...(host ? { host: hostPlan(context) } : {}),
     ...(context.provider === 'hetzner' ? { price: quotedPrice(context) } : {}),
@@ -485,8 +527,15 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
 
   const app = appClient(facts, deps.fetch);
   const webhookConfig = await readWebhookConfig(app);
-  if (webhookConfig?.url !== webhookUrlFor(url)) log(`Repointing the App webhook to ${webhookUrlFor(url)}`);
-  await configureWebhook(app, url, facts.webhookSecret);
+  // A GitHub App has one webhook. A reused App whose webhook still reaches a live installation keeps
+  // it unless this install is the cutover (--migrate), so a trial host never takes an existing
+  // installation's events away from it.
+  const webhookElsewhere = facts.reused && !context.host?.migrate && webhookConfig?.url && webhookConfig.url !== webhookUrlFor(url) && await answersHealth(session, String(webhookConfig.url)) ? String(webhookConfig.url) : null;
+  if (webhookElsewhere) log(`The App webhook stays with ${webhookElsewhere}, an installation that still answers; rerun with --migrate to move it here`);
+  else {
+    if (webhookConfig?.url !== webhookUrlFor(url)) log(`Repointing the App webhook to ${webhookUrlFor(url)}`);
+    await configureWebhook(app, url, facts.webhookSecret);
+  }
 
   const protectionInputs = { repository: session.inputs.repository, branch: session.inputs.baseBranch, requiredChecks: session.requiredChecks, graphyardAppId: facts.appId, reviewCount: session.reviewCount };
   const current = await readProtection(gh, session.inputs.repository, session.inputs.baseBranch);
@@ -503,7 +552,8 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const installation = installationClient(facts, deps.fetch);
   const since = deps.now();
   let webhook: DeliveryProof;
-  try {
+  if (webhookElsewhere) webhook = { delivered: false, statusCode: null, event: null, at: null, detail: `the reused App's webhook still serves ${webhookElsewhere}; this installation receives no GitHub events until it is moved here with --migrate` };
+  else try {
     await triggerDelivery(installation, session.inputs.repository, await headSha(gh, session.inputs.repository, session.inputs.baseBranch));
     webhook = await verifyDelivery(app, since, deps.wait);
   } catch (error: any) { webhook = { delivered: false, statusCode: null, event: null, at: null, detail: vault.scrub(`Could not publish the verification event: ${error.message}`) }; }
@@ -550,6 +600,11 @@ function emptyRecord(session: InstallSession, url: string): InstallRecord {
   return installRecordSchema.parse({ version: 1, installId: session.installId, repository: session.inputs.repository, provider: session.context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, domain: session.context.domain, url, principals: [], github: null, reviewers: [], profiles: [], createdAt: at, updatedAt: at });
 }
 
+async function answersHealth(session: InstallSession, webhook: string) {
+  try { return (await session.deps.fetch(`${new URL(webhook).origin}/healthz`, { signal: AbortSignal.timeout(15_000) })).ok; }
+  catch { return false; }
+}
+
 async function waitForHealth(session: InstallSession, url: string, attempts = 40) {
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (await session.adapter.health(session.context, url)) return true;
@@ -569,8 +624,24 @@ async function authenticatedStatus(session: InstallSession, url: string) {
   return { actor: String(body.actor.id), role: String(body.actor.role), repository: String(body.repository), githubAppId: body.githubAppId ?? null };
 }
 
-async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string; botUserId?: number }> {
+async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string; botUserId?: number; reused?: boolean }> {
   const { deps } = session;
+  const saved = session.savedApp.app;
+  if (saved) {
+    // A saved registration is used only once GitHub mints an installation token from it, so a
+    // deleted App or an uninstalled repository is found here rather than by the fleet.
+    try {
+      await installationToken(saved.facts, deps.fetch);
+      const own = appCredentialFile(session);
+      if (saved.file !== own) { await writeFile(own, await readFile(saved.file, 'utf8'), { mode: 0o600 }); await chmod(own, 0o600); }
+      deps.log(`Reusing the GitHub App ${saved.facts.slug} (app ${saved.facts.appId}) from ${saved.file}; no browser step`);
+      if (record.github && record.github.appId !== saved.facts.appId) deps.log(`GitHub App changed from ${record.github.appId} to ${saved.facts.appId}`);
+      return { ...saved.facts, reused: true };
+    } catch (error: any) {
+      if (session.inputs.githubAppFile) throw new Error(`The GitHub App saved in ${saved.file} cannot authenticate to ${session.inputs.repository}: ${error.message}`);
+      deps.log(`The GitHub App saved in ${saved.file} cannot authenticate (${error.message}); registering one in the browser instead`);
+    }
+  }
   if (!deps.githubApp) throw new Error('No GitHub App flow is available in this environment');
   const facts = await deps.githubApp({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session) });
   if (record.github && record.github.appId !== facts.appId) session.deps.log(`GitHub App changed from ${record.github.appId} to ${facts.appId}`);

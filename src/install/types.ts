@@ -93,6 +93,12 @@ export interface InstallInputs {
   maxMonthly?: number;
   /** Spend consent for a created server: the exact monthly price the plan showed (`--confirm-price`). */
   confirmPrice?: number;
+  /**
+   * An App registration the operator already holds for this repository (`--github-app FILE`, the
+   * JSON the manifest flow saves). Without it the installer still reuses this installation's own
+   * saved registration or the checkout's `.graphyard/github-app.json` before asking for a browser click.
+   */
+  githubAppFile?: string;
 }
 
 export function installIdFor(repository: string) {

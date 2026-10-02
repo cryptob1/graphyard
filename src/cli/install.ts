@@ -61,10 +61,13 @@ export const installCommands = defineCommands([
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
+      '          [--github-app FILE]',
       '                                Self-contained host: server, Postgres, loop, executors,',
       '                                Herdr and agent runtimes on one machine (hetzner creates it',
       '                                and needs its monthly price confirmed). --migrate moves an',
       '                                installation there from GRAPHYARD_MIGRATE_DATABASE_URL.',
+      '                                An App already saved for the repository (--github-app,',
+      '                                or .graphyard/github-app.json) is reused: no browser step.',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan.',
       '                                See docs/install.md for the agent-executable runbook.',
@@ -80,6 +83,7 @@ export const installCommands = defineCommands([
         'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
         'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
         target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
+        'github-app': { type: 'string' },
       }, allowPositionals: false });
       if (!values.repo) throw new Error('Use --repo OWNER/NAME');
       // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
@@ -99,6 +103,7 @@ export const installCommands = defineCommands([
         ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
         ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
         ...(values['confirm-price'] ? { confirmPrice: money('confirm-price', values['confirm-price']) } : {}),
+        ...(values['github-app'] ? { githubAppFile: values['github-app'] } : {}),
         ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
         ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
         ...(values.port ? { port: count('port', values.port) } : {}),

@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { parseEnv } from 'node:util';
 import { dirname, join } from 'node:path';
-import { applyInstall, buildPlan, prepareInstall, type InstallInputs } from '../src/install/index.js';
+import { applyInstall, buildPlan, prepareInstall, type InstallDependencies, type InstallInputs } from '../src/install/index.js';
 import { claimHash, ghWrapper, hostGithubFiles, hostLayout, hostRuntimes, CONNECT_PATH, HOST_GH_WRAPPER, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
 import { hostSizing, recommendServerType, parseServerTypes } from '../src/install/pricing.js';
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
@@ -19,7 +19,7 @@ import { authenticate } from '../src/server/auth.js';
 import { signinRoutes, claimHashOf } from '../src/server/routes/signin.js';
 import { claimFromHash } from '../web/pages/login.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { allText, appKey, harness, GRAPHYARD_APP_ID, HETZNER_SERVER_TYPES, type Harness } from './install-harness.js';
+import { allText, appKey, harness, GRAPHYARD_APP_ID, HETZNER_SERVER_TYPES, WEBHOOK_SECRET, type Harness } from './install-harness.js';
 
 // GY-717: the self-contained Graphyard host. Each test is named for the proof it produces, and its
 // title states the behaviour in that proof's own criterion's words, so a producer's stripped run
@@ -370,6 +370,67 @@ test('unit:self-contained-auth-plan — with no SSH and no manual file editing, 
   } finally {
     server.close();
   }
+});
+
+const savedApp = (repository = 'owner/project') => JSON.stringify({ appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project', installationId: 500, privateKey: appKey, webhookSecret: WEBHOOK_SECRET, repository });
+const noBrowser: InstallDependencies['githubApp'] = async () => { throw new Error('the browser App confirmation was requested'); };
+
+test('unit:self-contained-auth-plan — GitHub is connected with no human click when the operator already has the App: the saved registration is reused after a token minted from it proves it, the fleet starts, and the key reaches no plan', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    mkdirSync(join(fixture.root, '.graphyard'), { recursive: true });
+    writeFileSync(join(fixture.root, '.graphyard', 'github-app.json'), savedApp(), { mode: 0o600 });
+    const deps = { ...fixture.deps, githubApp: noBrowser };
+    const plan = await buildPlan(await prepareInstall(fixture.root, hostInputs(), deps, 'plan'));
+    const app = plan.actions.find(action => action.id === 'github.app')!;
+    assert.equal(app.state, 'update');
+    assert.match(app.title, new RegExp(`Reuse the Graphyard GitHub App graphyard-owner-project \\(app ${GRAPHYARD_APP_ID}, installation 500\\).*no browser step`));
+    assert.equal(app.human, undefined, 'reusing the App needs no human step');
+    assert.ok(!plan.humanSteps.some(step => /GitHub App in the browser/.test(step)), plan.humanSteps.join('\n'));
+    assert.ok(!JSON.stringify(plan).includes(appKey.split('\n')[1]) && !JSON.stringify(plan).includes(WEBHOOK_SECRET), 'the saved key and secret reach no plan');
+
+    const session = await prepareInstall(fixture.root, hostInputs(), deps);
+    const summary = await applyInstall(session, await buildPlan(session));
+    assert.ok(fixture.requests.some(request => request.url.endsWith('/app/installations/500/access_tokens')), 'the saved App is proven before it is used');
+    assert.equal(summary.github?.appId, GRAPHYARD_APP_ID);
+    assert.equal(fixture.state.hookConfig?.url, 'https://graphyard.example.test/api/github/webhook', 'an App whose webhook serves nothing live is pointed here');
+    // The fleet starts: the loop, the executors and every unit run, and workers hold the App key.
+    assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
+    assert.ok(hostLines(fixture).some(line => line.includes('systemctl --user enable --now graphyard-master.service')));
+    assert.equal(fixture.hostFiles.get(`${CONFIG}/github/app-private-key.pem`)!.content.trim(), appKey.trim());
+    // The registration is kept with the installation's other secrets, 0600, so a re-apply reuses it there.
+    const own = join(installDirectory('owner-project', fixture.configHome), 'github-app.json');
+    assert.equal(statSync(own).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(readFileSync(own, 'utf8')).appId, GRAPHYARD_APP_ID);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:self-contained-auth-plan — a reused App whose webhook still serves a live installation keeps it there, so a trial host takes no events from it', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    fixture.state.hookConfig = { url: 'https://graphyard-production.example.test/api/github/webhook' };
+    const file = join(fixture.configHome, 'saved-app.json');
+    writeFileSync(file, savedApp(), { mode: 0o600 });
+    const summary = await (async () => { const session = await prepareInstall(fixture.root, hostInputs({ githubAppFile: file }), { ...fixture.deps, githubApp: noBrowser }); return applyInstall(session, await buildPlan(session)); })();
+    assert.ok(!fixture.requests.some(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')), 'the webhook was not repointed');
+    assert.equal(fixture.state.hookConfig.url, 'https://graphyard-production.example.test/api/github/webhook');
+    assert.equal(summary.webhook.delivered, false);
+    assert.match(summary.webhook.detail, /still serves https:\/\/graphyard-production\.example\.test.*--migrate/);
+    assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:self-contained-auth-plan — a --github-app file registered for another repository fails preflight and changes nothing', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    const file = join(fixture.configHome, 'other-app.json');
+    writeFileSync(file, savedApp('owner/other'), { mode: 0o600 });
+    const session = await prepareInstall(fixture.root, hostInputs({ githubAppFile: file }), { ...fixture.deps, githubApp: noBrowser });
+    const plan = await buildPlan(session);
+    assert.match(plan.preflight.find(item => item.name === 'GitHub App registration')!.detail, /for owner\/other, not owner\/project/);
+    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
+    assert.equal(fixture.hostFiles.size, 0, 'nothing was written to the host');
+  } finally { await fixture.cleanup(); }
 });
 
 test('unit:self-contained-auth-plan — the sign-in claim is spent once and refused afterwards', async () => {
