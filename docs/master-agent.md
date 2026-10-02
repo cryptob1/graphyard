@@ -56,7 +56,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision; build follows it, failure never blocks.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. A branch restore owed under 30 minutes and a restart-resumed merge are self-handled, not `merge` faults.
 
 ## Machine-filed backlog
 
