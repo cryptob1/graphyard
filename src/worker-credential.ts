@@ -46,7 +46,7 @@ export function pushCredentialBound(work: Pick<Work, 'lastAssignment'>, owner: s
   return Number.isFinite(claimed) ? claimed + roleSessionMaximumMs.implementation : null;
 }
 
-const files = { hosts: 'hosts.yml', config: 'config.yml', token: 'token', record: 'credential.json' } as const;
+const files = { hosts: 'hosts.yml', config: 'config.yml', token: 'token', record: 'credential.json', revoke: 'revoke.json' } as const;
 
 /** Writes one file with mode 0600 in place of any earlier one, never leaving it half written. */
 async function privateReplace(directory: string, name: string, content: string) {
@@ -108,22 +108,66 @@ export function workerCredentialEnvironment(directory: string): Record<string, s
 }
 
 export type TokenRevoker = (token: string) => Promise<void>;
-/** Revokes an installation token with itself (DELETE /installation/token), so a withdrawn credential stops working at once. */
+/**
+ * Revokes an installation token with itself (DELETE /installation/token), so a withdrawn credential
+ * stops working at once. Only GitHub's 204 — or a 401, GitHub no longer authenticating the token at
+ * all — confirms it; any other answer (a 5xx, a rate limit) throws, and the caller keeps the token
+ * to revoke again (GY-1066).
+ */
 export const revokeInstallationToken: TokenRevoker = async token => {
-  await fetch('https://api.github.com/installation/token', { method: 'DELETE', headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(10_000) });
+  const response = await fetch('https://api.github.com/installation/token', { method: 'DELETE', headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(10_000) });
+  if (response.status !== 204 && response.status !== 401) throw new Error(`GitHub answered the worker push token's revocation with HTTP ${response.status}`);
 };
 
+/** GitHub's installation tokens live an hour at most: the expiry assumed for a token found without its record. */
+const installationTokenLifetimeMs = 3_600_000;
+/** A token that still has to be revoked, with GitHub's own expiry of it. */
+interface PendingRevocation { token: string; expiresAt: string }
+async function readPendingRevocations(directory: string): Promise<PendingRevocation[]> {
+  try {
+    const entries = JSON.parse(await readFile(resolve(directory, files.revoke), 'utf8'));
+    return Array.isArray(entries) ? entries.filter(entry => typeof entry?.token === 'string' && Number.isFinite(Date.parse(entry?.expiresAt))) : [];
+  } catch { return []; }
+}
 /**
- * Withdraws a session's credential: its token is revoked (best effort — GitHub's expiry bounds it
- * anyway) and the session directory removed. Answers whether a directory was there to remove.
+ * Revokes each token, answering those still to revoke: a token whose revocation GitHub did not
+ * confirm is kept until it is, or until GitHub's own expiry of it has passed.
  */
-export async function withdrawWorkerCredential(directory: string, revoke: TokenRevoker | null = revokeInstallationToken): Promise<boolean> {
+async function revokeEach(entries: PendingRevocation[], revoke: TokenRevoker | null, now: Date): Promise<PendingRevocation[]> {
+  const remaining: PendingRevocation[] = [];
+  for (const entry of entries) {
+    if (!revoke || Date.parse(entry.expiresAt) <= now.getTime()) continue;
+    try { await revoke(entry.token); } catch { remaining.push(entry); }
+  }
+  return remaining;
+}
+async function recordPendingRevocations(directory: string, entries: PendingRevocation[]) {
+  if (entries.length) await privateReplace(directory, files.revoke, `${JSON.stringify(entries)}\n`);
+  else await rm(resolve(directory, files.revoke), { force: true });
+}
+
+/**
+ * Withdraws a session's credential: its token, and any an earlier refresh could not revoke, are
+ * revoked and the session directory removed. A token GitHub did not confirm revoking is the only
+ * copy left to retry with, so it is kept (GY-1066): the session's own files go, the token stays in
+ * the directory's pending revocations, and a later sweep tries again until GitHub confirms or the
+ * token's own expiry passes. Answers 'absent' when nothing was there, 'retained' when a token is
+ * still to revoke, and 'withdrawn' once the directory is gone.
+ */
+export async function withdrawWorkerCredential(directory: string, revoke: TokenRevoker | null = revokeInstallationToken, now = new Date()): Promise<'absent' | 'withdrawn' | 'retained'> {
   let token: string | null = null;
   try { token = (await readFile(resolve(directory, files.token), 'utf8')).trim() || null; } catch { token = null; }
-  const existed = token !== null || !!await readWorkerCredentialRecord(directory);
+  const record = await readWorkerCredentialRecord(directory), pending = await readPendingRevocations(directory);
+  const existed = token !== null || !!record || pending.length > 0;
+  const tokenExpiresAt = record?.tokenExpiresAt && Number.isFinite(Date.parse(record.tokenExpiresAt)) ? record.tokenExpiresAt : new Date(now.getTime() + installationTokenLifetimeMs).toISOString();
+  const remaining = await revokeEach([...pending, ...(token && !pending.some(entry => entry.token === token) ? [{ token, expiresAt: tokenExpiresAt }] : [])], revoke, now);
+  if (remaining.length) {
+    await recordPendingRevocations(directory, remaining);
+    for (const name of [files.token, files.hosts, files.config, files.record]) await rm(resolve(directory, name), { force: true });
+    return 'retained';
+  }
   await rm(directory, { recursive: true, force: true });
-  if (token && revoke) await revoke(token).catch(() => {});
-  return existed;
+  return existed ? 'withdrawn' : 'absent';
 }
 
 /** How long before its expiry a running session's credential is replaced. */
@@ -146,14 +190,17 @@ export async function refreshWorkerCredential(directory: string, mint: () => Pro
   const minted = await mint();
   if (minted.key !== record.key || minted.epoch !== record.epoch) throw new Error(`The refreshed push credential is for ${minted.key} epoch ${minted.epoch}, not ${record.key} epoch ${record.epoch}`);
   await writeWorkerCredential(directory, minted, now);
-  if (previous && revoke && previous !== minted.token) await revoke(previous).catch(() => {});
+  // The replaced token is revoked; one GitHub does not confirm is kept to retry at the next refresh or the withdrawal.
+  const pending = await readPendingRevocations(directory);
+  const replaced = previous && previous !== minted.token && !pending.some(entry => entry.token === previous) ? [{ token: previous, expiresAt: record.tokenExpiresAt }] : [];
+  await recordPendingRevocations(directory, await revokeEach([...pending, ...replaced], revoke, now));
   return 'refreshed';
 }
 
 /**
  * Withdraws the session directories a profile's earlier attempts left behind once their credentials
  * have expired — a supervisor killed outright never withdraws its own. Each token is revoked and
- * its directory removed by its exact path.
+ * its directory removed by its exact path; answers the directories removed.
  */
 export async function sweepExpiredWorkerCredentials(root: string, now = new Date(), revoke: TokenRevoker | null = revokeInstallationToken): Promise<string[]> {
   let names: string[];
@@ -163,8 +210,10 @@ export async function sweepExpiredWorkerCredentials(root: string, now = new Date
     const directory = resolve(root, name);
     const record = await readWorkerCredentialRecord(directory);
     // Withdrawn, not merely deleted: a lease bound earlier than GitHub's own expiry leaves the
-    // token valid at GitHub, so it is revoked before its only local copy goes.
-    if (record && Date.parse(record.expiresAt) <= now.getTime()) { await withdrawWorkerCredential(directory, revoke); removed.push(directory); }
+    // token valid at GitHub, so it is revoked before its only local copy goes. A directory an
+    // earlier withdrawal retained holds only tokens still to revoke, and is retried each sweep.
+    const due = record ? Date.parse(record.expiresAt) <= now.getTime() : (await readPendingRevocations(directory)).length > 0;
+    if (due && await withdrawWorkerCredential(directory, revoke, now) === 'withdrawn') removed.push(directory);
   }
   return removed;
 }
@@ -174,21 +223,21 @@ export async function sweepExpiredWorkerCredentials(root: string, now = new Date
  * of a valid login — rather than anything about the item. Such an attempt is ended by the loop and
  * relaunched with a freshly minted credential instead of holding its lease on the blocker (GY-999).
  * The messages git and `gh` print themselves count alone; a generic authentication refusal (an
- * HTTP 401, "Requires authentication", "Bad credentials") counts only when the blocker also names
- * GitHub, git or `gh`, so a product's own 401 in an integration test is an item blocker that waits
- * for its clearance like any other.
+ * HTTP 401, "Requires authentication", "Bad credentials", and ssh's "Permission denied (publickey)")
+ * counts only when the blocker also names GitHub, git or `gh`, so a product's own 401 in an
+ * integration test, or an ssh refusal from a deployment host (GY-1066), is an item blocker that
+ * waits for its clearance like any other.
  */
 const credentialFailures = [
   /could not read (Username|Password) for '?https:\/\/github\.com/i,
   /The token in \S+ is invalid/i,
   /Authentication failed for '?https:\/\/github\.com/i,
   /Invalid username or (password|token)/i,
-  /Permission denied \(publickey\)/i,
   /You are not logged into any GitHub hosts/i,
   /To get started with GitHub CLI, please run:? +gh auth login/i,
   /Permission to \S+ denied to \S+/i,
 ];
-const genericAuthenticationFailures = [/HTTP 401\b/i, /\bBad credentials\b/i, /Requires authentication/i];
+const genericAuthenticationFailures = [/HTTP 401\b/i, /\bBad credentials\b/i, /Requires authentication/i, /Permission denied \(publickey\)/i];
 const githubContext = /github\.com|api\.github|\bgh (?:pr|api|auth|repo|run|release)\b|\bgit (?:push|fetch|pull|clone|ls-remote)\b/i;
 export const credentialFailure = (text: string | null | undefined) => !!text && (credentialFailures.some(pattern => pattern.test(text))
   || (genericAuthenticationFailures.some(pattern => pattern.test(text)) && githubContext.test(text)));

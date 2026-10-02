@@ -917,6 +917,8 @@ export class GitHub {
    */
   async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
+    const bypass = await this.workerPushBypass();
+    demand(!bypass, bypass ?? '', 409);
     const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
       method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions: workerPushPermissions }),
@@ -927,6 +929,30 @@ export class GitHub {
     const result: any = await response.json();
     demand(typeof result?.token === 'string' && result.token.length >= 20 && Number.isFinite(Date.parse(result.expires_at)), 'GitHub returned no worker push token', 502);
     return { token: result.token, expiresAt: new Date(Date.parse(result.expires_at)).toISOString(), permissions: result.permissions && typeof result.permissions === 'object' ? result.permissions : {} };
+  }
+  /**
+   * Why this App's token may not be handed to a worker, or null (GY-1066). On an organization
+   * repository Graphyard's merge-queue ruleset names the control-plane App as its one pull-request
+   * bypass actor (src/protection.ts repairBypassActor), and a token of that App with `contents`
+   * write can merge a pull request past the queue and the guarded final recheck. So while any merge
+   * queue on the base branch lists this App as a bypass actor — or its bypass list cannot be read —
+   * no worker credential is minted from it. A user-owned repository has no queue and is unaffected.
+   */
+  async workerPushBypass(): Promise<string | null> {
+    const rules = await this.request(`/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
+    demand(Array.isArray(rules), `GitHub did not answer the rules of ${this.config.base}, so no worker push credential is minted`, 502);
+    const rulesets = [...new Set(rules.filter((rule: any) => rule?.type === 'merge_queue').map((rule: any) => Number(rule?.ruleset_id)))];
+    for (const id of rulesets) {
+      const ruleset = Number.isSafeInteger(id) && id > 0 ? await this.request(`/rulesets/${id}`).catch(() => null) : null;
+      // GitHub answers whether the caller — this installation — may bypass; the actor list is the fallback when it does not.
+      const bypass = ruleset?.current_user_can_bypass;
+      if (bypass === 'never') continue;
+      const actors = ruleset?.bypass_actors;
+      if (bypass === 'always' || bypass === 'pull_requests_only') return `App ${this.config.appId} may bypass the merge queue on ${this.config.base} (ruleset ${id}: ${bypass}), so a token of it could merge a worker's own pull request past the queue; no worker push credential is minted from it`;
+      if (!Array.isArray(actors)) return `The bypass actors of the merge queue on ${this.config.base} (ruleset ${id}) cannot be read, so App ${this.config.appId} may be able to merge past the queue; no worker push credential is minted from it`;
+      if (actors.some((actor: any) => actor?.actor_type === 'Integration' && Number(actor?.actor_id) === this.config.appId)) return `App ${this.config.appId} is a bypass actor of the merge queue on ${this.config.base} (ruleset ${id}), so a token of it could merge a worker's own pull request past the queue; no worker push credential is minted from it`;
+    }
+    return null;
   }
   private async authenticate() {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
