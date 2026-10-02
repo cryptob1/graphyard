@@ -31,8 +31,6 @@ graphyard recover-containment GY-N --previous-worker-stopped "reason"        # d
 graphyard unblock GY-N "reason"                                              # unowned blocker
 ```
 
-The loop itself settles a lapsed, verified-dead quarantine, its clock bounded by a timed HEAD / (once a cycle, only while a quarantine awaits assessment), not the slow snapshot, judging that cycle's re-probes too. A proxy's dated error page is refused; a slow read refuses naming its round trip, awaiting a faster one. Escalation is recorded once; master status shows each round trip.
-
 Never attest a stop you have not confirmed. Merged work changes only through a follow-up item.
 
 ## Safety facts that never change
