@@ -324,6 +324,7 @@
     "tests/followups-batched-not-filed.test.ts": 938,
     "tests/generated-files-setup.test.ts": 3905,
     "tests/generated-index.test.ts": 5315,
+    "tests/github-budget.test.ts": 1315,
     "tests/github-cache-persistence.test.ts": 1859,
     "tests/github-http.test.ts": 997,
     "tests/github-merge-delegation.test.ts": 3083,
