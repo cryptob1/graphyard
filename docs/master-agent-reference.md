@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where only a page exists,
 | `installation-accept` | Accepts pending requests |
 | `protection` | Reconciles branch protection |
 
-Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 ## Harness permissions
 
@@ -51,9 +51,9 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0 for systemd to restart; one killed mid-action is named with its item in `master status`.
 
-A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`, its claim time; the server wakes the item's observation job, answering `observed`, `observedAt` and its `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. Unobserved, the claim fails at once with `no observation newer than the claim was saved` and its job's condition, then backs off. A job that is scheduled with no hold or error is a wait in progress: its failures stall the row only once they span thirty minutes, the bound any wait on an event is given; a held, failed or missing job stalls it after three. Row bookkeeping (claim, renew, settle) never refuses an observation read before it; other changes do.
+A `resync` completes only on a fresh observation. The executor calls `POST /api/work/:id/resync` with `{ since }`, its claim time; the server wakes the item's observation job, answering `observed`, `observedAt` and its `job` (`availableAt`, `lockedUntil`, `attempts`, `error`, `heldUntil`, `heldReason`). `wake: false` only reads. Unobserved, the claim fails at once with `no observation newer than the claim was saved` and its job's condition, then backs off. A scheduled job with no hold or error is a wait in progress: its failures stall the row only after spanning thirty minutes (the event-wait bound); a held, failed or missing job stalls it after three. Row bookkeeping (claim, renew, settle) never refuses an observation read before it; other changes do.
 
-A `dispatch` or `request-review` whose launch finds a producer or reviewer session already answering the requested head completes on that session instead of failing. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+A `dispatch` or `request-review` whose launch finds a producer or reviewer session already answering the requested head completes on that session instead of failing. Three failures with an unchanged reason mark a row stalled, not retried (a fleet that looks idle): it shows in `actions.stalled` and on its item's card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
 ### Loop failure recovery
 
@@ -61,7 +61,7 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, and stale `/tmp/graphyard-*`, `tsx-<uid>` directories (dead owner or 6h idle; unheld; ≤100/cycle, one pass in flight); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes a Graphyard launch on this host left behind are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed; `run.worktreeRemovalLimit`/cycle; `.graphyard/worktree-reclaim.jsonl`) and stale unheld `/tmp/graphyard-*`, `tsx-<uid>` directories (dead owner or 6h idle; ≤100/cycle, one pass at once); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes left by a Graphyard launch here are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
 
 ## Recovery
 
@@ -74,6 +74,8 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 ## Fault classes
 
 Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. A failed section is listed only in `unavailable`.
+
+Settled requests are `unanswered-request` only after 5 minutes (`settledAnswerGraceMs`); the line then names the answer: the owed relaunch or the `request-remedy` decision (rework/attest).
 
 ## Pipeline speed
 
