@@ -60,6 +60,26 @@ test('GitHub adapter binds observations to repository, base, current reviews, an
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
   f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
 });
+test('GY-1060: a required status context is read as a commit status, and protection and rulesets are read once across observations', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  f.github.request = async (path, method, body) => {
+    if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+    if (path.startsWith('/rules/branches/')) { f.calls.push({ path, method: method ?? 'GET', body }); return [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'secrets', integration_id: 77 }] } }]; }
+    if (path === `/commits/${head}/status?per_page=100`) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'error' }, { context: 'unrequired', state: 'failure' }] }; }
+    return request(path, method, body);
+  };
+  const obs = await f.github.observe(f.work);
+  assert.deepEqual(obs.requiredChecks, [{ name: 'ci/legacy', appId: null }, { name: 'secrets', appId: 77 }]);
+  assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368, id: 9 }, { name: 'ci/legacy', result: 'failure', appId: 0, source: 'status' }],
+    'only the required context no check run reports is read from statuses, an error as a failure');
+  await f.github.observe(f.work);
+  const reads = (pattern: RegExp) => f.calls.filter(call => pattern.test(call.path)).length;
+  assert.equal(reads(/\/protection$/), 1, 'the second observation reuses the protection read');
+  assert.equal(reads(/^\/rules\/branches\//), 1, 'and the ruleset read');
+  assert.equal(reads(/\/status\?/), 2, 'statuses are per head, read on each observation');
+  await f.github.protection(); await f.github.protection();
+  assert.equal(reads(/\/protection$/), 3, 'a direct protection read is never shared');
+});
 test('GitHub adapter retains retry history in deterministic check-run identity order', async () => {
   const f = fixture(), request = f.github.request.bind(f.github);
   f.github.request = async (path, method, body) => path.includes('/check-runs')

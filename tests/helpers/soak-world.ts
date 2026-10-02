@@ -16,6 +16,8 @@ import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../.
 // anything for Graphyard: the loop and the engine act, and this world only answers them.
 
 export const minute = 60_000, hour = 60 * minute;
+/** The check the simulated base branch's protection requires that the policy does not name (GY-1060). */
+export const protectionOnlyCheck = 'secrets';
 /** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
 export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
@@ -331,7 +333,9 @@ export class SimulatedGitHub {
     if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
     if (!this.runs.has(head)) {
       const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
-      const runs = ['test', 'typecheck'].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now }));
+      // `secrets` is required by the base branch's protection alone (GY-1060), bound to no app, as
+      // PR #221's scan was: every gate, verdict and window view of the day reads it beside the policy's.
+      const runs = ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now }));
       // The project's own documentation budget check (GY-574): the budget is the project's own
       // rule, counted over the pages its configuration names (here docs/ and README.md, as the
       // committed graphyard.json does), and this project's CI fails the check when that total is
@@ -503,7 +507,7 @@ export class SimulatedGitHub {
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
           mergeable: pr.open, conflicting: false, baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
-          protected: true, files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
+          protected: true, requiredChecks: [{ name: 'test', appId: options.ciAppId }, { name: 'typecheck', appId: options.ciAppId }, { name: protectionOnlyCheck, appId: null }], files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
           // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
           ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
           // The failing published tip's docs counts (GY-574), from which its overflow is attributed.

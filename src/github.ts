@@ -33,6 +33,12 @@ export const scopeLookupBudget = 200;
 export const compareFileCap = 300;
 /** Re-requests of a pull request GitHub answered with `mergeable: null`, `mergeabilityRetryMs` apart: at most 10 seconds (GY-548). */
 export const mergeabilityRetries = 3, mergeabilityRetryIntervalMs = 3_000;
+/**
+ * How long one read of the base branch's protection and of its rulesets serves every observation
+ * (GY-1060): both are repository-wide and rarely change, and each observation of every open
+ * candidate read both afresh. GitHub still enforces the live protection on every merge.
+ */
+export const protectionReadTtlMs = 60_000;
 /** One file of a GitHub compare, as far as a patch-id reads it. */
 export interface CompareFile { filename?: unknown; previous_filename?: unknown; status?: unknown; patch?: unknown; changes?: unknown; sha?: unknown }
 /**
@@ -988,6 +994,16 @@ export class GitHub {
     return value;
   }
   private repositoryIdentity: { at: number; value: { id: number; fullName: string } | null } | null = null;
+  private branchRuleReads = new Map<string, { at: number; value: Promise<any> }>();
+  /** A protection or ruleset read shared for `protectionReadTtlMs`, in flight included; a failed read is never reused. */
+  private branchRuleRead(path: string): Promise<any> {
+    const now = Date.now(), cached = this.branchRuleReads.get(path);
+    if (cached && now - cached.at < protectionReadTtlMs) return cached.value;
+    const value = this.request(path);
+    this.branchRuleReads.set(path, { at: now, value });
+    value.catch(() => { if (this.branchRuleReads.get(path)?.value === value) this.branchRuleReads.delete(path); });
+    return value;
+  }
   private async readReviewRepository(): Promise<{ id: number; fullName: string } | null> {
     try {
       // Membership in the token's installation is stronger than public repository readability.
@@ -1018,11 +1034,13 @@ export class GitHub {
   /**
    * The managed branch's protection as the gates read it: whether it is the protection Graphyard
    * requires, and whether it requires every review conversation resolved before a merge (GY-139).
-   * An unreadable protection is neither.
+   * An unreadable protection is neither. An observation passes `shared` to reuse the read for
+   * `protectionReadTtlMs` (GY-1060); every other caller reads it afresh.
    */
-  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean; requiredChecks: { name: string; appId: number | null }[] }> {
+  async branchProtection(requireNativeReview = false, shared = false): Promise<{ protected: boolean; conversationResolution: boolean; requiredChecks: { name: string; appId: number | null }[] }> {
     try {
-      const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
+      const path = `/branches/${encodeURIComponent(this.config.base)}/protection`;
+      const p = await (shared ? this.branchRuleRead(path) : this.request(path));
       // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
       // queue supersedes that setting with a published tip that already contains its validated base.
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
@@ -1039,10 +1057,27 @@ export class GitHub {
    */
   private async requiredStatusChecks(): Promise<{ name: string; appId: number | null }[]> {
     try {
-      const rules = await this.request(`/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
+      // Read only by observations, so always shared for `protectionReadTtlMs` (GY-1060).
+      const rules = await this.branchRuleRead(`/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
       if (!Array.isArray(rules)) return [];
       return mergeRequiredChecks(rules.filter((rule: any) => rule?.type === 'required_status_checks')
         .flatMap((rule: any) => (rule.parameters?.required_status_checks ?? []).map((check: any) => ({ name: check?.context, appId: check?.integration_id ?? null }))));
+    } catch { return []; }
+  }
+  /**
+   * GY-1060. The commit statuses of required contexts no check run reports: a classic protection
+   * `contexts` entry or a ruleset check bound to no app is commonly a commit status, which the
+   * check-runs read never sees, so the gate would refuse it as not passed forever. They are read
+   * only when such a context exists, as entries of app 0 marked `status`, which no policy check's
+   * trusted CI apps include. An error state is a failure; an unreadable answer adds nothing.
+   */
+  private async requiredStatuses(sha: string, required: { name: string; appId: number | null }[], policy: readonly string[], runs: { name: string }[]): Promise<Observation['checks']> {
+    const names = new Set(required.filter(check => check.appId === null && check.name !== CHECK_NAME && !policy.includes(check.name) && !runs.some(run => run.name === check.name)).map(check => check.name));
+    if (!names.size) return [];
+    try {
+      const combined = await this.request(`/commits/${sha}/status?per_page=100`);
+      return (Array.isArray(combined?.statuses) ? combined.statuses : []).filter((status: any) => typeof status?.context === 'string' && names.has(status.context))
+        .map((status: any) => ({ name: status.context, result: status.state === 'error' ? 'failure' : String(status.state), appId: 0, source: 'status' as const }));
     } catch { return []; }
   }
   /**
@@ -1203,12 +1238,14 @@ export class GitHub {
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protection, files, branch, rulesetChecks] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy), true), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
       this.requiredStatusChecks(),
     ]);
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
     // only while protection still requires conversation resolution (drift, which GitHub enforces).
+    const requiredChecks = mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]);
+    const statuses = await this.requiredStatuses(pr.head.sha, requiredChecks, work.policy.checks, checks);
     const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
@@ -1265,7 +1302,7 @@ export class GitHub {
       // Canonical oldest-to-newest ordering makes legacy consumers deterministic;
       // gates also compare immutable run IDs rather than trusting response order.
       checks: checks.filter(c => c.name !== CHECK_NAME).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
-        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
+        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })).concat(statuses),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
       // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
@@ -1276,7 +1313,7 @@ export class GitHub {
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
-      protected: protection.protected, requiredChecks: mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]), conversations, files: files.map(f => f.filename), at: startedAt,
+      protected: protection.protected, requiredChecks, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}), ...(docsBudget ? { docsBudget } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),

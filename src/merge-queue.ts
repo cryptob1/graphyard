@@ -970,18 +970,32 @@ export interface RequiredCheck { name: string; policy: boolean; appId: number | 
  * failing protection-only check — PR #221's `secrets` scan — is judged exactly as a policy check is.
  */
 export function requiredChecksOf(work: Pick<Work, 'policy' | 'observation'>): RequiredCheck[] {
-  const policy = work.policy.checks.map(name => ({ name, policy: true, appId: null }));
-  const extra = (work.observation?.requiredChecks ?? []).filter(check => check.name !== CHECK_NAME && !work.policy.checks.includes(check.name))
+  const names = work.policy?.checks ?? [];
+  const policy = names.map(name => ({ name, policy: true, appId: null }));
+  const extra = (work.observation?.requiredChecks ?? []).filter(check => check.name !== CHECK_NAME && !names.includes(check.name))
     .map(check => ({ name: check.name, policy: false, appId: check.appId }));
   return [...policy, ...extra];
 }
 /**
  * The newest run that counts for a required check: a policy check's from the configured CI apps,
- * as ever; a protection-only check's from the app protection binds it to, or from any app.
+ * as ever; a protection-only check's from the app protection binds it to. One bound to no app is
+ * satisfied on GitHub by any source's run or commit status of that name; Graphyard prefers the
+ * configured CI apps' runs whenever one reports it (GY-1060), so another app with checks:write can
+ * neither pass it nor fail it beside CI, and reads any other source only when no CI app reports it.
  */
 export function requiredCheckRun(check: RequiredCheck, checks: Observation['checks'], ciAppIds: readonly number[] | null): Observation['checks'][number] | undefined {
-  return latestCheck(checks.filter(run => run.name === check.name && (check.policy ? !ciAppIds || ciAppIds.includes(run.appId) : check.appId === null || run.appId === check.appId)));
+  const named = checks.filter(run => run.name === check.name);
+  if (check.policy) return latestCheck(named.filter(run => !ciAppIds || ciAppIds.includes(run.appId)));
+  if (check.appId !== null) return latestCheck(named.filter(run => run.appId === check.appId));
+  const trusted = ciAppIds ? named.filter(run => ciAppIds.includes(run.appId)) : [];
+  return latestCheck(trusted.length ? trusted : named);
 }
+/** Whether a counting run failed: a policy check by the queue's conclusions, as ever; a protection-only one by the failed-CI rework rule's (GY-430). */
+export function requiredRunFailed(check: RequiredCheck, run: Observation['checks'][number] | undefined): boolean {
+  return !!run && (check.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result));
+}
+/** The test gate's trusted CI apps as last recorded on the item; legacy snapshots use the engine's historical GitHub Actions default. */
+export const ciAppIdsOf = (work: Pick<Work, 'gates'>): readonly number[] => work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
 /** Whether a run satisfies its required check: success, or for a protection-only check any conclusion GitHub accepts (neutral, skipped). */
 export function requiredCheckPassed(check: RequiredCheck, run: Observation['checks'][number] | undefined): boolean {
   return !!run && (run.result === 'success' || !check.policy && ['neutral', 'skipped'].includes(run.result));
@@ -999,7 +1013,7 @@ declare module './model/work.js' {
  * Legacy snapshots without that metadata use the engine's historical GitHub Actions default;
  * the next gate evaluation records the installation's actual configuration, including [].
  */
-export function requiredCheck(work: Pick<Work, 'candidate' | 'observation' | 'gates'>, name: string, ciAppIds: readonly number[] = work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [15368]) {
+export function requiredCheck(work: Pick<Work, 'candidate' | 'observation' | 'gates'>, name: string, ciAppIds: readonly number[] = ciAppIdsOf(work)) {
   const observation = work.observation, candidate = work.candidate;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return undefined;
   return latestCheck(observation.checks.filter(run => run.name === name && ciAppIds.includes(run.appId)));
@@ -1091,10 +1105,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // for a required check decides, exactly as the test gate does, so a successful retry
   // never leaves an entry ejected by the failure it replaced — nor one its rerun (GY-516)
   // holds. GY-430: this includes both policy checks and branch-protection required checks.
-  const check = requiredChecksOf(work).find(required => {
-    const run = requiredCheckRun(required, observation.checks, ciAppIds);
-    return !!run && (required.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result)) && !holdingCheckRerun(work, candidate.sha, required.name, run);
-  })?.name;
+  const check = failedRequiredCheck(work, observation, ciAppIds);
   // Under a parallel-tip window (GY-498) the prefix tips isolate the culprit in one round instead
   // of a bisection. Outside the window nothing is required of the entry yet, and a failure on a
   // tip it still holds is inherited from the entries ahead (the waiting batch's rule); a head that
@@ -1443,7 +1454,7 @@ function blockedMergeStall(item: Work, state: GitHubMergeQueueState, now: number
   const ageMs = now - Date.parse(state.requestedAt!);
   if (!(ageMs > blockedMergeStallMs)) return null;
   const runs = observation.candidate.sha === candidate.sha ? observation.checks : [];
-  const judged = requiredChecksOf(item).map(check => ({ check, run: requiredCheckRun(check, runs, null) }));
+  const judged = requiredChecksOf(item).map(check => ({ check, run: requiredCheckRun(check, runs, ciAppIdsOf(item)) }));
   const failed = judged.filter(entry => !!entry.run && failedCheckResults.includes(entry.run.result)).map(entry => entry.check.name);
   const missing = judged.filter(entry => !requiredCheckPassed(entry.check, entry.run) && !failed.includes(entry.check.name)).map(entry => entry.check.name);
   const approved = observation.reviews.some(review => review.sha === candidate.sha && review.state === 'APPROVED') || observation.agentReview?.sha === candidate.sha && observation.agentReview.approved;
@@ -1622,7 +1633,8 @@ export function runMergeBatches(queue: string[], batchSize: number, runTip: (mer
 export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null): TipVerdict | undefined {
   const speculation = work.queue?.speculation, candidate = work.candidate, observation = work.observation;
   if (!speculation || !candidate || speculation.tip !== candidate.sha || !observation || observation.candidate.sha !== candidate.sha) return undefined;
-  const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
+  // The policy's checks and the base branch's other required checks alike (GY-1060), as ejection reads them.
+  const runs = judgedRequiredChecks(work, observation, ciAppIds);
   // A failure awaiting its one rerun (GY-516) is not yet a verdict: the batch waits, as for a pending run.
   const failed = failedRequiredCheck(work, observation, ciAppIds);
   // A tip whose only failure is the docs word budget is judged as that proof (GY-574), so the plan
@@ -1630,8 +1642,8 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   const docs = observation.docsBudget;
   if (failed && docs?.sha === candidate.sha && docs.onlyFailure && docs.budget && docsTotal(docs.pages) > docs.budget.total) return { result: 'fail', check: docsBudgetProof };
   if (failed) return { result: 'fail', check: failed };
-  if (runs.some(entry => !!entry.run && failedConclusions.has(entry.run.result))) return undefined;
-  return runs.every(entry => entry.run?.result === 'success') ? { result: 'pass' } : undefined;
+  if (runs.some(entry => requiredRunFailed(entry.check, entry.run))) return undefined;
+  return runs.every(entry => requiredCheckPassed(entry.check, entry.run)) ? { result: 'pass' } : undefined;
 }
 
 // ---- Validating queue positions in parallel (GY-498) ---------------------------------------------
@@ -1685,10 +1697,11 @@ export const aheadPassed = (view: Pick<TipWindowView, 'tips'>) => view.tips.slic
 function tipCi(work: Work, ciAppIds: readonly number[] | null): { ci: TipView['ci']; failedCheck?: string } {
   const observation = work.observation, candidate = work.candidate;
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha) return { ci: 'none' };
-  const runs = (work.policy?.checks ?? []).map(name => ({ name, run: latestCheck(observation.checks.filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId)))) }));
-  const failed = runs.find(entry => !!entry.run && failedConclusions.has(entry.run.result) && !holdingCheckRerun(work, candidate.sha, entry.name, entry.run));
-  if (failed) return { ci: 'fail', failedCheck: failed.name };
-  if (runs.length > 0 && runs.every(entry => entry.run?.result === 'success')) return { ci: 'pass' };
+  // Every required check, protection-only ones included (GY-1060): the window view and attribution agree with ejection.
+  const runs = judgedRequiredChecks(work, observation, ciAppIds);
+  const failed = failedRequiredCheck(work, observation, ciAppIds);
+  if (failed) return { ci: 'fail', failedCheck: failed };
+  if (runs.length > 0 && runs.every(entry => requiredCheckPassed(entry.check, entry.run))) return { ci: 'pass' };
   return { ci: runs.some(entry => !!entry.run) ? 'running' : 'none' };
 }
 /**
@@ -1922,17 +1935,25 @@ export function holdingCheckRerun(work: Pick<Work, 'checkReruns'>, sha: string, 
  * owed or requested rerun: the loop's decisions and the test gate's next action then wait for the
  * rerun instead of returning the head to its worker, which would cost the bindings the rerun keeps.
  */
-export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation' | 'gates'>, check: string): boolean {
+export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'observation' | 'gates' | 'policy'>, check: string): boolean {
   const observation = work.observation, sha = work.candidate?.sha;
   if (!observation || !sha || observation.candidate.sha !== sha) return false;
-  return !!holdingCheckRerun(work, sha, check, requiredCheck(work, check));
+  // A protection-only check's run is the one the test gate reads for it (GY-1060), not a policy check's trusted-app run.
+  const required = requiredChecksOf(work).find(entry => entry.name === check);
+  return !!holdingCheckRerun(work, sha, check, required && !required.policy ? requiredCheckRun(required, observation.checks, ciAppIdsOf(work)) : requiredCheck(work, check));
 }
-/** The required check whose newest trusted run failed on the observed candidate and is not held by a rerun. */
+/** Every required check (GY-430) with the run that counts for it on the observation. */
+function judgedRequiredChecks(work: Work, observation: Observation, ciAppIds: readonly number[] | null) {
+  return requiredChecksOf(work).map(check => ({ check, run: requiredCheckRun(check, observation.checks ?? [], ciAppIds) }));
+}
+/**
+ * The required check whose newest counting run failed on the observed candidate and is not held by
+ * a rerun: the policy's and the base branch's other required checks alike, so ejection, the batch
+ * verdict and the parallel-tip window read one answer (GY-1060).
+ */
 function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: readonly number[] | null): string | undefined {
-  return (work.policy?.checks ?? []).find(name => {
-    const run = latestCheck((observation.checks ?? []).filter(entry => entry.name === name && (!ciAppIds || ciAppIds.includes(entry.appId))));
-    return !!run && failedConclusions.has(run.result) && !holdingCheckRerun(work, observation.candidate.sha, name, run);
-  });
+  return judgedRequiredChecks(work, observation, ciAppIds)
+    .find(({ check, run }) => requiredRunFailed(check, run) && !holdingCheckRerun(work, observation.candidate.sha, check.name, run))?.check.name;
 }
 /** A transition of a rerun record, as the engine writes it to the item's ledger. */
 export interface CheckRerunTransition { kind: 'check.rerun.owed' | 'check.rerun.passed' | 'check.rerun.failed' | 'check.rerun.expired' | 'check.rerun.requested'; rerun: CheckRerun }
