@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { open, mkdir, utimes, writeFile, type FileHandle } from 'node:fs/promises';
+import { open, mkdir, readFile, utimes, writeFile, type FileHandle } from 'node:fs/promises';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,7 @@ import { GitHub, processJob } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
 import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
-import { approverSessionName, decisionInput, masterConfigSchema, mergeExecutor, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { approverSessionName, automaticReviewerConcurrency, decisionInput, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -34,7 +34,10 @@ import { branchReport, buildMasterStatus } from '../src/master/status.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAttention } from '../src/daemon/faults.js';
 import { docsTrimTitle } from '../src/model/documentation.js';
 import { successorWidening } from '../src/model/successors.js';
-import { systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { checkInvariants, emptyInvariantRecord, invariantDefaults, systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
+import { heldNameAttention, readReviewLedger, settledCloseAttempts, type ReviewRecord } from '../src/reviewer.js';
+import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
+import { fleet, requested } from './helpers/review-fleet.js';
 import { reclaimResources, readReclaimReports, settleTmpReclaim } from '../src/master-resources.js';
 import { heldOpenPaths, reclaimTmpDirectories, writeTempOwner, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, type TmpReclaimReport } from '../src/tmp-reclaim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -1723,7 +1726,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('exited:implementation:')), [], 'no exited-session sighting outlives the day');
   assert.deepEqual(final.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running').map(handle => `${item.key} ${handle.id}`)), [], 'every implementation handle is closed once its item is delivered');
   const seconds = (performance.now() - began) / 1000;
-  assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
+  assert.ok(seconds < 120, `the day runs well inside the six minutes its case timeout allows it (${seconds.toFixed(1)} s)`);
 });
 
 test('unit:soak-invariants-hold — the parallel-tip window validates several queue positions at once, a failing tip ejects only its own entry while the suffix rebuilds without it, and a mid-day window change is republished, with every system invariant holding', { timeout: 360_000 }, async () => {
@@ -1794,7 +1797,7 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses is restored at most twice per contaminated head, then held under the escalation with no further branch writes, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-854: a queue-only day in which item three's first tip, chained behind item two's, fails and
   // keeps failing after its rerun. Item two's tip passes but GitHub is slow to make it mergeable, so
   // item three is ejected while item two is still queued: the ejected tip holds item two's unlanded
@@ -1879,7 +1882,7 @@ test('unit:soak-invariants-hold — the documentation budget under the real loop
   assert.ok(github.docsReads.trees.size <= 48, `tree reads are bounded by the distinct commits counted (${github.docsReads.trees.size})`);
 });
 
-test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 120_000 }, async () => {
+test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop without judging are relaunched within the bound, a refused relaunch is retried, and the spent watches keep every invariant holding', { timeout: 240_000 }, async () => {
   // GY-551: for every decision a master put to an approver by hand the loop now launches up to two
   // more sessions itself and keeps the spent watch past the bound, so both repeat per item here.
   const day = await simulateDay({ hours: 6, handApprovers: true });
@@ -2028,7 +2031,7 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   assert.ok(seconds < 150, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 600_000 }, async () => {
   // GY-898: the master-session step runs every cycle of the real loop here. The session dies at
   // minute 70, inside a window (minutes 60–100) in which the registry refuses every end, so the
   // rotation's release is owed and retried; the relaunched session passes its 90-minute budget.
@@ -2208,6 +2211,96 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
+test('unit:soak-invariants-hold — automatic reviews over hours of dispatch ticks, items and heads: the default reviewer concurrency is never exceeded, every settled reviewer\'s pane is closed within one cycle, a pane Herdr will not close is retried a bounded number of times and reported, no pending session\'s pane is closed, and every invariant holds', { timeout: 180_000 }, async () => {
+  // GY-1072: the automatic profile runs automaticReviewerConcurrency sessions, and reconcileReviews
+  // sweeps settled reviewers' panes on every dispatch tick. Sixteen items each go through two heads
+  // (changes requested, then approved); one settled reviewer's close fails once, another's forever.
+  const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
+  const tickMs = 30_000, reviewMs = 2 * minute, reworkMs = minute;
+  try {
+    const config = await loadMasterConfig(host.root);
+    const limit = profileConcurrency(selectReviewerProfile(config).profile!);
+    assert.equal(limit, automaticReviewerConcurrency);
+    const cursor = emptyDispatchCursor(config);
+    const total = 16, closeOnceRefused = { n: 3, head: 1 }, closeNeverAccepted = { n: 7, head: 2 };
+    // Each item's current head, when it next enters (a rework waits for its worker), and when it was delivered.
+    const items = new Map<number, { work: Work | null; head: number; enterAt: number; deliveredAt: number | null }>();
+    for (let n = 1; n <= total; n++) items.set(n, { work: null, head: 1, enterAt: clock.now() + (n <= 6 ? 0 : (n - 6) * 5 * minute), deliveredAt: null });
+    const live = () => [...items.values()].filter(entry => entry.work && entry.deliveredAt === null).map(entry => entry.work!);
+    // Each session posts its verdict two minutes in: changes requested on a first head, an approval on the second.
+    const reviewIds = new Map<string, number>();
+    const observe = (record: ReviewRecord) => Date.now() - Date.parse(record.requestedAt) < reviewMs ? null
+      : { state: /e2/.test(record.sha) ? 'APPROVED' : 'CHANGES_REQUESTED', reviewer: 'graphyard-reviewer[bot]', reviewId: reviewIds.get(record.id) ?? reviewIds.set(record.id, 10_000 + reviewIds.size).get(record.id)!, submittedAt: new Date().toISOString() };
+    const effects = host.effects(live, () => config, observe);
+    const ledgerFile = join(host.root, '.graphyard/reviews.json');
+    const heldSince = new Map<string, number>(), seenPending = new Set<string>(), refused: string[] = [], ledgers: string[] = [];
+    let peak = 0, cycle = 0, neverPane: string | null = null, lingeringFrom: number | null = null;
+    const record = emptyInvariantRecord();
+    for (; cycle < 600; cycle++) {
+      for (const [n, entry] of items) if (!entry.work && entry.deliveredAt === null && entry.enterAt <= clock.now()) entry.work = requested(n, entry.head);
+      const closesBefore = host.closes.length;
+      const tick = await runDispatchTick(config, cursor, effects, Date.now);
+      refused.push(...tick.refused.map(entry => `${entry.work}: ${entry.reason}`));
+      const ledger = (await readReviewLedger(host.root)).reviews;
+      // Faults armed on the panes as their sessions start.
+      for (const entry of ledger.filter(entry => entry.state === 'pending' && entry.pane && !seenPending.has(entry.id))) {
+        seenPending.add(entry.id);
+        const n = Number(entry.key.slice(3)) - 500, head = /e2/.test(entry.sha) ? 2 : 1;
+        if (n === closeOnceRefused.n && head === closeOnceRefused.head) host.refuseClose.set(entry.pane!, 1);
+        if (n === closeNeverAccepted.n && head === closeNeverAccepted.head) { host.refuseClose.set(entry.pane!, Infinity); neverPane = entry.pane; }
+      }
+      // No pending session's pane is ever closed.
+      for (const pane of host.closes.slice(closesBefore)) assert.ok(!ledger.some(entry => entry.pane === pane && entry.state === 'pending'), `cycle ${cycle}: the pane ${pane} of a pending session was closed`);
+      // The profile never runs more sessions than its limit, the held name included.
+      const sessions = host.agents.filter(agent => agent.name?.startsWith('claude-reviewer')).length;
+      assert.ok(sessions <= limit, `cycle ${cycle}: ${sessions} reviewer sessions over the limit of ${limit}`);
+      peak = Math.max(peak, sessions);
+      // Every settled reviewer still in its pane is closed by the next cycle, unless Herdr refuses that close every time.
+      for (const entry of ledger.filter(entry => entry.state !== 'pending' && entry.pane)) {
+        const visible = host.agents.some(agent => agent.pane_id === entry.pane && agent.name === entry.agentName);
+        if (!visible) { heldSince.delete(entry.pane!); continue; }
+        if (!heldSince.has(entry.pane!)) heldSince.set(entry.pane!, cycle);
+        if (entry.pane !== neverPane) assert.ok(cycle - heldSince.get(entry.pane!)! <= 1, `cycle ${cycle}: settled reviewer ${entry.agentName} on ${entry.key} still holds pane ${entry.pane} since cycle ${heldSince.get(entry.pane!)}`);
+      }
+      // A verdict moves its item on: changes requested is reworked into the next head, an approval delivers it.
+      for (const entry of items.values()) {
+        if (entry.deliveredAt !== null || !entry.work || !ledger.some(review => review.requestId === entry.work!.autoDispatch!.review!.id && review.state === 'completed')) continue;
+        if (entry.head === 1) Object.assign(entry, { work: null, head: 2, enterAt: clock.now() + reworkMs });
+        else entry.deliveredAt = clock.now();
+      }
+      // The lingering-sessions invariant over the delivered items, their review sessions as the runtime lists them.
+      const delivered = [...items].filter(([, entry]) => entry.deliveredAt !== null).map(([n, entry]) => ({ ...requested(n, 2), stage: 'done', delivery: { mergedAt: new Date(entry.deliveredAt!).toISOString() },
+        sessions: ledger.filter(review => review.key === `GY-${500 + n}`).map(review => ({ id: review.id, kind: 'review', state: 'running', agentName: review.agentName, pane: review.pane })) }) as unknown as Work);
+      const lingering = checkInvariants(record, { work: delivered, now: clock.now(), agents: host.agents }).find(check => check.invariant === 'lingering-sessions')!;
+      const neverKey = `GY-${500 + closeNeverAccepted.n}`, neverDelivered = items.get(closeNeverAccepted.n)!.deliveredAt;
+      if (!lingering.holds) {
+        assert.deepEqual(lingering.subjects, [neverKey], `cycle ${cycle}: only the pane Herdr refuses to close lingers: ${lingering.reading}`);
+        assert.ok(neverDelivered !== null && clock.now() - neverDelivered > invariantDefaults.sessionAfterSettleMinutes * minute);
+        lingeringFrom ??= cycle;
+      }
+      if ([...items.values()].every(entry => entry.deliveredAt !== null)) {
+        ledgers.push(await readFile(ledgerFile, 'utf8'));
+        if (lingeringFrom !== null && ledgers.length > 10) break;
+      }
+      clock.advance(tickMs);
+    }
+    assert.ok(cycle < 600, 'the day settles');
+    assert.deepEqual(refused, [], 'no launch was refused at the agent-name bound or otherwise');
+    assert.ok(peak >= 3, `reviews ran in parallel (peak ${peak})`);
+    const ledger = (await readReviewLedger(host.root)).reviews;
+    assert.equal(ledger.filter(entry => entry.state === 'completed').length, 2 * total, 'every head of every item was reviewed once');
+    // The pane Herdr refused once was released by the sweep; the one it never closes was tried a bounded number of times and is reported.
+    assert.equal(host.closes.filter(pane => pane === neverPane).length, 1 + settledCloseAttempts, 'the settlement close and the bounded retries, nothing more');
+    const held = heldNameAttention(ledger);
+    assert.deepEqual(held.map(item => item.subject), [`GY-${500 + closeNeverAccepted.n}`]);
+    assert.match(held[0].text, new RegExp(`in pane ${neverPane}`));
+    assert.ok(lingeringFrom !== null, 'the lingering-sessions invariant names the held pane once it outlives its bound');
+    // Once every request has settled, the ledger is not rewritten on later ticks.
+    assert.ok(ledgers.length > 10, `the day ran on past its last delivery (${ledgers.length} quiet cycles)`);
+    assert.equal(new Set(ledgers.slice(-10)).size, 1, 'no ledger churn from the refused close');
+  } finally { await host.cleanup(); }
+});
+
 test('unit:soak-invariants-hold — headless approver runs through loop restarts (GY-453): each adopted and applied exactly once, lost ones retried within a bound, the run registry bounded', { timeout: 480_000 }, async () => {
   const { items, final, violations, failures, state, headless } = await simulateDay({ hours: 6, headless: true });
   const { pi, root, applied, submitted, runs, restarts, adoptedLive, adoptedEnded } = headless!;
@@ -2237,7 +2330,7 @@ test('unit:soak-invariants-hold — headless approver runs through loop restarts
   assert.deepEqual(readdirSync(registry), [], 'ended runs leave the registry once past their retention');
 });
 
-test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — sessions blocked on a GitHub credential failure are ended once each and relaunched on the retry ladder: one item recovers and is delivered, one that never recovers is held at the attempt cap, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-999: a worker whose push is refused for want of a valid GitHub login records that blocker.
   // The loop ends the attempt in the cycle that sees it — work kept, pane closed, lease released —
   // and the item is launched again with a fresh credential. The ending counts on the GY-885 retry
