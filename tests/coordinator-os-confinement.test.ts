@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusEndpointProblem, secretsBusMigration, secretsBusPath, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { createServer } from 'node:net';
 import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
@@ -220,6 +220,34 @@ test('unit:keyring-proxy-units — the shipped units keep the proxy read-only an
   assert.match(forwarder, /systemd-socket-proxyd %t\/graphyard-secrets-bus-filter$/m);
   assert.doesNotMatch(forwarder + filter, /rm -f %t\/graphyard-secrets-bus\s/, 'no unit unlinks the endpoint');
   assert.equal(secretsBusPath(1000, { XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/graphyard-secrets-bus', 'the launcher binds the socket unit\'s endpoint');
+});
+
+test('unit:keyring-endpoint-unheld-reported — an endpoint graphyard-secrets-bus.socket does not hold is named with its migration, and nothing is guessed (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-endpoint-held');
+  const server = createServer();
+  try {
+    const endpoint = join(base, 'graphyard-secrets-bus'), plain = join(base, 'plain-file');
+    writeFileSync(plain, '');
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const asked: string[][] = [];
+    const show = (output: string) => (command: string, args: string[]) => { asked.push([command, ...args]); return output; };
+    assert.equal(secretsBusEndpointProblem(show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint), null, 'the socket unit listening at the endpoint holds it');
+    assert.deepEqual(asked[0], ['systemctl', '--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket']);
+    // An earlier install enabled the service itself: xdg-dbus-proxy listens at the path and the socket unit is not loaded.
+    const unheld = secretsBusEndpointProblem(show('ActiveState=inactive\n'), endpoint);
+    assert.ok(unheld && unheld.text.includes(endpoint) && unheld.text.includes('is inactive'), 'an endpoint the socket unit does not hold is named');
+    assert.equal(unheld!.next, secretsBusMigration);
+    assert.match(secretsBusMigration, /disable --now graphyard-secrets-bus\.service && systemctl --user enable --now graphyard-secrets-bus\.socket/);
+    assert.ok(secretsBusEndpointProblem(show('ActiveState=active\nListen=/run/user/1/graphyard-secrets-bus (Stream)\n'), endpoint)!.text.includes('listens at /run/user/1/graphyard-secrets-bus instead'), 'a socket unit listening elsewhere does not hold this endpoint');
+    assert.equal(secretsBusEndpointProblem(() => { throw new Error('Failed to connect to bus'); }, endpoint), null, 'no answering user manager judges nothing');
+    assert.equal(secretsBusEndpointProblem(show(''), endpoint), null, 'unreadable output judges nothing');
+    assert.equal(secretsBusEndpointProblem(show('ActiveState=inactive\n'), plain), null, 'a path that is no socket is not an endpoint');
+    assert.equal(secretsBusEndpointProblem(show('ActiveState=inactive\n'), join(base, 'missing')), null, 'no endpoint, nothing to migrate');
+    assert.equal(secretsBusEndpointProblem(show('ActiveState=inactive\n'), null), null);
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
