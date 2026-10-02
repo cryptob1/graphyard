@@ -7,7 +7,7 @@ import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 // unit:app-permissions-declaration
 test('the control-plane declaration carries the merge queue\'s Contents: write and nothing beyond what a feature names', () => {
   const required = requiredPermissions(controlPlanePermissions);
-  assert.deepEqual(required, { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' });
+  assert.deepEqual(required, { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write' });
   const queue = controlPlanePermissions.filter(requirement => requirement.feature === 'merge-queue');
   assert.deepEqual(queue.map(requirement => [requirement.permission, requirement.level]), [['contents', 'write']], 'the queue is the only reason for Contents: write');
   for (const requirement of controlPlanePermissions) assert.ok(requirement.reason.length > 10, `${requirement.permission} ${requirement.level} states why it is needed`);
@@ -20,7 +20,7 @@ test('the reviewer declaration never gains Contents: write, Checks, or Administr
 });
 
 test('shortfalls compare granted levels with the declaration, name the blocked features, and point at the installation page', () => {
-  const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' };
+  const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
   const missing = permissionShortfalls(legacy, controlPlanePermissions);
   assert.deepEqual(missing.map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, granted: shortfall.granted, features: shortfall.features })),
     [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'] }]);
@@ -32,7 +32,7 @@ test('shortfalls compare granted levels with the declaration, name the blocked f
   const bare = permissionShortfalls({ metadata: 'read' }, controlPlanePermissions);
   const contents = bare.find(shortfall => shortfall.permission === 'contents')!;
   assert.equal(contents.granted, null); assert.equal(contents.required, 'write'); assert.deepEqual(contents.features, ['observation', 'merge-queue']);
-  assert.deepEqual(blockedFeatures(bare).sort(), ['check', 'check-rerun', 'comment-events', 'merge-queue', 'observation', 'review-dispatch', 'worker-push']);
+  assert.deepEqual(blockedFeatures(bare).sort(), ['check', 'check-rerun', 'comment-events', 'merge-queue', 'observation', 'review-dispatch']);
   // Write satisfies read; admin satisfies write; unknown or missing values satisfy nothing.
   assert.deepEqual(permissionShortfalls({ ...legacy, contents: 'admin' }, controlPlanePermissions), []);
   assert.equal(permissionShortfalls({ ...legacy, contents: 'write', checks: 'yes' }, controlPlanePermissions)[0].permission, 'checks');

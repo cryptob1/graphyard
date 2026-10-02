@@ -1,4 +1,4 @@
-import { afterEach, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { Work } from '../src/model.js';
@@ -8,7 +8,7 @@ import type { NextAction } from '../src/model/action-kinds.js';
 import { livenessCarry, livenessRetryLimit } from '../src/model/liveness.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { appPermissionsFirst, recordStallRemedy, stallRemedy, standingRemedy, type FlowResult, type RemedyFlow } from '../src/stall-remedies.js';
-import { owedRemedies, remedyStep, resetAppliedRemedies } from '../src/daemon/cycle-remedies.js';
+import { owedRemedies, remedyStep } from '../src/daemon/cycle-remedies.js';
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
@@ -66,8 +66,6 @@ async function runRemedyStep(work: Work[], flow: (name: RemedyFlow) => Promise<F
   await launcher.idle();
   return { ran, records, refused, reported: launcher.drain() };
 }
-
-afterEach(() => resetAppliedRemedies());
 
 // ---- AC-1 -----------------------------------------------------------------------------------------
 

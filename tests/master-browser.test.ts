@@ -485,7 +485,7 @@ test('permission comparison treats write as satisfying read and reports only wha
 });
 
 test('the permission flows hold the App to every permission github-permissions.ts declares, so the Actions: write hold that stalled GY-864 and GY-515 is one installation-accept accepts (GY-949)', async () => {
-  assert.deepEqual(controlPlanePermissions, requiredPermissions(declaredPermissions), 'one declaration, read by the flows too');
+  assert.deepEqual(controlPlanePermissions, { ...requiredPermissions(declaredPermissions), workflows: 'write' }, 'one declaration, read by the flows too, with the Workflows: write worker pushes need');
   assert.equal(controlPlanePermissions.actions, 'write');
   const { root, config, cleanup } = await master();
   try {

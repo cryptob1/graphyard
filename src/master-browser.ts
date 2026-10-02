@@ -27,8 +27,9 @@ export type BrowserFlow = typeof browserFlows[number];
 // What the control-plane App must hold for every path Graphyard exercises, read from the one
 // declaration of it (src/github-permissions.ts) so a permission a feature adds there — actions write
 // for failed CI reruns — is one these flows raise and accept, not one they report already granted
-// while the integration jobs it holds stay held (GY-949).
-export const controlPlanePermissions: Record<string, 'read' | 'write' | 'admin'> = requiredPermissions(declaredPermissions);
+// while the integration jobs it holds stay held (GY-949). Workflows write is registered on top: worker
+// pushes of base syncs that carry workflow changes need it, yet no preflight feature is held on it.
+export const controlPlanePermissions: Record<string, 'read' | 'write' | 'admin'> = { ...requiredPermissions(declaredPermissions), workflows: 'write' };
 const level = (value: unknown) => value === 'admin' ? 3 : value === 'write' ? 2 : value === 'read' ? 1 : 0;
 /** Permissions still below what the control plane needs. */
 export function missingPermissions(actual: Record<string, unknown> | null | undefined, desired = controlPlanePermissions) {

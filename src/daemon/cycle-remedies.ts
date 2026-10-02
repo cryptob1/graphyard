@@ -22,15 +22,20 @@ export function owedRemedies(work: Work[]): OwedRemedy[] {
 }
 
 /**
- * The runs this loop process has applied a remedy for, by row: the reason applied for. It covers
- * the instant between a remedy settling and the next snapshot showing its record, so a cycle that
- * read the world before the record landed does not apply it again; an entry goes once the snapshot
- * shows the record, or the row no longer stalls on that reason. A restart forgets it, and by then
- * the record is on the row: it is written before the launch settles.
+ * The runs a loop has applied a remedy for, by row: the reason applied for. It covers the instant
+ * between a remedy settling and the next snapshot showing its record, so a cycle that read the world
+ * before the record landed does not apply it again; an entry goes once the snapshot shows the
+ * record, or the row no longer stalls on that reason. It is kept per loop — keyed on the loop's
+ * launcher, which lives as long as the loop does — so two loops in one process never share or clear
+ * each other's entries. A restart forgets it, and by then the record is on the row: it is written
+ * before the launch settles.
  */
-const applied = new Map<string, string>();
-/** Test seam: forget what this process applied. */
-export function resetAppliedRemedies() { applied.clear(); }
+const appliedByLoop = new WeakMap<object, Map<string, string>>();
+function appliedOf(loop: object) {
+  let applied = appliedByLoop.get(loop);
+  if (!applied) appliedByLoop.set(loop, applied = new Map());
+  return applied;
+}
 
 /**
  * Step 6b. For every stalled row the registry binds to a remedy the loop applies, apply it once for
@@ -45,6 +50,7 @@ export function resetAppliedRemedies() { applied.clear(); }
 export async function remedyStep(cycle: Cycle) {
   const { effects, snapshot, state, now, launch } = cycle;
   if (!effects.browserFlow || !effects.recordRemedy) return;
+  const applied = appliedOf(cycle.launcher);
   for (const [id, reason] of [...applied]) {
     const item = snapshot.work.find(entry => (entry.actionQueue?.actions ?? []).some(row => row.id === id));
     const row = item?.actionQueue!.actions.find(entry => entry.id === id);

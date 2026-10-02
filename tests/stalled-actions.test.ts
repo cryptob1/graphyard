@@ -273,12 +273,17 @@ test('unit:stall-remedy-recorded-once — the control plane records the loop\'s 
   const recorded = await engine.recordActionRemedy(coordinator, last!.id, body);
   assert.equal(recorded.action.remedy?.outcome, 'refused');
   assert.equal(recorded.action.remedy?.by, coordinator.id);
-  await assert.rejects(engine.recordActionRemedy(coordinator, last!.id, { ...body, outcome: 'applied' }), /already recorded for this unchanged run/);
-  const stored = dispatchRow(await reload(item));
+  // The record is evaluated with the item: the refusal's escalation is queued at once and retires
+  // the stalled row, so a second record finds no open row to write to — one record, the first.
+  const escalated = await reload(item);
+  assert.equal(escalated.nextAction?.kind, 'escalate', 'the refused remedy is escalated in the same transaction');
+  assert.match(escalated.nextAction!.binding, new RegExp(`^stalled:${last!.id}:remedy:`));
+  await assert.rejects(engine.recordActionRemedy(coordinator, last!.id, { ...body, outcome: 'applied' }), /Action is not open on any work item/);
+  const stored = [...escalated.actionQueue!.actions, ...escalated.actionQueue!.history].find(row => row.id === last!.id)!;
   assert.equal(stored.remedy?.outcome, 'refused', 'one record, the first');
-  const raised = stalledActionAttention(await snapshotOf()).filter(entry => entry.subject === item.key);
-  assert.match(raised[0].next, /installation-accept remedy \(installation-accept\) was refused at .*Confirm access was not approved/);
-  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
+  // The escalation now owns the stall and names what the remedy did; no generic stalled line is left.
+  assert.match(escalated.nextAction!.reason, /installation-accept remedy \(installation-accept\) was refused at .*Confirm access was not approved/);
+  assert.deepEqual(stalledActionAttention(await snapshotOf()).filter(entry => entry.subject === item.key), []);
 });
 
 // ---- AC-4: backoff does not outlive the condition it was earned against ----------------------

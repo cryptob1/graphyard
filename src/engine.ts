@@ -1487,7 +1487,9 @@ export class Engine {
    * Record the loop's attempt of the remedy a stalled row's reason binds to (GY-949). The row keeps
    * one record per unchanged run (`recordStallRemedy` refuses a second), so the loop applies a
    * remedy at most once for a run however many of its cycles see the row, and the attention and the
-   * escalation read what it did from the row itself.
+   * escalation read what it did from the row itself. The item is evaluated with the record, so a
+   * refused remedy's escalation is queued in the same transaction rather than whenever the item is
+   * next evaluated — for an item no reconciliation job wakes, never.
    */
   async recordActionRemedy(actor: Principal, id: string, input: unknown) {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
@@ -1496,7 +1498,11 @@ export class Engine {
       const work = await this.actionOwner(db, id);
       demand(work, 'Action is not open on any work item', 404);
       const row = recordStallRemedy(work!, id, data, actor.id, now);
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document.id === work!.id ? work! : r.document);
+      this.evaluate(work!, all, now);
+      await this.recordDispatch(db, work!, now);
       await save(db, work!, actor.id, 'action.remedied', now, { id, kind: row.kind, remedy: data.remedy, outcome: data.outcome, flows: data.flows, detail: data.detail, reason: data.reason });
+      if (work!.submission) await wakeJob(db, work!.id);
       return { action: row, work: { id: work!.id, key: work!.key } };
     });
   }

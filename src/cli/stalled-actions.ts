@@ -51,6 +51,8 @@ export function stalledActionAttention(snapshot: { work: Work[]; now: string }):
       subject: entry.key,
       kind: 'stalled-action' as const,
       text: `${entry.key}'s ${entry.kind} action is stalled, retried only on a widening backoff: ${entry.stall!.failures} attempts in a row failed for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s)${entry.retryAt ? `; next attempt at ${entry.retryAt}` : ''}. Nothing changes by attempting it again while that condition stands`,
+      // Only the suspended installation is a human's: reinstating it is an account decision on the
+      // GitHub account that owns the installation, filed as installationOwner files the same hold.
       ...(bound?.owner === 'human' ? humanOwner('spending money or opening third-party accounts', next) : agentOwner('master', next)),
     };
   });

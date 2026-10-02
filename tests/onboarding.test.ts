@@ -108,7 +108,7 @@ test('the permission migration reads the App and its installation back, prints t
     const { mkdir: makeDirectory } = await import('node:fs/promises');
     await makeDirectory(join(root, '.graphyard'), { recursive: true });
     await writeFile(join(root, '.graphyard', 'github-app.json'), JSON.stringify({ appId: 123, slug: 'graphyard-owner-repo', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), webhookSecret: 'test-only', repository: 'owner/repo', installationId: 456 }), { mode: 0o600 });
-    const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' };
+    const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
     let registered: Record<string, string> = { ...legacy }, granted: Record<string, string> = { ...legacy };
     const requests: string[] = [];
     const fetcher = (async (url: unknown, options: any) => {
