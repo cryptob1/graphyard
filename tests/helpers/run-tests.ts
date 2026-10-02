@@ -31,14 +31,26 @@ import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim
 
 /** The most leftovers one sweep of this runner removes, so a backlog cannot stall the suite's start. */
 export const runnerTmpSweepLimit = 40;
+/**
+ * How old a `pg-password-*` file must be before the runner takes it (GY-1074). embedded-postgres
+ * writes the file to the tmpdir for initdb and unlinks it in a finally, so only a process killed
+ * mid-init leaves one; initdb reads it within seconds, so ten minutes never takes a live run's.
+ */
+export const runnerPasswordFileAgeMs = 10 * 60_000;
 
-async function sweepLeftoverTempDirectories(when: string) {
-  try {
-    const sweep = await reclaimTmpDirectories({ prefixes: ['graphyard-'], limit: runnerTmpSweepLimit });
-    const freed = describeTmpReclaim(sweep.removed.length, sweep.bytes);
-    if (freed) console.error(`[run-tests] ${when}: ${freed}, ${sweep.kept} kept (a live run's or not yet due)`);
-    for (const error of sweep.errors) console.error(`[run-tests] ${when}: could not remove ${error}`);
-  } catch { /* a sweep that cannot run must never stop the suite */ }
+/** One runner sweep over `tmpRoot` (the host's tmpdir by default): its `graphyard-*` leftovers and stale `pg-password-*` files. */
+export async function sweepLeftoverTempDirectories(when: string, tmpRoot?: string) {
+  const removed: string[] = [];
+  for (const options of [{ prefixes: ['graphyard-'] }, { prefixes: ['pg-password-'], maxAgeMs: runnerPasswordFileAgeMs }]) {
+    try {
+      const sweep = await reclaimTmpDirectories({ ...options, limit: runnerTmpSweepLimit, ...(tmpRoot ? { tmpRoot } : {}) });
+      removed.push(...sweep.removed.map(entry => entry.path));
+      const freed = describeTmpReclaim(sweep.removed.length, sweep.bytes);
+      if (freed) console.error(`[run-tests] ${when}: ${freed}, ${sweep.kept} kept (a live run's or not yet due)`);
+      for (const error of sweep.errors) console.error(`[run-tests] ${when}: could not remove ${error}`);
+    } catch { /* a sweep that cannot run must never stop the suite */ }
+  }
+  return removed;
 }
 
 /** The browser suite's historical port, tried first. */

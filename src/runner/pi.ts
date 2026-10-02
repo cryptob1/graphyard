@@ -1,8 +1,8 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -98,17 +98,34 @@ export interface PiRunnerOptions {
  * the service kills every process in it, setsid or not.
  */
 export type RunContainment = 'systemd' | 'setsid';
-let systemdReachable: boolean | null = null;
-/** `systemd` when this process runs in a systemd service's cgroup and the user manager answers; `setsid` otherwise. */
-export function runContainment(input: { cgroup?: string | null; systemd?: () => boolean } = {}): RunContainment {
+let systemdReachable: boolean | null = null, fallbackLogged = false;
+/**
+ * The service a cgroup line places the process in, or null. The user manager's own unit
+ * (`user@UID.service`) is not one: a process directly under it is in no service a stop could take.
+ */
+export function cgroupService(line: string) {
+  const unit = line.trim().replace(/\/$/, '').split('/').pop() ?? '';
+  return unit.endsWith('.service') && !/^user@\d+\.service$/.test(unit) ? unit : null;
+}
+/**
+ * `systemd` when this process runs in a systemd service's cgroup and the user manager answers;
+ * `setsid` otherwise. A service whose launcher cannot reach a user manager (a system-level unit)
+ * falls back to setsid inside that service's cgroup, where a stop of the service still kills the
+ * run: that is logged, once a process.
+ */
+export function runContainment(input: { cgroup?: string | null; systemd?: () => boolean; log?: (line: string) => void } = {}): RunContainment {
   let cgroup = input.cgroup;
   if (cgroup === undefined) { try { cgroup = readFileSync('/proc/self/cgroup', 'utf8'); } catch { cgroup = null; } }
-  if (!cgroup || !cgroup.split(/\r?\n/).some(line => /\.service\/?$/.test(line.trim()))) return 'setsid';
+  const service = cgroup?.split(/\r?\n/).map(cgroupService).find(Boolean) ?? null;
+  if (!service) return 'setsid';
   const reachable = input.systemd ?? (() => {
     if (systemdReachable === null) { try { execFileSync('systemctl', ['--user', 'show-environment'], { stdio: 'ignore', timeout: 5_000 }); systemdReachable = true; } catch { systemdReachable = false; } }
     return systemdReachable;
   });
-  return reachable() ? 'systemd' : 'setsid';
+  if (reachable()) return 'systemd';
+  const log = input.log ?? (line => { if (!fallbackLogged) { fallbackLogged = true; process.stderr.write(`${line}\n`); } });
+  log(`graphyard: headless runs started from ${service} get no transient scope (no systemd user manager answers), so a stop or restart of ${service} still ends them`);
+  return 'setsid';
 }
 
 /** The files of a run's directory: its registry entry, Pi's output, and the exit its shell records. */
@@ -121,6 +138,8 @@ export const runMetaSchema = z.object({
   /** The process's start time (/proc/PID/stat), so a reused pid is never taken for the run. */
   identity: z.string().max(40).nullable(), containment: z.enum(['systemd', 'setsid']), unit: z.string().max(200).nullable(),
   startedAt: z.string().max(40), timeoutMs: z.number().int().positive(), exitGraceMs: z.number().int().nonnegative(),
+  /** The process that started a scratch run (one outside the run registry), which the run must not outlive. */
+  launcher: z.object({ pid: z.number().int().positive(), identity: z.string().max(40).nullable() }).strict().nullable().optional(),
 }).strict();
 export type RunMeta = z.infer<typeof runMetaSchema>;
 
@@ -132,11 +151,16 @@ const quoted = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
  * `confinement` words wrap Pi alone, never the shell: the run's directory lies under the
  * coordinator checkout the confinement makes read-only, so only the shell outside it can write there.
  */
-export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = []) {
+export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = [], boundSeconds?: number) {
   const files = runFiles(directory), pending = `${files.exit}.tmp`;
   const confined = confinement.map(word => `${quoted(word)} `).join('');
-  const script = `trap : TERM INT HUP; if command -v "$0" >/dev/null 2>&1; then ${confined}"$0" "$@" <${'/dev/null'} >${quoted(files.stdout)} 2>${quoted(files.stderr)}; code=$?; `
-    + `else printf '%s: command not found\\n' "$0" >${quoted(files.stderr)}; code=spawn; fi; printf '%s\\n' "$code" >${quoted(pending)} && mv -f ${quoted(pending)} ${quoted(files.exit)}`;
+  // A bound the run enforces on itself: a scratch run has no watcher once the process that
+  // started it is gone, so nothing else would stop it. A watchdog beside Pi stops the run's whole
+  // group (the shell leads it) at the bound, as a watcher would, and is killed once Pi has exited.
+  // It ignores TERM so that its own stop does not end it before the KILL that follows.
+  const watchdog = boundSeconds ? `( trap '' TERM; sleep ${Math.ceil(boundSeconds)}; kill -TERM -$$; sleep 5; kill -KILL -$$ ) & watchdog=$!; ` : '';
+  const script = `trap : TERM INT HUP; ${watchdog}if command -v "$0" >/dev/null 2>&1; then ${confined}"$0" "$@" <${'/dev/null'} >${quoted(files.stdout)} 2>${quoted(files.stderr)}; code=$?; `
+    + `else printf '%s: command not found\\n' "$0" >${quoted(files.stderr)}; code=spawn; fi; ${watchdog ? 'kill -KILL "$watchdog" 2>/dev/null; ' : ''}printf '%s\\n' "$code" >${quoted(pending)} && mv -f ${quoted(pending)} ${quoted(files.exit)}`;
   const shell = ['/bin/sh', '-c', script, command, ...args];
   const unit = containment === 'systemd' ? `graphyard-run-${id}.scope` : null;
   return unit ? { file: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, '--', ...shell], unit } : { file: shell[0], args: shell.slice(1), unit };
@@ -173,17 +197,21 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
     name: 'pi',
     start<T>(prompt: string, options: RunOptions<T>): Run<T> {
       // A run without a run registry directory (triage, diagnosis) has no owner on disk, so nothing
-      // could adopt it after a restart: it gets no scope of its own and ends with this process.
+      // could adopt it after a restart: it gets no scope of its own, ends with this process, bounds
+      // itself, and is swept by the next scratch run should this process die without ending it.
       const id = randomUUID(), scratch = !options.runs;
-      const directory = resolve(options.runs ?? join(tmpdir(), 'graphyard-runs'), id);
+      const directory = scratch ? scratchDirectory(options.cwd, id) : resolve(options.runs!, id);
       const startedAt = new Date().toISOString();
-      const meta: RunMeta = { version: 1, id, command, pid: null, identity: null, containment: 'setsid', unit: null, startedAt, timeoutMs: options.timeoutMs, exitGraceMs: grace };
+      const meta: RunMeta = { version: 1, id, command, pid: null, identity: null, containment: 'setsid', unit: null, startedAt, timeoutMs: options.timeoutMs, exitGraceMs: grace,
+        ...(scratch ? { launcher: { pid: process.pid, identity: processIdentity(process.pid) } } : {}) };
       let failure: string | null = null, child: ChildProcess | null = null;
       try {
+        if (scratch) sweepScratchRuns(dirname(directory));
         mkdirSync(directory, { recursive: true, mode: 0o700 });
         const containment = scratch ? 'setsid' : configured.containment ?? runContainment();
         const confinement = configured.confine?.(options.cwd) ?? [];
-        const launch = detachedLaunch(directory, id, command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], containment, confinement);
+        const launch = detachedLaunch(directory, id, command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], containment, confinement,
+          scratch ? (options.timeoutMs + grace) / 1000 + scratchBoundMarginSeconds : undefined);
         // Detached: the run leads its own session and process group, holds no pipe to this process
         // (stdin is closed, so nothing can wait on a person), and is not waited on by it.
         child = (configured.spawn ?? spawn)(launch.file, launch.args, { cwd: options.cwd, env: runEnvironment(process.env, { ...configured.environment, ...options.env }), stdio: ['ignore', 'ignore', 'ignore'], detached: true });
@@ -206,6 +234,48 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
       return watchRun<T>(directory, meta, options, { pollMs: configured.pollMs, scratch: false, failure: () => null, child: null });
     },
   };
+}
+
+/** How far past its watcher's bound a scratch run's own bound lies, so a live watcher always stops it first. */
+export const scratchBoundMarginSeconds = 30;
+/** How old a scratch directory with no readable run.json is before a sweep takes it for abandoned. */
+const scratchOrphanAgeMs = 10 * 60_000;
+/**
+ * Where scratch runs write their output: `.graphyard/scratch-runs/` in the checkout they read (the
+ * loop's own), which a full or over-quota /tmp does not reach, else the OS temp directory.
+ */
+export function scratchRunsDirectory(cwd: string | undefined) {
+  if (cwd) {
+    // Each level made on its own, never recursively: a recursive mkdir can spin forever on a
+    // pseudo-filesystem such as /proc, where a plain one fails at once.
+    const local = resolve(cwd, '.graphyard', 'scratch-runs');
+    const made = (directory: string) => { try { mkdirSync(directory, { mode: 0o700 }); } catch (error: any) { if (error?.code !== 'EEXIST') throw error; } };
+    try { made(dirname(local)); made(local); return local; } catch { /* a checkout it cannot write to: the temp directory */ }
+  }
+  return join(tmpdir(), 'graphyard-runs');
+}
+const scratchDirectory = (cwd: string | undefined, id: string) => join(scratchRunsDirectory(cwd), id);
+/**
+ * Ends and removes every scratch run under `root` whose launcher is gone: one a loop left when it
+ * was killed outright (SIGKILL, OOM), before its exit hook could. A run whose launcher still lives
+ * is that process's to end. Returns how many it removed.
+ */
+export function sweepScratchRuns(root: string, now = Date.now()) {
+  let names: string[];
+  try { names = readdirSync(root); } catch { return 0; }
+  let removed = 0;
+  for (const name of names) {
+    if (scratchRuns.has(name)) continue;
+    const directory = join(root, name);
+    try {
+      const meta = readRunMeta(directory);
+      if (meta ? meta.launcher && runAlive(meta.launcher) : now - statSync(directory).mtimeMs < scratchOrphanAgeMs) continue;
+      if (meta) signalRun(meta, 'SIGKILL');
+      rmSync(directory, { recursive: true, force: true });
+      removed++;
+    } catch { /* one unreadable directory never stops the rest */ }
+  }
+  return removed;
 }
 
 /**
