@@ -24,6 +24,10 @@ export function sessionEnded(session: FleetSession, work: SessionWork | undefine
   if (age < launchGraceMs) return null;
   if (age > sessionCapMs) return 'older than any session runs';
   if (session.role === 'approver' || session.role === 'escalation-handler') return age > decisionSessionMs ? 'the decision window passed' : null;
+  // The master session (GY-898) names no work item by design: it holds its slot until the loop
+  // that supervises it ends it (rotation), bounded only by the outer cap above — its own budget is
+  // at most 12 hours — so a second host never reads the role as free while the pane still runs.
+  if (session.role === 'master') return null;
   if (!work) return session.work ? `${session.work} is no longer an open work item` : 'the launch grace passed and the session names no work item';
   if (session.role === 'worker') {
     const lease = work.lease;
@@ -255,7 +259,9 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
     return { role: role.name, accounts: role.accounts, concurrency: role.concurrency, live: running, next: blocked ? null : first, blocked, policy: rolePolicy(role) };
   });
   const unassigned = accounts.filter(account => !account.roles.length).map(account => `${account.name} serves no role; name it in a role or remove it`);
-  const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
+  const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => name === 'master'
+    ? 'role master is not configured; the durable loop launches no master session until graphyard master registry role set master ACCOUNT[,ACCOUNT…] --reason REASON names its accounts'
+    : `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
   return { revision: registry.revision, updatedAt: registry.updatedAt, configured: registry.roles.length > 0, host, runtimes: registry.runtimes, models: registry.models, accounts, roles,
     sessions: registry.sessions.slice(-30), refusals: registry.refusals, lastMutation: registry.lastMutation,
     attention: [...roles.filter(role => role.blocked).map(role => role.blocked!), ...unassigned, ...missing] };

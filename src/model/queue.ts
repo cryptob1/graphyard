@@ -1,9 +1,10 @@
-import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedCheckLift, ejectedTipRestore, ejectingCheck, ejectionReason, failedCheckEjectionPrefix, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
 import { behindBaseHold } from './behind-base.js';
 import { carriedApproval, currentCarry, describeGround } from './carry.js';
 import { currentEvidence } from './evidence.js';
+import { evaluateLandability, landabilityAudit, landabilityEjections, landabilityFamily, type LandabilityVerdict } from './landability.js';
 import { exactApproval } from './review.js';
 import { requiredProofs } from './bootstrap.js';
 import { defaultOptimisticMerge, defaultOptimisticExclude, optimisticEligibility, type OptimisticEligibility } from '../optimistic-merge.js';
@@ -17,20 +18,25 @@ export const queueSettings = (settings: number | MergeQueueSettings | undefined)
 /**
  * Queue membership is derived, never asserted: no command, operator, or administrator can
  * place, reorder, or hold a position. An entry leaves only by merging or by an explicit,
- * observed validation failure, and a re-entry always starts a new sequence at the back.
+ * observed validation failure, and a re-entry always starts a new sequence at the back — except
+ * a CI ejection a passing rerun on the same tip lifts (GY-1095), which returns to the place it held.
  *
  * The one entry that never joins is an optimistic one (GY-500): not queued, every gate passing on
  * its own head, and its files disjoint from everything the base changed since its bound base (see
  * optimisticEligibility). It merges head-bound at once, with no queue reason on its merge gate;
  * main is guarded after the merge instead. An entry that stops being eligible joins as any other.
  */
-export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, settings: number | MergeQueueSettings = defaultMergeBatchSize) {
+export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, settings: number | MergeQueueSettings = defaultMergeBatchSize, landability?: LandabilityVerdict) {
   const { batchSize, optimistic: optimisticMode, optimisticExclude, parallelTips } = queueSettings(settings);
   const history = [...(work.queueHistory ?? [])];
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
-  const record = (event: QueueHistoryEntry['event'], reason?: string, tip?: string) => {
-    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}), ...(event === 'ejected' ? { conflict: null } : {}) });
+  // The landability verdict is computed on demand from the live facts (GY-878): the caller's own
+  // evaluation of this pass, or a fresh one, never a verdict stored on an earlier record.
+  let computed = landability;
+  const verdict = () => computed ??= evaluateLandability(work, all, now);
+  const record = (event: QueueHistoryEntry['event'], reason?: string, tip?: string, audit?: QueueHistoryEntry['verdict']) => {
+    history.push({ at: now.toISOString(), event, sequence: queueSequence, ...(reason ? { reason } : {}), ...(tip ? { tip } : {}), ...(event === 'ejected' ? { conflict: null } : {}), ...(audit ? { verdict: audit } : {}) });
     if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
   };
   const probe = { ...work, queue, queueSequence, gates: [], violations: work.violations } as Work;
@@ -40,16 +46,41 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const peersOf = (subject: Work) => all.map(item => item.id === subject.id ? subject : item);
   const batchOf = (subject: Work) => queueBatch(subject, peersOf(subject), now.getTime(), batchSize, ciAppIds);
   const windowOf = (subject: Work) => parallelTips ? describeTipWindow(peersOf(subject), predictQueue(peersOf(subject), now.getTime()), parallelTips, ciAppIds).get(subject.key) ?? null : null;
-  const reason = queue ? ejectionReason(probe, ciAppIds, all, parallelTips ? null : batchOf(probe), windowOf(probe)) : null;
+  const reason = queue ? ejectionReason(probe, ciAppIds, all, parallelTips ? null : batchOf(probe), windowOf(probe), now, verdict()) : null;
   const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
   if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
+  const lift = !queue && eligible && ejection?.check ? ejectedCheckLift(work, all, ciAppIds) : null;
   if (queue && reason) {
-    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null };
-    record('ejected', reason, queue.speculation?.tip ?? candidate?.sha);
+    // A landability ejection is typed as one and records the verdict version and inputs it was
+    // refused by, so the audit trail shows what was judged and re-entry never reads the text.
+    const audit = landabilityEjections(verdict()).includes(reason) ? landabilityAudit(verdict()) : undefined;
+    // A required check failing on the tip is recorded as a typed fact with the failed run and the
+    // speculation the entry held, so a passing rerun on the same tip can lift it (GY-1095).
+    const failing = ejectingCheck(probe, ciAppIds);
+    const check = failing && candidate && reason.startsWith(failedCheckEjectionPrefix(failing.name))
+      ? { name: failing.name, runId: failing.run.id ?? null, tip: candidate.sha, speculation: queue.speculation ?? null } : null;
+    ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null,
+      family: audit ? 'landability' : null, ...(audit ? { verdict: audit } : {}), check };
+    record('ejected', reason, queue.speculation?.tip ?? candidate?.sha, audit);
     queue = null;
+  } else if (lift && ejection?.check) {
+    // A CI ejection whose check's newest run on the same tip now passes is lifted (GY-1095): the
+    // failure it was made for was superseded, so the entry re-enters at the sequence it held, with
+    // its speculation, and needs no new candidate. A rerun that failed again, another failing
+    // required check, or a changed tip keeps the ejection.
+    queue = { sequence: ejection.sequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: ejection.check.speculation };
+    queueSequence = Math.max(queueSequence, ejection.sequence);
+    history.push({ at: now.toISOString(), event: 'lifted', sequence: ejection.sequence, reason: lift.reason, tip: lift.tip, check: lift.check, runId: lift.run.id ?? null });
+    if (history.length > queueHistoryLimit) history.splice(0, history.length - queueHistoryLimit);
+    ejection = null;
   } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all)
     // A candidate ejected for a merge refusal a fresh approval has since answered re-enters (GY-831).
-    || ejection!.reason.startsWith(mergeRefusalEjectionPrefix) && !standingMergeRefusal(work))) {
+    || ejection!.reason.startsWith(mergeRefusalEjectionPrefix) && !standingMergeRefusal(work)
+    // A landability ejection is never sticky (GY-878): it holds the head out only while the verdict,
+    // recomputed now from live facts, still refuses; once it is landable the same head re-enters.
+    // Any other ejection keeps the head out until it changes, so a CI or review ejection does not
+    // churn in and out. The ejected tip is still restored to the item's own head first.
+    || landabilityFamily(ejection!) && !ejectedTipRestore(work, all) && verdict().verdict === 'landable')) {
     queueSequence = nextQueueSequence(all);
     queue = { sequence: queueSequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null };
     ejection = null;
@@ -117,7 +148,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const reasons = placement ? placement.reasons
     : work.observation?.merged || work.stage === 'done' ? []
     : waiting?.length ? [predecessorWaitText(work, waiting)]
-    : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]
+    : ejection ? [`Ejected from the merge queue: ${ejection.reason}; ${ejection.check ? `a passing rerun of ${ejection.check.name} on this tip lifts the ejection, or ` : ''}a new candidate re-enters at the back of the queue`]
     : eligible ? ['Candidate has not entered the merge queue'] : [];
   return { queue, queueSequence, ejection, history, reasons, placement, optimistic };
 }
@@ -138,6 +169,16 @@ export function queueEjectionRecord(work: Work, all: Work[], reason: string, now
     conflict: conflict ? { base: placement?.predictedBase ?? null } : null, ...(predecessors ? { predecessors } : {}) };
   const history = [...(work.queueHistory ?? []), { at, event: 'ejected' as const, sequence, reason, conflict: ejection.conflict, ...(work.queue!.speculation ? { tip: work.queue!.speculation.tip } : {}), ...(predecessors ? { predecessors } : {}) }].slice(-queueHistoryLimit);
   return { ejection, history };
+}
+
+/**
+ * The lift this evaluation just made (GY-1095), for the ledger: an entry unqueued before it that
+ * re-entered by a `lifted` history entry at `now`, naming the check, the passing run and the tip.
+ */
+export function liftedEjection(work: Pick<Work, 'queue' | 'queueHistory'>, queuedBefore: number | null, now: Date) {
+  const entry = work.queueHistory?.at(-1);
+  if (queuedBefore !== null || !work.queue || entry?.event !== 'lifted' || entry.at !== now.toISOString()) return null;
+  return { sequence: entry.sequence, check: entry.check ?? null, runId: entry.runId ?? null, tip: entry.tip ?? null, reason: entry.reason ?? null };
 }
 
 /**

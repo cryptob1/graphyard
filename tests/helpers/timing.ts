@@ -67,6 +67,8 @@ export interface TimingMeasurement {
   observationsAbove: number;
   distribution: { minMs: number; medianMs: number; maxMs: number };
   passed: boolean;
+  /** Set when the measurement went over its budget but inside the run's slack, so the assertion passed: the slack it passed within. */
+  toleratedBySlack?: number;
   at: string;
 }
 
@@ -108,12 +110,34 @@ export function recordTiming(measurement: TimingMeasurement, file = process.env[
 /**
  * Assert a wall-clock measurement against its budget. The measurement is recorded whether it
  * passes or fails, and a failure is a `TimingAssertionError` naming the measured value against
- * the budget, so nothing downstream has to guess that the red test was about time.
+ * the budget, so nothing downstream has to guess that the red test was about time. One the slack
+ * lets through is recorded with `toleratedBySlack`, so the timing report does not call a passing
+ * run over budget (GY-1040).
  */
 export function assertTiming(input: Parameters<typeof measureTiming>[0], file?: string) {
-  const measurement = recordTiming(measureTiming(input), file);
-  if (!measurement.passed) throw new TimingAssertionError(measurement);
+  const measured = measureTiming(input), slack = timingSlack();
+  const tolerated = !measured.passed && withinSlack(measured, slack);
+  const measurement = recordTiming(tolerated ? { ...measured, toleratedBySlack: slack } : measured, file);
+  if (!measurement.passed && !tolerated) throw new TimingAssertionError(measurement);
   return measurement;
+}
+/** Whether a recorded measurement failed its assertion: over budget and not let through by the slack. */
+export const failedTiming = (m: Pick<TimingMeasurement, 'passed' | 'toleratedBySlack'>) => !m.passed && m.toleratedBySlack === undefined;
+
+/**
+ * How far a shared CI runner may run past a timing budget before the assertion fails:
+ * `GRAPHYARD_TIMING_SLACK` (a multiplier, at least 1; default 1, so local runs keep the exact
+ * budget). On 2026-10-01 a 100-item cycle measured 20 072 ms against a 20 000 ms budget on a
+ * loaded runner and failed main's CI, and such misses ejected good candidates from the merge queue.
+ */
+export const timingSlackVariable = 'GRAPHYARD_TIMING_SLACK';
+export function timingSlack(env: Record<string, string | undefined> = process.env) {
+  const value = Number(env[timingSlackVariable]);
+  return Number.isFinite(value) && value >= 1 ? value : 1;
+}
+/** Whether an over-budget upper-bound measurement still sits inside the run's slack. */
+export function withinSlack(m: Pick<TimingMeasurement, 'measuredMs' | 'budgetMs' | 'comparison'>, slack = timingSlack()) {
+  return m.comparison === '<=' && m.measuredMs <= m.budgetMs * slack;
 }
 
 /** Read a timing record back; a missing file is a run that made no timing assertion. */

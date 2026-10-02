@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { GitHubChargeLedger } from './github-charges.js';
 
 /**
  * The GitHub adapter's response caches, persisted so a restart starts warm (github_cache,
@@ -6,38 +7,56 @@ import type pg from 'pg';
  * after each restart spent ~400 billable requests a minute re-reading answers that had not
  * changed. The in-memory maps in src/github.ts stay the hot layer; this is the cold one.
  *
- * - Immutable answers (ancestry of a SHA pair, a blob at a SHA, a history between two SHAs) are
+ * - Immutable answers (ancestry of a SHA pair, a blob at a SHA, a history between two SHAs, and
+ *   the whole response to a commit read by SHA or a compare of two exact SHAs, GY-806) are
  *   loaded once and never expire. ETag entries are loaded with their ETag and still revalidated
  *   with If-None-Match, which GitHub answers with a free 304.
+ * - Whole immutable responses are kept while they are used (GY-806): `lookup` answers a read the
+ *   hot layer has evicted, and every hit refreshes the row, so a SHA an open item or queue entry
+ *   still reads is asked of GitHub at most once. They have their own bound, apart from the other
+ *   kinds, so ETag churn never evicts them: the newest-used `maxImmutableRows` rows and
+ *   `maxImmutableBytes` of values. A compare keyed by a base tip that has moved on stops being
+ *   read, ages out, and is deleted; a value over `maxValueBytes` stays in the hot layer only.
  * - Reads happen once, at attach; writes are batched write-behind on a timer, one pool query at
  *   a time, so the cache never holds more than one of the pool's connections. Plain pool queries
  *   only: never inside a coordination transaction and never under the advisory lock.
- * - The table is pruned to the newest `maxRows` rows and `maxBytes` of values.
+ * - Every other kind is pruned to the newest `maxRows` rows and `maxBytes` of values.
+ * - A value over `maxValueBytes`, or a put past `maxPending` queued entries, is not persisted, for
+ *   every kind: the table and its write queue stay bounded however large a compare is.
  * - A database failure never fails an observation: the maps stay as they are and the adapter
  *   asks GitHub, exactly as it did before the cache was persisted.
  */
-export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history';
+export type GitHubCacheKind = 'etag' | 'ancestry' | 'blob' | 'history' | 'immutable';
+/** The map operations `load` needs; the adapter's etag and immutable maps are byte-bounded caches (src/github-response-cache.ts). */
+interface LoadableMap<V> { readonly size: number; has(key: string): boolean; set(key: string, value: V): unknown; delete(key: string): boolean; keys(): IterableIterator<string> }
 export interface GitHubCacheMaps {
-  etag: Map<string, { etag: string; value: any }>;
+  etag: LoadableMap<{ etag: string; value: any }>;
   ancestry: Map<string, boolean>;
   blob: Map<string, string | null>;
   history: Map<string, Set<string> | null>;
+  /** Optional so a caller that keeps no whole-response layer loads none of it. */
+  immutable?: LoadableMap<unknown>;
 }
-export interface GitHubCacheOptions { flushMs?: number; pruneMs?: number; maxRows?: number; maxBytes?: number; maxValueBytes?: number; maxPending?: number }
+export interface GitHubCacheOptions { flushMs?: number; pruneMs?: number; maxRows?: number; maxBytes?: number; maxValueBytes?: number; maxPending?: number; maxImmutableRows?: number; maxImmutableBytes?: number }
 type Pending = { kind: GitHubCacheKind; etag: string | null; value: string } | 'touch';
 
 export class GitHubCacheStore {
   readonly flushMs: number; readonly pruneMs: number; readonly maxRows: number; readonly maxBytes: number; readonly maxValueBytes: number; readonly maxPending: number;
+  readonly maxImmutableRows: number; readonly maxImmutableBytes: number;
   private pending = new Map<string, Pending>();
   private timer: NodeJS.Timeout | null = null;
   private flushing: Promise<void> | null = null;
   private prunedAt = 0;
   private reportedAt = 0;
+  /** The installation's billable charges across replicas (GY-806), on the same database and scope; the adapter attaches it with the cache. */
+  readonly charges: GitHubChargeLedger;
   /** `scope` separates installations that share one database; the adapter passes its installation id. */
   constructor(private pool: Pick<pg.Pool, 'query'>, private scope = '', options: GitHubCacheOptions = {}) {
+    this.charges = new GitHubChargeLedger(pool, scope);
     this.flushMs = options.flushMs ?? 5_000; this.pruneMs = options.pruneMs ?? 10 * 60_000;
     this.maxRows = options.maxRows ?? 20_000; this.maxBytes = options.maxBytes ?? 200 * 1024 * 1024;
     this.maxValueBytes = options.maxValueBytes ?? 1024 * 1024; this.maxPending = options.maxPending ?? 10_000;
+    this.maxImmutableRows = options.maxImmutableRows ?? 20_000; this.maxImmutableBytes = options.maxImmutableBytes ?? 128 * 1024 * 1024;
   }
   private key(kind: GitHubCacheKind, key: string) { return `${this.scope}:${kind}:${key}`; }
   private report(what: string, error: unknown) {
@@ -46,13 +65,13 @@ export class GitHubCacheStore {
     console.error(`GitHub cache ${what} failed; requests fall back to GitHub: ${error instanceof Error ? error.message : String(error)}`);
   }
   /** Fill the maps from the table, newest last so each map's insertion order stays its recency order. Never throws. */
-  async load(maps: GitHubCacheMaps, caps: Record<GitHubCacheKind, number>): Promise<number> {
+  async load(maps: GitHubCacheMaps, caps: Record<Exclude<GitHubCacheKind, 'immutable'>, number> & { immutable?: number }): Promise<number> {
     try {
       const prefix = `${this.scope.replace(/[\\%_]/g, '\\$&')}:%`;
       const rows = (await this.pool.query(`SELECT key, kind, etag, value FROM (
   SELECT key, kind, etag, value, updated_at, row_number() OVER (PARTITION BY kind ORDER BY updated_at DESC, key) AS n FROM github_cache WHERE key LIKE $1
-) t WHERE n <= CASE kind WHEN 'etag' THEN $2::int WHEN 'ancestry' THEN $3::int WHEN 'blob' THEN $4::int WHEN 'history' THEN $5::int ELSE 0 END
-ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.history])).rows;
+) t WHERE n <= CASE kind WHEN 'etag' THEN $2::int WHEN 'ancestry' THEN $3::int WHEN 'blob' THEN $4::int WHEN 'history' THEN $5::int WHEN 'immutable' THEN $6::int ELSE 0 END
+ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.history, maps.immutable ? caps.immutable ?? 0 : 0])).rows;
       let loaded = 0;
       for (const row of rows) {
         const kind = row.kind as GitHubCacheKind;
@@ -61,12 +80,13 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
         else if (kind === 'ancestry' && typeof row.value === 'boolean' && !maps.ancestry.has(key)) maps.ancestry.set(key, row.value);
         else if (kind === 'blob' && (typeof row.value === 'string' || row.value === null) && !maps.blob.has(key)) maps.blob.set(key, row.value);
         else if (kind === 'history' && (Array.isArray(row.value) || row.value === null) && !maps.history.has(key)) maps.history.set(key, row.value ? new Set(row.value.map(String)) : null);
+        else if (kind === 'immutable' && row.value !== null && row.value !== undefined && maps.immutable && !maps.immutable.has(key)) maps.immutable.set(key, row.value);
         else continue;
         loaded++;
       }
       for (const kind of Object.keys(caps) as GitHubCacheKind[]) {
-        const map = maps[kind] as Map<string, unknown>;
-        while (map.size > caps[kind]) map.delete(map.keys().next().value!);
+        const map = maps[kind] as LoadableMap<unknown> | undefined;
+        while (map && map.size > (caps[kind] ?? 0)) map.delete(map.keys().next().value!);
       }
       return loaded;
     } catch (error) { this.report('load', error); return 0; }
@@ -87,6 +107,14 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
     if (this.pending.has(id) || this.pending.size >= this.maxPending) return;
     this.pending.set(id, 'touch');
     this.schedule();
+  }
+  /** One entry, queued or stored, for a read the hot layer no longer holds; undefined when there is none. Never throws. */
+  async lookup(kind: GitHubCacheKind, key: string): Promise<any> {
+    const id = this.key(kind, key);
+    const queued = this.pending.get(id);
+    if (queued && queued !== 'touch') return JSON.parse(queued.value);
+    try { return (await this.pool.query('SELECT value FROM github_cache WHERE key = $1', [id])).rows[0]?.value; }
+    catch (error) { this.report('lookup', error); return undefined; }
   }
   private schedule() {
     if (this.timer) return;
@@ -118,19 +146,23 @@ ON CONFLICT (key) DO UPDATE SET kind=EXCLUDED.kind, etag=EXCLUDED.etag, value=EX
     }
     if (Date.now() - this.prunedAt >= this.pruneMs) await this.prune();
   }
-  /** Delete everything past the newest `maxRows` rows or `maxBytes` of values. Returns the rows removed; never throws. */
+  /**
+   * Delete entries past their bound, newest-used kept: whole immutable responses past `maxImmutableRows`
+   * rows or `maxImmutableBytes` of values, every other kind past `maxRows` or `maxBytes`. Returns the rows removed; never throws.
+   */
   async prune(): Promise<number> {
     this.prunedAt = Date.now();
     try {
       const result = await this.pool.query(`DELETE FROM github_cache c USING (
-  SELECT key, row_number() OVER w AS n, sum(pg_column_size(value)) OVER w AS bytes FROM github_cache WINDOW w AS (ORDER BY updated_at DESC, key)
-) r WHERE c.key = r.key AND (r.n > $1 OR r.bytes > $2)`, [this.maxRows, this.maxBytes]);
+  SELECT key, kind = 'immutable' AS whole, row_number() OVER w AS n, sum(pg_column_size(value)) OVER w AS bytes FROM github_cache
+  WINDOW w AS (PARTITION BY kind = 'immutable' ORDER BY updated_at DESC, key)
+) r WHERE c.key = r.key AND (CASE WHEN r.whole THEN r.n > $3 OR r.bytes > $4 ELSE r.n > $1 OR r.bytes > $2 END)`, [this.maxRows, this.maxBytes, this.maxImmutableRows, this.maxImmutableBytes]);
       return result.rowCount ?? 0;
     } catch (error) { this.report('prune', error); return 0; }
   }
-  /** Stop the timer and write what is queued. */
+  /** Stop the timers and write what is queued. */
   async close() {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    await this.flush();
+    await Promise.all([this.flush(), this.charges.close()]);
   }
 }
