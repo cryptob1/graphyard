@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -140,13 +140,17 @@ export const launcherRootUndetermined = (argv1: string | undefined = process.arg
  * The shared Git paths a confined session's linked worktree writes that may not exist yet — the
  * `graphyard/` branch namespace and its reflogs — plus an empty FETCH_HEAD for the fetches a
  * reviewer or producer runs from the coordinator root. Each is created before the confinement is
- * built, so coordinatorConfinement re-exposes it; the launcher itself is not confined.
+ * built, so coordinatorConfinement re-exposes it; the launcher itself is not confined. The paths
+ * resolve through `checkoutGitDirectory`/`checkoutWorktreeAdminDirectory`: when the coordinator is
+ * itself a linked worktree its `.git` is a pointer file, and creating them there would fail under a
+ * file instead of preparing the real common Git directory and the checkout's own worktree admin
+ * (GY-957, review finding).
  */
 export function prepareConfinedGitPaths(root: string): void {
-  const gitDir = join(root, '.git');
+  const gitDir = checkoutGitDirectory(root);
   if (!existsSync(gitDir)) return;
   for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')]) mkdirSync(path, { recursive: true });
-  const fetchHead = join(gitDir, 'FETCH_HEAD');
+  const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
   if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
 }
 /** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. The sandbox-claim check models the runtime's workspace root as its working directory (`cwd` when the pane starts elsewhere, GY-888); the read-only mount re-exposes the allocated `directory` separately, so a terminal reviewer or producer that starts from the coordinator root still gets its own checkout writable while the root stays read-only (GY-888, review finding). */
@@ -177,6 +181,8 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
   if (cwd === undefined) throw new Error(`${head}: the run has no working directory to confine around. Graphyard never starts a session unconfined.`);
   if (!bwrap) throw new Error(`${head}: bubblewrap (bwrap) is not installed. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap).`);
   if (mountNamespaceProbeResult(bwrap) === false) throw new Error(`${head}: this host refuses the unprivileged namespaces bubblewrap needs. Graphyard never starts a session unconfined; allow unprivileged user namespaces on this host.`);
+  const gitProblem = checkoutGitProblem(root);
+  if (gitProblem) throw new Error(`${head}: the Git directory it writes through cannot be resolved — ${gitProblem}. Graphyard never starts a session unconfined.`);
   prepareConfinedGitPaths(root);
   return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap });
 }
