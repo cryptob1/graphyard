@@ -1,6 +1,7 @@
-import { attributeTipFailure, baseRefreshConflict, blamedTipFailure, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, unattributedTipFailure, windowAttributionClause, windowBatchView } from '../merge-queue.js';
-import type { FailureAttribution, QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
+import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedTipRestore, ejectionReason, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
+import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
+import { attributeTipFailure, blamedTipFailure, unattributedTipFailure, windowAttributionClause, type FailureAttribution } from '../merge-queue.js';
 import { behindBaseHold } from './behind-base.js';
 import { carriedApproval, currentCarry, describeGround } from './carry.js';
 import { currentEvidence } from './evidence.js';
@@ -63,9 +64,10 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     // refused by, so the audit trail shows what was judged and re-entry never reads the text.
     const audit = landabilityEjections(verdict()).includes(reason) ? landabilityAudit(verdict()) : undefined;
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null,
-      family: audit ? 'landability' : null, ...(audit ? { verdict: audit } : {}),
-      ...(culprits ? { predecessors: culprits } : {}), ...(blamed ? { attribution: blamed.attribution } : attribution ? { attribution } : {}) };
+      family: audit ? 'landability' : null, ...(audit ? { verdict: audit } : {}) };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha, audit);
+    // A failure attributed on the tip records whom it blamed and the evidence (GY-471).
+    if (culprits || blamed || attribution) ejection = { ...ejection, ...(culprits ? { predecessors: culprits } : {}), ...(blamed ? { attribution: blamed.attribution } : attribution ? { attribution } : {}) };
     queue = null;
   } else if (!queue && eligible && (!(ejection && candidate && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision) || predecessorReentry(work, all)
     // A candidate ejected for a merge refusal a fresh approval has since answered re-enters (GY-831).
@@ -139,9 +141,11 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
       }
     }
   }
+  // The reasons describe the ejection this evaluation made, which a predecessor wait reads (GY-471).
+  work = { ...work, queueEjection: ejection };
   const reasons = placement ? placement.reasons
     : work.observation?.merged || work.stage === 'done' ? []
-    : waiting?.length ? [predecessorWaitText({ ...work, queueEjection: ejection } as Work, waiting)]
+    : waiting?.length ? [predecessorWaitText(work, waiting)]
     : ejection ? [`Ejected from the merge queue: ${ejection.reason}; a new candidate re-enters at the back of the queue`]
     : eligible ? ['Candidate has not entered the merge queue'] : [];
   return { queue, queueSequence, ejection, history, reasons, placement, optimistic };
