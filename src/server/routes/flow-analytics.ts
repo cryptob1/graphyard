@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { demand, stages } from '../../model.js';
-import { flowDrilldown, flowExport, flowWindowMessage, flowWindows, invalidateFlowReports, pooledFlowReport, resolvedProductionEnvironment, type FlowWindow } from '../../flow-analytics.js';
+import { flowDrilldown, flowExport, pooledFlowDrilldown, flowWindowMessage, flowWindows, invalidateFlowReports, pooledFlowReport, resolvedProductionEnvironment, type FlowWindow } from '../../flow-analytics.js';
 import { Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** Roles that may see exact pull-request, commit and evidence identities behind an aggregate. */
@@ -52,10 +52,12 @@ export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
       const query = { ...flowQuery(url, await resolvedProductionEnvironment(engine.store.reportPool)), production: production?.status() ?? null };
       // The report cache answers for up to a minute per window and filter set; the bounded catch-up
       // runs on the report pool on every read (GY-491), so a new step event recomputes at once (GY-705).
+      const request = { metric: query.metric ?? 'bottleneck', key: query.key ?? null, authorized: auditRoles.includes(actor.role) };
+      // A drill-down reads only the kinds its rows derive from (`pooledFlowDrilldown`), never the report's whole scan.
+      if (part === 'drilldown') return pooledFlowDrilldown(engine.store, query, request);
       const { dataset, report } = await pooledFlowReport(engine.store, query);
       if (!part) return report;
-      const drilldown = flowDrilldown(dataset, report, { metric: query.metric ?? 'bottleneck', key: query.key ?? null, authorized: auditRoles.includes(actor.role) });
-      if (part === 'drilldown') return drilldown;
+      const drilldown = flowDrilldown(dataset, report, request);
       const payload = flowExport(report, drilldown, query.format);
       res.writeHead(200, { 'Content-Type': query.format === 'csv' ? 'text/csv; charset=utf-8' : 'application/json', 'Content-Disposition': `attachment; filename="graphyard-flow-${drilldown.metric}-${query.days}d.${query.format}"` });
       res.end(payload);
