@@ -26,7 +26,7 @@ import type { DecidePayload } from '../src/runner/payloads.js';
 import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import type { RunOptions, RunRecord, RunResult, Runner } from '../src/runner/types.js';
-import type { DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { diagnosisLimitHoldMs, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { branchReport, buildMasterStatus } from '../src/master/status.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAttention } from '../src/daemon/faults.js';
@@ -177,22 +177,34 @@ const basePlan = {
 };
 /** GY-430: the main day's item whose auto-merge GitHub holds BLOCKED past the bound: one with no other merge-path fault. */
 const blockedMergeItem = 6;
+/**
+ * GY-1092: the main day's diagnostician provider is spent from the start until past the first
+ * recurring-fault item's filing, naming no reset, so the loop's first diagnoses wait the hold, one
+ * probe after it is refused again, and the next probe finds the provider answering.
+ */
+const diagnosisLimit = { from: 0, to: 3 * hour + 30 * minute };
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
 
+/** One diagnostician run the soak's fake started: whose, which attempt, when, and whether its provider refused it for its limit. */
+interface DiagnosisRun { subject: string; attempt: 'primary' | 'fallback'; at: number; refused: boolean }
 /**
  * The diagnostician's answer, derived the way a read-only session would from the evidence the
  * prompt carries: the cause is the held integration job standing for the class, and the answer is
  * the newest open item listed as covering the cause. The payload goes through the options' own
  * validation, exactly as a real run's tool call does.
  */
-function diagnosisRunner(seen: { subject: string }[]): Runner {
+function diagnosisRunner(seen: DiagnosisRun[], attempt: 'primary' | 'fallback', refuses: () => boolean): Runner {
   return {
     name: 'soak-diagnostician',
     start<T>(prompt: string, options: RunOptions<T>) {
       const given = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { subject: string; faultClass: string; instances: { at: string }[]; openItems: string[] };
-      seen.push({ subject: given.subject });
+      const refused = refuses();
+      seen.push({ subject: given.subject, attempt, at: clock.now(), refused });
+      // GY-1092: the provider's spent account, as Pi reports it — the run makes no call and ends on the provider's 429.
+      if (refused) return { id: `soak-diagnosis-${seen.length}`, events: [], onEvent: () => () => {}, cancel() {},
+        result: async (): Promise<RunResult<T>> => ({ ok: false, failure: { reason: 'no-payload', detail: 'the run ended without a graphyard_diagnose call (last error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted"})' }, payloads: [] }) };
       const open = given.openItems.map(line => /^GY-(\d+)/.exec(line)?.[1]).filter((key): key is string => !!key && `GY-${key}` !== given.subject);
       const payload = {
         subject: given.subject,
@@ -306,7 +318,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -799,10 +811,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // its filing and deciding ride the same routes the production wiring uses, as the master's
   // operator-agent identity.
   const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
-  const diagnosed: { subject: string }[] = [];
+  const diagnosed: DiagnosisRun[] = [];
+  // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
+  const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
   const diagnostician: DiagnosticianEffects = {
     settings, cwd: '/tmp/soak/checkout',
-    runner: async attempt => ({ runner: diagnosisRunner(diagnosed), runtime: `soak-${attempt}`, model: attempt === 'primary' ? settings.model : settings.fallbackModel }),
+    runner: async attempt => ({ runner: diagnosisRunner(diagnosed, attempt, limited), runtime: `soak-${attempt}`, model: attempt === 'primary' ? settings.model : settings.fallbackModel }),
     context: async () => ({ journal: [`${new Date(clock.now()).toISOString()} graphyard-master: 1 integration job(s) held on a permission shortfall`], serverLog: [`${new Date(clock.now()).toISOString()} POST /api/status 200`], pullRequests: [] }),
     file: (input, key) => engine.execute(principals.operatorAgent, 'create', null, input, key),
     decide: (work, action, reason, input = {}) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
@@ -1308,7 +1322,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
-    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, mergeStallSightings, restoreLines, master, lanesSeen, laneApplications, approverWorks };
 }
 
@@ -1341,9 +1355,9 @@ function assertLaunchesConfined(day: { confined: { role: string; key: string; di
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, plan: { blockedMerge: blockedMergeItem } });
+  const day = await simulateDay({ hours, plan: { blockedMerge: blockedMergeItem }, diagnosisLimit });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -1524,6 +1538,27 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(configurationDiagnosis.state, 'answered', `the held-job diagnosis was answered: ${configurationDiagnosis.detail}`);
   assert.deepEqual(configurationDiagnosis.runs.map(entry => [entry.model, entry.result]), [[diagnosisModel, 'diagnosed']], 'one primary run diagnosed it, no fallback needed');
   assert.ok(!(await store.list()).some(item => /Filed by the master loop from the diagnostician's diagnosis/.test(item.description ?? '')), 'the covering diagnoses filed no fix item');
+  // GY-1092: the diagnostician's provider was spent for the day's first hours, naming no reset. The
+  // loop filed no loop fault for it, launched nothing while the hold stood, probed the provider with
+  // one subject per hold window, and once the provider answered ran every waiting subject once more.
+  const refusedRuns = diagnosisRuns.filter(run => run.refused), primaries = diagnosisRuns.filter(run => run.attempt === 'primary');
+  assert.ok(refusedRuns.length >= 2, `the provider refused the day's first diagnoses: ${JSON.stringify(diagnosisRuns.slice(0, 6))}`);
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:diagnosis').map(entry => entry.text), [], 'a provider limit files no loop fault');
+  for (const [index, run] of primaries.entries()) {
+    if (!run.refused) continue;
+    const next = primaries.slice(index + 1).find(later => later.at > run.at);
+    if (next) assert.ok(next.at - run.at >= diagnosisLimitHoldMs, `no diagnosis launched ${Math.round((next.at - run.at) / minute)} min after a refusal, inside the hold: ${next.subject}`);
+  }
+  const window = diagnosisLimit.to - (refusedRuns[0].at - dayStart);
+  assert.ok(primaries.filter(run => run.refused).length <= Math.ceil(window / diagnosisLimitHoldMs) + 1, `one probe per hold window while the provider is spent: ${primaries.filter(run => run.refused).length}`);
+  for (const subject of new Set(primaries.map(run => run.subject))) {
+    const own = primaries.filter(run => run.subject === subject);
+    assert.ok(own.length <= own.filter(run => run.refused).length + 1, `${subject} was run again once per refusal, no more: ${own.length} launches`);
+    assert.equal(own.at(-1)!.refused, false, `${subject} was run again once the provider answered`);
+  }
+  const answered = primaries.find(run => !run.refused)!;
+  assert.deepEqual([...new Set(primaries.filter(run => run.at < answered.at).map(run => run.subject))], [refusedRuns[0].subject], 'only the probe ran until the provider answered: every other subject was held');
+  assert.ok(Object.values(state.diagnoses).every(entry => entry.state !== 'waiting'), 'no diagnosis is left waiting at the day\'s end');
   assert.ok(approverPanes.length > 0, 'the day launched approver sessions for its decisions');
   assert.deepEqual(approverPanes.filter(pane => !herdrClosed.includes(pane)), [], `every approver session the day launched was closed once its decision settled: ${JSON.stringify(herdrClosed)}`);
   assert.ok(cycles > 24 * 6, `the loop cycled through the day (${cycles} cycles)`);

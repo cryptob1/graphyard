@@ -6,7 +6,7 @@ import { faultClassItem, type FaultClass, type FaultInstance } from '../src/mode
 import { providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { actionableSubjects, emptyDaemonState, loopAttention, loopLiveness, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisStep, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisStep, diagnosticianHeldUntil, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import type { RunFailure, RunOptions, RunResult, Runner } from '../src/runner/types.js';
@@ -158,6 +158,53 @@ test('manual:fault-class-loop — all nine refused in one cycle file no fault, a
   await step(state, effects, work, refusedAt + 2 * hour);
   assert.equal(starts.length, 18, 'the new subject waits for the same reset');
   assert.equal(state.diagnoses['GY-1092'], undefined);
+});
+
+test('manual:fault-class-loop — after the reset one subject probes the provider: a still-spent provider costs one run pair per reset, and the rest follow its answer', async () => {
+  const state = emptyDaemonState(config()), starts: string[] = [];
+  const work = [...diagnosisInstances.map(instance => recurring(instance.subject, instance.faultClass, refusedAt - minute)), covering];
+  let answer: 'refuse' | 'diagnose' = 'refuse';
+  const effects = diagnostician(() => answer, starts);
+  await step(state, effects, work, refusedAt);
+  await step(state, effects, work, refusedAt + 1000);
+  assert.equal(starts.length, 18);
+  // The reset passes with the provider still spent: one probe, refused again, and the hold renewed.
+  const after = Date.parse(reset) + 1000;
+  await step(state, effects, work, after);
+  await step(state, effects, work, after + 1000);
+  assert.deepEqual(starts.slice(18), ['GY-1083', 'GY-1083'], 'one subject probed, primary and fallback');
+  assert.equal(diagnosticianHeldUntil(state, after + 2000), iso(after + 1000 + diagnosisLimitHoldMs), "the probe's refusal renews the hour's hold: the reset it names is past");
+  await step(state, effects, work, after + 30 * minute);
+  assert.equal(starts.length, 20, 'nothing launched while the renewed hold stands');
+  // The next probe is answered: it alone runs that cycle, and every other waiting subject follows.
+  answer = 'diagnose';
+  const recovered = after + diagnosisLimitHoldMs + 2000;
+  await step(state, effects, work, recovered);
+  assert.equal(starts.length, 21, 'one probe after the renewed hold');
+  await step(state, effects, work, recovered + 1000);
+  await step(state, effects, work, recovered + 2000);
+  assert.equal(starts.length, 29, 'the eight others each ran once on the answered provider');
+  assert.ok(Object.values(state.diagnoses).every(entry => entry.state !== 'waiting'));
+  assert.deepEqual(diagnosisFaults(state), []);
+});
+
+test('manual:fault-class-loop — the hold is the latest reset any waiting diagnosis holds, not the newest refusal\'s', () => {
+  const state = emptyDaemonState(config());
+  const entry = (subject: string, updatedAt: number, retryAt: number) => ({ subject, kind: 'recurring', faultClass: 'loop', work: subject, state: 'waiting', startedAt: iso(updatedAt), updatedAt: iso(updatedAt),
+    runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: iso(retryAt), detail: '' }) as DaemonState['diagnoses'][string];
+  state.diagnoses['GY-1083'] = entry('GY-1083', refusedAt, refusedAt + 3 * hour);
+  state.diagnoses['GY-1084'] = entry('GY-1084', refusedAt + minute, refusedAt + hour);
+  assert.equal(diagnosticianHeldUntil(state, refusedAt + 2 * hour), iso(refusedAt + 3 * hour));
+});
+
+test('manual:fault-class-loop — a limit phrase in an exit\'s stderr is no provider refusal: the run is a genuine failure', async () => {
+  const state = emptyDaemonState(config()), starts: string[] = [];
+  const effects = { ...diagnostician(() => 'refuse', starts), runner: async () => ({ runtime: 'pi', model: 'm', runner: { name: 'pi', start: <T>() => ({ id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {},
+    result: async (): Promise<RunResult<T>> => ({ ok: false, failure: { reason: 'exit', detail: 'pi exited with code 1: the agent wrote "HTTP 429: usage limit reached" into its notes' }, payloads: [] }) }) } as Runner }) };
+  await step(state, effects, [recurring('GY-1085', 'scope', refusedAt)], refusedAt);
+  await step(state, effects, [recurring('GY-1085', 'scope', refusedAt)], refusedAt);
+  assert.equal(state.diagnoses['GY-1085'].state, 'failed');
+  assert.equal(diagnosisFaults(state).length, 1);
 });
 
 test('manual:fault-class-loop — a limit naming no reset waits the hold; a run that fails any other way is still a loop fault', async () => {

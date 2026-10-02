@@ -54,7 +54,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows the recommendation, a differing answer reworks, failure never blocks; product questions need a human.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. A diagnosis its provider refuses for quota or rate (429, a limit notice) waits in `daemon.diagnoses` until the named reset (else an hour), launches nothing else meanwhile, and is no loop fault.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. A diagnosis its provider refuses for quota or rate (429, a limit notice) waits in `daemon.diagnoses` until the latest named reset (else an hour) and is no loop fault; nothing else launches meanwhile, then one probe runs and the rest follow once it is answered.
 
 ## Machine-filed backlog
 
