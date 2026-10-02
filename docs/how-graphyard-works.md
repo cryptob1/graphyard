@@ -28,7 +28,7 @@ Every lane requires `e2e:` proofs and inherited bootstrap obligations; low and m
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the operator supervises one worker while gates activate; then the master dispatches many, each in its own worktree.
+Text equivalent: in bootstrap the human operator supervises one worker while gates activate; then the master dispatches many, each in its own worktree.
 
 ![Authority held by the operator, Graphyard, Herdr sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
@@ -40,7 +40,7 @@ Text equivalent: the operator sends human-only decisions; Herdr hosts master, sl
 
 Text equivalent: callers use the API; the engine applies each mutation in one locked Postgres transaction; the reconciliation worker syncs GitHub, publishes the check and merges; webhooks only wake jobs.
 
-- Gates deterministically check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change voids evidence.
+- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change voids evidence.
 - Each claim bumps the epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; the latest trusted record per proof and candidate wins, even a failure.
 - History is append-only (routine rows compacted after retention); a same-day retry replays.
