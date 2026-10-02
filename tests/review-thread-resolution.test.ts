@@ -7,8 +7,8 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { listedThreadLimit, threadSection } from '../src/review-threads.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
+import { canonicalThreadIds, fileFollowUpThreads, listedThreadLimit, readUnresolvedThreads, threadSection, unaccountedThreads } from '../src/review-threads.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewHistory, reviewPrompt, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -299,5 +299,133 @@ test('unit:approval-accounts-for-listed-threads — an approval that leaves a li
     assert.equal(complete.verdict?.state, 'APPROVED');
     assert.deepEqual(dismissed.length, 1, 'a complete approval is never withdrawn');
     assert.deepEqual(complete.threadResolution?.named, ['PRRT_fixed0001', 'PRRT_bot00001']);
+  } finally { await cleanup(); }
+});
+
+// GY-959: reviewers quote the same threads under the other IDs GitHub shows them — each comment's
+// PRRC_ node ID or its REST database ID. A listed thread named by any of them is accounted for, and
+// the loop still acts only on the canonical PRRT_ thread ID.
+const aliased = (id: string, aliases: string[]) => ({ ...listedThread(id), aliases });
+const aliasedListing = async () => [aliased('PRRT_node00001', ['PRRC_comment01', 'PRRC_comment02', '4129874805']), aliased('PRRT_rest00001', ['PRRC_comment03', '4129874810']), aliased('PRRT_plain0001', ['PRRC_comment04'])];
+/** GitHub for the alias checks: each approval by id, the PR's threads with their comment IDs, and the resolve mutation. */
+function aliasedGithub(bodies: Record<number, string>) {
+  const resolved: string[] = [];
+  const nodes = (ids: string[]) => ids.map(id => /^\d+$/.test(id) ? { id: `PRRC_rest${id}`, databaseId: Number(id) } : { id, databaseId: null });
+  const run = (_command: string, args: string[]) => {
+    const id = /pulls\/64\/reviews\/(\d+)$/.exec(args[1] ?? '')?.[1];
+    if (id) return JSON.stringify({ id: Number(id), state: 'APPROVED', commit_id: H, user: { login: reviewer }, submitted_at: submittedAt, body: bodies[Number(id)] });
+    const query = args.find(arg => arg.startsWith('query=')) ?? '';
+    if (query.includes('resolveReviewThread')) { const thread = args.find(arg => arg.startsWith('thread='))!.slice('thread='.length); resolved.push(thread); return JSON.stringify({ data: { resolveReviewThread: { thread: { id: thread, isResolved: true } } } }); }
+    if (query.includes('reviewThreads')) return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      ['PRRT_node00001', ['PRRC_comment01', 'PRRC_comment02']], ['PRRT_rest00001', ['PRRC_comment03']], ['PRRT_plain0001', ['PRRC_comment04']], ['PRRT_unlisted1', ['PRRC_unlisted01']]].map(([thread, comments]) =>
+      ({ id: thread, isResolved: resolved.includes(thread as string), isOutdated: false, path: 'src/a.ts', line: 3, comments: { nodes: [{ author: { login: 'lead' }, body: 'finding', createdAt: '2026-09-23T11:00:00Z' }] }, commentIds: { nodes: nodes(comments as string[]) } })) } } } } });
+    throw new Error(`unexpected gh ${args.join(' ')}`);
+  };
+  return { run, resolved };
+}
+
+test('unit:approval-accounts-for-comment-ids — a listed thread named on a closing line by its PRRC_ comment node ID or REST comment ID is accounted for; the approval stands and only canonical thread IDs are resolved', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: aliasedListing });
+    const launched = (await readReviewLedger(root)).reviews[0];
+    // The session record keeps the launch's own comment IDs: the check reads them with no further GitHub call.
+    assert.deepEqual(launched.threadAliases, { PRRT_node00001: ['PRRC_comment01', 'PRRC_comment02', '4129874805'], PRRT_rest00001: ['PRRC_comment03', '4129874810'], PRRT_plain0001: ['PRRC_comment04'] });
+    const gh = aliasedGithub({ 77: 'AC-1 met.\nResolved threads: PRRC_comment02 4129874810\nFollow-up threads: none\nOverridden threads: PRRT_plain0001' });
+    const dismissed: number[] = [];
+    const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, dismiss: async (_record, reviewId) => { dismissed.push(reviewId); } });
+    assert.deepEqual(dismissed, [], 'an approval naming every listed thread under some alias is never withdrawn');
+    const record = settled.reviews[0];
+    assert.equal(record.state, 'completed', record.resolution);
+    assert.equal(record.verdict?.state, 'APPROVED');
+    assert.equal(record.unaccounted, undefined);
+    assert.deepEqual(record.threadResolution?.named, ['PRRT_node00001', 'PRRT_rest00001', 'PRRT_plain0001'], 'the named threads are recorded under their canonical IDs');
+    assert.deepEqual(gh.resolved.sort(), ['PRRT_node00001', 'PRRT_plain0001', 'PRRT_rest00001'], 'only canonical thread IDs are resolved, never a comment ID');
+  } finally { await cleanup(); }
+});
+
+test('unit:approval-accounts-for-comment-ids — aliases widen nothing: an unlisted thread\'s comment ID accounts for nothing, prose alone accounts for nothing, and the approval is withdrawn', async () => {
+  for (const scenario of [
+    { name: 'unlisted alias', body: 'AC-1 met.\nResolved threads: PRRC_comment01 4129874810\nFollow-up threads: PRRC_unlisted01\nOverridden threads: none', unaccounted: ['PRRT_plain0001'] },
+    { name: 'prose only', body: 'AC-1 met. PRRT_plain0001 (PRRC_comment04) is fixed in head.\nResolved threads: PRRT_node00001 4129874810\nFollow-up threads: none\nOverridden threads: none', unaccounted: ['PRRT_plain0001'] },
+    { name: 'no alias at all', body: 'AC-1 met.\nResolved threads: none\nFollow-up threads: none\nOverridden threads: none', unaccounted: ['PRRT_node00001', 'PRRT_rest00001', 'PRRT_plain0001'] },
+  ]) {
+    const { root, cleanup } = await boundMaster();
+    try {
+      await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: aliasedListing });
+      const gh = aliasedGithub({ 77: scenario.body });
+      const dismissed: { reviewId: number; message: string }[] = [];
+      const settled = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, dismiss: async (_record, reviewId, message) => { dismissed.push({ reviewId, message }); } });
+      assert.deepEqual(dismissed.map(entry => entry.reviewId), [77], scenario.name);
+      assert.ok(dismissed[0]!.message.includes(scenario.unaccounted.join(', ')), `${scenario.name}: ${dismissed[0]!.message}`);
+      const record = settled.reviews[0];
+      assert.equal(record.state, 'failed', `${scenario.name}: recorded unanswered, so the request is relaunched`);
+      assert.deepEqual(record.unaccounted, scenario.unaccounted, scenario.name);
+      assert.deepEqual(gh.resolved, [], `${scenario.name}: an incomplete approval resolves nothing`);
+    } finally { await cleanup(); }
+  }
+});
+
+test('unit:approval-accounts-for-comment-ids — canonical mapping maps only listed threads\' aliases, and follow-up filing files the canonical thread', async () => {
+  const aliases = { PRRT_node00001: ['PRRC_comment01', '4129874805'] };
+  assert.deepEqual(canonicalThreadIds(['PRRC_comment01', '4129874805', 'PRRT_node00001', 'PRRC_unlisted01'], ['PRRT_node00001'], aliases), ['PRRT_node00001', 'PRRC_unlisted01']);
+  assert.deepEqual(canonicalThreadIds(['PRRC_comment01'], ['PRRT_other0001'], aliases), ['PRRC_comment01'], 'an alias of a thread the launch did not list names nothing');
+  assert.deepEqual(unaccountedThreads('Resolved threads: 4129874805\nFollow-up threads: none\nOverridden threads: none', ['PRRT_node00001'], true, aliases), []);
+  assert.deepEqual(unaccountedThreads('Resolved threads: 4129874805\nFollow-up threads: none\nOverridden threads: none', ['PRRT_node00001'], true), ['PRRT_node00001'], 'without the recorded aliases a comment ID accounts for nothing');
+  const gh = aliasedGithub({ 77: 'AC-1 met.\nResolved threads: none\nFollow-up threads: PRRC_comment03 PRRC_unlisted01\nOverridden threads: none' });
+  const replies: string[] = [];
+  const run = (command: string, args: string[]) => {
+    const query = args.find(arg => arg.startsWith('query=')) ?? '';
+    if (query.includes('addPullRequestReviewThreadReply')) { replies.push(args.find(arg => arg.startsWith('thread='))!.slice('thread='.length)); return JSON.stringify({ data: { addPullRequestReviewThreadReply: { comment: { id: 'PRRC_reply' } } } }); }
+    if (query.includes('comments(first:100')) return JSON.stringify({ data: { node: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
+    return gh.run(command, args);
+  };
+  const filing = await fileFollowUpThreads({ repository: 'owner/project', key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77, reviewer, listed: ['PRRT_node00001', 'PRRT_rest00001', 'PRRT_plain0001'],
+    aliases: { PRRT_rest00001: ['PRRC_comment03', '4129874810'] } }, run, async () => ({ key: 'GY-900' }), new Date('2026-09-23T12:30:00Z'));
+  assert.deepEqual(filing.named, ['PRRT_rest00001', 'PRRC_unlisted01']);
+  assert.deepEqual(filing.threads.map(thread => thread.id), ['PRRT_rest00001'], 'the canonical thread is filed');
+  assert.ok(filing.refused.some(entry => entry.startsWith('PRRC_unlisted01: not listed to the reviewer at launch')));
+  assert.deepEqual(replies, ['PRRT_rest00001']);
+  assert.deepEqual(gh.resolved, ['PRRT_rest00001'], 'the follow-up thread is resolved under its canonical ID');
+});
+
+test('unit:thread-section-shows-comment-ids — the launch\'s thread read captures each thread\'s comment node IDs and REST IDs, and the prompt shows them beside the thread ID', async () => {
+  const queries: string[] = [];
+  const run = (_command: string, args: string[]) => {
+    queries.push(args.find(arg => arg.startsWith('query='))!);
+    return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+      { id: 'PRRT_kwDOUZby-s6m87lZ', isResolved: false, isOutdated: false, path: 'src/a.ts', line: 3, comments: { nodes: [{ author: { login: 'lead' }, body: 'finding', createdAt: '2026-09-23T11:00:00Z' }] },
+        commentIds: { nodes: [{ id: 'PRRC_kwDOUZby-s72InX8', databaseId: 4129874805 }, { id: 'PRRC_kwDOUZby-s72InYD', databaseId: 4129874810 }] } },
+      { id: 'PRRT_bare00001', isResolved: false, isOutdated: false, path: 'src/b.ts', line: null, comments: { nodes: [] } }] } } } } });
+  };
+  const threads = await readUnresolvedThreads('owner/project', 64, run);
+  assert.match(queries[0]!, /commentIds: comments\(first: \d+\) \{ nodes \{ id databaseId \} \}/);
+  assert.deepEqual(threads[0]!.aliases, ['PRRC_kwDOUZby-s72InX8', '4129874805', 'PRRC_kwDOUZby-s72InYD', '4129874810']);
+  assert.equal(threads[1]!.aliases, undefined);
+  const section = threadSection(H, threads);
+  assert.ok(section.includes('[1] PRRT_kwDOUZby-s6m87lZ (comment IDs PRRC_kwDOUZby-s72InX8 4129874805 PRRC_kwDOUZby-s72InYD 4129874810) by lead on src/a.ts:3'), section);
+  assert.ok(section.includes('[2] PRRT_bare00001 by an unknown author on src/b.ts'), section);
+  assert.match(section, /one of its comment IDs shown beside it names the same thread, and a comment ID of any other thread names nothing/);
+});
+
+test('unit:relaunched-reviewer-prompt-names-unaccounted-threads — the attempt after an unaccounted-threads withdrawal is told which threads the prior approval left unaccounted, and why it was withdrawn', async () => {
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: aliasedListing });
+    const gh = aliasedGithub({ 77: 'AC-1 met; PRRT_plain0001 is fixed in head.\nResolved threads: none\nFollow-up threads: PRRC_comment01 4129874810\nOverridden threads: none' });
+    const config = await loadMasterConfig(root);
+    const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, dismiss: async () => {} });
+    const withdrawn = settled.reviews[0];
+    assert.deepEqual(withdrawn.unaccounted, ['PRRT_plain0001']);
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: aliasedListing });
+    const relaunched = (await readReviewLedger(root)).reviews.find(record => record.id !== withdrawn.id)!;
+    assert.deepEqual(relaunched.reviewRound?.withdrawn, { reviewId: 77, threads: ['PRRT_plain0001'] });
+    const prompt = reviewPrompt(config, { key: 'GY-64', pr: 64, sha: H, baseSha: B, policyRevision: 1 }, undefined, { unresolved: await aliasedListing() }, work().criteria, relaunched.reviewRound);
+    assert.match(prompt, /A previous approval of this head, review 77, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread PRRT_plain0001/);
+    assert.match(prompt, /a thread described only in prose[^.]*is not accounted for/);
+    // A launch with no such withdrawal says nothing of one.
+    assert.doesNotMatch(reviewPrompt(config, { key: 'GY-64', pr: 64, sha: H, baseSha: B, policyRevision: 1 }, undefined, { unresolved: await aliasedListing() }, work().criteria, { changesRequested: 0 }), /was withdrawn by Graphyard/);
+    // A head that changed since starts clean: the withdrawal of another head is not carried.
+    assert.equal(reviewHistory((await readReviewLedger(root)).reviews, { key: 'GY-64', pr: 64, sha: H2, policyRevision: 1 }, reviewer).withdrawn, undefined);
   } finally { await cleanup(); }
 });
