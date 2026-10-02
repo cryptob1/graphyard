@@ -90,8 +90,8 @@ test('unit:worker-session-scoped-push-credential — a worker launched under its
     const issued = await issuePushCredential(services(leased()), worker, 'GY-999', { epoch: 4 }, now);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, 'https://api.github.com/app/installations/5678/access_tokens');
-    assert.deepEqual(requests[0].body, { repositories: ['project'], permissions: { contents: 'write', pull_requests: 'write' } }, 'one repository, and only the two permissions a push and its pull request need');
-    assert.deepEqual(workerPushPermissions, { contents: 'write', pull_requests: 'write' });
+    assert.deepEqual(requests[0].body, { repositories: ['project'], permissions: { contents: 'write', pull_requests: 'write', workflows: 'write' } }, 'one repository, and only the permissions a push, its pull request and a base sync that touched a workflow need');
+    assert.deepEqual(workerPushPermissions, { contents: 'write', pull_requests: 'write', workflows: 'write' });
     const leaseBound = Date.parse(claimedAt) + roleSessionMaximumMs.implementation;
     assert.equal(issued.leaseBound, new Date(leaseBound).toISOString());
     assert.ok(Date.parse(issued.expiresAt) <= leaseBound, 'the credential expires no later than the lease bound');
@@ -367,12 +367,12 @@ test('GY-1066 — no worker token from a merge-queue bypass App, the lease check
   const directory = await temporaryDirectory('push-credential-followups');
   try {
     const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-    let rules: unknown = [], ruleset: unknown = null, mints = 0, revokeStatus = 204;
+    let rules: unknown = [], ruleset: unknown = null, rulesetStatus = 404, mints = 0, revokeStatus = 204;
     const revocations: string[] = [];
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       const target = String(url);
       if (target.includes('/rules/branches/')) return new Response(JSON.stringify(rules), { status: 200 });
-      if (/\/rulesets\/\d+$/.test(target)) return ruleset ? new Response(JSON.stringify(ruleset), { status: 200 }) : new Response('{"message":"Not Found"}', { status: 404 });
+      if (/\/rulesets\/\d+$/.test(target)) return ruleset ? new Response(JSON.stringify(ruleset), { status: 200 }) : new Response('{"message":"unavailable"}', { status: rulesetStatus });
       if (target.endsWith('/installation/token')) { revocations.push(String((init?.headers as Record<string, string>).Authorization)); return new Response(null, { status: revokeStatus }); }
       if (!target.endsWith('/access_tokens')) throw new Error(`unexpected request ${target}`);
       if (!init?.body) return new Response(JSON.stringify({ token: token('client'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: {} }), { status: 201 });
@@ -388,7 +388,14 @@ test('GY-1066 — no worker token from a merge-queue bypass App, the lease check
     ruleset = { id: 77, current_user_can_bypass: 'pull_requests_only' };
     await assert.rejects(github.mintPushToken(), /may bypass the merge queue on main \(ruleset 77: pull_requests_only\)/);
     ruleset = null;
-    await assert.rejects(github.mintPushToken(), /bypass actors of the merge queue on main \(ruleset 77\) cannot be read/);
+    await assert.rejects(github.mintPushToken(), (error: any) => error.status === 409 && /bypass actors of the merge queue on main \(ruleset 77\) cannot be read/.test(error.message)
+      && /no worker can launch on this repository until workers push as an App the queue does not exempt/.test(error.message));
+    // A ruleset GitHub fails to answer transiently is retryable (502), never the standing policy refusal.
+    for (const status of [500, 503]) {
+      rulesetStatus = status;
+      await assert.rejects(github.mintPushToken(), (error: any) => error.status === 502 && /ruleset 77\) could not be read now .*ask again/.test(error.message), `HTTP ${status}`);
+    }
+    rulesetStatus = 404;
     assert.equal(mints, 0, 'nothing is minted from a bypass App');
     ruleset = { id: 77, current_user_can_bypass: 'never', bypass_actors: [{ actor_id: 9, actor_type: 'Integration', bypass_mode: 'always' }] };
     assert.equal((await github.mintPushToken()).token, token('mint1'), 'a queue this App cannot bypass leaves the worker its credential');
