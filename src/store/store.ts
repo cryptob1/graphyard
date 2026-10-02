@@ -237,7 +237,8 @@ export async function save(db: pg.PoolClient, work: Work, actor: string, kind: s
   assertSavable(work);
   work.revision++;
   work.updatedAt = now.toISOString();
-  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
+  const text = JSON.stringify(work);
+  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, text]);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
-  await appendSave(db, work, actor, kind, details);
+  await appendSave(db, work, actor, kind, details, text);
 }

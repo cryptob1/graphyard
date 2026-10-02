@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { stableJson } from './model/stable-json.js';
+import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
@@ -39,7 +39,7 @@ import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMer
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
-import { isStandIn, lockedRows, lockedWork, workIdByRef } from './store/locked-read.js';
+import { isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -2090,9 +2090,11 @@ export class Engine {
   async reconcile() {
     let cursor = 0, first = true, limit = this.reconcileBatchItems;
     for (;;) {
+      let saved: SavedVersion[] = [];
       const finished = await this.store.transaction(async (db, now) => {
-        const started = performance.now();
+        const started = performance.now(); saved = [];
         const rows = await lockedRows(db, [], { after: cursor, limit }), all = rows.map(row => row.document);
+        const written: Work[] = [];
         // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
         if (first) { await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now); first = false; }
         let reconciled = 0;
@@ -2100,30 +2102,34 @@ export class Engine {
           if (number <= cursor || isStandIn(work)) continue;
           // The batch's rows are done, or its budget is spent: the next batch reads from the cursor.
           if (reconciled >= limit) break;
-          if (reconciled && performance.now() - started >= this.reconcileBatchMs) { limit = reconciled; return false; }
-          await this.reconcileItem(db, work, all, now);
+          if (reconciled && performance.now() - started >= this.reconcileBatchMs) { limit = reconciled; saved = await savedVersions(db, written); return false; }
+          if (await this.reconcileItem(db, work, all, now)) written.push(work);
           cursor = number; reconciled++;
         }
+        saved = await savedVersions(db, written);
         // A batch that filled its rows may have more after them; one short of the limit was the last.
         const last = reconciled < limit;
         limit = Math.min(this.reconcileBatchItems, limit * 2);
         return last;
       }, { lane: 'background' });
+      // Committed: what this batch saved stands in for its rows until they are written again.
+      rememberSaved(saved);
       if (finished) return;
       await new Promise(resolve => setImmediate(resolve));
     }
   }
-  /** One item's reconciliation inside a batch's coordination transaction. */
-  private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date) {
+  /** One item's reconciliation inside a batch's coordination transaction; whether it saved the item. */
+  private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date): Promise<boolean> {
     // A delivered item is not re-evaluated, but one still holding rows, a queue entry or an
     // action from before its delivery — every item delivered before GY-185 — is settled here
     // once, and the check that finds nothing to settle costs no evaluation.
     if (work.stage === 'done') {
       const leftover = !!work.queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
-      if (leftover && settleDelivered(work, all, now)) await save(db, work, 'graphyard', 'delivery.settled', now);
-      return;
+      if (!leftover || !settleDelivered(work, all, now)) return false;
+      await save(db, work, 'graphyard', 'delivery.settled', now);
+      return true;
     }
-    const before = stableJson(work);
+    const before = JSON.stringify(work);
     // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
@@ -2177,13 +2183,15 @@ export class Engine {
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-    if (stableJson(work) !== before) {
+    if (jsonChanged(before, work)) {
       for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
       if (work.submission) await wakeJob(db, work.id);
       if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
+      return true;
     }
+    return false;
   }
   /**
    * Save a provider observation of the item, read at `expectedRevision`.

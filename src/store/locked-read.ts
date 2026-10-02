@@ -1,6 +1,6 @@
 import type { Work } from '../model.js';
 import { pathScope } from '../model/scope.js';
-import { coordinationDocumentSql, coordinationRelevance, coordinationTail, detoasted } from './coordination-sql.js';
+import { coordinationDocumentSql, coordinationRecords, coordinationRelevance, coordinationSessions, coordinationTail, detoasted } from './coordination-sql.js';
 
 /**
  * What a coordination decision reads of the board while it holds the coordination lock (GY-1027).
@@ -32,6 +32,8 @@ export type Queryable = { query: (text: string, values?: unknown[]) => Promise<{
 const summaries = new WeakSet<object>(), projections = new WeakSet<object>();
 /** Stand-ins, parsed and frozen, by the version of the row each was built from, in insertion order; bounded so a long-lived process stays bounded. */
 const cache = new Map<string, Work>();
+/** The version each item's stand-in of each kind is cached under, so a newer version replaces it rather than accumulating beside it. */
+const cachedVersion = new Map<string, string>();
 export const lockedSummaryCacheLimit = 20_000;
 
 /** Whether `work` is a settled delivery's summary handed out by `lockedWork` rather than its document. */
@@ -157,10 +159,85 @@ function deepFreeze(value: unknown): unknown {
   return value;
 }
 
+/** Cache a stand-in under its version (`${cluster}/${kind}/${id}:${xmin}`), dropping the item's older version of that kind. */
 function remember(version: string, document: Work) {
+  const slot = version.slice(0, version.lastIndexOf(':')), previous = cachedVersion.get(slot);
+  if (previous !== undefined && previous !== version) cache.delete(previous);
+  cachedVersion.set(slot, version);
   cache.delete(version);
   cache.set(version, document);
-  while (cache.size > lockedSummaryCacheLimit) cache.delete(cache.keys().next().value!);
+  while (cache.size > lockedSummaryCacheLimit) {
+    const oldest = cache.keys().next().value!;
+    cache.delete(oldest);
+    const evicted = oldest.slice(0, oldest.lastIndexOf(':'));
+    if (cachedVersion.get(evicted) === oldest) cachedVersion.delete(evicted);
+  }
+}
+
+/**
+ * The rows this coordination transaction saved and still holds at the revision its save left
+ * (GY-1027), named by the version each committed row will carry. A reconciliation pass saves most
+ * open items it visits, and projecting each saved row again in the next batch cost ~1 ms apiece under
+ * the lock. Read once per batch, inside its transaction, from the row versions it wrote itself
+ * (`xmin` its own transaction id) and the work index's revision, so a row it did not write last is
+ * never mistaken for the document it saved.
+ */
+export async function savedVersions(db: Queryable, works: readonly Work[]): Promise<SavedVersion[]> {
+  if (!works.length) return [];
+  const rows = (await db.query(`SELECT w.id::text AS id, w.xmin::text AS wx, i.revision::text AS revision, current_database() || ':' || pg_postmaster_start_time()::text AS cluster
+    FROM work_items w JOIN work_index i ON i.id = w.id WHERE w.id::text = ANY($1::text[]) AND w.xmin::text = (pg_current_xact_id()::xid)::text AND COALESCE(i.settled AND i.summary IS NOT NULL, false) = false`, [works.map(work => work.id)])).rows;
+  const versions = new Map<string, { version: string; revision: number }>(rows.map(row => [row.id, { version: `${row.cluster}/w/${row.id}:${row.wx}`, revision: Number(row.revision) }]));
+  return works.filter(work => versions.get(work.id)?.revision === work.revision).map(work => ({ version: versions.get(work.id)!.version, document: work }));
+}
+export type SavedVersion = { version: string; document: Work };
+/**
+ * Cache what a committed transaction saved (`savedVersions`) as those rows' stand-ins: each saved
+ * document projected in-process exactly as `coordinationDocumentSql` projects it from the row
+ * (`coordinationProjection`), frozen and marked as a stand-in like every other. Called after the
+ * commit, outside the lock; a row written again since carries a newer version and is projected afresh.
+ */
+export function rememberSaved(saved: readonly SavedVersion[]) {
+  for (const { version, document } of saved) {
+    const projection = deepFreeze(coordinationProjection(JSON.parse(JSON.stringify(document)))) as Work;
+    projections.add(projection);
+    remember(version, projection);
+  }
+}
+
+const arrayOf = (value: unknown): any[] => Array.isArray(value) ? value : [];
+const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+const lastOf = <T>(entries: T[], keep: number) => entries.slice(Math.max(0, entries.length - keep));
+/** `->>` on a jsonb member: absent and JSON null read as SQL NULL, a string as itself, anything else as its JSON text. */
+const text = (value: unknown) => value === undefined || value === null ? null : typeof value === 'string' ? value : JSON.stringify(value);
+/**
+ * `coordinationDocumentSql` (with `coordinationRelevance(coordinationTail)`) in JavaScript, over a
+ * JSON-parsed document: an open item's coordination projection, built from a document this process
+ * just saved instead of read back from the row. tests/locked-read.test.ts holds the two equal.
+ */
+export function coordinationProjection(document: Work): Work {
+  const doc = document as unknown as Record<string, any>, keep = coordinationTail;
+  const candidate = isObject(doc.candidate) ? doc.candidate : {}, dispatch = isObject(doc.autoDispatch) ? doc.autoDispatch : {};
+  const head = text(candidate.sha), base = text(candidate.baseSha);
+  const requested = new Set([text(isObject(dispatch.review) ? dispatch.review.sha : undefined), ...arrayOf(dispatch.producers).map(request => text(request?.sha)),
+    ...lastOf(arrayOf(dispatch.history), keep).map(request => text(request?.sha))].filter(sha => sha !== null));
+  const carried = new Set([...arrayOf(doc.queue?.speculation?.carry?.evidence), ...arrayOf(doc.baseRefresh?.carry?.evidence)]
+    .filter(entry => entry?.carried === true).map(entry => text(entry.evidenceId)).filter(id => id !== null));
+  const relevant = (entry: any) => {
+    const sha = text(entry?.sha);
+    return (sha !== null && head !== null && sha === head && text(entry?.baseSha) === base) || carried.has(text(entry?.id)!) || (sha !== null && requested.has(sha));
+  };
+  const { pipeline: _pipeline, evidence, observation, queueHistory, actionQueue, autoDispatch, sessions, ...rest } = doc;
+  const out: Record<string, any> = { ...rest };
+  out.evidence = arrayOf(evidence).filter(relevant).map(entry => { if (!isObject(entry)) return entry; const { artifacts: _a, scopeFiles: _s, provenance: _p, ...kept } = entry; return kept; });
+  if ('observation' in doc) out.observation = isObject(observation) ? (({ scopeFiles: _s, ...kept }) => kept)(observation) : observation;
+  if (Array.isArray(queueHistory)) out.queueHistory = lastOf(queueHistory, keep);
+  if (isObject(actionQueue)) {
+    const { history, ...kept } = actionQueue;
+    out.actionQueue = { ...kept, history: lastOf(arrayOf(history), keep).map(row => isObject(row) && Array.isArray(row.history) ? { ...row, history: lastOf(row.history, coordinationRecords) } : row) };
+  }
+  if (isObject(autoDispatch)) { const { history, ...kept } = autoDispatch; out.autoDispatch = { ...kept, history: lastOf(arrayOf(history), keep) }; }
+  if (Array.isArray(sessions)) out.sessions = sessions.filter((entry, index) => text(entry?.state) === 'running' || index + 1 > sessions.length - coordinationSessions);
+  return out as Work;
 }
 
 /**

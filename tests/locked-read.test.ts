@@ -8,7 +8,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { AgentRegistry } from '../src/agent-registry.js';
-import { isSettledSummary, isStandIn, lockedWork } from '../src/store/locked-read.js';
+import { coordinationProjection, isSettledSummary, isStandIn, lockedWork } from '../src/store/locked-read.js';
+import { coordinationDocumentSql, coordinationRelevance, coordinationTail, detoasted } from '../src/store/coordination-sql.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -289,4 +290,48 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   console.log(`slow reconcile pass: ${slowBatches.length} batches, ${slowRead} open documents read whole (${opened_} open)`);
   assert.ok(slowBatches.length > batches.length, `a 1 ms budget yields more often: ${slowBatches.length} batches against ${batches.length}`);
   assert.ok(slowRead < opened_ * 2, `with every batch yielding on its budget the pass read ${slowRead} open documents whole for ${opened_} open items`);
+});
+
+test('a row a reconciliation batch saved stands in as exactly the projection the database would build from it', async () => {
+  assert.ok(template, 'the benchmark seeded the ledger');
+  // In-process projection and SQL projection agree, over the edge shapes the SQL handles too.
+  const base = open(template, 9100), evidence = base.evidence!;
+  const running = { id: 'early-running', kind: 'implementation', state: 'running', runtime: 'claude', principal: 'engineer-a', startedAt: stamp(1) };
+  const shapes: Work[] = [
+    { ...base, id: randomUUID(), key: 'SHAPE-1', candidate: { sha: evidence[0].sha, baseSha: evidence[0].baseSha, pr: 9100 } as Work['candidate'],
+      autoDispatch: { ...base.autoDispatch!, review: { sha: sha(1, 'r') }, producers: [{ sha: sha(2, 'p') }], history: [] } as unknown as Work['autoDispatch'],
+      evidence: [...evidence, { ...evidence[0], id: randomUUID(), sha: sha(1, 'r') }, { ...evidence[0], id: randomUUID(), sha: sha(2, 'p') }, { ...evidence[0], id: randomUUID(), sha: sha(3, 'z') }, { ...evidence[0], id: randomUUID(), baseSha: sha(9, 'z') }],
+      sessions: [running, ...base.sessions!] as Work['sessions'],
+      actionQueue: { actions: [], history: base.actionQueue!.history.map(row => ({ ...row, history: Array.from({ length: 7 }, (_, index) => ({ at: stamp(index), event: `step-${index}` })) })) } as unknown as Work['actionQueue'],
+      observation: { prState: 'open', files: ['src/a.ts'], scopeFiles: [{ path: 'src/a.ts', digest: sha(1, 'f') }] } as unknown as Work['observation'] },
+    { ...base, id: randomUUID(), key: 'SHAPE-2', queue: { sequence: 7, speculation: { carry: { evidence: [{ evidenceId: evidence[0].id, carried: true }, { evidenceId: evidence[1].id, carried: false }] } } } as unknown as Work['queue'],
+      baseRefresh: { carry: { evidence: [{ evidenceId: evidence[2].id, carried: true }] } } as unknown as Work['baseRefresh'],
+      evidence: evidence.map(entry => ({ ...entry, sha: sha(5, 'q') })), autoDispatch: null as unknown as Work['autoDispatch'], observation: null as unknown as Work['observation'], queueHistory: null as unknown as Work['queueHistory'] },
+    { ...base, id: randomUUID(), key: 'SHAPE-3', evidence: undefined, actionQueue: undefined, autoDispatch: undefined, sessions: undefined, queueHistory: undefined, observation: undefined, pipeline: undefined } as unknown as Work,
+  ];
+  await insert(shapes);
+  const fromSql = async (ids: string[]) => new Map((await store.pool.query(`SELECT d.id, x.document::text AS text
+    FROM (SELECT w.id::text AS id, ${detoasted('w.document')} AS document FROM work_items w WHERE w.id::text = ANY($1::text[]) OFFSET 0) d
+    CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`, [ids])).rows.map(row => [row.id as string, JSON.parse(row.text)]));
+  const projected = await fromSql(shapes.map(shape => shape.id));
+  for (const shape of shapes) assert.deepEqual(coordinationProjection(JSON.parse(JSON.stringify(shape))), projected.get(shape.id), `${shape.key}'s in-process projection is the SQL one`);
+
+  await store.pool.query(`DELETE FROM work_items WHERE document->>'key' LIKE 'SHAPE-%'`);
+
+  // A reconciliation pass saves the unreconciled items; the next read serves each saved row as the
+  // projection the database builds from it, without projecting it again under the lock.
+  await insert(Array.from({ length: 3 }, (_, n) => ({ ...open(template, 9200 + n), key: `SAVED-${n}` }) as Work));
+  const before = (await store.pool.query(`SELECT document->>'key' AS key, (document->>'revision')::int AS revision FROM work_items WHERE document->>'key' LIKE 'SAVED-%'`)).rows;
+  await engine.reconcile();
+  const after = (await store.pool.query(`SELECT id::text AS id, document->>'key' AS key, (document->>'revision')::int AS revision FROM work_items WHERE document->>'key' LIKE 'SAVED-%'`)).rows;
+  assert.ok(after.every(row => row.revision > before.find(entry => entry.key === row.key)!.revision), 'the pass saved every unreconciled item');
+  const queries: string[] = [];
+  const watched = { query: (text: string, values?: unknown[]) => { queries.push(text); return store.pool.query(text, values as unknown[]); } };
+  const board = await lockedWork(watched, []), stored = await fromSql(after.map(row => row.id));
+  for (const row of after) {
+    const standIn = board.find(work => work.id === row.id)!;
+    assert.ok(isStandIn(standIn), `${row.key} is read as a stand-in`);
+    assert.deepEqual(JSON.parse(JSON.stringify(standIn)), stored.get(row.id), `${row.key}'s stand-in is the projection of the row as saved`);
+  }
+  assert.ok(!queries.some(text => text.includes('jsonb_to_record')), 'no row the pass saved is projected again on the next read');
 });
