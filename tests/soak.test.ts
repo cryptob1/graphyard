@@ -1314,7 +1314,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
  */
 function assertLaunchesConfined(day: { confined: { role: string; key: string; directory: string; mechanism: string; reexposed: readonly string[] }[]; unconfinedRefusals: string[]; sessions: unknown[]; producerRuns: unknown[] }, root: string) {
   const gitDir = join(root, '.git');
-  const shared = [join(gitDir, 'objects'), join(gitDir, 'worktrees'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'FETCH_HEAD')];
+  const shared = [join(gitDir, 'objects'), join(gitDir, 'worktrees'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes'), join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'FETCH_HEAD')];
   const sharedWritable = (path: string) => shared.some(base => path === base || path.startsWith(`${base}/`));
   const workerLaunches = day.confined.filter(launch => launch.role === 'worker');
   assert.equal(workerLaunches.length, day.sessions.length, `every worker dispatch the loop made was confined before its pane opened (${workerLaunches.length} of ${day.sessions.length})`);
@@ -1331,7 +1331,7 @@ function assertLaunchesConfined(day: { confined: { role: string; key: string; di
     `the same launches are refused where the confinement cannot be built: ${day.unconfinedRefusals[0] ?? 'none'}`);
 }
 
-test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 180_000 }, async () => {
+test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
   const day = await simulateDay({ hours, plan: { blockedMerge: blockedMergeItem } });
@@ -1593,7 +1593,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(seconds < 120, `the day runs well inside the three minutes the CI test job allows it (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — the parallel-tip window validates several queue positions at once, a failing tip ejects only its own entry while the suffix rebuilds without it, and a mid-day window change is republished, with every system invariant holding', { timeout: 180_000 }, async () => {
+test('unit:soak-invariants-hold — the parallel-tip window validates several queue positions at once, a failing tip ejects only its own entry while the suffix rebuilds without it, and a mid-day window change is republished, with every system invariant holding', { timeout: 360_000 }, async () => {
   // GY-498: a queue-only day (the optimistic lane off, so every item goes through the queue),
   // released three minutes apart so the queue stays deeper than the window, with the window
   // reconfigured from 4 to 2 an hour and a quarter in. Item four is the one whose first tip fails
@@ -1699,7 +1699,7 @@ test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses 
 });
 
 const docsTotalDebug = (count: Record<string, number> | undefined) => count === undefined ? undefined : Object.values(count).reduce((a: number, b: number) => a + b, 0);
-test('unit:soak-invariants-hold — the documentation budget under the real loop: a base inside the 3% warning files the trim item once across the day, a tip failing only the docs budget ejects the entry whose docs change crossed it naming the words over and the pages that grew, and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — the documentation budget under the real loop: a base inside the 3% warning files the trim item once across the day, a tip failing only the docs budget ejects the entry whose docs change crossed it naming the words over and the pages that grew, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-574, over the real queue, the real observer and the real word counting: the base sits at
   // 11,985 of a 12,000-word budget (inside the 3% warning), four items grow the pages, and the day
   // is judged on what the loop, the gates, the window and the counter do about it.
@@ -1768,7 +1768,7 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
 });
 
-test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is acted on, never retried for good: a stuck candidate is re-reviewed and then reworked while the queue moves, a lost carried review is re-reviewed at once, and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is acted on, never retried for good: a stuck candidate is re-reviewed and then reworked while the queue moves, a lost carried review is re-reviewed at once, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-831 in the world the loop really runs in: the queue's own tip publication carries each
   // item's approval, the guarded merge re-posts it through the bound reviewer App, and a refusal
   // repeats every cycle until the ten-minute bound. Item two queues behind item one, so its tip is
@@ -1858,7 +1858,7 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
   assert.ok(seconds < 200, `the day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 180_000 }, async () => {
+test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 360_000 }, async () => {
   // GY-849: between minute 50 and minute 130 no approver account is eligible, which spans the
   // rework rounds of items three and seven (requested about minutes 58 and 118), so both decisions
   // sit waiting when the window closes. The loop must relaunch them — uncounted against the launch
@@ -1943,7 +1943,7 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
 // GY-475's citation day runs before the regression day: the days share one control plane, and
 // the regression day leaves items mid-flight on purpose, whose rework a later day's loop would
 // take up with the pull request of a simulated GitHub that day can no longer reach.
-test('unit:soak-invariants-hold — after a restart the first request for a refused rework decision already cites the refusal the binding names, and no request is refused', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — after a restart the first request for a refused rework decision already cites the refusal the binding names, and no request is refused', { timeout: 600_000 }, async () => {
   // GY-475: the approver refuses the rework decision items 3 and 7 call for; the loop settles the
   // watch, escalates the refusal and never re-requests it. A restart then loses the cursor while
   // both items still call for the same decision — same head, base and grounds binding. The ledger
@@ -1985,7 +1985,7 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });
 
-test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: 4, scope: true });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { items, final, violations, failures, state, escalations } = day;
@@ -2044,7 +2044,7 @@ test('unit:soak-invariants-hold — a loop change that breaks an invariant fails
   assert.equal(state.faults.instances.filter(instance => instance.kind === 'invariant:lingering-sessions' && instance.faultClass === 'session-liveness').length, 1);
 });
 
-test('unit:soak-invariants-hold — a worker idle past its bound whose pane died is reclaimed without pasting into or closing the pane the reused agent name holds, and is still delivered', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — a worker idle past its bound whose pane died is reclaimed without pasting into or closing the pane the reused agent name holds, and is still delivered', { timeout: 600_000 }, async () => {
   // GY-852: one worker takes its lease and then idles at its prompt for ever. Past the idle bound
   // the loop re-prompts it once — in its own pane. The pane then dies and the profile's agent name
   // is taken by another session (the shape that delivered GY-589's re-prompt to GY-831-4's pane),

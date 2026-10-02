@@ -114,11 +114,22 @@ const touchesHot = (item: Work, hot: ReadonlySet<string>) => {
  * per cycle from one snapshot and passed in: heat is a property of the whole set, and a comparator
  * driven only by (a, b) must not derive it mid-sort. The default empty set is the cold order, so
  * every existing `.sort(dispatchOrder)` call site is unchanged.
+ *
+ * Given `now`, an item of the same priority that has waited `dispatchStarvationMs` or longer in its
+ * stage is offered before every item that has not, whatever its scope or heat (among such items the
+ * order below still decides):
+ * the smallest-scope and cold-first preferences alone starved a broad item for hours while smaller
+ * items kept arriving ahead of it (GY-1023, ready from 00:40 to past 04:00 on 2026-10-01).
  */
-export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new Set()) {
+export const dispatchStarvationMs = 60 * 60_000;
+export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new Set(), now?: number) {
   const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
   const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);
-  return a.priority - b.priority || (hotA !== hotB ? (hotA ? 1 : -1) : 0)
+  const waited = (item: Work) => now === undefined ? 0 : now - Date.parse(item.stageEnteredAt ?? item.createdAt);
+  const starvingA = waited(a) >= dispatchStarvationMs, starvingB = waited(b) >= dispatchStarvationMs;
+  return a.priority - b.priority
+    || (starvingA !== starvingB ? (starvingA ? -1 : 1) : 0)
+    || (hotA !== hotB ? (hotA ? 1 : -1) : 0)
     || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || Date.parse(a.createdAt) - Date.parse(b.createdAt);
 }
 
