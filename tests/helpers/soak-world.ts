@@ -583,6 +583,7 @@ export class SimulatedGitHub {
           world.restoreWrites.push({ key: work.key, write: kind, refused, at: clock.now() });
           if (refused) throw new Refusal(`GitHub ${kind === 'reset' ? 'PATCH /git/refs/heads/' + pr.branch : 'POST /merges'} failed (403): Protected branch update failed for refs/heads/${pr.branch}`, 502);
         };
+        let built: { sha: string; base: string } | null = null;
         const provider: GitHub = Object.assign(Object.create(GitHub.prototype), {
           config: { repository: world.options.repository, base },
           request: async (path: string) => {
@@ -593,14 +594,16 @@ export class SimulatedGitHub {
           ownReviewedHead: async () => pr.head,
           refHead: async () => pr.head,
           describeMerge: async () => null,
-          updateBranch: async (_branch: string, own: string) => { write('reset'); pr.head = own; pr.pushed.set(own, clock.now()); },
-          mergeBranch: async (_branch: string, tip: string, message: string) => {
-            write('merge');
-            const own = pr.head, onto = world.commits.get(tip)!;
-            const merged = world.record({ sha: sha('restore', own, tip), tree: sha('tree', 'restore', own, tip), parents: [own, tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message },
-              world.mergedContents(own, tip, work.plannedFiles ?? []));
-            pr.head = merged.sha; pr.base = tip; pr.pushed.set(merged.sha, clock.now());
-            return merged.sha;
+          // The restored commit is built off the branch (GY-1087), so the branch's one write is the move to it.
+          updateBranch: async (_branch: string, head: string) => {
+            write('reset'); pr.head = head; pr.pushed.set(head, clock.now());
+            if (built?.sha === head) pr.base = built.base;
+          },
+          mergeOnScratch: async (_key: string, own: string, tip: string, message: string) => {
+            const onto = world.commits.get(tip)!;
+            built = { sha: sha('restore', own, tip), base: tip };
+            return world.record({ sha: sha('restore', own, tip), tree: sha('tree', 'restore', own, tip), parents: [own, tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message },
+              world.mergedContents(own, tip, work.plannedFiles ?? [])).sha;
           },
         });
         return provider.restoreBranch(work, restore);

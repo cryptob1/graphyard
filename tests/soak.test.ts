@@ -1860,7 +1860,8 @@ test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses 
   const writes = github.restoreWrites.filter(write => write.key === ejectee.key);
   assert.deepEqual(writes.map(write => [write.write, write.refused]), [['reset', true], ['reset', true]], `at most two restore attempts for the contaminated head: ${JSON.stringify(writes)}`);
   assert.ok(Date.parse(restore!.performedAt!) - dayStart < 45 * minute, 'the escalation was recorded early in the day, with many cycles after it');
-  assert.ok(writes.every(write => write.at <= Date.parse(restore!.performedAt!)), 'no branch write followed the escalation');
+  // performedAt is stamped as the restore starts; its own branch write follows the scratch merge by milliseconds (GY-1087), a cycle by minutes.
+  assert.ok(writes.every(write => write.at <= Date.parse(restore!.performedAt!) + 1000), 'no branch write followed the escalation');
   const landedAhead = github.merges.find(merge => merge.key === ahead.key)!;
   assert.ok(landedAhead.at - Date.parse(restore!.performedAt!) >= 15 * minute, 'the entry ahead landed well after the escalation: the contaminated head stood through many cycles');
   assert.equal(github.restoreWrites.filter(write => write.key !== ejectee.key).length, 0, 'no other branch was restored');

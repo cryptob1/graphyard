@@ -25,7 +25,7 @@ import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, ty
 import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
-import { workerPushPermissions } from './worker-credential.js';
+import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -684,6 +684,8 @@ export class GitHub {
     clearTimeout(timer);
   }
   private preflightState: AppPermissionReport | null = null;
+  /** The wanted worker push permissions the last mint found ungranted (GY-1100); null until a mint. */
+  private pushShortfalls: PushPermissionShortfall[] | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
   // A rejected App credential is retried once a minute, not once per queued job: every request
@@ -911,7 +913,10 @@ export class GitHub {
       const app = typeof installation.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(this.config.appId);
       const installationUrl = typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId);
       const suspended = !!installation.suspended_at;
-      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl))];
+      // A push shortfall a mint met is kept current here, so accepting the permission clears it.
+      if (this.pushShortfalls) this.pushShortfalls = grantedPushPermissions(granted).missing;
+      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl)),
+        ...(this.pushShortfalls ?? []).map(shortfall => describePushShortfall(shortfall, app, installationUrl))];
       this.preflightState = { ...base, app, account: typeof installation.account?.login === 'string' ? installation.account.login : null, installationUrl, verifiedAt: base.observedAt, error: null, suspended, granted, missing, blockedFeatures: blockedFeatures(missing), attention };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'GitHub App permissions could not be read';
@@ -981,32 +986,51 @@ export class GitHub {
   }
   /**
    * A worker session's push credential (GY-999): an installation token narrowed to this one
-   * repository and to the two permissions pushing a branch and opening its pull request need. It
-   * is never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * repository and to the permissions pushing a branch and opening its pull request need. It is
+   * never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * It asks only for the wanted permissions the installation grants (GY-1100): the preflight's
+   * verified reading when there is one, else the installation read now. A wanted permission the
+   * installation lacks is left out and raised as permission attention instead of failing the mint;
+   * a 422 on a preflight reading re-reads the installation once, in case it changed since.
    */
   async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     const bypass = await this.workerPushBypass();
     demand(!bypass, bypass ?? '', 409);
-    const mint = (permissions: Record<string, string>) => fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
-      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
-    });
-    let response = await mint(workerPushPermissions);
-    this.record('/app/installations/access_tokens', response, false);
-    // An installation that has not accepted `workflows` refuses the whole request (422); the worker
-    // still gets the push credential it had before, and only a base sync carrying a workflow change
-    // is refused, never every launch (2026-10-02).
-    if (response.status === 422 && 'workflows' in workerPushPermissions) {
-      const { workflows: _omitted, ...withoutWorkflows } = workerPushPermissions as Record<string, string>;
-      response = await mint(withoutWorkflows);
-      this.record('/app/installations/access_tokens', response, false);
-    }
+    const cached = this.preflightState?.verifiedAt ? this.preflightState.granted : null;
+    let response = await this.requestPushToken(cached ?? await this.installationGrants());
+    if (response.status === 422 && cached) response = await this.requestPushToken(await this.installationGrants());
     const refused = await this.refusal(response, 'worker push credential');
     if (refused) throw refused;
     const result: any = await response.json();
     demand(typeof result?.token === 'string' && result.token.length >= 20 && Number.isFinite(Date.parse(result.expires_at)), 'GitHub returned no worker push token', 502);
     return { token: result.token, expiresAt: new Date(Date.parse(result.expires_at)).toISOString(), permissions: result.permissions && typeof result.permissions === 'object' ? result.permissions : {} };
+  }
+  /** The installation's granted permissions read now with the App JWT. */
+  private async installationGrants(): Promise<Record<string, string>> {
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    this.record('/app/installations', response, false);
+    const refused = await this.refusal(response, 'GET /app/installations');
+    if (refused) throw refused;
+    const installation: any = await response.json();
+    demand(installation?.permissions && typeof installation.permissions === 'object', 'GitHub returned an installation without permissions', 502);
+    return Object.fromEntries(Object.entries(installation.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string>;
+  }
+  private async requestPushToken(granted: Record<string, string>) {
+    const { permissions, missing } = grantedPushPermissions(granted);
+    demand(permissions.contents === 'write', `The App installation grants no Contents: write, so no worker push credential can be minted; accept it at ${this.preflightState?.installationUrl ?? installationSettingsUrl(this.config.installationId)}`, 502);
+    this.pushShortfalls = missing;
+    const report = this.preflightState;
+    if (report) {
+      report.attention = [...report.attention.filter(line => !line.includes(pushShortfallMarker)),
+        ...missing.map(shortfall => describePushShortfall(shortfall, report.app, report.installationUrl))];
+    }
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
+    });
+    this.record('/app/installations/access_tokens', response, false);
+    return response;
   }
   /**
    * Why this App's token may not be handed to a worker, or null (GY-1066). On an organization
@@ -1973,9 +1997,22 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // one request wide, the item is queued (a worker push at that point is a new head the queue
     // would eject for anyway), and the next observation reads the branch afresh, so the worker's
     // head is at worst reported as replaced rather than silently kept. Narrow, and accepted.
-    if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
-    const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
+    // The tip is built on the scratch branch and the pull request's branch is moved once, to it
+    // (GY-1087). Resetting the branch to the reviewed head and then merging onto it was two pushes:
+    // GitHub raised a pull_request event for each, both resolved to the tip, CI's per-PR concurrency
+    // cancelled one of the two runs, and when the later-created run was the one cancelled — before
+    // any job started — GitHub read the head's required checks as expected for good (GY-1063:
+    // "3 of 4 required status checks are expected"), so auto-merge never fired.
+    let merged: string | null;
+    try { merged = await this.mergeOnScratch(work.key, reviewedHead, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`); }
+    catch (error) {
+      // A conflicting tip still leaves the branch at the item's own reviewed head, never at the
+      // earlier tip and the predecessors it carries.
+      if (error instanceof SpeculativeConflict && reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
+      throw error;
+    }
     const tip = merged ?? reviewedHead;
+    if (tip !== pr.head.sha) await this.updateBranch(pr.head.ref, tip);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
@@ -2046,27 +2083,31 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // record is what lets a second attempt tell a lasting refusal from a transient one.
     const refused = (kind: RestoreFailureKind, reason: string): BaseRefresh => record({}, 'unpublished', kind, reason);
     await beforeWrite();
+    // The restored commit is built on the scratch branch and the pull request's branch is moved
+    // once, as a speculative tip is (GY-1087): one push, so one CI run binds to the restored head.
+    let merged: string | null, conflict: string | null = null;
+    try { merged = await this.mergeOnScratch(work.key, own, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
+    catch (error) {
+      if (error instanceof SpeculativeConflict) { merged = null; conflict = error.message; }
+      else if (!(error instanceof Refusal)) throw error;
+      else return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
+    }
+    // A conflicting restore still moves the branch to the item's own reviewed head; the merge is the worker's.
+    const produced = merged ?? own;
     // The same one-request window as in publishSpeculativeTip: a worker push between the head
     // check above and this forced update is overwritten by the restore. The head being restored
     // is one no worker may push over (a contaminated tip), the record names the head it moved
     // from, and the next observation reads the branch afresh.
-    try { await this.updateBranch(pr.head.ref, own); }
+    try { await this.updateBranch(pr.head.ref, produced); }
     catch (error) {
       if (!(error instanceof Refusal)) throw error;
-      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to the reviewed head ${own.slice(0, 12)}: ${error.message}`);
+      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to ${merged ? `the reviewed head ${own.slice(0, 12)} merged onto the base, ${produced.slice(0, 12)}` : `the reviewed head ${own.slice(0, 12)}`}: ${error.message}`);
     }
-    let merged: string | null;
-    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
-    catch (error) {
-      if (error instanceof SpeculativeConflict)
-        return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${error.message}`);
-      if (!(error instanceof Refusal)) throw error;
-      return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
-    }
+    if (conflict !== null)
+      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${conflict}`);
     // The restore is done only when GitHub itself shows the branch at the commit it produced
     // (GY-854): a push GitHub does not reflect has happened, and a record that claimed it anyway
     // left the item waiting at a head no observation would ever read.
-    const produced = merged ?? own;
     let shown: string;
     try { shown = await this.refHead(pr.head.ref); }
     catch (error) {
@@ -2122,16 +2163,26 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
-    const branch = mergeCheckBranch(key);
-    await this.publishRef(`refs/heads/${branch}`, head);
     try {
-      await this.mergeBranch(branch, base, `Graphyard merge check for ${key} [skip ci]`);
+      await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
       return null;
     } catch (error) {
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
-    } finally {
-      // A scratch branch left behind by a failed delete is overwritten by the next check, but it
+    }
+  }
+  /**
+   * Merges `base` onto `head` on the item's scratch branch and returns the merge commit, or null
+   * when `head` already contains `base`; a conflict throws SpeculativeConflict. No branch a pull
+   * request, a person or a check reads is written (GY-1087): the caller moves the pull request's
+   * branch to the result in one push, so GitHub starts one set of workflow runs for the new head.
+   */
+  async mergeOnScratch(key: string, head: string, base: string, message: string): Promise<string | null> {
+    const branch = mergeCheckBranch(key);
+    await this.publishRef(`refs/heads/${branch}`, head);
+    try { return await this.mergeBranch(branch, base, message); }
+    finally {
+      // A scratch branch left behind by a failed delete is overwritten by the next merge, but it
       // is visible in the repository until then, so the failure is named.
       await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(error => console.error(`Graphyard could not delete merge-check branch ${branch}: ${error instanceof Error ? error.message : String(error)}`));
     }
