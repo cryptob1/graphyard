@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
+import { Refusal, demand, itemLane, resolveEscalation, reworkNeedsApprover, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
@@ -10,6 +10,7 @@ import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { mergePath, namedMergePathFault } from '../master/repair-lane.js';
+import { closeWork } from './close.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
@@ -55,6 +56,48 @@ export async function requestDecision(services: Services, caller: Principal, id:
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
+  // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): once recorded,
+  // it is applied at once with the lane as its ground. A replayed request whose application was
+  // interrupted resumes it; a high-lane rework waits for its independent approver as ever.
+  const requested = await recordRequest(services, caller, id, data, input, key, fingerprint);
+  return requested.action === 'rework' && (requested.state === 'requested' || (requested.state === 'approved' && requested.approvedBy === laneApprover))
+    ? applyLaneRework(services, requested) : requested;
+}
+
+/** The ledger's approver of a rework its lane applied without an approver decision (GY-883). */
+export const laneApprover = 'graphyard-risk-lane';
+
+async function applyLaneRework(services: Services, requested: DecisionRecord): Promise<DecisionRecord> {
+  let applying: { decision: DecisionRecord; work: Work; reason: string } | null = null;
+  const settled = await services.engine.store.transaction(async db => {
+    const work = await findWork(db, requested.workId); demand(work, 'Work item not found', 404);
+    const decision = (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
+    const resuming = decision.state === 'approved' && decision.approvedBy === laneApprover;
+    if (!resuming && (decision.state !== 'requested' || reworkNeedsApprover(work!))) return decision;
+    const lane = itemLane(work!), reason = `the ${lane} risk lane applies a rework without an approver decision (GY-883)`;
+    if (!resuming) {
+      const precondition = decisionPrecondition(decision.action, decision.input, work!);
+      if (precondition) return decision;
+      await record(db, work!, laneApprover, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver: { id: laneApprover, role: 'risk-lane' }, lane });
+    }
+    applying = { decision, work: work!, reason };
+    return null;
+  });
+  if (settled) return settled;
+  const { decision, work, reason } = applying!;
+  let outcome: { kind: string; details: object };
+  try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, { id: laneApprover, role: 'admin' } as Principal, reason) } }; }
+  catch (error) {
+    if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
+    outcome = { kind: 'decision.failed', details: { error: error.message } };
+  }
+  return services.engine.store.transaction(async db => {
+    await record(db, work, laneApprover, outcome.kind, { id: decision.id, ...outcome.details });
+    return (await readDecisions(db, work)).find(entry => entry.id === decision.id)!;
+  });
+}
+
+async function recordRequest(services: Services, caller: Principal, id: string, data: z.infer<typeof decisionRequestSchema>, input: any, key: string, fingerprint: string): Promise<DecisionRecord> {
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
@@ -225,7 +268,7 @@ async function resolveInTransaction(services: Services, db: Db, now: Date, work:
   return `Resolved ${decision.input.trigger} on ${work.key}`;
 }
 
-async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
+export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   // The requester acts, with the authority the two-party decision grants for this one input.
   const actor: Principal = { id: decision.requestedBy, role: 'admin', sessionKind: 'ai', displayName: `${decision.requestedBy} (decision ${decision.id} approved by ${approver.id})` };
   const reason = `${decision.reason} [decision ${decision.id}, requested by ${decision.requestedBy}, approved by ${approver.id}: ${approvalReason}]`.slice(0, 2000);
@@ -236,8 +279,15 @@ async function applyThroughEngine(services: Services, decision: DecisionRecord, 
     case 'requirements': { const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key); return `Requirements revised to policy revision ${work.policyRevision}`; }
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
-    case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key); return `${input.proof} attested ${input.result} for ${input.sha}`;
-    case 'close': return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
+    case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key, { attestation: { decision: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id } }); return `${input.proof} attested ${input.result} for ${input.sha}`;
+    case 'close': {
+      // A triage closure (its input carries the judgement's `triageAt`) applies through the triage
+      // path; a diagnostician's closure (GY-439) closes the item directly, with the approval's own
+      // composed reason.
+      if (input.triageAt !== undefined) return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
+      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key);
+      return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
+    }
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
     default: throw new Error(`No engine application for ${decision.action}`);
   }

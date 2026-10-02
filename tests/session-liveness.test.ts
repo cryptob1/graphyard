@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -22,6 +21,7 @@ import { masterConfigSchema, profileSessions } from '../src/master.js';
 import { sessionReport } from '../src/cli/master-status.js';
 import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
 import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-113: a session was recorded as running until something ended it, so a session that crashed,
@@ -52,7 +52,7 @@ before(async () => {
   // An offset no other test file takes: two files sharing a port fail whichever starts its
   // Postgres second, in its `before` hook, with no reason given.
   const port = Number(process.env.GRAPHYARD_SESSION_LIVENESS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 73);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-session-liveness-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('session-liveness'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
@@ -89,7 +89,8 @@ const fleetConfig = masterConfigSchema.parse({
   repository: 'owner/project', baseBranch: 'main', githubAppId: 15368, hostId: 'host-1', masterAgentName: 'm', herdrWorkspace: 'wF',
   workers: [{ name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }],
   reviewer: { appId: 4242, installationId: 99, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.json', boundAt: '2026-09-01T00:00:00.000Z' },
-  reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto' }],
+  // Concurrency 1 declared: the automatic profile's unset concurrency reads as automaticReviewerConcurrency (GY-1072), and these tests are about one slot.
+  reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto', concurrency: 1 }],
   producers: [{ name: 'claude-producer', principal: producer.id, agentName: 'proof-claude', kind: 'claude', credentialFile: '/outside/producer.token', approvals: 'auto' }],
   run: { reviewerProfile: 'claude-reviewer' },
 });

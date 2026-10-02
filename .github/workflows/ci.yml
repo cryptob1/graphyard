@@ -12,44 +12,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name != 'pull_request' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  container-acceptance:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with: { persist-credentials: false }
-      - uses: actions/setup-node@v4
-        with: { node-version: '24' }
-      - name: Build candidate image as the release process would
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$GITHUB_SHA" --tag graphyard-ci .
-      - name: Exercise container over HTTP with an isolated database
-        # Validation only: this PR-controlled job has no evidence-producer credential.
-        run: |
-          echo '{}' > "$RUNNER_TEMP/candidate.json"
-          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/acceptance.json"
-      - name: Exercise the merge-authorization contract against the container
-        # Validation only: this PR-controlled job has no evidence-producer credential.
-        run: node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/merge-authorization.json" integration:merge-authorization
-      - name: Verify the release contract, backup and restore with the shipped image
-        run: node scripts/verify-image-release.mjs graphyard-ci "$(node -p "require('./package.json').version")" "$GITHUB_SHA"
-  container-recovery:
-    runs-on: ubuntu-latest
-    # The recovery contract waits out the shipped two-minute lease and launch fences.
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with: { persist-credentials: false }
-      - uses: actions/setup-node@v4
-        with: { node-version: '24' }
-      - name: Build candidate image
-        run: docker build --tag graphyard-ci .
-      - name: Recover an expired lease on a second machine identity
-        # Validation only: this PR-controlled job has no evidence-producer credential.
-        run: |
-          echo '{}' > "$RUNNER_TEMP/candidate.json"
-          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/recovery.json" integration:herdr-recovery
+  # The pre-merge gate runs only fast, deterministic checks (GY-1093): typecheck and the test
+  # aggregate below are the required set, every job of it bounded so the set finishes in under ten
+  # minutes. The soak, the timing-budget suites, container acceptance, container recovery and the
+  # chart run only against a release-candidate SHA, in release-candidate.yml.
   secrets:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +49,7 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -90,31 +57,110 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run docs:check
-  test:
+  # The Node suite's pre-merge files, split over a matrix of shard jobs (GY-499). Each shard runs
+  # the files scripts/ci-tests.mjs assigns it, balanced by the per-file durations recorded in
+  # tests/helpers/timing-baseline.json; the shard count is this matrix's length (default 4). On a
+  # pull request's own run only the test files its change affects are selected; pushes to main,
+  # merge-queue tips and any change the dependency map cannot place run every pre-merge file.
+  test-shard:
+    name: test shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        # Two commits: a pull request's checkout is its merge onto the base, whose first parent is
+        # the base, so the change is the diff between them.
+        with: { fetch-depth: 2 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      # The coordinator-confinement suite builds launches and runs shell probes inside real
+      # bubblewrap namespaces (GY-888), and a host without bubblewrap must refuse every session
+      # rather than start one unconfined. Ubuntu 24.04 confines unprivileged user namespaces to
+      # profiled binaries, so the runner lifts that restriction for the suite.
+      - name: Install bubblewrap (the confinement suite runs real namespaces)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      - name: Select the test files this run executes
+        run: node scripts/ci-tests.mjs select --out "$RUNNER_TEMP/selected-tests.txt"
+      - name: Run this shard, keeping the record of its timing-dependent assertions
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: |
+          set -euo pipefail
+          echo "GRAPHYARD_TIMING_RECORD=$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/timing"
+          # Test files run in parallel, each with its own Postgres on a per-file port offset. Two
+          # files share offset 25; this gives one of them a free port so neither fails on scheduling.
+          GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/shard-${{ matrix.shard }}.jsonl" npm test -- --shard "$SHARD" --files-from "$RUNNER_TEMP/selected-tests.txt" --durations "$RUNNER_TEMP/timing/durations-${{ matrix.shard }}.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-${{ matrix.shard }}.log"
+      - name: Summarise this shard's timing-dependent assertions
+        if: always()
+        run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_RECORD" > /dev/null
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graphyard-timing-record-${{ matrix.shard }}
+          path: ${{ runner.temp }}/timing/
+          if-no-files-found: ignore
+  test-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '24', cache: npm }
       - run: npm ci
-      - name: Run the suite, keeping the record of its timing-dependent assertions
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "GRAPHYARD_TIMING_RECORD=$RUNNER_TEMP/graphyard-timing.jsonl" >> "$GITHUB_ENV"
-          # Test files run in parallel, each with its own Postgres on a per-file port offset. Two
-          # files share offset 25; this gives one of them a free port so neither fails on scheduling.
-          GRAPHYARD_EVENTS_TEST_PORT=15466 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/graphyard-timing.jsonl" npm test 2>&1 | tee "$RUNNER_TEMP/graphyard-test.log"
-      - name: Report timing-dependent assertions on this check run
-        # Whatever the suite's verdict, and never changing it: an assertion that went over its
-        # budget is annotated with what it measured, which `graphyard master status` reads back.
-        if: always()
-        run: npx tsx tests/helpers/timing-report.ts "$GRAPHYARD_TIMING_RECORD" "$RUNNER_TEMP/graphyard-test.log"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: graphyard-timing-record
-          path: ${{ runner.temp }}/graphyard-timing.jsonl
-          if-no-files-found: ignore
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+  # The required check. Branch protection names `test`, so this job keeps the name and passes only
+  # when every shard and the browser suite passed; a failed, skipped or cancelled one fails it.
+  test:
+    needs: [test-shard, test-browser]
+    # Not always(): a run cancelled for a superseded head reports nothing rather than a failure.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: graphyard-timing-record-*
+          path: ${{ runner.temp }}/timing
+          merge-multiple: true
+      - name: Find timing-dependent assertions over budget
+        id: timing
+        shell: bash
+        run: |
+          shopt -s nullglob
+          records=("$RUNNER_TEMP"/timing/shard-*.jsonl)
+          if (( ${#records[@]} )); then cat "${records[@]}" > "$RUNNER_TEMP/graphyard-timing.jsonl"; fi
+          if grep -qs '"passed":false' "$RUNNER_TEMP/graphyard-timing.jsonl"; then echo "over=true" >> "$GITHUB_OUTPUT"; fi
+      # Only when an assertion went over its budget, so a passing run pays for no install here.
+      - uses: actions/checkout@v4
+        if: steps.timing.outputs.over == 'true'
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        if: steps.timing.outputs.over == 'true'
+        with: { node-version: '24', cache: npm }
+      - name: Report timing-dependent assertions on this check run
+        # Whatever the suite's verdict, and never changing it: an assertion that went over its
+        # budget is annotated on the required check with what it measured, which
+        # `graphyard master status` reads back, beside how many tests failed across every shard.
+        if: steps.timing.outputs.over == 'true'
+        shell: bash
+        run: |
+          npm ci --ignore-scripts
+          npx tsx tests/helpers/timing-report.ts "$RUNNER_TEMP/graphyard-timing.jsonl" "$RUNNER_TEMP"/timing/test-*.log
+      - name: Pass only when every shard and the browser suite passed
+        env:
+          SHARDS: ${{ needs.test-shard.result }}
+          BROWSER: ${{ needs.test-browser.result }}
+        run: |
+          echo "shards: $SHARDS, browser: $BROWSER"
+          test "$SHARDS" = success && test "$BROWSER" = success

@@ -1,9 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { readFile, statfs } from 'node:fs/promises';
+import { lstat, readdir, readFile, statfs } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
+import { describeTmpReclaim, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import type { Work } from './model.js';
 
 /**
@@ -22,7 +24,7 @@ import type { Work } from './model.js';
  * the reclaim pass gives each one back; and `/healthz` reports the plane unhealthy while it cannot record.
  */
 
-export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk'] as const;
+export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] as const;
 export type ResourceId = typeof resourceIds[number];
 export type ResourceState = 'ok' | 'low' | 'exhausted' | 'unknown';
 
@@ -58,6 +60,21 @@ export interface ResourceInputs {
   loop: { lagMs: number | null; stalledAfterMs: number; detail: string } | null;
   revision: { behind: number; loaded: string; checkout: string } | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
+  /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
+  tmp?: TmpInodes | null;
+}
+export interface TmpInodes {
+  path: string; totalInodes: number; freeInodes: number;
+  /** What the last /tmp pass to remove anything removed, and when it was recorded. */
+  removed: number | null; removedAt: string | null;
+  /** The latest finished /tmp pass's own count, often 0 (GY-1081); null before any pass is recorded. */
+  latest?: { removed: number; at: string } | null;
+  /**
+   * This user's own top-level entries in the directory, and how many carry a test temp name
+   * (GY-1081): the per-user quota is not readable without quotactl, so this is what the reading can
+   * show of this user's share. `capped` when the count stopped at `ownEntriesScanBound`.
+   */
+  own?: { entries: number; testTemp: number; capped: boolean } | null;
 }
 
 export interface ResourceDefinition {
@@ -228,9 +245,9 @@ export const resourceRegistry: ResourceDefinition[] = [
   },
   {
     id: 'database-capacity', title: 'Control-plane database', unit: 'bytes',
-    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane (default ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured bound also fails health): set it to the database volume's size`,
+    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane, else the database volume's size when the plane can read it, else ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured or measured bound also fails health`,
     usage: '/healthz resources.database: pg_database_size of the plane\'s database', owner: 'the control plane (src/store)',
-    reclaim: 'none automatic: the ledger is append-only history; grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
+    reclaim: 'receipts past one day are pruned and routine ledger rows past the retention window compacted (store/compaction.ts); space returns to Postgres for reuse, to the volume only after VACUUM FULL; otherwise grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
     remedy: 'grow the database volume and raise GRAPHYARD_DATABASE_MAX_BYTES to match before writes fail',
     warnBelow: tenthOf, symptoms: [/could not extend file|No space left on device|disk full/i],
     read: input => [{ id: '', used: input.plane?.database?.used ?? null, bound: input.plane?.database?.bound ?? null, detail: input.plane?.database?.detail ?? (input.plane ? null : 'the plane\'s /healthz could not be read'), reclaimable: 0 }],
@@ -244,7 +261,32 @@ export const resourceRegistry: ResourceDefinition[] = [
     warnBelow: bound => bound, symptoms: [/ENOSPC|No space left on device|Disk quota exceeded/],
     read: input => [input.disk ? { id: '', used: input.disk.totalBytes - input.disk.freeBytes, bound: input.disk.totalBytes, detail: `${input.disk.path}`, reclaimable: 0 } : { id: '', used: null, bound: null, detail: 'free space could not be read', reclaimable: 0 }],
   },
+  {
+    id: 'tmp-inodes', title: 'Host /tmp inodes', unit: 'inodes',
+    // statfs reports the filesystem's free inodes, not what remains of this user's quota: a quota is
+    // not readable without quotactl, so the reading warns early rather than claiming to track it.
+    bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
+    usage: 'statfs of the host temporary directory (os.tmpdir())', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
+    reclaim: `the loop's reclaim pass removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
+    warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
+    read: input => [input.tmp
+      ? { id: '', used: input.tmp.totalInodes - input.tmp.freeInodes, bound: input.tmp.totalInodes, reclaimable: 0,
+        detail: describeTmpInodes(input.tmp) }
+      : { id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }],
+  },
 ];
+
+const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
+/** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
+function describeTmpInodes(tmp: TmpInodes) {
+  const parts = [`${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
+  if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} at its top level are this user's (${tmp.own.testTemp} with test temp names); the per-user quota itself is not readable`);
+  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}`);
+  if (tmp.removed === null) parts.push('the loop has recorded no /tmp pass that removed anything');
+  else if (!tmp.latest || tmp.latest.at !== tmp.removedAt) parts.push(`the last pass to remove anything removed ${entries(tmp.removed)}${tmp.removedAt ? ` at ${tmp.removedAt}` : ''}`);
+  return parts.join('; ');
+}
 
 /**
  * What the loop consumes that the registry does not declare: a capped ledger schema no entry
@@ -411,6 +453,41 @@ export async function readDisk(root: string, config: MasterConfig) {
   return null;
 }
 
+/** The most top-level /tmp entries a reading stats for its owner: a status read stays bounded on a host with a backlog. */
+export const ownEntriesScanBound = 20_000;
+/** This user's own top-level entries in `path`, and how many carry a test temp name; null where there are no uids. */
+export async function countOwnEntries(path: string, uid = process.getuid?.()): Promise<TmpInodes['own']> {
+  if (uid === undefined) return null;
+  const names = await readdir(path);
+  let entries = 0, testTemp = 0;
+  for (const name of names.slice(0, ownEntriesScanBound)) {
+    let info;
+    try { info = await lstat(resolve(path, name)); } catch { continue; }
+    if (info.uid !== uid) continue;
+    entries++;
+    if (testTempPatterns.some(pattern => pattern.test(name))) testTemp++;
+  }
+  return { entries, testTemp, capped: names.length > ownEntriesScanBound };
+}
+
+/**
+ * The host temporary directory's inode headroom, this user's own entries in it, the latest /tmp
+ * pass's count and the count the last pass to remove anything removed, from the reclaim record
+ * (GY-1074, GY-1081). Null when the volume cannot be read, or reports no inode count (a filesystem
+ * without fixed inodes).
+ */
+export async function readTmpInodes(root: string, path = tmpdir(), volume: (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }> = statfs, uid = process.getuid?.()): Promise<TmpInodes | null> {
+  try {
+    const info = await volume(path);
+    const totalInodes = Number(info.files), freeInodes = Number(info.ffree);
+    if (!Number.isFinite(totalInodes) || totalInodes <= 0) return null;
+    const file = await readReclaimFile(root);
+    const last = file.reports.filter(report => report.tmp?.removed).at(-1);
+    const own = await countOwnEntries(path, uid).catch(() => null);
+    return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null, latest: file.tmpLatest ?? null, own };
+  } catch { return null; }
+}
+
 // ---- The reclaim pass --------------------------------------------------------------------------
 
 export interface ResourceReclaimReport {
@@ -418,14 +495,17 @@ export interface ResourceReclaimReport {
   reaped: { review: number; producer: number };
   closed: { name: string; pane: string; reason: string }[];
   released: { name: string; ledger: 'review' | 'producer'; reason: string }[];
+  /** The stale /tmp entries the pass removed and the bytes they freed (GY-421, GY-1074). */
+  tmp: { removed: number; bytes: number };
   errors: string[];
 }
 export const resourceReportFile = (root: string) => resolve(root, '.graphyard/resource-reclaims.json');
 const retainedReports = 50;
 
-interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Record<string, string> }
+/** `tmpLatest`: the latest finished /tmp pass, recorded even when it removed nothing (GY-1081). */
+interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Record<string, string>; tmpLatest?: { removed: number; at: string } | null }
 async function readReclaimFile(root: string): Promise<ReclaimFile> {
-  try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {} }; }
+  try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {}, tmpLatest: body.tmpLatest ?? null }; }
   catch { return { version: 1, reports: [], seen: {} }; }
 }
 export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
@@ -444,10 +524,37 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * or a running session needs, and it never touches a worker's pane: the loop's first step closes
  * those once their lease ends.
  */
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void> } = {}): Promise<ResourceReclaimReport> {
+/**
+ * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
+ * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoot`, the host's temporary directory unless the
+ * caller names another (a test's scratch root, so it never sweeps the developer's real /tmp).
+ */
+export const loopTmpReclaimOptions = (tmpRoot?: string): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, ...(tmpRoot ? { tmpRoot } : {}) });
+/** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
+let tmpPass: Promise<void> | null = null;
+let tmpFinished: TmpReclaimReport | null = null;
+/**
+ * Hand over the last finished /tmp pass's report, if one is waiting, and start the next pass when
+ * none is running. The pass is never awaited here: its bounded work runs beside the cycle.
+ */
+export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => reclaimTmpDirectories(loopTmpReclaimOptions())): TmpReclaimReport | null {
+  const finished = tmpFinished;
+  tmpFinished = null;
+  if (!tmpPass) {
+    tmpPass = run()
+      .then(report => { tmpFinished = report; })
+      .catch(error => { tmpFinished = { at: new Date().toISOString(), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [error instanceof Error ? error.message : String(error)] }; })
+      .finally(() => { tmpPass = null; });
+  }
+  return finished;
+}
+/** Wait for the /tmp pass in flight, if any: for a caller that must see it finish. */
+export const settleTmpReclaim = async () => { await tmpPass; };
+
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport> } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
-  const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], errors: [] };
+  const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [] };
   // A pane is closed only once it has been seen finished and unowned by an earlier pass at least
   // the grace ago: a session launched a moment ago holds its name before its record is written.
   // A pending session is failed as absent only once every pass for `stuckSessionMs` missed it: one
@@ -523,9 +630,25 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
     }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
-  const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.errors.length);
-  if (took || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
-    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen }); }
+  // The host's own temporary directories (GY-421): a bounded pass removes what earlier runs left —
+  // a live owner keeps its directory, a dead owner's goes whatever its age, and an ownerless one
+  // goes once it is older than `tmpReclaimMinAgeMs` and no live process holds it open. Both bounds
+  // (count and wall-clock work) hold per pass, and the pass runs beside the cycle rather than in
+  // it: a host with thousands of leftovers never stalls a cycle, and each cycle records what the
+  // last finished pass freed. Ages are judged on the host's real clock, never the cycle's `now`,
+  // which a caller may set anywhere: a directory is old only when it truly is.
+  // `tmpRoot` names the directory scanned and `tmpPass` the pass itself, for a caller that must
+  // keep the sweep off the host's /tmp or watch it run; the loop passes neither.
+  const tmp = takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoot)));
+  if (tmp) {
+    report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
+    report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
+  }
+  const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
+  // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
+  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at } : file.tmpLatest ?? null;
+  if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
+    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen, tmpLatest }); }
     catch (error) { report.errors.push(`Recording the reclaim: ${error instanceof Error ? error.message : String(error)}`); }
   }
   return report;
@@ -537,9 +660,64 @@ export function describeReclaim(report: ResourceReclaimReport) {
     report.reaped.review || report.reaped.producer ? `reaped ${report.reaped.review} review and ${report.reaped.producer} producer ledger record(s)` : '',
     report.closed.length ? `closed ${report.closed.length} finished session(s) and released their names (${report.closed.map(entry => entry.name).join(', ')})` : '',
     report.released.length ? `released ${report.released.length} stuck session slot(s) (${report.released.map(entry => entry.name).join(', ')})` : '',
+    describeTmpReclaim(report.tmp.removed, report.tmp.bytes),
     report.errors.length ? `${report.errors.length} could not be reclaimed: ${report.errors[0]}` : '',
   ].filter(Boolean);
   return parts.length ? `Resource reclaim: ${parts.join('; ')}` : null;
+}
+
+// ---- The host's panes (GY-842) -----------------------------------------------------------------
+
+/** The count of agentless panes a Graphyard launch opened past which attention is raised (GY-842). */
+export const agentlessPaneAttentionBound = 20;
+
+export interface PaneReclaimStatus {
+  at: string;
+  /** Panes the host's runtime reports (`herdr pane list`); null while it cannot be read. */
+  panes: number | null;
+  /** Panes a Graphyard launch opened: the pane ids its sessions recorded. */
+  launched: number;
+  /** Launched panes holding no agent — a runtime that exited and left its shell behind. */
+  agentless: number;
+  /** The oldest agentless launched pane, by the start its session recorded. */
+  oldest: { pane: string; work: string; kind: string; launchedAt: string } | null;
+  /** One attention item once agentless panes pass the bound, naming the counts and the remedy. */
+  attention: AttentionItem | null;
+}
+
+/**
+ * The pane picture of this host (GY-842): how many panes the runtime holds, how many a Graphyard
+ * launch opened, and how many of those stand agentless — the runtime exited and left its shell,
+ * which holds a pty, a process and memory whether or not anything runs in it. Herdr held 621 panes
+ * on 26 September 2026, 584 of them Graphyard's, agentless; the host throttled and every session
+ * and test run on it slowed. A pane counts as agentless only when the runtime reports the pane
+ * with no agent in it, and only a pane a Graphyard session recorded is Graphyard's — a pane the
+ * operator or another tool opened is never counted, and never closed. Only the handles `hostId`
+ * recorded count: the reading is this host's, and a remote handle naming the same pane coordinate
+ * is another host's launch, not this host's pane.
+ */
+export function paneReclaimStatus(panes: { pane_id?: string }[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string): PaneReclaimStatus {
+  // Every pane on the host, from the pane inventory; the agent inventory stands in for presence
+  // when the pane list could not be read, since it lists a session's pane while the pane exists.
+  const listed = new Set((panes ?? []).map(pane => pane.pane_id).filter((id): id is string => !!id));
+  // A launch's own record of its pane (GY-172): the handle every launcher registers, whatever its role.
+  const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null; running: boolean }>();
+  for (const item of work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === hostId)
+    recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null, running: handle.state === 'running' });
+  // A pane with an agent in it is a live session, whatever its state: the inventory detects the agent.
+  const withAgent = new Set((agents ?? []).filter(agent => !!agent.agent && !!agent.pane_id).map(agent => agent.pane_id!));
+  const seenByRuntime = new Set((agents ?? []).map(agent => agent.pane_id).filter((id): id is string => !!id));
+  const present = (pane: string) => listed.has(pane) || (panes === null && seenByRuntime.has(pane));
+  const agentless = [...recorded.entries()].filter(([pane, record]) => present(pane) && !withAgent.has(pane));
+  const oldest = agentless.length
+    ? agentless.reduce((earliest, entry) => Date.parse(entry[1].launchedAt ?? '') < Date.parse(earliest[1].launchedAt ?? '') ? entry : earliest, agentless[0])
+    : null;
+  const reading = { panes: panes === null ? null : listed.size, launched: recorded.size, agentless: agentless.length,
+    oldest: oldest ? { pane: oldest[0], work: oldest[1].work.key, kind: oldest[1].kind, launchedAt: oldest[1].launchedAt ?? 'an unrecorded time' } : null };
+  const attention: AttentionItem[] = agentless.length > agentlessPaneAttentionBound ? [{ subject: 'agentless panes',
+    text: `Herdr holds ${reading.panes ?? 'an unknown number of'} pane(s) on this host and ${agentless.length} of the panes Graphyard launched stand agentless (past the ${agentlessPaneAttentionBound}-pane attention bound), the oldest pane ${reading.oldest!.pane} of ${reading.oldest!.work} (${reading.oldest!.kind}), launched ${reading.oldest!.launchedAt}. Each is a shell holding a pty and memory, and enough of them slow every session and test run on the host`,
+    ...agentOwner('master', 'the loop sweeps them itself, a bounded number per cycle, once agentless past its launch bound; graphyard master run --once runs a pass now') }] : [];
+  return { ...reading, at: new Date(now).toISOString(), attention: attention[0] ?? null };
 }
 
 // ---- The plane's health ------------------------------------------------------------------------
@@ -564,20 +742,42 @@ export async function probeWrites(pool: { connect(): Promise<{ query(sql: string
 }
 
 /**
- * The plane's database size against its declared bound. The default bound is a guess at a volume
- * nobody sized, so it is advisory: `master status` warns on it, but only a configured bound fails health.
+ * The size of the volume holding the database's data directory, when the plane can see it: the
+ * directory is readable to the database role (`data_directory` needs pg_read_all_settings) and the
+ * same path exists on this host — an embedded, compose or same-machine database. A database on its
+ * own host (a managed service) answers null and the default bound stands.
+ */
+export async function readDatabaseVolumeBytes(pool: { query(sql: string): Promise<{ rows: any[] }> }): Promise<{ bytes: number; path: string } | null> {
+  try {
+    const path = String((await pool.query("SELECT current_setting('data_directory') AS path")).rows[0]?.path ?? '');
+    if (!path) return null;
+    const volume = await statfs(path);
+    const bytes = Number(volume.blocks) * Number(volume.bsize);
+    return Number.isFinite(bytes) && bytes > 0 ? { bytes, path } : null;
+  } catch { return null; }
+}
+
+/**
+ * The plane's database size against its bound: GRAPHYARD_DATABASE_MAX_BYTES when set, else the
+ * size of the database's own volume when the plane can read it (GY-979: the fixed 10 GiB default
+ * reported headroom a 19 GB volume did not have, or lacked), else the default. Only the default is
+ * a guess at a volume nobody sized, so it alone is advisory: `master status` warns on it, but a
+ * configured or measured bound fails health.
  */
 export async function readDatabaseCapacity(pool: { query(sql: string): Promise<{ rows: any[] }> }, env: NodeJS.ProcessEnv = process.env): Promise<PlaneReading> {
   const configured = Number(env.GRAPHYARD_DATABASE_MAX_BYTES);
   const set = Number.isFinite(configured) && configured > 0;
-  const bound = set ? configured : defaultDatabaseMaxBytes;
+  const volume = set ? null : await readDatabaseVolumeBytes(pool);
+  const bound = set ? configured : volume?.bytes ?? defaultDatabaseMaxBytes;
+  const advisory = !set && !volume;
+  const against = set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : volume ? `the size of the database volume at ${volume.path}` : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset and the database volume not readable from the plane; it warns but does not fail health)';
   try {
     const used = Number((await pool.query('SELECT pg_database_size(current_database()) AS size')).rows[0].size);
     // The largest tables, so growth is attributed from outside the database (a catalogue read, no scan).
     const tables = await pool.query(`SELECT relname AS table, pg_total_relation_size(c.oid) AS bytes FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relkind = 'r' AND n.nspname = 'public' ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 6`).then(r => r.rows.map(row => ({ table: String(row.table), bytes: Number(row.bytes) })), () => undefined);
-    return { used, bound, advisory: !set, ...(tables ? { tables } : {}), detail: `pg_database_size against ${set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset; it warns but does not fail health)'}` };
-  } catch (error) { return { used: null, bound, advisory: !set, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
+    return { used, bound, advisory, ...(tables ? { tables } : {}), detail: `pg_database_size against ${against}` };
+  } catch (error) { return { used: null, bound, advisory, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
 }
 
 const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>();

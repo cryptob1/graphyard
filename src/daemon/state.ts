@@ -4,13 +4,14 @@ import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
 import { runRecordSchema } from '../runner/types.js';
+import { diagnosisRecordSchema, diagnosisSettled, retainedDiagnoses } from '../runner/payloads.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
@@ -30,6 +31,8 @@ export const daemonActionSchema = z.object({
   at: z.string(),
   /** Set on a failed or indeterminate action: the fault class that failure is an instance of (GY-173). */
   faultClass: z.enum(faultClasses).optional(),
+  /** Set on a refused merge (GY-831): when the guarded merge first gave the refusal this detail names, unchanged since. */
+  since: z.string().optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
@@ -221,6 +224,8 @@ export const approvalWatchSchema = z.object({
   requestedAt: z.string(), launchedAt: z.string().nullable().default(null),
   /** Approver sessions launched (or attempted) for this decision; bounded by `maxApproverLaunches`. */
   launches: z.number().int().min(0).default(0),
+  /** Headless approver runs lost for this decision (GY-453) whose launch was given back; bounded by `maxLostApproverRuns`. */
+  lostRuns: z.number().int().min(0).default(0),
   /** Requests made for this binding, counting the ones the server settled without applying; bounded by `maxDecisionRequests`. */
   requests: z.number().int().min(0).default(1),
   /** How each earlier session ended without a judgement, oldest first. */
@@ -253,7 +258,7 @@ export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
  * What a re-keyed watch takes over from the one it retires: the session goes on, and so does what
  * it runs on, so a retained session's exhaustion holds the account it spent (GY-182).
  */
-export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
+export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, lostRuns: prior.lostRuns, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
   exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session });
 
 /**
@@ -311,6 +316,58 @@ export const upgradeStateSchema = z.object({
 }).strict().default(() => ({ alignedRelease: null, pending: null, last: null, refused: null }));
 export type UpgradeState = z.infer<typeof upgradeStateSchema>;
 
+/**
+ * What the loop last saw of the master session it launches and supervises (GY-898): the handle it
+ * launched (or adopted), the registry session and account it holds, the rotation count and why the
+ * last one ended, and the wake bookkeeping — the subject digests last named, so an unchanged cause
+ * never wakes twice, and the last wake's time and causes. All of it is cursor state: a restarted
+ * loop adopts the live session from this record and its Herdr name rather than launching a second.
+ */
+export const masterSessionSchema = z.object({
+  agentName: z.string().max(200).nullable().default(null),
+  pane: z.string().max(200).nullable().default(null),
+  runtime: z.string().max(40).nullable().default(null),
+  /** The account the registry's master role chose, held so its exhaustion holds the right account. */
+  account: z.string().max(200).nullable().default(null),
+  /** The agent registry session the launch holds; ended when the session is replaced. */
+  session: z.string().max(200).nullable().default(null),
+  /** When this session started (a launch, or the moment the loop adopted one it found live). */
+  startedAt: z.string().nullable().default(null),
+  /** Whether the record came from adopting a session the loop did not launch. */
+  adopted: z.boolean().default(false),
+  rotations: z.number().int().min(0).default(0),
+  /** Why the last session ended and when: exited, exhausted, or budget. */
+  lastEnd: z.object({ cause: z.string().max(40), at: z.string(), detail: z.string().max(500) }).strict().nullable().default(null),
+  /** The last wake: when, the subject keys it named (empty for a heartbeat), and whether it was the heartbeat. */
+  lastWake: z.object({ at: z.string(), causes: z.array(z.string().max(60)).max(20), heartbeat: z.boolean() }).strict().nullable().default(null),
+  /** Consecutive liveness misses: an exit is established on the second. */
+  misses: z.number().int().min(0).default(0),
+  /** True from hand-off until the launch settles, so no cycle doubles it. */
+  launching: z.boolean().default(false),
+  /**
+   * Per subject key, the digest of its detail when it was last woken about (or first seen). It is
+   * never cut to a count: it tracks exactly the current actionable subjects (pruned to them every
+   * cycle, like `silence.subjects`, which already holds each with its detail), and a digest dropped
+   * for a bound would read as a changed subject and wake the session every cycle with no event.
+   */
+  subjects: z.record(z.string().max(60), z.string().max(40)).default({}),
+  /**
+   * Registry sessions an ended or failed launch could not give back: the master role runs one
+   * session at a time, so a leaked row would refuse every relaunch. Each is ended again every cycle
+   * until the registry takes it back, or until the registry's own session cap has ended it.
+   */
+  unreleased: z.array(z.object({ session: z.string().max(200), since: z.string(), reason: z.string().max(300) }).strict()).max(20).default([]),
+}).strict();
+export type MasterSessionState = z.infer<typeof masterSessionSchema>;
+export const emptyMasterSession = (): MasterSessionState => masterSessionSchema.parse({});
+/** The master line of the daemon summary (GY-898); the session and heartbeat budgets are added by the reader from its config. */
+export function masterSummary(master: MasterSessionState, now: number) {
+  const startedAt = master.startedAt ? Date.parse(master.startedAt) : Number.NaN;
+  return { session: master.agentName, pane: master.pane, runtime: master.runtime, account: master.account, adopted: master.adopted,
+    startedAt: master.startedAt, ageMs: Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : null,
+    rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
+}
+
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -353,11 +410,18 @@ export const daemonStateSchema = z.object({
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
+   * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
+   * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).
+   */
+  diagnoses: z.record(z.string(), diagnosisRecordSchema).default(() => ({})),
+  /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
    * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
    * losses seen — and the last cycle's report, one line per invariant, for `master status`.
    */
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
+  /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
+  master: masterSessionSchema.default(() => emptyMasterSession()),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -418,6 +482,10 @@ export function pruneDaemonState(state: DaemonState) {
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
+  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight.
+  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
+  const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
+  if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
   return state;
 }
 
@@ -476,6 +544,15 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     watch.ended = watch.ended.slice(-10).map(entry => cut(entry, 300));
   }
   for (const absence of Object.values(state.absences)) absence.owner = cut(absence.owner, 200);
+  if (state.master) {
+    state.master.agentName = cut(state.master.agentName, 200);
+    state.master.pane = cut(state.master.pane, 200);
+    state.master.account = cut(state.master.account, 200);
+    state.master.session = cut(state.master.session, 200);
+    if (state.master.lastEnd) state.master.lastEnd = { ...state.master.lastEnd, cause: cut(state.master.lastEnd.cause, 40), detail: cut(state.master.lastEnd.detail, 500) };
+    if (state.master.lastWake) state.master.lastWake = { ...state.master.lastWake, causes: state.master.lastWake.causes.slice(-20).map(cause => cut(cause, 60)) };
+    state.master.unreleased = state.master.unreleased.slice(-20).map(entry => ({ ...entry, session: cut(entry.session, 200), reason: cut(entry.reason, 300) }));
+  }
   const failures = state.failures;
   if (failures.last) Object.assign(failures.last, { call: cut(failures.last.call, 100), reason: cut(failures.last.reason, 1000) });
   if (failures.lastUnhandled) failures.lastUnhandled.reason = cut(failures.lastUnhandled.reason, 1000);

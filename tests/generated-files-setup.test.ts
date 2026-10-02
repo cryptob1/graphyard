@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configuredGeneratedFiles, parseGeneratedFiles } from '../src/generated-files.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable } from '../src/install/generated-files.js';
 import { installationOwner } from '../src/master.js';
 import { applyProposal, scanProposal } from '../src/repository-setup.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-77 AC-1 / AC-2: the installers derive GRAPHYARD_GENERATED_FILES from the managed
 // repository's generated-file manifest and set it beside GRAPHYARD_PRINCIPALS, master status
@@ -39,7 +39,7 @@ const ordersApi = {
 };
 
 async function fixtureRepo(files: Record<string, string> = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-generated-files-'));
+  const root = await temporaryDirectory('generated-files');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:owner/repo.git'], { cwd: root });
   for (const [path, content] of Object.entries(files)) {
@@ -174,7 +174,7 @@ test('integration:generated-files-setup — the server refuses an unparseable va
 // recording shim on PATH: what reaches `railway variable set` is the assertion, not the source
 // text. `src` and the dependency install are linked in so the copied adapter resolves them.
 async function adapterFixture(files: Record<string, string>) {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-adapter-'));
+  const root = await temporaryDirectory('adapter');
   await symlink(join(repository, 'src'), join(root, 'src'), 'dir');
   const resolved = createRequire(import.meta.url).resolve('tsx/esm/api');
   await symlink(resolved.slice(0, resolved.lastIndexOf(`${sep}node_modules${sep}`) + `${sep}node_modules`.length), join(root, 'node_modules'), 'dir');

@@ -1,8 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -13,6 +11,7 @@ import { Delivery, commonInterval, mergeSegments, serviceState, type Environment
 import { server } from '../src/server.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import type { Principal, Work, Observation } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * D3 acceptance checks of the turnkey delivery roadmap, one test per check, named
@@ -38,7 +37,7 @@ let http: ReturnType<typeof server>, url: string;
 let serial = 0;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_DELIVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 4);
-  pg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-delivery-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('delivery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delivery_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);

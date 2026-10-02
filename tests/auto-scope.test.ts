@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +16,8 @@ import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPa
 import { regressionRefusals } from '../src/regression-guard.js';
 import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
+import { workFaults } from '../src/model/fault-classes.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
 // records the ask as structured state; the master loop asks the control plane to decide it on the
@@ -94,7 +96,7 @@ const escalations = (state: DaemonState) => Object.entries(state.actions).filter
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_AUTO_SCOPE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 43);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-auto-scope-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('auto-scope-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('auto_scope_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/auto_scope_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
@@ -102,7 +104,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   await ok(token(operator), 'POST', 'operator-agents', { id: master.id, displayName: master.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: master.token, reason: 'Onboarding provisions the master operator agent' });
-  operatorTokenFile = join(await mkdtemp(join(tmpdir(), 'graphyard-auto-scope-')), 'operator.token');
+  operatorTokenFile = join(await temporaryDirectory('auto-scope'), 'operator.token');
   await writeFile(operatorTokenFile, `${master.token}\n`, { mode: 0o600 });
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
@@ -158,11 +160,16 @@ test('integration:auto-scope-approval — the loop decides an implied additive r
   assert.equal(scopeAction(state, work, asked.scopeRequest!.at).attempts, 1);
   assert.equal((await reload(work.id)).policyRevision, work.policyRevision);
 
-  // The control plane decides; the caller does not. A coordinator asking for an epoch that no
-  // longer has an undecided request is refused rather than obeyed.
+  // The control plane decides; the caller does not. A coordinator asking again for an answered
+  // request gets the item and the decision it recorded (GY-955), and nothing is decided twice.
+  const decidedItem = await reload(work.id);
   const repeated = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
-  assert.equal(repeated.status, 404, JSON.stringify(repeated.body));
-  assert.match(repeated.body.error, /No scope request is open/);
+  assert.equal(repeated.status, 200, JSON.stringify(repeated.body));
+  assert.deepEqual(repeated.body.scopeDecision, decidedItem.scopeDecision);
+  assert.equal(repeated.body.revision, decidedItem.revision, 'the standing answer rewrites nothing');
+  const otherEpoch = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch + 1 });
+  assert.equal(otherEpoch.status, 404, JSON.stringify(otherEpoch.body));
+  assert.match(otherEpoch.body.error, /No scope request is open/);
   const byWorker = await call(token(implementer), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
   assert.equal(byWorker.status, 403, JSON.stringify(byWorker.body));
 });
@@ -343,8 +350,9 @@ test('integration:scope-redecision — a refusal the current rules would approve
   await cycle(state);
   assert.equal(scopeAction(state, work, asked.scopeRequest!.at).attempts, 1);
   const still = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
-  assert.notEqual(still.status, 200, JSON.stringify(still.body));
-  assert.match(still.body.error, /current rules still refuse/);
+  assert.equal(still.status, 200, JSON.stringify(still.body));
+  assert.deepEqual(still.body.scopeRequest.decision, work.scopeRequest!.decision, 'answered with the standing refusal (GY-955)');
+  assert.equal(still.body.revision, work.revision, 'never rewritten');
 
   // The item now plans the whole docs/ tree, so the rule implies the consumers it asked for.
   await ok(master.token, 'POST', `work/${work.id}/requirements`, { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
@@ -367,7 +375,9 @@ test('integration:scope-redecision — a refusal the current rules would approve
   await cycle(state);
   assert.equal((await reload(work.id)).policyRevision, work.policyRevision);
   const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
-  assert.equal(again.status, 404, JSON.stringify(again.body));
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal(again.body.scopeDecision.state, 'approved', 'answered with the recorded approval');
+  assert.equal(again.body.policyRevision, work.policyRevision);
 });
 
 test('integration:scope-from-review-finding — a refused request for a file a review finding on the item names is widened by the loop, as the master, with the finding as its grounds', async () => {
@@ -593,13 +603,13 @@ test('unit:review-finding-scope — only a file on the base that a finding names
       { id: 3, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'COMMENTED', body: '' }]]);
   };
   // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
-  const repo = await mkdtemp(join(tmpdir(), 'gy-finding-base-'));
+  const repo = await temporaryDirectory('gy-finding-base');
   const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   git(['-C', repo, 'init', '-q']); await mkdir(join(repo, 'src')); await writeFile(join(repo, 'src', 'present.ts'), 'export {};\n');
   git(['-C', repo, 'add', '.']); git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base']);
   git(['-C', repo, 'branch', '-M', 'main']);
   // The loop's checkout: its origin/main is read once and then left stale while the remote moves on.
-  const checkout = await mkdtemp(join(tmpdir(), 'gy-finding-checkout-'));
+  const checkout = await temporaryDirectory('gy-finding-checkout');
   git(['clone', '-q', repo, checkout]);
   await writeFile(join(repo, 'src', 'added.ts'), 'export {};\n'); git(['-C', repo, 'rm', '-q', 'src/present.ts']); git(['-C', repo, 'add', '.']);
   git(['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'base moves']);
@@ -766,4 +776,135 @@ test('unit:review-named-and-pinning-tests-granted — a file an unresolved revie
   assert.equal(pinningTestGround(pinning, 'fails on /Not in the test/', texts[pinning], [{ path: layout, text: 'Not in the test' }]), null, 'the test does not hold the quote');
   assert.equal(pinningTestGround('src/widget/Other.ts', `fails on /${heading}/`, texts[pinning], [{ path: layout, text: texts[layout] }]), null, 'only a test file is granted this way');
   assert.equal(pinningTestGround(pinning, 'fails on `short`', 'short', [{ path: layout, text: 'short' }]), null, 'a quote too short to tie the two together');
+});
+
+// GY-955: one scope request is decided once. The loop's scope step and an executor's queued
+// approve-scope both posted work/:id/autoscope for one undecided request; the second to land met
+// "The current rules still refuse this scope request" and the loop recorded a failed action — a
+// second scope-class fault instance for the same request (GY-945 at 06:31:21Z, GY-883 at 07:03:39Z).
+const failedScope = (state: DaemonState) => Object.values(state.actions).filter(action => action.kind === 'scope' && action.state === 'failed');
+/** The snapshot the loop polled before an executor decided: what makes its later post the duplicate. */
+const staleSnapshot = async (skewMs = 0) => { const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: new Date(Date.parse(snapshot.now) + skewMs).toISOString() }; };
+const executorDecides = (work: Work) => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch }) as Promise<Work>;
+
+test('unit:autoscope-answers-standing-decision — autoscope on a decided request answers with its standing decision, and on a cleared one with the recorded scopeDecision, never the 422', async () => {
+  let work = await claimed('standing decision');
+  await request(work, { paths: ['src/ci-guard.ts'], reason: 'Wider than the item' });
+  const refused = await executorDecides(work);
+  assert.equal(refused.scopeRequest!.decision!.state, 'refused');
+  const again = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.doesNotMatch(JSON.stringify(again.body), /still refuse this scope request/);
+  assert.deepEqual(again.body.scopeRequest.decision, refused.scopeRequest!.decision, 'the standing refusal, unchanged');
+  assert.equal(again.body.revision, refused.revision, 'nothing is rewritten');
+  // Withdrawn and asked again for what the item implies: approved and cleared, then answered from the record.
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [], reason: 'withdrawn' });
+  await request(work, { paths: [theme], reason: 'AC-2 names it' });
+  const approved = await executorDecides(work);
+  assert.equal(approved.scopeRequest, null);
+  assert.equal(approved.scopeDecision!.state, 'approved');
+  const answered = await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch });
+  assert.equal(answered.status, 200, JSON.stringify(answered.body));
+  assert.deepEqual(answered.body.scopeDecision, approved.scopeDecision);
+  assert.equal(answered.body.policyRevision, approved.policyRevision, 'decided once, applied once');
+  work = await reload(work.id);
+  assert.equal(work.revision, approved.revision);
+  // Authority is unchanged: only a coordinator asks, and only for the asking attempt.
+  assert.equal((await call(token(implementer), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch })).status, 403);
+  assert.equal((await call(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.epoch + 1 })).status, 404);
+});
+
+test('unit:scope-decided-once-not-failed — an executor deciding between the loop\'s snapshot and its scope step leaves a done action and no failure; a held approve-scope row keeps the loop from posting at all', async () => {
+  for (const paths of [[theme], ['src/ci-guard.ts']]) {
+    const work = await claimed(`race ${paths[0]}`);
+    await request(work, { paths, reason: 'The race GY-945 and GY-883 lost' });
+    const stale = await staleSnapshot();
+    const decided = await executorDecides(work);
+    const state = emptyDaemonState(loopConfig());
+    await cycle(state, { snapshot: async () => stale });
+    assert.deepEqual(failedScope(state), [], `no failed action for ${paths[0]}`);
+    const action = Object.values(state.actions).find(entry => entry.kind === 'scope' && entry.work === work.key);
+    assert.equal(action?.state, 'done', JSON.stringify(action));
+    if (decided.scopeRequest === null) assert.match(action!.detail, /^Widened /, 'the recorded approval is read as the widening it is');
+    else assert.match(action!.detail, /^Refused /, 'a standing refusal is read as the refusal it is, and handled as one');
+  }
+  // While an executor holds the request's approve-scope row, it is the one decider: the loop does not post.
+  const work = await claimed('held row');
+  await request(work, { paths: [theme], reason: 'AC-2 names it' });
+  const stale = await staleSnapshot();
+  const item = stale.work.find(entry => entry.id === work.id)!;
+  const row = item.actionQueue!.actions.find(entry => entry.kind === 'approve-scope')!;
+  assert.ok(row, 'the control plane computed the approve-scope row');
+  const held = { ...row, state: 'claimed' as const, claim: { executor: 'graphyard-master@loop-host/1', host: 'loop-host', principal: coordinator.id, claimedAt: stale.now, expiresAt: new Date(Date.parse(stale.now) + 60_000).toISOString(), attempt: 1 } };
+  let posts = 0;
+  const state = emptyDaemonState(loopConfig());
+  await cycle(state, { snapshot: async () => ({ ...stale, work: stale.work.map(entry => entry.id === work.id ? { ...entry, actionQueue: { ...entry.actionQueue!, actions: [held] } } : entry) }), decideScope: async decided => { posts++; return decided; } });
+  assert.equal(posts, 0, 'one decider per request');
+  assert.deepEqual(failedScope(state), []);
+  // Unclaimed, the row is the loop's to answer: a fleet that serves no approve-scope never waits.
+  await cycle(state, { snapshot: async () => stale });
+  assert.equal((await reload(work.id)).scopeDecision?.state, 'approved');
+
+  // A request closed meanwhile (its refusal recorded, the request gone) is answered, not routed or escalated.
+  const closing = await claimed('closed meanwhile');
+  const asked = await request(closing, { paths: ['src/ci-guard.ts'], reason: 'Wider than the item' });
+  const closedState = emptyDaemonState(loopConfig());
+  const refusal = { state: 'refused' as const, reason: 'outside', at: new Date().toISOString(), decidedBy: 'graphyard', waitedMs: 1, paths: ['src/ci-guard.ts'], requestedBy: implementer.id, requestedAt: asked.scopeRequest!.at, epoch: closing.epoch };
+  await cycle(closedState, { decideScope: async item => ({ ...item, scopeRequest: null, scopeDecision: refusal }) });
+  const answered = Object.values(closedState.actions).find(entry => entry.kind === 'scope' && entry.work === closing.key);
+  assert.match(answered?.detail ?? '', /was already answered: refused — outside/, answered?.detail);
+  assert.ok(!escalations(closedState).some(entry => entry.key.startsWith(`escalation:scope:${closing.id}`)), 'nothing escalated for a closed request');
+  assert.deepEqual(failedScope(closedState), []);
+});
+
+test('unit:scope-fault-class-instances-removed — GY-945\'s and GY-883\'s asks, refused by the base rule and then failed by the duplicate decide, are decided with grounds and no failed action, leaving no scope fault', async () => {
+  const replay = async (title: string, criteria: { id: string; text: string; proofs: string[] }[], plannedFiles: string[], paths: string[]) => {
+    let work = await ok(master.token, 'POST', 'work', { title, plannedFiles, criteria, reason: 'Replay of a GY-954 scope-class instance' }) as Work;
+    work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the replay' }) as Work;
+    work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+    await request(work, { paths, reason: 'The feature implementation, not optional add-ons' });
+    return reload(work.id);
+  };
+  // The base rule grounded only criteria-named paths and the documentation rule; neither ask held.
+  const baseRefuses = (work: Work, paths: string[]) => paths.filter(path => !impliedScopes(work.criteria, ['docs/', 'AGENTS.md', 'README.md']).some(entry => entry.kind === 'documentation' ? path.startsWith(entry.scope) : namedPaths(entry.scope).includes(path) || entry.scope === path));
+  const fleetAsk = ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts', 'tests/docs-budget.test.ts'];
+  const fleet = await replay('GY-945 replay', [
+    { id: 'AC-1', text: 'A fleet panel in the web UI lists every registry account: runtime, quota state, eligibility and live session count.', proofs: ['unit:fleet-panel-renders-registry'] },
+    { id: 'AC-2', text: 'Stale or probe-failed accounts are visually distinguished from healthy ones.', proofs: ['unit:fleet-panel-marks-stale-probe'] },
+  ], [], fleetAsk);
+  assert.deepEqual(baseRefuses(fleet, fleetAsk), fleetAsk.slice(1), 'the base rule refused all but the guide, so the whole ask');
+  const fixtures = ['tests/auto-rebase.test.ts', 'tests/bootstrap-policy.test.ts', 'tests/queue-carry.test.ts'];
+  const lanes = await replay('GY-883 replay', [
+    { id: 'AC-1', text: 'src/model/policy.ts assigns every item a lane. A new test file tests/risk-lanes.test.ts that this item creates asserts it.', proofs: ['unit:risk-lane-assigned'] },
+    { id: 'AC-2', text: 'In src/model/gates.ts a low-lane item is landable with its required CI checks green.', proofs: ['unit:lane-sets-required-gates'] },
+  ], ['src/model/policy.ts', 'src/model/gates.ts', 'tests/risk-lanes.test.ts'], fixtures);
+  assert.deepEqual(baseRefuses(lanes, fixtures), fixtures);
+
+  // The race: the loop polls, an executor decides, then the loop's scope step posts for both items.
+  const stale = await staleSnapshot();
+  const fleetDecided = await executorDecides(fleet), lanesDecided = await executorDecides(lanes);
+  assert.equal(fleetDecided.scopeDecision!.state, 'approved', 'GY-945\'s five paths are grounded by the rule itself');
+  assert.match(fleetDecided.scopeDecision!.reason, /tests\/fleet-panel\.test\.ts is the test file AC-1, AC-2's proofs .* live in/);
+  assert.equal(lanesDecided.scopeRequest!.decision!.state, 'refused', 'GY-883\'s fixtures need the base read the loop does');
+  // Exactly the base's failing condition: a decided request the rule still refuses.
+  assert.notEqual(decideScopeRequest(lanesDecided, lanesDecided.scopeRequest!).state, 'approved');
+
+  const base: Record<string, string> = {
+    'src/model.ts': "export * from './model/policy.js';\nexport * from './model/gates.js';\n", 'src/engine.ts': 'export class Engine {}',
+    ...Object.fromEntries(fixtures.map(path => [path, "import { Engine } from '../src/engine.js';\nimport { evaluate, type Work } from '../src/model.js';\n"])),
+  };
+  const widen = async (item: Work, asked: ScopeRequestState, paths: string[], reason: string) => ok(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
+  const state = emptyDaemonState(loopConfig());
+  await cycle(state, { snapshot: async () => stale, basePaths: async paths => new Set(paths.filter(path => path in base)), baseText: async path => base[path] ?? null, baseMentions: async () => Infinity, widenScope: widen });
+  assert.deepEqual(failedScope(state), [], 'no action:scope instance');
+  for (const replayed of [fleet, lanes]) {
+    const now = await reload(replayed.id);
+    assert.equal(now.scopeRequest, null, `${replayed.title}: decided and cleared`);
+    assert.equal(now.blocker, null);
+    assert.deepEqual(workFaults(now, Date.now()).filter(fault => fault.faultClass === 'scope'), [], `${replayed.title}: no scope fault stands`);
+  }
+  const lanesNow = await reload(lanes.id);
+  assert.ok(fixtures.every(path => lanesNow.plannedFiles.includes(path)), `${lanesNow.plannedFiles}`);
+  const widened = Object.values(state.actions).find(action => action.work === lanes.key && /^Widened /.test(action.detail));
+  assert.match(widened?.detail ?? '', /imports src\/model\.ts, which re-exports planned file src\/model\/(policy|gates)\.ts/, widened?.detail);
 });

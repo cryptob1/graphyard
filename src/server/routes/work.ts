@@ -10,8 +10,9 @@ import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDec
 import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
-import { appendFollowUps, migrateFollowUps, recordTriage } from '../followups.js';
+import { appendFollowUps, followUpsByPr, migrateFollowUps, promoteFollowUp, readFollowUps, recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
+import { issuePushCredential } from '../push-credential.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -80,8 +81,19 @@ export const workRoutes = defineRoutes('work', [
       return closeWork(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
-  // The machine-filed backlog (GY-402): a later approval's findings appended to the parent's one
-  // follow-up item, the one-time migration of the duplicates, and the triage agent's judgement.
+  // Review follow-ups (GY-402, GY-896): an approval's findings recorded on the approved item's own
+  // record (or appended to a legacy follow-up item), read back by item or by pull request, one
+  // finding promoted to a work item on an operator's demand, the one-time migration of the
+  // duplicate follow-up items, and the triage agent's judgement.
+  { method: 'GET', path: /^\/api\/work\/([^/]+)\/followups$/, handle: ({ services, operatorVisible }, [id]) => readFollowUps(services, operatorVisible, decodeURIComponent(id)) },
+  { method: 'GET', path: '/api/followups', handle: ({ services, operatorVisible, url }) => followUpsByPr(services, operatorVisible, url.searchParams) },
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/promote$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'promote');
+      return promoteFollowUp(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
+    },
+  },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/(followups|triage)$/,
     async handle(context, [id, action]) {
@@ -117,6 +129,14 @@ export const workRoutes = defineRoutes('work', [
       // is recorded here rather than inherited from a handler never reached.
       await refuseLead(context, id, 'merge-acquire');
       return engine.requestEnqueue(actor, id, await parseJson(context, undefined, '{}'), context.idempotencyKey());
+    },
+  },
+  // A worker session's short-lived push credential (GY-999), for the lease holder only.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/push-credential$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'push-credential');
+      return issuePushCredential(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
     },
   },
   {

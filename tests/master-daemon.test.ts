@@ -1,19 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { acquireDaemonLock, actionDetailMax, candidateKey, cycleFailureDelay, cycleFailureStart, daemonStatePath, daemonStateSchema, daemonSummary, dispatchKey, emptyDaemonState, missingProofs, noteCycleFailure, observeDeployment, percentiles, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, retriedSnapshot, runCycle, runDaemon, snapshotRetryDelayMs, stageMetrics, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const workerToken = 'worker-token-'.padEnd(40, 'x');
 
 async function privateDirectory() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-daemon-'));
+  const directory = await temporaryDirectory('daemon');
   const token = join(directory, 'coordinator.token');
   await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   return { directory, token };
@@ -71,7 +71,7 @@ test('the daemon cursor lives beside the coordinator credential, stays private, 
   try {
     const master = config(token);
     assert.equal(daemonStatePath(master), join(directory, 'coordinator.daemon.json'));
-    const root = await mkdtemp(join(tmpdir(), 'graphyard-daemon-root-'));
+    const root = await temporaryDirectory('daemon-root');
     execFileSync('git', ['init', '-q', root]);
     try {
       assert.equal((await readDaemonState(root, master)).cycle, 0, 'a missing cursor is an empty cursor, not a failure');
@@ -145,7 +145,7 @@ test('restarting the loop resumes the cursor without dispatching or requesting a
   const { directory, token } = await privateDirectory();
   const workerCredential = join(directory, 'worker.token');
   await writeFile(workerCredential, workerToken, { mode: 0o600 });
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-daemon-root-'));
+  const root = await temporaryDirectory('daemon-root');
   execFileSync('git', ['init', '-q', root]);
   try {
     const master = config(token, { workers: [profile('codex', workerCredential)] });
@@ -256,6 +256,28 @@ test('one cycle closes finished sessions, dispatches, requests proof, merges onl
     await runCycle(master, state, deps, () => clock + 20_000);
     assert.deepEqual(log, [], 'completed actions must not repeat while the candidate is unchanged');
     assert.equal(state.cycle, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:proof-dispatch-waits-for-push-run — a fresh candidate is left to its push-triggered acceptance run, and the loop dispatches the proof workflow only once the grace period passes', async () => {
+  const { directory, token } = await privateDirectory();
+  try {
+    const master = config(token, { run: { proofWorkflow: 'acceptance.yml', proofDispatchGraceMinutes: 180 } });
+    const proofDispatchGraceMs = 180 * 60_000;
+    const acceptance = submitted({ id: 'acceptance', key: 'GY-44', stage: 'acceptance',
+      criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }],
+      gates: [{ name: 'acceptance', passed: false, reasons: ['needs evidence'] }] });
+    const log: string[] = [];
+    let elapsed = 0;
+    const deps = effects({ snapshot: async () => ({ work: [acceptance], now: iso(elapsed) }) }, log);
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, deps, () => clock);
+    elapsed = proofDispatchGraceMs - 60_000;
+    await runCycle(master, state, deps, () => clock + elapsed);
+    assert.deepEqual(log.filter(entry => entry.startsWith('proof:')), [], 'no duplicate run is queued while the push-triggered run has its chance');
+    elapsed = proofDispatchGraceMs;
+    await runCycle(master, state, deps, () => clock + elapsed);
+    assert.deepEqual(log.filter(entry => entry.startsWith('proof:')), ['proof:GY-44'], 'the fallback dispatch runs once the grace period passes');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

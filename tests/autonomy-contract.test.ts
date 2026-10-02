@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +17,7 @@ import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer
 import { launchProducer } from '../src/producer.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-184: autonomy is a product contract. Every session Graphyard launches carries one autonomy
 // contract (src/autonomy.ts), every accepted runtime launches in its no-approval mode or is
@@ -52,7 +52,7 @@ const ready = () => work({ stage: 'ready', lease: null, submission: null, candid
 
 /** A master installed in a throwaway repository, its credentials outside it, with reviewer, approver and operator-agent identities. */
 async function installed() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-')), credentials = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-credentials-'));
+  const root = await temporaryDirectory('autonomy'), credentials = await temporaryDirectory('autonomy-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
@@ -153,7 +153,7 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
   const kinds = agentKindSchema.options;
   for (const kind of ['pi', 'gemini', 'copilot', 'qwen']) assert.ok(nonInteractiveLaunch[kind], `${kind} has a recipe`);
   assert.deepEqual(Object.keys(nonInteractiveLaunch).filter(kind => !(kinds as readonly string[]).includes(kind)), [], 'every recipe is for an accepted kind');
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-refused-'));
+  const directory = await temporaryDirectory('autonomy-refused');
   try {
     for (const kind of kinds) {
       const recipe = nonInteractiveLaunch[kind];
@@ -243,7 +243,7 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
     // session's working directory is recorded as trusted in the config home the session reads, the
     // record the dialog's "Yes, proceed" writes, before anything is typed into the pane — but only
     // for a launch that loads none of the repository's own settings, which that record would enable.
-    const home = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-claude-home-')), worktree = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-worktree-'));
+    const home = await temporaryDirectory('autonomy-claude-home'), worktree = await temporaryDirectory('autonomy-worktree');
     try {
       const config = join(home, '.claude.json');
       await writeFile(config, JSON.stringify({ numStartups: 3, projects: { '/elsewhere': { hasTrustDialogAccepted: true, lastCost: 1 } } }));
@@ -271,7 +271,7 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
       assert.equal(again.trust!.written, false); assert.equal(JSON.parse(await readFile(config, 'utf8')).projects[realpathSync(nested)], undefined);
       // A folder that carries no repository configuration is trusted whatever the setting sources,
       // and sessions of one account launched at once each keep their record: the writes are serialized, none is lost.
-      const folders = await Promise.all(Array.from({ length: 6 }, () => mkdtemp(join(tmpdir(), 'graphyard-autonomy-concurrent-'))));
+      const folders = await Promise.all(Array.from({ length: 6 }, () => temporaryDirectory('autonomy-concurrent')));
       try {
         const results = await Promise.all(folders.map((folder, index) => trustClaudeFolder(folder, { CLAUDE_CONFIG_DIR: home }, index % 2 ? userOnly : ['--permission-mode', 'bypassPermissions'])));
         assert.ok(results.every(result => result.written));
@@ -282,7 +282,7 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
       // A settings.local.json is the repository's own configuration unless git ignores it there
       // (Graphyard writes a worker's only into a worktree that ignores it), so a tracked one refuses
       // the launch and an ignored one does not.
-      const local = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-local-'));
+      const local = await temporaryDirectory('autonomy-local');
       try {
         execFileSync('git', ['init', '--quiet'], { cwd: local });
         mkdirSync(join(local, '.claude')); await writeFile(join(local, '.claude/settings.local.json'), JSON.stringify({ hooks: {} }));
@@ -305,7 +305,7 @@ test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSche
 });
 
 test('unit:contract-reaches-runtimes-without-role-flag — a codex and an opencode session, which load no role file, start on a request that begins with the contract', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-autonomy-request-'));
+  const directory = await temporaryDirectory('autonomy-request');
   try {
     for (const kind of ['codex', 'opencode']) {
       assert.equal(launchRoleContracts[kind], undefined, `${kind} has no role-file flag`);

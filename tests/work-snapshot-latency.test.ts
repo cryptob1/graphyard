@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +18,7 @@ import { proofOutcome } from '../src/producer.js';
 import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork } from '../src/server/work-view.js';
 import { cycleBudget } from '../src/cli/master.js';
 import { assertTiming, minimumSamples, steadyState } from './helpers/timing.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // A ledger the size production reached and beyond: 100 items, each carrying the history a long-lived
 // item accumulates (evidence for every head it ever had, the per-file scope comparison of its last
@@ -73,7 +73,7 @@ function ledgerItem(index: number, now: Date): Work {
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_SNAPSHOT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 23);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-snapshot-test-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('snapshot-test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_snapshot_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_snapshot_test`); await store.init();
   const now = new Date();
@@ -89,7 +89,7 @@ before(async () => {
   http = server(new Engine(store, [15368], 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
-  directory = await mkdtemp(join(tmpdir(), 'graphyard-snapshot-master-'));
+  directory = await temporaryDirectory('snapshot-master');
   const credentialFile = join(directory, 'coordinator.token'); await writeFile(credentialFile, coordinatorToken, { mode: 0o600 });
   config = masterConfigSchema.parse({ version: 1, url: origin, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
 });
@@ -299,11 +299,14 @@ test('integration:cycle-within-interval — a coordination cycle over the 100-it
   const budget = cycleBudget(state, intervalMs);
   assert.deepEqual(budget.lastCycle, { cycle: cycle.cycle, at: cycle.at, durationMs: cycle.durationMs, childWaitMs: cycle.childWaitMs, workMs: cycle.workMs });
   assert.equal(cycle.childWaitMs, 0, 'a cycle that ran no child process waited on none'); assert.equal(cycle.workMs, cycle.durationMs);
-  assert.equal(budget.withinInterval, true); assert.equal(budget.overruns, 0); assert.equal(budget.measured, 1); assert.equal(budget.intervalMs, intervalMs);
+  // The bound itself is the assertTiming above, which a loaded CI runner may pass inside its slack
+  // (GY-1040); the report must then still say the cycle overran its interval, not that it fit.
+  const overran = cycle.durationMs > intervalMs;
+  assert.equal(budget.withinInterval, !overran); assert.equal(budget.overruns, overran ? 1 : 0); assert.equal(budget.measured, 1); assert.equal(budget.intervalMs, intervalMs);
   // A regression is visible: an overrunning cycle is counted and named.
   const slow = { ...cycle, cycle: cycle.cycle + 1, durationMs: intervalMs * 3 };
   const regressed = cycleBudget({ metrics: [...state.metrics, slow] }, intervalMs);
-  assert.equal(regressed.withinInterval, false); assert.equal(regressed.overruns, 1); assert.deepEqual(regressed.lastOverrun, { cycle: slow.cycle, at: slow.at, durationMs: slow.durationMs, childWaitMs: slow.childWaitMs, workMs: slow.workMs });
+  assert.equal(regressed.withinInterval, false); assert.equal(regressed.overruns, (overran ? 1 : 0) + 1); assert.deepEqual(regressed.lastOverrun, { cycle: slow.cycle, at: slow.at, durationMs: slow.durationMs, childWaitMs: slow.childWaitMs, workMs: slow.workMs });
   assert.equal(regressed.p95Ms, slow.durationMs);
   assert.deepEqual(cycleBudget({ metrics: [] }, intervalMs), { intervalMs, measured: 0, lastCycle: null, withinInterval: null, p95Ms: null, overruns: 0, lastOverrun: null });
 });

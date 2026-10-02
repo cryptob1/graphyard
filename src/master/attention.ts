@@ -67,6 +67,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (cause === 'contaminated') {
     const restore = currentRestore(work)?.restore ?? null;
     if (restore?.outcome === 'unrepairable') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION: the foreign commits sit under something the control plane cannot move, so a fresh attempt on a fresh branch is the way back`, 'approver');
+    if (restore?.outcome === 'unpublished' && restore.escalated) return agentOwner('master', `Fix what GitHub refuses for ${key} — the restore's own record names it (${restore.failure ?? restore.escalated}), usually branch protection or the App's contents permission — then graphyard master repair ${key} REASON requests the restore again; it stops repeating on its own`);
     if (restore && !restore.performedAt) return agentOwner('master', `Nothing to run: the reconciliation job restores ${key} to its own reviewed head merged onto the base and reports the result here`);
     return work.queueEjection?.sha === work.candidate?.sha
       ? agentOwner('master', `Nothing to run: the control plane restores an ejected tip on its own, to ${key}'s own reviewed head merged onto the base; graphyard master repair ${key} REASON requests it again if the record shows no restore`)

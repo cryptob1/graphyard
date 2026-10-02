@@ -3,8 +3,9 @@ import { randomUUID, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { mergeOrder } from '../delegation.js';
-import { type Work, standingEscalations, evidenceIndependenceRefusals, nativeReviewRequired, CHECK_NAME, type CarriedApproval, carriedApproval } from '../model.js';
+import { type Work, standingEscalations, evidenceIndependenceRefusals, nativeReviewRequired, CHECK_NAME, type CarriedApproval, carriedApproval, carriedReviewedHead } from '../model.js';
 import { conversationProtectionRefusal } from '../merge-queue.js';
+import { onOptimisticLane, optimisticLandingRefusal } from '../optimistic-merge.js';
 import { missingBaseAncestry, missingAncestryReason } from '../merge-base-ancestry.js';
 import type { MasterConfig } from './profiles.js';
 import { privateFile } from './config.js';
@@ -111,6 +112,12 @@ export async function assertQueuedLanding(work: Work, authorization: { sha: stri
 const verdictStates = ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'];
 export type CarriedApprovalRepost = { posted: boolean; reviewId: number | null; reason: string };
 /**
+ * GY-831. The re-post found no approval it may use: the carried review is gone from the pull
+ * request and the bound reviewer has not approved the head the tip was built from on it. Retrying
+ * cannot change that; the carried approval is cleared so the review gate asks for a fresh review.
+ */
+export class StaleCarriedApprovalError extends Error {}
+/**
  * GitHub dismisses a stale review on any push to the branch, Graphyard's own mechanical tip
  * publication included, and a native review requirement then demands an approval after that
  * push. When the control plane carried the approval of H to its authored tip H', the master
@@ -134,7 +141,14 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
   if (latest?.commit_id === candidate.sha && latest.state === 'APPROVED') return { posted: false, reviewId: Number(latest.id), reason: `${identity} already approved tip ${candidate.sha.slice(0, 12)}` };
   if (latest?.state === 'CHANGES_REQUESTED') throw new Error(`${work.key}: ${identity} requested changes after approving ${carried.originalSha.slice(0, 12)}; the carried approval is not re-posted over a changed verdict`);
   const original = carried.reviewId !== undefined ? own.find((review: any) => Number(review.id) === carried.reviewId) : own.find((review: any) => review.commit_id === carried.originalSha && review.state !== 'CHANGES_REQUESTED');
-  if (!original || original.commit_id !== carried.originalSha) throw new Error(`${work.key}: the approval of ${carried.originalSha.slice(0, 12)} by ${identity} is no longer on the pull request; the carried binding cannot be re-posted`);
+  // The carried review can be gone — given on an earlier pull request of the item — while the
+  // same reviewer approved the head this tip was built from on this one (GY-831): that approval
+  // stands for exactly the reviewed content the tip carries, so it is the one re-posted.
+  const reviewedHead = carriedReviewedHead(work);
+  const rebound = !original || original.commit_id !== carried.originalSha
+    ? own.filter((review: any) => review.state === 'APPROVED' && reviewedHead && review.commit_id === reviewedHead && Number.isSafeInteger(Number(review.id))).at(-1) ?? null : null;
+  if ((!original || original.commit_id !== carried.originalSha) && !rebound) throw new StaleCarriedApprovalError(`${work.key}: the approval of ${carried.originalSha.slice(0, 12)} by ${identity} is no longer on the pull request, and ${identity} has not approved the reviewed head ${reviewedHead?.slice(0, 12) ?? '(unknown)'} tip ${candidate.sha.slice(0, 12)} was built from on it; the carried binding cannot be re-posted`);
+  const approvedSha: string = rebound ? rebound.commit_id : carried.originalSha, approvedReview = rebound ? Number(rebound.id) : carried.reviewId;
   const mint = dependencies.mint ?? (async (file: string, repository: string) => {
     const { mintReviewerToken, reviewerCredentialSchema } = await import('../reviewer.js');
     await privateFile(file);
@@ -144,9 +158,9 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
   // The approval binds the very commit it was given on when GitHub dismissed it for a merge-base
   // change on an unchanged head, or when the reviewed head was republished as the tip itself;
   // the recorded reason says which.
-  const body = carried.originalSha === candidate.sha
-    ? `Graphyard restored this identity's approval of ${candidate.sha} (review ${carried.reviewId ?? 'n/a'}) to the commit it was given on: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval of the same commit again.`
-    : `Graphyard carried this identity's approval of ${carried.originalSha} (review ${carried.reviewId ?? 'n/a'}) to Graphyard-authored merge-queue tip ${candidate.sha}: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval after the control plane's own tip publication.`;
+  const body = approvedSha === candidate.sha
+    ? `Graphyard restored this identity's approval of ${candidate.sha} (review ${approvedReview ?? 'n/a'}) to the commit it was given on: ${carried.reason}. Re-posted by the reviewer App so branch protection sees the approval of the same commit again.`
+    : `Graphyard carried this identity's approval of ${approvedSha} (review ${approvedReview ?? 'n/a'}) to Graphyard-authored merge-queue tip ${candidate.sha}: ${rebound ? `the approval of the reviewed head ${approvedSha} this tip was built from, re-bound in place of the carried review ${carried.reviewId ?? 'n/a'} the pull request no longer holds` : carried.reason}. Re-posted by the reviewer App so branch protection sees the approval after the control plane's own tip publication.`;
   const response = await (dependencies.fetcher ?? fetch)(`https://api.github.com/repos/${config.repository}/pulls/${candidate.pr}/reviews`, {
     method: 'POST', signal: AbortSignal.timeout(15_000),
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
@@ -155,11 +169,11 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
   if (!response.ok) throw new Error(`The reviewer App could not re-post the carried approval for ${work.key} (${response.status})`);
   const posted: any = await response.json();
   if (posted?.state !== 'APPROVED' || posted?.commit_id !== candidate.sha || String(posted?.user?.login ?? '').toLowerCase() !== identity.toLowerCase() || !Number.isSafeInteger(posted?.id)) throw new Error(`GitHub did not record the re-posted approval for ${work.key} as ${identity} on ${candidate.sha.slice(0, 12)}`);
-  return { posted: true, reviewId: posted.id, reason: `re-posted the carried approval of ${carried.originalSha.slice(0, 12)} as ${identity} on tip ${candidate.sha.slice(0, 12)}` };
+  return { posted: true, reviewId: posted.id, reason: `re-posted the carried approval of ${approvedSha.slice(0, 12)}${rebound ? ` (review ${approvedReview}, re-bound from the reviewed head)` : ''} as ${identity} on tip ${candidate.sha.slice(0, 12)}` };
 }
 /**
  * What a guarded merge is bound to: the candidate head, its base, the policy revision, the published
- * queue tip and the all-gates authorization for exactly those. The whole-document revision is not
+ * queue tip or the optimistic lane (GY-500) and the all-gates authorization for exactly those. The whole-document revision is not
  * part of it: observations, bookkeeping and dispatch records bump the revision constantly, and a
  * merge refused for an unrelated write lost every race to its own background refreshes (GY-192).
  * Anything that changes what would be merged changes this binding and still refuses.
@@ -167,7 +181,7 @@ export async function repostCarriedApproval(config: MasterConfig, work: Work, ca
 export function mergeBinding(work: Work) {
   const speculation = work.queue?.speculation;
   return JSON.stringify([work.candidate?.sha ?? null, work.candidate?.baseSha ?? null, work.candidate?.pr ?? null, work.policyRevision,
-    speculation?.tip ?? null, speculation?.base ?? null, speculation?.baseTree ?? null,
+    speculation?.tip ?? null, speculation?.base ?? null, speculation?.baseTree ?? null, work.optimistic?.head ?? null, work.optimistic?.baseTip ?? null,
     work.mergeAuthorization?.sha ?? null, work.mergeAuthorization?.baseSha ?? null, work.mergeAuthorization?.policyRevision ?? null]);
 }
 /**
@@ -199,11 +213,20 @@ export async function mergeWork(config: MasterConfig, work: Work, freshSnapshot:
   // from the ref itself inside assertQueuedLanding, because `baseRefOid` is a cached value.
   const pr = JSON.parse(await run('gh', ['pr', 'view', String(authorization.pr), '--repo', config.repository, '--json', 'headRefOid,baseRefName,state,isDraft']));
   if (pr.headRefOid !== authorization.sha || pr.baseRefName !== config.baseBranch || pr.state !== 'OPEN' || pr.isDraft) throw new Error(`${work.key} changed on GitHub before merge`);
-  await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
+  // An entry on its optimistic lane (GY-500) lands its own head past the queue: the base must still
+  // stand where its disjointness was judged, and its own base is an ancestor of that tip, so the
+  // merge base GitHub computes is the one it was approved on.
+  const optimistic = onOptimisticLane(current, authorization);
+  if (optimistic) {
+    const refusal = optimisticLandingRefusal(current, await readBaseTip(config.repository, config.baseBranch, run));
+    if (refusal) throw new Error(`${work.key} merge refused: ${refusal}`);
+  } else await assertQueuedLanding(current, authorization, config.baseBranch, config.repository, run);
   // A head without the base tip in its history is refused before any approval is re-posted: GitHub
-  // would dismiss it again as a merge-base change (GY-145).
-  const unancestored = missingBaseAncestry(current);
-  if (unancestored) throw new Error(`${work.key} merge refused: ${missingAncestryReason(unancestored)}`);
+  // would dismiss it again as a merge-base change (GY-145). An optimistic head keeps its own merge base.
+  if (!optimistic) {
+    const unancestored = missingBaseAncestry(current);
+    if (unancestored) throw new Error(`${work.key} merge refused: ${missingAncestryReason(unancestored)}`);
+  }
   // An approval the control plane carried onto its authored tip is re-posted through the reviewer
   // App first, so a native review requirement GitHub re-armed on the tip does not hold the queue.
   const carried = carriedApproval(current);
@@ -228,5 +251,15 @@ export function mergeExecutor(config: MasterConfig, snapshot: () => Promise<{ wo
   const stepKey = (item: Work, step: string) => createHash('sha256').update(`${outerRequest}\0master-merge\0${item.id}\0${item.candidate?.sha ?? ''}\0${step}`).digest('hex');
   return (item: Work) => mergeWork(config, item, snapshot,
     (latest, authorization) => mutation(`work/${latest.id}/merge-acquire`, { enqueue: true, expectedRevision: authorization.revision, sha: authorization.sha, baseSha: authorization.baseSha, policyRevision: authorization.policyRevision, ...(latest.queue?.speculation?.tip ? { queueTip: latest.queue.speculation.tip } : {}), executor: executor.instance }, stepKey(latest, 'enqueue')),
-    run, (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? defaultChildRun }));
+    run, (latest, carried) => repostCarriedApproval(config, latest, carried, { run: run ?? defaultChildRun }).catch(error => refuseStaleCarry(latest, error, mutation, stepKey)));
+}
+/**
+ * GY-831. A carried approval the re-post cannot use is reported to the control plane at once,
+ * which clears it: the review gate then asks for a fresh review of the tip and the queue head
+ * passes to the next entry, instead of the loop retrying a merge that cannot succeed.
+ */
+export async function refuseStaleCarry(work: Work, error: unknown, mutation: (path: string, data: unknown, requestId?: string) => Promise<any>, stepKey: (item: Work, step: string) => string): Promise<never> {
+  if (!(error instanceof StaleCarriedApprovalError) || !work.candidate) throw error;
+  await mutation(`work/${work.id}/mergerefused`, { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, reason: error.message.slice(0, 2000) }, stepKey(work, 'stale-carry'));
+  throw new StaleCarriedApprovalError(`${error.message}. Graphyard cleared the carried approval: the review gate requests a fresh review of tip ${work.candidate.sha.slice(0, 12)}, and the next queue entry heads the queue meanwhile`);
 }

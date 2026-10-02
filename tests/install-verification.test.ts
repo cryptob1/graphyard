@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -15,6 +14,7 @@ import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerPro
 import { ensureTokens, installDirectory, plannedPrincipals, prepareInstallDirectory, Vault } from '../src/install/secrets.js';
 import { fakeTransport, type Transport } from '../src/install/transport.js';
 import { appKey, githubResponses, harness, temporaryRepository, GRAPHYARD_APP_ID, WEBHOOK_SECRET } from './install-harness.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const INSTALL_ID = 'owner-project';
 
@@ -41,13 +41,13 @@ const github = {
 
 before(async () => {
   root = await temporaryRepository();
-  configHome = await mkdtemp(join(tmpdir(), 'graphyard-verify-'));
+  configHome = await temporaryDirectory('verify');
   const directory = installDirectory(INSTALL_ID, configHome);
   await prepareInstallDirectory(directory, root);
   tokens = await ensureTokens(directory, principals, new Vault());
 
   const port = Number(process.env.GRAPHYARD_INSTALL_TEST_PORT ?? 0) || await freePort();
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-verify-db-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: (message: unknown) => console.error('postgres:', String(message)), postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('verify-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: (message: unknown) => console.error('postgres:', String(message)), postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_install');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_install`); await store.init();
   const engine = new Engine(store, [15368], 120, 'owner/project');
@@ -183,7 +183,7 @@ test('runtime and Herdr detection report only what is present and signed in', as
     { match: 'command -v herdr', result: '/usr/local/bin/herdr' },
     { match: 'herdr --version', result: 'herdr 0.7.1' },
   ] });
-  const home = await mkdtemp(join(tmpdir(), 'graphyard-home-'));
+  const home = await temporaryDirectory('home');
   try {
     const table = [{ kind: 'claude', program: 'claude', credentials: ['.claude/.credentials.json'] }, { kind: 'codex', program: 'codex', credentials: ['.codex/auth.json'] }];
     const unauthenticated = await detectRuntimes(present as Transport, home, table);

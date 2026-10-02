@@ -111,6 +111,13 @@ test('integration:agents-settings-page — Settings › Agents renders every run
   expect(await main.innerText()).not.toMatch(secretShaped);
   expect(await page.content()).not.toMatch(secretShaped);
 
+  // The default view is the account cards and one connect button; every registry form waits behind a collapsed Advanced.
+  await expect(main.locator('[data-connect-account]')).toBeVisible();
+  const advanced = main.locator('details.advanced');
+  await expect(advanced).not.toHaveAttribute('open', '');
+  expect(await main.locator('input:visible, select:visible, textarea:visible').count()).toBe(0);
+  await advanced.locator('summary').click();
+
   // A pasted credential is refused in the browser and never sent.
   const form = main.getByRole('form', { name: 'Set a role' });
   await form.getByLabel('Accounts, most preferred first').fill('claude-b');
@@ -120,8 +127,9 @@ test('integration:agents-settings-page — Settings › Agents renders every run
   await expect(main.getByRole('alert').filter({ hasText: 'That looks like a credential' })).toBeVisible();
   expect(posted).toEqual([]);
 
-  // Without one, the role and its policy are sent to the registry.
+  // Without one, the role and its policy are sent to the registry, even when the audit reason names a token prefix (GY-397).
   await form.getByLabel('Allowed tools').fill('Read, Grep');
+  await form.getByLabel('Audit reason').fill('Rotated sk-ant-api03-abcdefghijklmnop out of the old home');
   await form.getByRole('button', { name: 'Save role' }).click();
   await expect.poll(() => posted).toEqual(['/api/agent-registry/roles']);
 });
