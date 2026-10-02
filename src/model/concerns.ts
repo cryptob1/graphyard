@@ -127,6 +127,11 @@ export interface HumanNeededRow {
 }
 
 /**
+ * Whether the loop requests the judgment itself (the daemon's `loopRequestsJudgment`, GY-1084): such
+ * a row is the loop's work in progress, not a wait on anybody, and is left out.
+ */
+export type LoopRequests = (work: Work, judgment: { kind: NextActionKind; trigger: string | null }) => boolean;
+/**
  * Every concern that needs a person, across the graph.
  *
  * An action an executor may claim is work in progress however long it waits; an action no
@@ -135,7 +140,7 @@ export interface HumanNeededRow {
  * decides it, the command that answers it, and since when: from the moment the control plane
  * computed the action, not from the moment it grew old.
  */
-export function humanNeededActions(all: readonly Work[], now: Date): HumanNeededRow[] {
+export function humanNeededActions(all: readonly Work[], now: Date, loopRequests: LoopRequests = () => false): HumanNeededRow[] {
   const rows: HumanNeededRow[] = [];
   for (const work of all) {
     const action = openAction(work);
@@ -146,10 +151,10 @@ export function humanNeededActions(all: readonly Work[], now: Date): HumanNeeded
       const instant = Number.isFinite(parsed) ? parsed : now.getTime();
       return { since: new Date(instant).toISOString(), waitedMs: Math.max(0, now.getTime() - instant) };
     };
-    if (action.needsHuman) rows.push({ key: work.key, work: work.id, source: 'action', kind: action.kind,
+    if (action.needsHuman && !loopRequests(work, { kind: action.kind, trigger: action.inputs.kind === 'escalate' ? action.inputs.trigger : null })) rows.push({ key: work.key, work: work.id, source: 'action', kind: action.kind,
       trigger: action.inputs.kind === 'escalate' ? action.inputs.trigger : null, reason: action.reason,
       ...action.needsHuman, action: row?.id ?? null, ...since(row?.requestedAt ?? null) });
-    for (const concern of action.carried ?? []) rows.push({ key: work.key, work: work.id, source: 'carried', kind: action.kind,
+    for (const concern of action.carried ?? []) if (!loopRequests(work, { kind: 'escalate', trigger: concern.trigger })) rows.push({ key: work.key, work: work.id, source: 'carried', kind: action.kind,
       trigger: concern.trigger, reason: `${work.key} carries a standing ${concern.trigger} escalation while it is worked: ${concern.reason}`,
       decision: `resolving ${work.key}'s ${concern.trigger} escalation`, resolve: concern.resolve, action: null, ...since(concern.at) });
   }

@@ -103,6 +103,11 @@ test('unit:followup-migration-merges — the one-time migration merges each pare
   const repeat = await ok(coordinator, 'followups/migrate', {});
   assert.equal(repeat.already, true);
   assert.equal(repeat.merged, result.merged);
+  // The loop asks for it as the master's operator agent (GY-1084): refused by the route guard, it failed on every loop start.
+  const agent = { id: 'backlog-master-agent', token: `backlog-master-agent-${'y'.repeat(32)}` };
+  await ok(operator, 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: ['intent:create'], scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'The master loop requests the migration' });
+  const asAgent = await fetch(`${url}/api/followups/migrate`, { method: 'POST', headers: { Authorization: `Bearer ${agent.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'graphyard-followups-migration' }, body: '{}' });
+  assert.deepEqual([asAgent.status, (await asAgent.json() as any).already], [200, true]);
   assert.equal((await store.list()).length, 6, 'nothing was deleted');
 });
 

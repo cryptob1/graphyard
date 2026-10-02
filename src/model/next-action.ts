@@ -22,7 +22,7 @@ export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './ac
 export { refusalAction, refusalRuleFor, refusalRuleIndex, refusalRules, reviewStandstill } from './refusal-mapping.js';
 export { gateRefusalCatalogue, refusalShape, type RefusalShape } from './refusal-catalogue.js';
 // What stands beside an action lives in `concerns.ts`, re-exported here likewise.
-export { carriedAction, dispatchHold, escalationResolution, humanNeeded, humanNeededActions, openAction } from './concerns.js';
+export { carriedAction, dispatchHold, escalationResolution, humanNeeded, humanNeededActions, openAction, type LoopRequests } from './concerns.js';
 export type { CarriedConcern, HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
 
 /**

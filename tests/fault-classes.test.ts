@@ -8,7 +8,9 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
-import { escalationTriggers, type Work } from '../src/model.js';
+import { escalationTriggers, leaseLossReason, type Work } from '../src/model.js';
+import { nextAction } from '../src/model/next-action.js';
+import { humanNeededAttention } from '../src/cli/master-status.js';
 import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
 import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
@@ -494,6 +496,48 @@ test('unit:recurring-class-item — review conflicts and the other lines status 
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'review-conflict').map(entry => entry.subject), ['GY-1', 'GY-2', 'GY-3']);
   assert.deepEqual(recurringClasses(state.faults.instances, work, policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['review-convergence'],
     'three review conflicts in the window file the review-convergence item');
+});
+
+test('unit:fault-class-decision — a judgment the loop requests itself is not owed, so ordinary rework rounds and superseded lease-losses file no decision faults (GY-1084)', async () => {
+  // 2026-10-01: 324 decision faults in a day, 78 of the 100 GY-1084 lists `owed-decision` lines such as "GY-1023 needs a new
+  // head: Required CI check test has not passed on the current candidate; rerun: expired … — no executor may run it; a new
+  // head for GY-1023 has been owed for 46s", and "GY-612 carries a standing lease-loss escalation while it is worked: Worker
+  // graphyard-cursor-2 lost lease epoch 35". The loop was already putting each of those decisions to its approver.
+  const head = (n: number) => `${n}`.padStart(40, 'a'), base = 'b'.repeat(40);
+  const failedCi = (key: string, n: number) => {
+    const candidate = { sha: head(n), baseSha: base, pr: n, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' };
+    return item(key, { stage: 'test', ready: true, epoch: 1, candidate, submission: { epoch: 1, pr: n }, policy: { checks: ['test'], review: true },
+      observation: { candidate, checks: [{ appId: 15368, name: 'test', result: 'failure', id: n, attempt: 1 }], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
+        files: ['src/a.ts'], scopeFiles: [], at: iso(-60_000), prState: 'open', draft: false, baseTip: base, baseTree: base, baseTipContained: true, conversations: { required: true, unresolved: [] } },
+      gates: [{ name: 'test', passed: false, reasons: ['Required CI check test has not passed on the current candidate'] }] } as unknown as Partial<Work>);
+  };
+  // A newer attempt holds the item whose epoch 35 lease was lost: the loop asks the resolve on its own (supersededLeaseLoss).
+  const lost = { trigger: 'lease-loss' as const, reason: leaseLossReason({ owner: 'graphyard-cursor-2', epoch: 35 }), at: iso(-hour), actor: 'graphyard' };
+  const superseded = item('GY-612', { stage: 'build', ready: true, epoch: 36, lease: { owner: 'graphyard-cursor-1', epoch: 36, expiresAt: iso(hour) }, escalation: lost, escalations: [lost],
+    gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] } as unknown as Partial<Work>);
+  // The control: a rework the loop has no ground to request (files outside plannedFiles, GY-971) is still somebody's to judge.
+  const outside = failedCi('GY-971', 971);
+  Object.assign(outside, { observation: { ...outside.observation!, checks: [{ appId: 15368, name: 'test', result: 'success', id: 971, attempt: 1 }] },
+    gates: [{ name: 'build', passed: false, reasons: ['Candidate changes 7 files outside its planned files that must match the base branch byte-for-byte'] }] });
+  const work = [failedCi('GY-1023', 1023), failedCi('GY-73', 73), failedCi('GY-957', 957), superseded, outside];
+  for (const entry of work) entry.nextAction = nextAction(entry, work, new Date(clock));
+  assert.deepEqual(work.map(entry => entry.nextAction?.kind), ['request-rework', 'request-rework', 'request-rework', 'escalate', 'request-rework']);
+  const snapshot = { work, now: iso(0) };
+
+  // The base: every one of them was an owed line, and the loop counted each as a decision fault.
+  const before = classifyAttention(humanNeededAttention(snapshot));
+  assert.deepEqual(before.map(entry => `${entry.subject} ${entry.kind} ${entry.faultClass}`).sort(), ['GY-1023', 'GY-612', 'GY-73', 'GY-957', 'GY-971'].map(key => `${key} owed-decision decision`));
+  assert.match(before.find(entry => entry.subject === 'GY-1023')!.text, /needs a new head: Required CI check test has not passed .* no executor may run it; a new head for GY-1023 has been owed for/);
+
+  // The candidate: the attention master status and the loop read names only the judgment nobody requests.
+  const derived = await derivedAttention('/nonexistent', config(), async () => ({}), { github: true }, snapshot, { reviews: [], producers: [], runtime: { available: true, agents: [] }, trees: [] });
+  assert.deepEqual(derived.owed.rows.map(row => row.key), ['GY-971'], 'the loop requests the rework rounds and the lease-loss resolve itself');
+  const owed = classifyAttention(derived.items).filter(entry => entry.kind === 'owed-decision');
+  assert.deepEqual(owed.map(entry => entry.subject), ['GY-971']);
+  const state = emptyDaemonState(config());
+  for (let round = 0; round < 4; round++) trackFaults(state.faults, cycleFaults(state, work, clock + round * 60_000, { config: config(), reported: derived.items }), iso(round * 60_000));
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision').map(entry => [entry.kind, entry.subject]), [['owed-decision', 'GY-971']]);
+  assert.deepEqual(recurringClasses(state.faults.instances, work, policy, clock + hour).filter(entry => entry.faultClass === 'decision' && entry.file), [], 'no decision class past the threshold to file');
 });
 
 test('unit:recurring-class-item — the fault record stays bounded when failing runs never succeed', () => {

@@ -11,7 +11,7 @@ import { registeredLaunch } from '../model/session-state.js';
 import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
 import { clearProfileFailure, profileHealth, readyToRetry, recordProfileFailure } from './sessions.js';
-import { detailChanged, fitDecisionReason, routineDecision } from './decisions.js';
+import { detailChanged, fitDecisionReason, loopRequestsJudgment, routineDecision } from './decisions.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { credentialBlockedMarker } from '../worker-credential.js';
@@ -149,8 +149,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //     queue row nobody was ever coming for. A concern carried beside an action that is running
   //     is named here too: the work is not frozen by it, and it is not lost behind the work. An
   //     item parked on a human-only decision is named by the step above with the exact answer
-  //     command, so it is not named twice.
-  for (const owed of humanNeededActions(open.filter(item => !parkedOnHuman(item)), new Date(clock))) {
+  //     command, so it is not named twice. A judgment this loop requests itself (a rework round,
+  //     a superseded lease-loss: `loopRequestsJudgment`, GY-1084) is its own work, not owed.
+  for (const owed of humanNeededActions(open.filter(item => !parkedOnHuman(item)), new Date(clock), (work, judgment) => loopRequestsJudgment(work, judgment, config))) {
     const key = `owed:${owed.work}:${owed.kind}:${owed.trigger ?? 'refusal'}:${owed.since}`;
     if (state.actions[key]) continue;
     performed.push(await record(state, key, { kind: 'human', work: owed.key, principal: null, state: 'done',

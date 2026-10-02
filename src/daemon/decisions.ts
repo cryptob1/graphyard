@@ -380,6 +380,23 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   }
   return null;
 }
+/**
+ * GY-1084. Whether the loop asks for the judgment an owed row names itself, so nobody else owes it.
+ *
+ * `request-rework` and a standing lease-loss are judgments no executor may run (`actionJudgment`),
+ * and the owed report named each as waiting on a master session — "no executor may run it; a new
+ * head has been owed for 46s" — from the cycle that computed it. But the loop requests exactly these
+ * decisions on its own (`neededDecision`: a rework round for a failed check, a standing verdict, a
+ * conflict; a resolve for a superseded lease-loss) and the approver judges them. Counted as owed,
+ * every ordinary rework round became a decision fault: 2026-10-01 recorded 324 in a day, most of
+ * them a CI rework the loop was already putting to its approver. A row the loop requests is the
+ * loop's work in progress; one it does not request is still owed. A request the loop could not put,
+ * or one refused or unanswered, is its own fault (`action:decision`, `decision-refused`, `decision-unanswered`).
+ */
+export function loopRequestsJudgment(work: Work, row: { kind: string; trigger: string | null }, config: Pick<MasterConfig, 'autoMerge'>): boolean {
+  if (row.kind === 'request-rework') return neededDecision(work, config)?.action === 'rework';
+  return row.trigger === 'lease-loss' && !!leaseLossDecision(work);
+}
 /** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */
 function leaseLossDecision(work: Work): RoutineDecision | null {
   const lost = supersededLeaseLoss(work);
