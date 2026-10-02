@@ -68,7 +68,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless']],
-    ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker']],
+    ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
   for (const [source, kinds] of sources) for (const kind of kinds) {
     assert.ok(isFaultKind(kind), `${source}: ${kind} is in the catalogue`);
