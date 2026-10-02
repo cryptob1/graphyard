@@ -734,7 +734,8 @@ test('manual:fault-class-decision — the scope-decision latency escalation is a
   assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision').map(entry => entry.text), []);
 });
 
-test(`manual:fault-class-decision — GY-1033: a rework refused because the base fails the same check is GY-528's base-failure cause`, () => {
+// AC-1 excludes this instance: its cause is GY-528's, which raises a check the base fails too against the base.
+test(`manual:fault-class-decision — GY-1033 (excluded by AC-1): a rework refused because the base fails the same check is GY-528's base-failure cause`, () => {
   const [instance] = decisionFaults.filter(entry => entry.cause === 'base-failure');
   assert.equal(instance.subject, 'GY-1033');
   // Unlike the rerun-expiry refusals, the rerun had run and failed again: the failure is the base's, not a wait.
