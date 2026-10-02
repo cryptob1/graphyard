@@ -9,7 +9,7 @@ A criterion states an outcome and its proofs:
 {"id":"AC-1","text":"Retrying a confirmed booking produces exactly one SMS request","proofs":["integration:sms-idempotency"]}
 ```
 
-`unit:` and `integration:` proofs are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless `producerProofs` lists it (then it is producer-runnable). `e2e:` proofs use the [validation runner](validation.md).
+`unit:`/`integration:` proofs are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)). A `manual:` proof is attested through a two-party decision unless `producerProofs` lists it; judged, not title-counted, its trusted pass proves it whatever it executed (`unit:`/`integration:`/`e2e:` need `executed > 0`). `e2e:` proofs use the [validation runner](validation.md).
 
 ## Revise requirements explicitly
 
@@ -21,15 +21,23 @@ A criterion states an outcome and its proofs:
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden, or is withdrawn; the loop resolves those named. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item (typed actions already escalate those). After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (filed as backlog) or overridden — by its thread ID or a comment ID the prompt shows beside it; prose counts for nothing — or is withdrawn, and the relaunch's prompt names the threads it missed; the loop resolves those named, always by thread ID. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items. A worker cannot widen `plannedFiles`; a scope request or an audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
+`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items; carried files (another item's unlanded commits) are no ejection (GY-871). A worker cannot widen `plannedFiles`; a scope request or audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
+
+One landability verdict, `evaluateLandability` (`src/model/landability.ts`), is the single authority on whether a candidate can land: the build and acceptance gates are its refusals, and the merge queue ejects an entry only for a reason it gives. It is computed from live facts keyed by candidate SHA and policy revision, never stored; each refusal records its version and inputs on the gate and the ejection. A landability ejection is not sticky: once the verdict is landable, the same head re-enters the queue.
 
 ### Keep current with `graphyard sync`
 
-Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. Restore an out-of-scope file with `git checkout BASE_TIP -- PATH`.
+The landing check compares the candidate's changes since its merge base with the commit it would land on (live or predicted base). Each out-of-scope file is judged by the head's three-way merge onto it, not its blob: a change the commit has since extended, or one only the base made, merges to the commit's version, while a head restoring the merge-base version over it is still refused. Out-of-scope deletions and rewrites remain refused. Every observation recomputes this check, so stale refusals clear without a push. The simulated-day soak (`tests/soak.test.ts`) runs this check across landing-base moves, and stages a window where GitHub answers compares without a usable merge base; its false refusals hold only there.
+
+Before any push, `graphyard sync GY-N` merges `origin/BASE` (never a rebase), regenerates, commits and prints the same classification. `graphyard sync GY-N --restore` does the same, then restores every out-of-scope file to the base tip in one new commit whose message names them, so a plain push updates the PR; it never rewrites history, and a force push is never needed or allowed.
+
+### Submit when your own criteria pass
+
+The full suite is CI's gate, not the worker's (GY-853). Every worker request says so. A worker runs the build and `graphyard verify GY-N`, which runs only its own criteria's proofs, and submits when they pass. It names in the PR any full-suite failure that comes only from its sandbox and lies outside `plannedFiles`, and it records no blocker for that failure. `verify` marks a proof `leftToCi` only when every one of the proof's own cases executed and passed, yet the run still ended abnormally (a hook, crash or signal from other suites in the file). `verify` then exits 0, and `complete` reports `passing` while naming that proof as left to CI. A failed, skipped or unexecuted case of the proof always blocks.
 
 ### Generated files never conflict
 

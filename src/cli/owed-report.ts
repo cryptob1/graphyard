@@ -1,7 +1,7 @@
 import { agentOwner, type AttentionItem, type AttentionOwner } from '../master.js';
 import type { Work } from '../model.js';
 import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
-import { decideScopeRequest, scopeRefusalBlocker } from '../model/scope.js';
+import { decideScopeRequest, scopeRefusalBlocker, terminalScopeRefusal } from '../model/scope.js';
 import { elapsed } from '../model/sessions.js';
 import { routedScopeRequests } from './status-attention.js';
 
@@ -26,6 +26,8 @@ import { routedScopeRequests } from './status-attention.js';
  * on that line being read. The verdict is recomputed from the item itself, never taken from the
  * request; a request from a lease that ended is never surfaced. Nor is one the loop has routed to
  * the independent approver (its `approvals` watch, GY-176): that is being decided, and the worker reads the outcome.
+ * A terminal over-cap refusal names `master requirements`, whose revision can fold or split the
+ * ask, never the plain union `master scope` posts past the same bound (GY-936).
  */
 export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, approvals: Parameters<typeof routedScopeRequests>[0] = []): AttentionItem[] {
   const routed = routedScopeRequests(approvals);
@@ -36,7 +38,7 @@ export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, a
     const decision = request.decision ?? decideScopeRequest(work, request);
     if (decision.state === 'approved') return [];
     return [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}. The widening rule refuses it: ${decision.reason}`,
-      ...agentOwner('master', `graphyard master scope ${work.key}`) }];
+      ...agentOwner('master', terminalScopeRefusal(work) ? `graphyard master requirements ${work.key} FILE REASON` : `graphyard master scope ${work.key}`) }];
   });
 }
 

@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { idleLeaseMs } from '../src/daemon/cycle-sessions.js';
+import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { SessionHandle, SessionHandleInput } from '../src/model/sessions.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-524: a worker whose blocker or scope request is resolved is told to resume, a worker idle
@@ -21,7 +22,7 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const minutes = (count: number) => count * 60_000;
 
 async function setup() {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-resume-'));
+  const directory = await temporaryDirectory('resume');
   const credentialFile = join(directory, 'coordinator.token'), worker = join(directory, 'worker.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await writeFile(worker, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -110,16 +111,30 @@ test('unit:resume-prompt-after-unblock — one re-prompt after a blocker clears 
     assert.match(log.prompts[1], /its scope request was applied: plannedFiles now include src\/b\.ts/);
     assert.ok(log.prompts[1].includes(`complete GY-252 1 255`), 'the pull request Graphyard has seen is named in the command');
 
-    // A worker already active is not re-prompted: the resolution is consumed without a paste.
-    item.current = [held({ blocker: 'waiting on a decision' })];
+    // A worker already active is not re-prompted: the resolution is consumed without a paste. This
+    // is a fresh attempt (epoch 2): blocking again on epoch 1 after its clearance would end that
+    // attempt instead (GY-867, tests/reblocked-attempt.test.ts).
+    const second = { epoch: 2, lease: { owner: 'alpha-principal', epoch: 2, expiresAt: iso(minutes(600)) }, lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(170_000) } } as Partial<Work>;
+    item.current = [held({ ...second, blocker: 'waiting on a decision' })];
     await runCycle(master, state, effects, () => clock + 180_000);
     agent.agent_status = 'working';
-    item.current = [held()];
+    item.current = [held(second)];
     await runCycle(master, state, effects, () => clock + 210_000);
     agent.agent_status = 'idle';
     await runCycle(master, state, effects, () => clock + 240_000);
     assert.equal(log.prompts.length, 2, 'an active worker is not re-prompted, then or later');
     assert.ok(Object.values(state.actions).some(action => /is already active, so it is not re-prompted/.test(action.detail)), 'the skipped re-prompt is recorded with why');
+
+    // A scope request asked and answered between two cycles was never marked (GY-544): the decision
+    // the item keeps for this epoch still earns its one re-prompt, and only one.
+    agent.agent_status = 'idle';
+    item.current = [held({ plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+      scopeDecision: { state: 'approved', reason: 'criteria name it', at: iso(260_000), decidedBy: 'graphyard', waitedMs: 5_000, paths: ['src/c.ts'], requestedBy: 'alpha-principal', requestedAt: iso(255_000), epoch: 1 } as Work['scopeDecision'] })];
+    await runCycle(master, state, effects, () => clock + 270_000);
+    assert.equal(log.prompts.length, 3, 'the unmarked answer is re-prompted within one cycle');
+    assert.match(log.prompts[2], /its scope request was applied: plannedFiles now include src\/c\.ts/);
+    await runCycle(master, state, effects, () => clock + 300_000);
+    assert.equal(log.prompts.length, 3, 'and not twice');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -181,7 +196,7 @@ test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompt
   }
 });
 
-test('unit:exited-worker-session-closed — an implementation session whose agent exited, or whose item left build, is closed within one cycle', async () => {
+test('unit:exited-worker-session-closed — an implementation session whose item left build is closed within one cycle, one whose agent exited once that sight stands on a later cycle', async () => {
   const { directory, master } = await setup();
   try {
     const handle = (id: string, pane: string, principal: string, host = 'machine-a'): SessionHandle => ({ id, kind: 'implementation', principal, epoch: null, runtime: 'claude', host,
@@ -197,9 +212,14 @@ test('unit:exited-worker-session-closed — an implementation session whose agen
     const { log, effects } = harness(item, agent, { herdr: () => ({ agents: [agent], available: true }) });
     const state = emptyDaemonState(master);
     await runCycle(master, state, effects, () => clock);
+    assert.deepEqual(log.sessions.filter(entry => entry.state === 'finished').map(entry => entry.id), ['codex-2:1'], 'the item that left build closes at once; an exited agent is only a first sighting (GY-544)');
+    assert.equal(state.actions['exited:implementation:work-257:codex-3:2:' + iso(-minutes(230))]?.state, 'waiting', 'the first sighting is recorded');
+    await runCycle(master, state, effects, () => clock + 30_000);
+    assert.equal(log.sessions.filter(entry => entry.state === 'finished').length, 1, 'a second sighting before launchAppearanceMs has passed closes nothing');
+    await runCycle(master, state, effects, () => clock + launchAppearanceMs);
 
     const closed = log.sessions.filter(entry => entry.state === 'finished');
-    assert.deepEqual(closed.map(entry => entry.id).sort(), ['codex-2:1', 'codex-3:2'], 'both over sessions are closed in one cycle, the live one and the other host\'s are not');
+    assert.deepEqual(closed.map(entry => entry.id).sort(), ['codex-2:1', 'codex-3:2'], 'both over sessions are closed, the live one and the other host\'s are not');
     assert.match(closed.find(entry => entry.id === 'codex-2:1')!.outcome!, /GY-356 has left build, the stage this implementation session was launched for, and is now in test/);
     assert.match(closed.find(entry => entry.id === 'codex-3:2')!.outcome!, /the claude runtime is no longer the foreground process of pane w1:p4GS/);
     for (const entry of closed) assert.equal(entry.kind, 'implementation');
@@ -209,14 +229,33 @@ test('unit:exited-worker-session-closed — an implementation session whose agen
     const shell = held({ id: 'work-258', key: 'GY-258', lease: { owner: 'codex-4', epoch: 1, expiresAt: iso(minutes(600)) }, sessions: [handle('codex-4:1', 'w1:p4ZZ', 'codex-4')] });
     item.current = [shell];
     const bare = harness(item, agent, { herdr: () => ({ agents: [agent, { pane_id: 'w1:p4ZZ', agent: null, agent_status: 'unknown' }], available: true }) });
-    await runCycle(master, state, bare.effects, () => clock + 30_000);
+    await runCycle(master, state, bare.effects, () => clock + minutes(3));
+    await runCycle(master, state, bare.effects, () => clock + minutes(6));
     assert.equal(bare.log.sessions.filter(entry => entry.state === 'finished' && entry.id === 'codex-4:1').length, 1);
 
     // Closed once: the next cycle writes nothing more for them.
     item.current = [moved, exited, running];
     const again = harness(item, agent, { herdr: () => ({ agents: [agent], available: true }) });
-    await runCycle(master, state, again.effects, () => clock + 60_000);
+    await runCycle(master, state, again.effects, () => clock + minutes(9));
     assert.equal(again.log.sessions.filter(entry => entry.state === 'finished').length, 0);
+
+    // Herdr misreading a live agent for one cycle closes nothing: the sighting lapses when the agent is seen again.
+    const flicker = held({ id: 'work-259', key: 'GY-259', lease: { owner: 'codex-5', epoch: 1, expiresAt: iso(minutes(600)) }, sessions: [handle('codex-5:1', 'w1:p4FL', 'codex-5')] });
+    const pane: HerdrAgent = { pane_id: 'w1:p4FL', agent: null, agent_status: 'unknown' };
+    const misread = harness({ current: [flicker] }, agent, { herdr: () => ({ agents: [agent, pane], available: true }) }), fresh = emptyDaemonState(master);
+    await runCycle(master, fresh, misread.effects, () => clock);
+    pane.agent = 'codex'; pane.agent_status = 'working';
+    await runCycle(master, fresh, misread.effects, () => clock + minutes(3));
+    assert.equal(Object.keys(fresh.actions).filter(key => key.startsWith('exited:implementation:')).length, 0, 'the sighting lapses once the agent is detected again');
+    pane.agent = null; pane.agent_status = 'unknown';
+    await runCycle(master, fresh, misread.effects, () => clock + minutes(6));
+    assert.equal(misread.log.sessions.filter(entry => entry.state === 'finished').length, 0, 'a new sighting starts over rather than closing on the old one');
+
+    // A pane missing from a listing that read nothing of its workspace is not taken for an exit.
+    const partial = harness({ current: [exited] }, agent, { herdr: () => ({ agents: [{ name: 'other', pane_id: 'w7:p1', agent: 'claude', agent_status: 'working' }], available: true }) }), unlisted = emptyDaemonState(master);
+    await runCycle(master, unlisted, partial.effects, () => clock);
+    await runCycle(master, unlisted, partial.effects, () => clock + minutes(3));
+    assert.equal(partial.log.sessions.filter(entry => entry.state === 'finished').length, 0, 'workspace w1 was not read, so its pane is unknown, not exited');
 
     // An unreadable Herdr closes nothing on the runtime's word.
     const unread = harness({ current: [exited] }, agent, { herdr: () => ({ agents: [], available: false }) });

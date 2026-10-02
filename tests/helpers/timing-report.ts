@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describeTiming, parseTimingRecord, percentile, type TimingMeasurement } from './timing.js';
+import { describeTiming, failedTiming, parseTimingRecord, percentile, type TimingMeasurement } from './timing.js';
 import { timingAnnotationMarker, type TimingFailure } from '../../src/cli/timing-failures.js';
 
 // The CI half of a distinguishable timing failure. The required `test` job runs this after the
@@ -16,9 +16,12 @@ export function failedTestCount(log: string): number | null {
   return counts.length ? Number(counts.at(-1)![1]) : null;
 }
 
-/** Over-budget assertions, each with how many other tests failed beside the timing-dependent ones. */
+/**
+ * Over-budget assertions, each with how many other tests failed beside the timing-dependent ones.
+ * A measurement the run's slack let through passed its assertion and is not one of them.
+ */
 export function timingFailures(record: TimingMeasurement[], failedTests: number | null): TimingFailure[] {
-  const failed = record.filter(entry => !entry.passed);
+  const failed = record.filter(failedTiming);
   const timingTests = new Set(failed.map(entry => entry.test)).size;
   const otherFailures = failedTests === null ? null : Math.max(0, failedTests - timingTests);
   return failed.map(({ name, test, statistic, measuredMs, budgetMs, comparison, samples, warmupDiscarded }) => ({ name, test, statistic, measuredMs, budgetMs, comparison, samples, warmupDiscarded, otherFailures }));
@@ -42,7 +45,7 @@ export function timingSpread(runs: TimingMeasurement[][]): TimingSpread[] {
   return [...byName.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, entries]) => {
     const measured = entries.map(entry => entry.measuredMs), latest = entries.at(-1)!;
     const minMs = Math.min(...measured), maxMs = Math.max(...measured);
-    return { name, test: latest.test, statistic: latest.statistic, budgetMs: latest.budgetMs, comparison: latest.comparison, runs: entries.length, failures: entries.filter(entry => !entry.passed).length,
+    return { name, test: latest.test, statistic: latest.statistic, budgetMs: latest.budgetMs, comparison: latest.comparison, runs: entries.length, failures: entries.filter(failedTiming).length,
       minMs, medianMs: percentile(measured, 0.5), maxMs, spreadMs: Math.round((maxMs - minMs) * 1000) / 1000, headroomMs: Math.round((latest.budgetMs - maxMs) * 1000) / 1000 };
   });
 }
@@ -60,7 +63,7 @@ export function timingSummary(record: TimingMeasurement[], failures: TimingFailu
   lines.push('| Assertion | Test | Measured | Budget | Samples | Recorded spread on an unchanged tree | Verdict |', '| --- | --- | --- | --- | --- | --- | --- |');
   for (const entry of record) {
     const known = baseline?.spread.find(spread => spread.name === entry.name);
-    lines.push(`| ${entry.name} | ${entry.test} | ${entry.statistic} ${entry.measuredMs}ms | ${entry.comparison} ${entry.budgetMs}ms | ${entry.samples} (${entry.warmupDiscarded} warmup discarded) | ${known ? `${known.minMs}–${known.maxMs}ms over ${known.runs} runs` : 'not recorded'} | ${entry.passed ? 'within budget' : '**over budget**'} |`);
+    lines.push(`| ${entry.name} | ${entry.test} | ${entry.statistic} ${entry.measuredMs}ms | ${entry.comparison} ${entry.budgetMs}ms | ${entry.samples} (${entry.warmupDiscarded} warmup discarded) | ${known ? `${known.minMs}–${known.maxMs}ms over ${known.runs} runs` : 'not recorded'} | ${entry.passed ? 'within budget' : entry.toleratedBySlack !== undefined ? `over budget, within its ${entry.toleratedBySlack}× slack` : '**over budget**'} |`);
   }
   if (failures.length) lines.push('', failures[0].otherFailures === 0 ? 'Every failed test in this run failed on a timing-dependent assertion: the run measured the runner or a latency regression, not a behavioural defect.'
     : failures[0].otherFailures === null ? 'The run did not report how many tests failed, so other failures cannot be ruled out.'
@@ -69,10 +72,13 @@ export function timingSummary(record: TimingMeasurement[], failures: TimingFailu
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const [recordFile, logFile] = process.argv.slice(2);
-  if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log]');
+  // One log per shard in CI (GY-499): the failed tests beside the timing-dependent ones are counted
+  // across every shard, and unknown when any shard's log is missing or has no summary.
+  const [recordFile, ...logFiles] = process.argv.slice(2);
+  if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log...]');
   const record = existsSync(recordFile) ? parseTimingRecord(readFileSync(recordFile, 'utf8')) : [];
-  const failures = timingFailures(record, logFile && existsSync(logFile) ? failedTestCount(readFileSync(logFile, 'utf8')) : null);
+  const counts = logFiles.map(file => existsSync(file) ? failedTestCount(readFileSync(file, 'utf8')) : null);
+  const failures = timingFailures(record, counts.length && counts.every(count => count !== null) ? counts.reduce<number>((sum, count) => sum + count!, 0) : null);
   for (const failure of failures) console.log(annotationCommand(failure));
   const summary = timingSummary(record, failures, readBaseline());
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary); else console.log(summary);

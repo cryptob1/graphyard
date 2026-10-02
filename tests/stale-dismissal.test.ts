@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +16,7 @@ import { sessionRetry } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/master-status.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces: integration:dismissed-review-not-matched,
 // integration:recover-review-without-base-refresh, unit:unobtainable-review-visible and
@@ -61,7 +61,7 @@ function stubs(reviews: () => unknown[]) {
 }
 
 async function reviewerRoot() {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-stale-dismissal-')), credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-stale-dismissal-credentials-'));
+  const root = await temporaryDirectory('stale-dismissal'), credentialDirectory = await temporaryDirectory('stale-dismissal-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);

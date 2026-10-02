@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
@@ -12,6 +11,7 @@ import { executorRunnableKinds, type NextActionKind } from '../src/model/action-
 import { detectLoopMerger, installationMerger, loopMergeGuardedEffects, loopMergeRefusal } from '../src/executor.js';
 import { executorDeclarationFile, executorUnit, installExecutorSupervision, loopMergerExecutorKinds, type SystemctlRunner } from '../src/repository-setup.js';
 import type { ExecutorEffects } from '../src/auto-dispatch.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const launcher = join(root, 'bin/graphyard.mjs');
@@ -21,7 +21,7 @@ const systemctl: SystemctlRunner = args => args[0] === 'is-active' ? 'active' : 
 
 /** A coordinator host: master.json and its credential, one unit directory with the loop's unit installed and one without. */
 async function coordinatorHost() {
-  const base = await mkdtemp(join(tmpdir(), 'graphyard-executor-kinds-'));
+  const base = await temporaryDirectory('executor-kinds');
   const checkout = join(base, 'checkout'), credentials = join(base, 'credentials');
   await mkdir(join(checkout, '.graphyard'), { recursive: true, mode: 0o700 }); await mkdir(credentials, { mode: 0o700 });
   git(checkout, 'init', '-q'); git(checkout, 'remote', 'add', 'origin', 'https://github.com/owner/project.git');

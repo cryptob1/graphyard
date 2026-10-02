@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, readFile, readdir, stat } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile,
+import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, masterConfigSchema, readCredentialFile,
   type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
+import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -97,24 +99,37 @@ export function runtimeSessionGone(session: FleetSession, runtime: RuntimeInvent
 export const skipCause = (reason: string): AccountSkipCause =>
   /is not logged in/.test(reason) ? 'logged-out' : /quota is exhausted/.test(reason) ? 'exhausted' : 'unconfigured';
 
-export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = 10_000): FleetClient {
-  const call = async (path: string, body?: unknown) => {
-    // A credential this host cannot read is the registry being unaskable, not a fleet decision:
-    // it takes the same path as an outage, so a role the registry never decided still launches
-    // from its local profile while a role it did decide refuses rather than falling back.
-    let token: string;
-    try { token = await readCredentialFile(config.credentialFile); }
-    catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} cannot be asked: ${error instanceof Error ? error.message : 'the coordinator credential is unreadable'}`); }
-    let response: Response;
-    try {
-      response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(timeoutMs),
-        headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    } catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
-    const text = await response.text();
-    let parsed: any = null; try { parsed = JSON.parse(text); } catch { /* a proxy page, not the control plane */ }
-    if (!response.ok || parsed === null) throw new FleetUnreachableError(`The agent registry at ${config.url} answered ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
-    return parsed;
-  };
+/**
+ * One authenticated control-plane call for the host-side fleet workers: the coordinator credential
+ * is read here, so a credential this host cannot read is the control plane being unaskable, not a
+ * fleet decision. `httpFleetClient` and the connect-account worker (GY-409) both go through it.
+ */
+/**
+ * How long a registry request may take. Registry writes (select, session end) run in a coordination
+ * transaction and queue behind the global lock; on 2026-10-01 45 of 46 selects were abandoned at the
+ * old 10 s bound while the server still completed them, so dispatches failed and the abandoned
+ * selections left phantom live sessions (GY-1027 removes the queueing itself).
+ */
+export const fleetRequestTimeoutMs = 30_000;
+export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, path: string, init: { method?: 'GET' | 'POST'; body?: unknown; fetch?: typeof fetch; timeoutMs?: number; idempotencyKey?: string } = {}): Promise<any> {
+  let token: string;
+  try { token = await readCredentialFile(config.credentialFile); }
+  catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} cannot be asked: ${error instanceof Error ? error.message : 'the coordinator credential is unreadable'}`); }
+  const body = init.body;
+  let response: Response;
+  try {
+    const method = init.method ?? (body === undefined ? 'GET' : 'POST');
+    response = await (init.fetch ?? fetch)(`${config.url}/api/${path}`, { method, signal: AbortSignal.timeout(init.timeoutMs ?? fleetRequestTimeoutMs),
+      headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'POST' ? { 'Idempotency-Key': init.idempotencyKey ?? randomUUID() } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  } catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
+  const text = await response.text();
+  let parsed: any = null; try { parsed = JSON.parse(text); } catch { /* a proxy page, not the control plane */ }
+  if (!response.ok || parsed === null) throw new FleetUnreachableError(`The agent registry at ${config.url} answered ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
+  return parsed;
+}
+
+export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
+  const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
   return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); } };
 }
 
@@ -133,7 +148,7 @@ export type FleetRead = { managed: true; registry: AgentRegistry; client: FleetC
 /** Whether the registry decides `role` for this executor, and the registry when it does. */
 export async function readFleet(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}): Promise<FleetRead> {
   if (!probe.registry && (!config.url || !config.hostId)) return { managed: false, reason: 'this configuration names no control plane' };
-  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000);
+  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
   const now = probe.now?.() ?? Date.now(), failed = probe.registry ? undefined : unreachable.get(config.url!);
   let registry: AgentRegistry;
   try {
@@ -180,10 +195,13 @@ const smokesInFlight = new Map<string, Promise<SmokeResult>>();
 
 /**
  * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) with no result since it last changed. An interactive
- * runtime's session is its own check — a session that cannot start fails its launch.
+ * runtime (Pi, the narrow roles' runner) with no result since it last changed, or whose last test
+ * failed `smokeRetestMs` ago or more (GY-515). An interactive runtime's session is its own check — a
+ * session that cannot start fails its launch — and the registry's launch contract names no
+ * one-prompt headless mode for it, so it has no smoke test to run.
  */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime) => runtime.launch.kind === 'pi' && account.enabled && !account.smoke;
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => runtime.launch.kind === 'pi' && account.enabled
+  && (!account.smoke || smokeFailureDue(account, now));
 
 /**
  * The session a launch runs on, chosen by the control plane — or null when the registry does not
@@ -208,7 +226,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime), model = registry.models.find(entry => entry.name === account.model);
     const observation = observations.find(entry => entry.account === account.name);
-    if (!runtime || !model || !needsSmoke(account, runtime) || observation?.quota.loggedIn === false) return;
+    if (!runtime || !model || !needsSmoke(account, runtime, probe.now?.() ?? Date.now()) || observation?.quota.loggedIn === false) return;
     const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
       fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
     // Concurrent launches that read the registry before the first result is folded share one smoke
@@ -250,22 +268,26 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
 /**
  * Whether a role can launch from the registry right now, without choosing anything: what the
  * durable loop and `master status` read before they dispatch. Null when the registry does not
- * decide the role.
+ * decide the role. `running` counts the settled document the control plane serves (GY-974): a
+ * session whose lease or request has gone is already ended there, so it never holds a slot.
+ * A Pi account whose only fault is a smoke failure that has aged past
+ * `smokeRetestMs` reads healthy here (GY-515): the launch this admits is what runs the retest,
+ * and the choice it asks for still refuses until the fresh result is folded.
  */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
-  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [] }; }
+  try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
-    const reason = account ? accountIneligibility(fleet.registry, account, now, host) : `${name} is not a registered account`;
+    const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) : `${name} is not a registered account`;
     return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role && !runtimeSessionGone(session, probe.runtime, host, now)).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
-  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts };
+  return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
 }
 
 /**
@@ -286,7 +308,7 @@ export function settledRecordSessions(role: 'reviewer' | 'producer', records: re
  */
 export async function reconcileFleetSessions(config: FleetConfig, runtime: RuntimeInventory, finished: ReadonlyMap<string, string>, probe: FleetProbe = {}) {
   if (!probe.registry && (!config.url || !config.hostId)) return [];
-  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? 10_000);
+  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
   const registry = await client.document(), now = probe.now?.() ?? Date.now(), ended: { session: string; role: FleetRoleName; work: string | null; account: string; reason: string }[] = [];
   for (const session of liveSessions(registry)) {
     const reason = finished.get(session.id) ?? runtimeSessionGone(session, runtime, config.hostId, now);
@@ -388,11 +410,265 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
   const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
-  const roles: FleetRole[] = !accounts.length ? [] : fleetRoles.flatMap(name => {
+  // The master role is never proposed (GY-898): it is one account the operator names for it with
+  // `master registry role set master`, and the durable loop launches nothing until it is named.
+  const proposed = fleetRoles.filter(name => name !== 'master');
+  const roles: FleetRole[] = !accounts.length ? [] : proposed.flatMap(name => {
     const added = accounts.filter(account => serves(account, name)).map(account => account.name);
     const existing = current.roles.find(role => role.name === name);
     if (existing) return [{ ...existing, accounts: [...existing.accounts, ...added.filter(account => !existing.accounts.includes(account))] }];
     return added.length ? [{ name, accounts: added, concurrency: proposedConcurrency[name] }] : [];
   });
   return { runtimes, models, accounts, roles };
+}
+
+// ---------------------------------------------------------------------------
+// Connect an account from the UI (GY-409).
+//
+// The catalog below is everything the browser, the control plane and the host's
+// executor agree on about the providers an operator can connect without a shell:
+// what each one is called, whether it takes a pasted API key or the provider's
+// own subscription login, which runtime and registry model its account runs,
+// which file inside the login home holds its credential and what that file
+// looks like, the login command whose output is relayed to the operator, and
+// the one-line smoke prompt that decides whether the card turns healthy.
+// Everything here is pure: the writes and spawns live in src/master/environments.ts.
+// ---------------------------------------------------------------------------
+
+/** A provider an operator connects from Settings › Agents. */
+export interface ConnectProvider {
+  /** Stable id on the wire (`connect.provider`). */
+  id: string;
+  /** The operator-facing name the UI shows. */
+  label: string;
+  /** `api-key` providers take a pasted key sealed to the agent host; `subscription` providers run their own login. */
+  kind: 'api-key' | 'subscription';
+  /** The registry runtime the account runs on. */
+  runtime: string;
+  /** The registry model the account runs; added when the registry lacks it, left alone when it has one. */
+  model: string;
+  /** The capability class the default role placement follows (GY-409 AC-4). */
+  tier: 'strong' | 'fast';
+  /** Path of the provider's own auth file inside the login home, for `api-key` providers. */
+  authFile?: string;
+  /** The provider's auth file content: what `key` becomes, laid over whatever the file already held. */
+  authDocument?: (existing: Record<string, unknown>, key: string) => Record<string, unknown>;
+  /**
+   * The provider's own login command for `subscription` providers, and the env variable that selects
+   * the login home. `env` is laid over the host's environment (to keep a login from opening a
+   * browser on the host). `pasteCode` marks a login that, after the sign-in, asks for the code the
+   * provider's page shows to be pasted back: the card asks the operator for it and the host writes
+   * it to the login's stdin.
+   */
+  login?: { command: string; args: string[]; envVariable: string; env?: Record<string, string>; pasteCode?: boolean };
+  /** Path inside the login home whose presence means the login completed. */
+  loginFile?: string;
+  /** The one-line smoke prompt: what is run inside the login home to decide the card's health. */
+  smoke: { command: string; args: string[]; envVariable: string };
+  /** One line of UI help under the provider's picker entry. */
+  help: string;
+}
+
+const smokePrompt = 'Reply with the single word: ok';
+
+/** The providers Settings › Agents offers, in the order the picker shows them. */
+export const connectProviders: readonly ConnectProvider[] = [
+  {
+    id: 'z.ai', label: 'z.ai (GLM coding plan)', kind: 'api-key', runtime: 'opencode', model: 'opencode-default', tier: 'fast',
+    authFile: 'opencode/auth.json',
+    // OpenCode's auth entries are a union discriminated on `type`: without `type: 'api'` it
+    // discards the entry, so the pasted key would never be used and the smoke would pass on
+    // whatever other provider the host still had.
+    authDocument: (existing, key) => ({ ...existing, 'zai-coding-plan': { ...(existing['zai-coding-plan'] as Record<string, unknown> | undefined ?? {}), type: 'api', key } }),
+    // The smoke pins the provider and model, so "healthy" means this key answered.
+    smoke: { command: 'opencode', args: ['run', '--model', 'zai-coding-plan/glm-5.3-flash', smokePrompt], envVariable: 'XDG_DATA_HOME' },
+    help: 'Your z.ai coding-plan key, wrapped by OpenCode. Cheap-model accounts join research, approval and proofs.',
+  },
+  {
+    id: 'anthropic-api', label: 'Anthropic API', kind: 'api-key', runtime: 'claude', model: 'claude-default', tier: 'strong',
+    authFile: 'settings.json',
+    authDocument: (existing, key) => {
+      const updated = { ...existing, env: { ...((existing.env ?? {}) as Record<string, unknown>), ANTHROPIC_API_KEY: key } };
+      return updated;
+    },
+    smoke: { command: 'claude', args: ['-p', smokePrompt], envVariable: 'CLAUDE_CONFIG_DIR' },
+    help: 'An Anthropic API key Claude Code bills to your API account.',
+  },
+  {
+    id: 'openai-api', label: 'OpenAI API', kind: 'api-key', runtime: 'codex', model: 'codex-default', tier: 'strong',
+    authFile: 'auth.json',
+    authDocument: (existing, key) => ({ ...existing, OPENAI_API_KEY: key }),
+    smoke: { command: 'codex', args: ['exec', smokePrompt], envVariable: 'CODEX_HOME' },
+    help: 'An OpenAI API key Codex bills to your API account.',
+  },
+  {
+    id: 'claude', label: 'Claude (subscription)', kind: 'subscription', runtime: 'claude', model: 'claude-default', tier: 'strong',
+    // Claude Code signs in with `claude auth login` (`claude login` is a session whose prompt is
+    // "login"). Off a terminal it prints the sign-in URL and waits on stdin for the code the
+    // provider's page shows after the sign-in, so the operator pastes that code back on the card.
+    login: { command: 'claude', args: ['auth', 'login'], envVariable: 'CLAUDE_CONFIG_DIR', pasteCode: true }, loginFile: '.credentials.json',
+    smoke: { command: 'claude', args: ['-p', smokePrompt], envVariable: 'CLAUDE_CONFIG_DIR' },
+    help: 'Your Claude subscription. Finish the sign-in in your own browser.',
+  },
+  {
+    id: 'chatgpt', label: 'ChatGPT / Codex (subscription)', kind: 'subscription', runtime: 'codex', model: 'codex-default', tier: 'strong',
+    // The device flow: a URL and a one-time code that work from any browser, where plain `codex
+    // login` waits on a localhost callback only a browser on the agent host can reach.
+    login: { command: 'codex', args: ['login', '--device-auth'], envVariable: 'CODEX_HOME' }, loginFile: 'auth.json',
+    smoke: { command: 'codex', args: ['exec', smokePrompt], envVariable: 'CODEX_HOME' },
+    help: 'Your ChatGPT plan, through the Codex CLI. Finish the sign-in in your own browser.',
+  },
+  {
+    id: 'cursor', label: 'Cursor (subscription)', kind: 'subscription', runtime: 'cursor', model: 'cursor-default', tier: 'strong',
+    // Without NO_OPEN_BROWSER the login opens a browser on the host; the card's URL is the only path.
+    login: { command: 'agent', args: ['login'], envVariable: 'CURSOR_CONFIG_DIR', env: { NO_OPEN_BROWSER: '1' } }, loginFile: 'cli-config.json',
+    smoke: { command: 'agent', args: ['-p', smokePrompt], envVariable: 'CURSOR_CONFIG_DIR' },
+    help: 'Your Cursor plan. Finish the sign-in in your own browser.',
+  },
+];
+
+/** The provider a connect request names, or null when it names no known one. */
+export const connectProvider = (id: string): ConnectProvider | null => connectProviders.find(entry => entry.id === id) ?? null;
+
+/**
+ * The roles a newly connected account joins by default, by capability (GY-409 AC-4): strong-model
+ * accounts join worker and reviewer; cheap models (GLM, Flash-class) join research, the approver
+ * and the unit producer. Every role listed that exists in the registry takes the account appended
+ * to its failover order. `research` is the host's own (master.json) configuration, not a registry
+ * role: the account joins it only once the host has made the account's Pi wrapper the research
+ * command, and the host's result is what reports it — the card never claims a placement the
+ * fleet cannot launch.
+ */
+export function connectDefaultRoles(tier: ConnectProvider['tier']): readonly string[] {
+  return tier === 'fast' ? ['research', 'approver', 'producer'] : ['worker', 'reviewer'];
+}
+
+/**
+ * The URL a provider's login printed, and the device or one-time code beside it, or nulls. Terminal
+ * colour codes are stripped first (Codex colours its URL and code), a code is looked for only
+ * outside URLs (Claude's carries `code=true`), and a code holds a digit, so prose such as "Paste
+ * code here" or "device code authorization" is never read as one.
+ */
+export function parseLoginOutput(text: string): { url: string | null; code: string | null } {
+  const plain = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '');
+  const url = plain.match(/https?:\/\/[^\s"'<>]+/)?.[0] ?? null;
+  const prose = plain.replace(/https?:\/\/[^\s"'<>]+/g, ' ');
+  const code = [...prose.matchAll(/code\b(?:\s*is)?(?:\s*\([^)\n]*\))?[:\s]+([A-Za-z0-9][A-Za-z0-9-]{3,30})\b/gi)]
+    .map(match => match[1]).find(candidate => /\d/.test(candidate)) ?? null;
+  return { url, code };
+}
+
+/**
+ * Start the provider's own login inside a fresh login home and relay what it prints (GY-409): the
+ * URL and code reach the UI as soon as they appear, the login file's arrival ends the wait, and
+ * the caller runs the smoke prompt before the card turns healthy. A login that asks for the code
+ * its sign-in page shows (`pasteCode`) reads it on stdin: `answer` is polled once the URL is out,
+ * and the first code it returns is written to the login once. The child is bounded: past the
+ * window it is stopped and the failure is what the card shows.
+ */
+export async function relaySubscriptionLogin(provider: ConnectProvider, home: string, options: { login?: { command: string; args: string[] }; pollMs?: number; loginTimeoutMs?: number; onPrinted?: (printed: { url: string | null; code: string | null }) => unknown; answer?: () => Promise<string | null>; isCancelled?: () => Promise<boolean> } = {}): Promise<{ url: string | null; code: string | null; loggedIn: boolean; error: string | null }> {
+  const login = options.login ?? { command: provider.login!.command, args: provider.login!.args };
+  const pollMs = options.pollMs ?? 2_000, timeoutMs = options.loginTimeoutMs ?? 10 * 60_000;
+  const file = resolve(home, provider.loginFile ?? '');
+  const seen = () => access(file).then(() => true, () => false);
+  return await new Promise(done => {
+    let child: ReturnType<typeof spawn>;
+    const pasteCode = !!provider.login!.pasteCode;
+    try { child = spawn(login.command, login.args, { env: { ...process.env, ...provider.login!.env, [provider.login!.envVariable]: home }, stdio: [pasteCode ? 'pipe' : 'ignore', 'pipe', 'pipe'] }); }
+    catch (error) { done({ url: null, code: null, loggedIn: false, error: `${login.command} could not be started: ${error instanceof Error ? error.message : 'unknown reason'}` }); return; }
+    let text = '', found: { url: string | null; code: string | null } | null = null, settled = false;
+    const finish = (result: { url: string | null; code: string | null; loggedIn: boolean; error: string | null }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(limit); clearInterval(polling); clearTimeout(settle);
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      done(result);
+    };
+    const printed = () => { found ??= parseLoginOutput(text); return found; };
+    // The login blocks until the operator signs in, and the operator needs the URL to do that: hand
+    // it on the moment it is printed (with the code, once both are out or the output settles).
+    let announced = false, settle: ReturnType<typeof setTimeout> | undefined, lastAnnounced: { url: string | null; code: string | null } | null = null;
+    const tell = () => {
+      if (settled) return;
+      const now = parseLoginOutput(text);
+      if (!now.url && !now.code) return;
+      clearTimeout(settle);
+      const announce = () => { if (settled) return; found = parseLoginOutput(text); if (!announced || found.url !== lastAnnounced?.url || found.code !== lastAnnounced?.code) { announced = true; lastAnnounced = found; void Promise.resolve(options.onPrinted?.(found)).catch(() => {}); } };
+      if (now.url && now.code) announce(); else settle = setTimeout(announce, 500);
+    };
+    const read = (chunk: Buffer) => { text += chunk.toString(); tell(); };
+    child.stdout?.on('data', read);
+    child.stderr?.on('data', read);
+    const limit = setTimeout(() => finish({ ...(found ?? { url: null, code: null }), loggedIn: false, error: `${login.command} did not finish within ${Math.round(timeoutMs / 1000)}s and was stopped` }), timeoutMs);
+    // The pasted code goes to the login exactly once; a wrong one fails the login, and the card says so.
+    let answered = !pasteCode || !options.answer, asking = false;
+    child.stdin?.on('error', () => { /* the login exited before reading the code; its exit reports why */ });
+    const ask = () => {
+      if (answered || asking || !announced || settled) return;
+      asking = true;
+      void options.answer!().then(code => { if (code && !answered && !settled) { answered = true; child.stdin?.end(`${code.trim()}\n`); } }, () => {}).finally(() => { asking = false; });
+    };
+    const polling = setInterval(() => { if (settled) return; ask(); void seen().then(there => { if (there) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null }); }); void (options.isCancelled?.() ?? Promise.resolve(false)).then(cancelled => { if (cancelled) finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: 'The connect was cancelled' }); }, () => { /* a failed cancellation poll leaves the login running, as the answer poll does */ }); }, pollMs);
+    limit.unref?.(); polling.unref?.();
+    child.on('error', error => finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} failed: ${error instanceof Error ? error.message : 'unknown reason'}` }));
+    child.on('close', status => { void seen().then(there => {
+      if (there) return finish({ ...(printed() ?? { url: null, code: null }), loggedIn: true, error: null });
+      // The login's own last word (a rejected code, an expired sign-in) is what the card shows.
+      const last = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').split('\n').map(line => line.trim()).filter(Boolean).at(-1);
+      finish({ ...(printed() ?? { url: null, code: null }), loggedIn: false, error: `${login.command} exited ${status ?? 'to a signal'} before the login file appeared${last ? `: ${last.slice(0, 300)}` : ''}` });
+    }); });
+  });
+}
+
+/**
+ * The provider error an operator is shown, with the credential itself cut out: a provider that
+ * echoes the pasted key back in an error message must not carry it onto a card, into history or
+ * into a log line.
+ */
+export const redactKey = (text: string, key: string) => key.length > 8 ? text.split(key).join('[redacted]') : text;
+
+/**
+ * Research joins through a Pi wrapper (GY-409 AC-4): `pi-<letter>` reads the provider key at run
+ * time from the account's login home and execs `pi`, so a cheap account can serve research without
+ * the key being copied anywhere. An existing wrapper is never overwritten; null says there was
+ * nothing to write.
+ */
+export async function ensureResearchWrapper(name: string, home: string, options: { root?: string; binDirectory?: string } = {}): Promise<string | null> {
+  const letter = name.match(/-([a-z0-9]+)$/)?.[1];
+  if (!letter) return null;
+  const bin = options.binDirectory ?? resolve(homedir(), '.local/bin');
+  const file = resolve(bin, `pi-${letter}`);
+  if (await access(file).then(() => true, () => false)) return null;
+  // Paths are shell-quoted: a home carrying a quote or a `$` must not break or inject into the wrapper.
+  const piDirectory = shellQuote(resolve(agentEnvironmentRoot(options.root), `pi-${letter}`));
+  const script = [
+    '#!/usr/bin/env bash',
+    `# pi, env ${letter}: the provider key is read at run time from its login home; never stored here.`,
+    `mkdir -p ${piDirectory}`,
+    `export PI_CODING_AGENT_DIR=${piDirectory}`,
+    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' ${shellQuote(resolve(home, 'opencode/auth.json'))})"`,
+    'exec pi "$@"',
+    '',
+  ].join('\n');
+  await mkdir(bin, { recursive: true });
+  await writeFile(file, script, { mode: 0o755 });
+  return file;
+}
+
+/**
+ * Make the account's Pi wrapper the research command in the coordinator checkout's
+ * .graphyard/master.json (GY-409 AC-4): a cheap account joins research only once the host's own
+ * configuration can launch it. A research or Pi command the operator set is never replaced, and a
+ * host with no readable master configuration appends nothing; false says so, and the connect's
+ * result then claims only the registry roles.
+ */
+export async function appendResearchCommand(wrapper: string, options: { masterFile?: string } = {}): Promise<boolean> {
+  const file = options.masterFile ?? resolve(process.cwd(), '.graphyard/master.json');
+  let config: MasterConfig;
+  try { config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
+  catch { return false; }
+  if (config.run.research?.command || config.run.pi?.command) return false;
+  const parsed = masterConfigSchema.parse({ ...config, run: { ...config.run, research: { ...config.run.research, command: wrapper } } });
+  await atomicPrivateWrite(file, parsed);
+  return true;
 }

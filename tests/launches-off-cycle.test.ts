@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,6 +10,7 @@ import { Launcher, defaultLaunchConcurrency } from '../src/daemon/cycle.js';
 import { cycleCost, cycleTimes, loopLiveness, slowCycleAttention, slowCycleMs } from '../src/daemon/liveness.js';
 import { type CycleMetrics, emptyCycleSteps } from '../src/daemon/state.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-616: a burst of session launches ran inside the master cycle, one Herdr pane and session
 // registration after another, and every merge, decision and close after them waited for the burst.
@@ -30,63 +30,61 @@ function work(key: string): Work {
 const profile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 
 test('unit:launches-off-cycle — the cycle hands 10 five-second launches to the launcher and completes in under 10 s; the launcher runs 3 at a time and all 10 finish, reported to the next cycle', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'graphyard-launches-off-cycle-'));
-  try {
-    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const credential = join(directory, 'worker.token'); await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const keys = Array.from({ length: 10 }, (_, index) => `GY-${index + 1}`);
-    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: cli, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
-      masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: keys.map((_, index) => profile(`worker-${index + 1}`, credential)) });
-    assert.equal(master.run.launchConcurrency, undefined, 'master.json sets no concurrency, so the default applies');
-    let running = 0, peak = 0;
-    const finished: string[] = [];
-    const effects: DaemonEffects = {
-      agents: () => [], credentials: async items => Object.fromEntries(items.map(item => [item.name, { available: true, reason: null }])),
-      snapshot: async () => ({ work: keys.map(work), now: iso(0) }),
-      closeSession: () => {},
-      // Each launch — a pane and a registered session — takes five seconds.
-      dispatch: async item => { running += 1; peak = Math.max(peak, running); await delay(5_000); running -= 1; finished.push(item.key); },
-      requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
-    };
-    const state = emptyDaemonState(master), launcher = new Launcher();
-    assert.equal(launcher.concurrency, defaultLaunchConcurrency); assert.equal(defaultLaunchConcurrency, 3);
+  const directory = await temporaryDirectory('launches-off-cycle');
+  const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const credential = join(directory, 'worker.token'); await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const keys = Array.from({ length: 10 }, (_, index) => `GY-${index + 1}`);
+  const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: cli, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
+    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: keys.map((_, index) => profile(`worker-${index + 1}`, credential)) });
+  assert.equal(master.run.launchConcurrency, undefined, 'master.json sets no concurrency, so the default applies');
+  let running = 0, peak = 0;
+  const finished: string[] = [];
+  const effects: DaemonEffects = {
+    agents: () => [], credentials: async items => Object.fromEntries(items.map(item => [item.name, { available: true, reason: null }])),
+    snapshot: async () => ({ work: keys.map(work), now: iso(0) }),
+    closeSession: () => {},
+    // Each launch — a pane and a registered session — takes five seconds.
+    dispatch: async item => { running += 1; peak = Math.max(peak, running); await delay(5_000); running -= 1; finished.push(item.key); },
+    requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+  };
+  const state = emptyDaemonState(master), launcher = new Launcher();
+  assert.equal(launcher.concurrency, defaultLaunchConcurrency); assert.equal(defaultLaunchConcurrency, 3);
 
-    const started = Date.now();
-    const first = await runCycle(master, state, effects, Date.now, launcher);
-    const elapsed = Date.now() - started;
-    assert.ok(elapsed < 10_000, `the cycle completed in ${elapsed}ms without waiting on its launches`);
-    assert.ok(first.metrics.durationMs < 10_000);
-    assert.equal(finished.length, 0, 'no five-second launch had finished when the cycle ended: it recorded the requests and moved on');
-    assert.equal(launcher.pending, 10, 'all 10 launch requests are with the launcher');
-    assert.ok(first.metrics.timings!.steps.every(step => step.ms < 5_000), 'no step of the cycle waited on a launch');
-    assert.ok(!first.actions.some(action => action.kind === 'dispatch' && action.state === 'done'), 'nothing is reported done before it is');
-    // Each launch in flight holds its profile, and the next cycle neither repeats a launch nor
-    // reconciles its `started` entry as interrupted.
-    const second = await runCycle(master, state, effects, Date.now, launcher);
-    assert.ok(!second.actions.some(action => /Resumed/.test(action.detail)), 'a launch in flight is not reconciled as interrupted');
-    assert.equal(launcher.pending, 10, 'a launch already in flight is not requested twice');
+  const started = Date.now();
+  const first = await runCycle(master, state, effects, Date.now, launcher);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 10_000, `the cycle completed in ${elapsed}ms without waiting on its launches`);
+  assert.ok(first.metrics.durationMs < 10_000);
+  assert.equal(finished.length, 0, 'no five-second launch had finished when the cycle ended: it recorded the requests and moved on');
+  assert.equal(launcher.pending, 10, 'all 10 launch requests are with the launcher');
+  assert.ok(first.metrics.timings!.steps.every(step => step.ms < 5_000), 'no step of the cycle waited on a launch');
+  assert.ok(!first.actions.some(action => action.kind === 'dispatch' && action.state === 'done'), 'nothing is reported done before it is');
+  // Each launch in flight holds its profile, and the next cycle neither repeats a launch nor
+  // reconciles its `started` entry as interrupted.
+  const second = await runCycle(master, state, effects, Date.now, launcher);
+  assert.ok(!second.actions.some(action => /Resumed/.test(action.detail)), 'a launch in flight is not reconciled as interrupted');
+  assert.equal(launcher.pending, 10, 'a launch already in flight is not requested twice');
 
-    await launcher.idle();
-    assert.equal(finished.length, 10, 'all 10 launches finished');
-    assert.deepEqual([...finished].sort(), [...keys].sort());
-    assert.equal(peak, 3, 'the launcher ran at most 3 launches at once');
-    assert.ok(Date.now() - started >= 15_000, 'ten 5 s launches, three at a time, take four waves');
+  await launcher.idle();
+  assert.equal(finished.length, 10, 'all 10 launches finished');
+  assert.deepEqual([...finished].sort(), [...keys].sort());
+  assert.equal(peak, 3, 'the launcher ran at most 3 launches at once');
+  assert.ok(Date.now() - started >= 15_000, 'ten 5 s launches, three at a time, take four waves');
 
-    // The next cycle reports what every launch did.
-    const third = await runCycle(master, state, effects, Date.now, launcher);
-    const reported = third.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').map(action => action.work).sort();
-    assert.deepEqual(reported, [...keys].sort(), 'each launch result is reported to the next cycle');
-    assert.equal(launcher.drain().length, 0);
+  // The next cycle reports what every launch did.
+  const third = await runCycle(master, state, effects, Date.now, launcher);
+  const reported = third.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').map(action => action.work).sort();
+  assert.deepEqual(reported, [...keys].sort(), 'each launch result is reported to the next cycle');
+  assert.equal(launcher.drain().length, 0);
 
-    // A concurrency set in master.json is the launcher's.
-    const tuned = masterConfigSchema.parse({ ...master, run: { ...master.run, launchConcurrency: 5 } });
-    assert.equal(tuned.run.launchConcurrency, 5);
-    await runCycle(tuned, emptyDaemonState(tuned), { ...effects, dispatch: async () => {} }, Date.now, launcher);
-    assert.equal(launcher.concurrency, 5);
-    await launcher.idle();
-    assert.throws(() => masterConfigSchema.parse({ ...master, run: { ...master.run, launchConcurrency: 0 } }));
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  // A concurrency set in master.json is the launcher's.
+  const tuned = masterConfigSchema.parse({ ...master, run: { ...master.run, launchConcurrency: 5 } });
+  assert.equal(tuned.run.launchConcurrency, 5);
+  await runCycle(tuned, emptyDaemonState(tuned), { ...effects, dispatch: async () => {} }, Date.now, launcher);
+  assert.equal(launcher.concurrency, 5);
+  await launcher.idle();
+  assert.throws(() => masterConfigSchema.parse({ ...master, run: { ...master.run, launchConcurrency: 0 } }));
 });
 
 test('unit:launches-off-cycle — the launcher queues past its concurrency, runs each key once, and a launch that throws settles without holding up the rest', async () => {

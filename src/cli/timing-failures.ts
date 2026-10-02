@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { z } from 'zod';
 import { latestCheck } from '../merge-queue.js';
+import { ciCheckName } from '../model/ci-refusal.js';
 import { agentOwner, type AttentionItem, type buildMasterStatus } from '../master.js';
 import type { Work } from '../model.js';
 
@@ -78,7 +79,7 @@ export async function qualifyTimingFailures(status: MasterStatus, work: Work[], 
     }
   }
   if (!qualified.size) return status;
-  const unqualified = (key: string, text: string | null | undefined) => !!text && /^Required CI check .* has not passed on the current candidate$/.test(text) && qualified.has(key);
+  const unqualified = (key: string, text: string | null | undefined) => !!text && ciCheckName(text) !== null && qualified.has(key);
   let raised = 0;
   const rows = status.work.map(row => {
     const item = qualified.get(row.key);

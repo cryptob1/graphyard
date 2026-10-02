@@ -1,18 +1,16 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
-import { resyncUnobservedPrefix } from '../src/model/action-kinds.js';
+import { observationWaitBoundMs, resyncUnobservedPrefix } from '../src/model/action-kinds.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import type { MasterConfig } from '../src/master.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-607: an executor claiming an item's `resync` row saved the item, so the GitHub observation
@@ -24,7 +22,8 @@ import { stalledActionAttention } from '../src/cli/master-status.js';
  * observation's read and its save leaves the observation saved; any other change still refuses it.
  * unit:resync-completes-on-fresh-observation — a `resync` completes only once an observation newer
  * than its claim is saved, never on a re-read that saves nothing, and three claims in a row without
- * one raise an attention item naming the item and its observation job's condition.
+ * one raise an attention item naming the item and its observation job's condition once they outlast
+ * the bound a scheduled job's wait keeps (GY-1090).
  */
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
@@ -37,7 +36,7 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
   // An offset no other file takes: two files sharing a port fail whichever starts second.
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 137;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-claim-observation-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('claim-observation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
@@ -69,8 +68,8 @@ function observation(item: Work): Observation {
 }
 const claimResync = async (id: string) => (await engine.claimNextAction(executor, { host: 'host-1', kinds: ['resync'], work: id }, randomUUID())).action!;
 const settle = (row: ActionRow, result: 'done' | 'failed', reason: string) => engine.settleClaimedAction(executor, row.id, { result, reason }, randomUUID());
-/** The handlers Graphyard ships, over the engine instead of HTTP; `wait` is where the observer runs. */
-function handlers(wait: (ms: number) => Promise<unknown>) {
+/** The handlers Graphyard ships, over the engine instead of HTTP. */
+function handlers() {
   const unusable = async (): Promise<never> => { throw new Error('not reached'); };
   // A resync reads no launch configuration.
   return controlPlaneHandlers(() => ({}) as MasterConfig, {
@@ -78,7 +77,6 @@ function handlers(wait: (ms: number) => Promise<unknown>) {
     mutate: async (path, body) => { const [, id, command] = path.split('/'); assert.equal(command, 'resync'); return engine.resyncWork(executor, id, body); },
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
     dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable, merge: unusable, observeDeployment: unusable,
-    wait,
   });
 }
 
@@ -107,24 +105,32 @@ test('unit:action-claim-keeps-observation — an action claimed, renewed and set
   await assert.rejects(engine.observe(item.id, read.revision, observation(read)), /Task changed while GitHub was being observed; retry/);
 });
 
-test('unit:resync-completes-on-fresh-observation — a resync completes only on an observation newer than its claim, and three unobserved claims raise attention naming the item and its observation job', async () => {
+test('unit:resync-completes-on-fresh-observation — a resync completes only on an observation newer than its claim, and three unobserved claims that outlast the observation bound raise attention naming the item and its observation job', async () => {
   // Satisfied by the observation it woke, even though its own claim saved the item after the read.
   const item = await submitted();
   await store.pool.query("UPDATE jobs SET available_at=now() + interval '1 hour' WHERE work_id=$1", [item.id]);
   const read = await reload(item.id);
   const claimed = await claimResync(item.id);
-  let observedBy: string | null = null;
-  const run = handlers(async () => { if (!observedBy) observedBy = (await engine.observe(item.id, read.revision, observation(read))).observation!.at; });
-  const done = await run.resync!(claimed, { id: executor.id, host: 'host-1' }) as string;
+  const run = handlers();
+  // The claim wakes the job and returns at once (GY-646): nothing is observed yet, so the row is
+  // left waiting rather than the executor waiting inside it.
+  const waiting = await Promise.resolve(run.resync!(claimed, { id: executor.id, host: 'host-1' })).then(() => null, (error: Error) => error.message);
   const job = (await store.pool.query('SELECT available_at FROM jobs WHERE work_id=$1', [item.id])).rows[0];
   assert.ok(new Date(job.available_at).getTime() <= Date.now(), 'the resync woke the item\'s observation job');
-  assert.ok(observedBy, 'the handler waited for the observation rather than completing on its own re-read');
+  assert.match(waiting ?? '', new RegExp(`^${item.key}: ${resyncUnobservedPrefix}; `), 'the claim does not complete on its own re-read');
+  await settle(claimed, 'failed', waiting!);
+  // The observation the claim woke is saved after it; a later claim of the row — carrying the
+  // unobserved attempt in its history — completes on it, measured from the claim that woke the job.
+  const observedBy = (await engine.observe(item.id, read.revision, observation(read))).observation!.at;
+  const failed = resyncRow(await reload(item.id)) ?? claimed;
+  const later = new Date(Date.parse(observedBy) + 1_000).toISOString();
+  const again: ActionRow = { ...failed, state: 'claimed', claim: { ...claimed.claim!, claimedAt: later }, history: [...failed.history, { at: later, event: 'claimed', requester: 'graphyard', executor: executor.id, result: null, reason: 'attempt 2' }] };
+  const done = await run.resync!(again, { id: executor.id, host: 'host-1' }) as string;
   assert.match(done, new RegExp(`observed ${item.key} at ${observedBy}, after the claim at ${claimed.claim!.claimedAt}`));
-  await settle(claimed, 'done', done);
 
   // A re-read that saves nothing never satisfies it: every claim fails, naming the job's condition.
   const stale = await submitted();
-  const idle = handlers(async () => {});
+  const idle = handlers();
   let row: ActionRow | undefined;
   for (let claim = 1; claim <= 3; claim++) {
     // The row's backoff is not under test: it is due again at once.
@@ -133,14 +139,22 @@ test('unit:resync-completes-on-fresh-observation — a resync completes only on 
     assert.equal(row.attempts, claim);
     const refused = await Promise.resolve(idle.resync!(row, { id: executor.id, host: 'host-1' })).then(() => null, (error: Error) => error.message);
     assert.ok(refused, `claim ${claim} is not completed by a re-read that saved nothing`);
-    assert.match(refused!, new RegExp(`^${stale.key}: ${resyncUnobservedPrefix} within 90s; its observation job is scheduled and records no error, yet saved no observation$`));
+    assert.match(refused!, new RegExp(`^${stale.key}: ${resyncUnobservedPrefix}; its observation job is scheduled and records no error, yet saved no observation; the claim woke it and leaves the row waiting for the observation$`));
     await settle(row, 'failed', refused!);
     const snapshot = { work: await store.list(), now: new Date().toISOString() };
     const raised = stalledActionAttention(snapshot).filter(entry => entry.subject === stale.key);
-    if (claim < 3) { assert.deepEqual(raised, [], `no attention after ${claim} unobserved claim(s)`); continue; }
-    assert.equal(raised.length, 1, 'three unobserved claims raise one attention item');
-    assert.match(raised[0].text, new RegExp(`^${stale.key}'s resync action is stalled`));
-    assert.match(raised[0].text, /its observation job is scheduled and records no error, yet saved no observation/);
+    // A job the claim woke and that is scheduled with no error is a wait in progress (GY-1090):
+    // the claims inside its bound raise nothing, whatever their count.
+    assert.deepEqual(raised, [], `no attention after ${claim} unobserved claim(s) inside the observation bound`);
+    if (claim < 3) continue;
+    // The same run, its first failure moved back past the bound, is a stall and raises attention.
+    const outlasted = structuredClone(snapshot);
+    const failures = outlasted.work.find(entry => entry.id === stale.id)!.actionQueue!.actions[0].history.filter(entry => entry.event === 'failed');
+    failures[0].at = new Date(Date.parse(failures.at(-1)!.at) - observationWaitBoundMs).toISOString();
+    const stalled = stalledActionAttention(outlasted).filter(entry => entry.subject === stale.key);
+    assert.equal(stalled.length, 1, 'three unobserved claims that outlast the bound raise one attention item');
+    assert.match(stalled[0].text, new RegExp(`^${stale.key}'s resync action is stalled`));
+    assert.match(stalled[0].text, /its observation job is scheduled and records no error, yet saved no observation/);
   }
   assert.equal((await reload(stale.id)).observation ?? null, null, 'nothing was observed');
 });

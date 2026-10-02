@@ -1,8 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -15,6 +14,7 @@ import { harnessDecision } from '../src/harness.js';
 import { blockerCommands, branchRestoration, buildMasterStatus, sessionHarnessPlan, unrunnableRemedies, workerHarnessPlan } from '../src/master.js';
 import { parseLocalScopeDiff } from '../src/sync.js';
 import type { Observation, Principal, Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-128: the recovery the control plane authorizes for an ejected or contaminated tip — reset
 // the assigned branch to the reviewed head, sync it onto the base, push — must be executable by
@@ -84,7 +84,7 @@ const credentials = [operator, worker].map(principal => ({ ...principal, token: 
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, scratch: string;
 before(async () => {
   const port = Number(process.env.GRAPHYARD_WORKER_PUSH_RIGHTS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 61);
-  scratch = await mkdtemp(join(tmpdir(), 'graphyard-push-rights-'));
+  scratch = await temporaryDirectory('push-rights');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -10,12 +10,15 @@ import { describeObservationJob, resyncUnobservedPrefix } from './model/action-k
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
+import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
-import { dispatchReserved, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
+import { dispatchReserved, profileConcurrency, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
+import { processConnectAccounts } from './master/environments.js';
+import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
 import { loopUnitName } from './supervisor.js';
 import { executorUnitDirectory } from './repository-setup.js';
 
@@ -52,12 +55,39 @@ export interface ControlPlaneEffects {
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
-  /** How a handler waits between reads; a timer unless a test drives the clock. */
-  wait?: (ms: number) => Promise<unknown>;
 }
 
-/** How long a `resync` attempt waits for the observation it woke, and how often it reads again. */
-export const resyncObservationWaitMs = 90_000, resyncPollMs = 5_000;
+/**
+ * The instant a `resync` claim's observation must beat: the claim that first woke the item's
+ * observation job in the row's current run of unobserved claims (GY-646). Each claim wakes the job
+ * and returns, so an observation saved between two claims is newer than the first and satisfies
+ * the next one; only a completion, a reopening or a different failure starts a new run.
+ */
+export function resyncWaitingSince(row: Pick<ActionRow, 'claim' | 'history'>): string | null {
+  let since = row.claim?.claimedAt ?? null;
+  for (const entry of [...row.history].reverse()) {
+    if (entry.event === 'claimed') { since = entry.at; continue; }
+    if (entry.event === 'reclaimed' || (entry.event === 'failed' && (entry.reason ?? '').includes(resyncUnobservedPrefix))) continue;
+    break;
+  }
+  return since;
+}
+
+/**
+ * The same effects, answering the supervisor's watchdog before every claim, settlement and claim
+ * renewal (GY-646). It sits outside every guard, so an executor that claims nothing — an empty
+ * queue, a restart fence, a stand-down — still says it is alive at every step; only a process whose
+ * event loop wedged goes quiet. With no handler inside one request longer than the renewal
+ * interval, the notifications are never further apart than `actionRenewIntervalMs` plus a poll.
+ */
+export function watchdogEffects<E extends ExecutorEffects>(effects: E, alive: () => void): E {
+  return {
+    ...effects,
+    claim: request => { alive(); return effects.claim(request); },
+    settle: (action, result, reason) => { alive(); return effects.settle(action, result, reason); },
+    ...(effects.renew ? { renew: (action: ActionRow) => { alive(); return effects.renew!(action); } } : {}),
+  };
+}
 
 /**
  * The executor instance one executor process names on its merge requests.
@@ -70,8 +100,48 @@ export const resyncObservationWaitMs = 90_000, resyncPollMs = 5_000;
 export const executorMergeExecutor = (principal: string, instance = `executor-${randomUUID()}`): MergeExecutor => ({ principal, instance });
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+/**
+ * How the coordinator checkout stands, read synchronously: the executor is a thin startup path
+ * that loads its modules from this checkout before anything runs, and the guard below judges it
+ * once, at construction, before the first claim. An unreadable checkout (no git, no commit) is
+ * never dirty: it cannot be read as code either.
+ */
+const executorCheckout = (root: string): ReturnType<typeof parseCoordinatorCheckout> => {
+  const git = (args: string[]) => { try { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }); } catch { return null; } };
+  const commit = git(['rev-parse', 'HEAD']);
+  if (commit === null) return { root, commit: null, modified: [], untracked: [] };
+  const status = git(['status', '--porcelain', '-z', '--untracked-files=normal']);
+  return status === null ? { root, commit: commit.trim() || null, modified: [], untracked: [] } : parseCoordinatorCheckout(root, commit, status);
+};
 /** An executor holds no cool-off state of its own: a failed attempt backs off on its own action row. */
 const statelessProfiles = { profiles: {} } as unknown as DaemonState;
+
+/**
+ * The connect-account worker (GY-409): this host's resident executor is what turns a connect an
+ * operator makes in Settings › Agents into a registered, smoke-tested account. It registers the
+ * host's public key, claims each connect addressed to this host — the control plane's claim makes
+ * every connect exactly-once across this host's slots — unseals the payload to this host alone,
+ * writes the provider's auth file at mode 0600, relays a subscription login's URL and code, and
+ * reports the card healthy or the provider's error. The control plane never sees a plaintext key,
+ * and no worker here reads one: the sealed payload is opened only inside `processConnectAccounts`.
+ *
+ * The loop is deferred and unref'd: it fires first after `intervalMs`, never holds the process
+ * open, and one pass at a time per process.
+ */
+export function startConnectAccountWorker(config: () => MasterConfig, options: { intervalMs?: number; connect?: typeof processConnectAccounts; log?: (line: string) => void } = {}) {
+  const intervalMs = options.intervalMs ?? 15_000, connect = options.connect ?? processConnectAccounts, log = options.log ?? (line => console.error(line));
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try { await connect(config()); } catch (error) { log(`[graphyard-executor] connect-account worker: ${message(error)}`); }
+    finally { running = false; }
+  };
+  let rest: ReturnType<typeof setInterval> | undefined;
+  const first = setTimeout(() => { void tick(); rest = setInterval(() => { void tick(); }, intervalMs); rest.unref?.(); }, intervalMs);
+  first.unref?.();
+  return { stop: () => { clearTimeout(first); clearInterval(rest); } };
+}
 
 /**
  * The handlers a control-plane executor runs: one per mechanical kind, plus the two that launch a
@@ -79,6 +149,19 @@ const statelessProfiles = { profiles: {} } as unknown as DaemonState;
  * construction, and `judgmentInExecutorLoop` below is what keeps that true as kinds are added.
  */
 export function controlPlaneHandlers(config: () => MasterConfig, effects: ControlPlaneEffects): Partial<Record<NextActionKind, ExecutorHandler>> {
+  // GY-857: an executor runs the modules it imported from the coordinator checkout once, at
+  // startup. When that checkout holds uncommitted work, no claim may run it — the modules are
+  // behaviour no commit names — so every handler is replaced by the refusal, each claim is
+  // settled failed naming the dirty paths, and the connect-account worker never starts. The
+  // process stays up so its supervisor does not restart it onto the same dirty checkout; a
+  // restart after the checkout is cleaned is what puts the fleet back on committed code.
+  const cliPath = config().cliPath;
+  const checkout = typeof cliPath === 'string' && cliPath ? executorCheckout(coordinatorCheckoutRoot(cliPath)) : null;
+  const checkoutRefusal = checkout && checkoutGuardApplies(checkout.root) ? coordinatorCheckoutRefusal(checkout, 'this executor') : null;
+  // A host with a declared identity serves connects: a fresh installation's operator connects its
+  // first accounts from the UI before any session can launch, and this is the process that is
+  // already resident on the agent host with a coordinator credential (GY-409).
+  if (!checkoutRefusal && config().url && config().hostId) startConnectAccountWorker(config);
   const find = async (action: ActionRow) => {
     const snapshot = await effects.snapshot();
     const work = snapshot.work.find(item => item.id === action.work);
@@ -154,7 +237,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     throw new Error(`no worker profile can take ${work.key}: every healthy profile is reserved by another dispatch (${held.join('; ')})`);
   };
 
-  return {
+  const handlers: Partial<Record<NextActionKind, ExecutorHandler>> = {
     dispatch: async action => {
       const { work, all, observedAt } = await find(action);
       if (action.inputs.kind !== 'dispatch') throw new Error('unreachable');
@@ -171,10 +254,20 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // A name every session of the profile could take is held: the namespace is at its bound,
       // and the refusal names it rather than reading as a busy reviewer (GY-132).
       assertNameAvailable('reviewer', profile, agents);
-      if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
+      // The fixed name is busy only for a profile that runs one session; one that runs several names each session for its request (GY-1072).
+      if (profileConcurrency(profile) === 1 && agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
       // A launch refused by a resource at its bound — the review ledger's cap — records that resource.
-      await registeredLaunch(record(work), launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace),
-        () => effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); }), launched => launched, attachTo);
+      try {
+        await registeredLaunch(record(work), launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace),
+          () => effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); }), launched => launched, attachTo);
+      } catch (error) {
+        // The loop's tick launches reviewers beside the executors: a session already answering this
+        // head is the request being answered, as a pending producer is for a proof dispatch (GY-415),
+        // not a failure to repeat until the review is posted (GY-1090).
+        const pending = answeredByPendingReview(error, request);
+        if (!pending) throw error;
+        return `${work.key}'s review of ${request.sha.slice(0, 12)} is left to reviewer session ${pending.agentName} already answering that head; its verdict settles the request`;
+      }
       return `launched reviewer ${profile.name} on ${request.sha.slice(0, 12)}`;
     },
     'approve-scope': async action => {
@@ -188,19 +281,19 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     resync: async action => {
       const { work } = await find(action);
       // Satisfied by a fresh observation of the item, never by a re-read that saves nothing
-      // (GY-607): the control plane wakes the observation job, and the attempt completes only once
-      // an observation newer than this claim is saved. One that does not arrive in time fails the
-      // attempt naming the job's state; the row backs off and `master status` names a run of them.
-      const since = action.claim?.claimedAt ?? new Date().toISOString();
-      let result = await effects.mutate(`work/${work.id}/resync`, { since }, randomUUID());
-      for (let polls = Math.ceil(resyncObservationWaitMs / resyncPollMs); result?.observed === false && polls > 0; polls--) {
-        await (effects.wait ?? delay)(resyncPollMs);
-        result = await effects.mutate(`work/${work.id}/resync`, { since, wake: false }, randomUUID());
-      }
+      // (GY-607), and never by waiting for one inside the claim (GY-646): the claim wakes the
+      // item's observation job and returns. The row is left waiting — settled failed with a reason
+      // naming the job's condition, so it backs off — and a later claim completes it once an
+      // observation newer than the claim that first woke the job is saved. The same condition
+      // gives the same reason on every claim, so the bounded run of them (`actionStallThreshold`)
+      // stalls the row and `master status` names it. An executor holding a resync is therefore
+      // never inside a handler longer than one request, and answers its watchdog between steps.
+      const since = resyncWaitingSince(action) ?? new Date().toISOString();
+      const result = await effects.mutate(`work/${work.id}/resync`, { since }, randomUUID());
       // A control plane from before GY-607 cannot say whether it observed; its answer is taken as
       // the re-read it always was, and the executor reports that it could not tell.
       if (result && typeof result.observed !== 'boolean') return `re-read ${work.key} from the provider and reconciled it; the control plane does not report observations, so none was awaited`;
-      if (!result?.observed) throw new Error(`${work.key}: ${resyncUnobservedPrefix} within ${Math.round(resyncObservationWaitMs / 1000)}s; ${describeObservationJob(result?.job, Date.now())}`);
+      if (!result?.observed) throw new Error(`${work.key}: ${resyncUnobservedPrefix}; ${describeObservationJob(result?.job, Date.now())}; the claim woke it and leaves the row waiting for the observation`);
       return `observed ${work.key} at ${result.observedAt}, after the claim at ${since}`;
     },
     reclaim: async action => {
@@ -221,9 +314,14 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // The step throws when it does not record the merge request, so reaching here means GitHub
       // now holds the authorized head (GY-258). What it returns is its own account — requested and
       // not yet observed, or already merged — and the row records that verbatim rather than a word
-      // of the executor's own: only the observation says merged.
-      const result = await effects.merge(work) as { result?: string } | undefined;
-      return `${work.key}: ${result?.result ?? 'the guarded merge returned without a result of its own'}`;
+      // of the executor's own: only the observation says merged. An outcome that is neither pending
+      // nor merged is named as such, the way the loop names it (GY-246), so the row never reads it
+      // the same as an accepted merge (GY-442).
+      const result = await effects.merge(work) as { result?: string; pending?: boolean; merged?: boolean } | undefined;
+      const unaccounted = result?.merged !== true && result?.pending !== true;
+      const unaccountedNote = 'the merge reported neither a pending request nor a merge GitHub performed';
+      if (!result?.result) return `${work.key}: ${unaccounted ? unaccountedNote : 'the guarded merge returned without a result of its own'}`;
+      return `${work.key}: ${result.result}${unaccounted ? `; ${unaccountedNote}` : ''}`;
     },
     'verify-deployment': async action => {
       const { work } = await find(action);
@@ -235,6 +333,10 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}`;
     },
   };
+  if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {
+    handlers[kind] = (async () => { throw new Error(checkoutRefusal); }) as ExecutorHandler;
+  }
+  return handlers;
 }
 
 /**

@@ -1,12 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { AddressInfo } from 'node:net';
 import EmbeddedPostgres from 'embedded-postgres';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type pg from 'pg';
 import { Store, storeStatementTimeoutMs, workDelta } from '../src/store.js';
 import { reportPoolConnections, reportStatementTimeoutMs } from '../src/store/report-pool.js';
@@ -110,7 +108,7 @@ function* ledger(now: number) {
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 491;
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-interventions-scale-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('interventions-scale'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('interventions_scale');
   databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/interventions_scale`;
   store = new Store(databaseUrl);

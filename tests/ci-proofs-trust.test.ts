@@ -1,8 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -10,6 +8,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { ciProducerRuntime } from '../src/model/ci-proofs.js';
 import { currentEvidence, type Observation, type Principal, type Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free protected workflow script.
 import { observeCiRun, publishCiReport } from '../scripts/publish-acceptance.mjs';
 // @ts-expect-error Dependency-free protected workflow script.
@@ -47,7 +46,7 @@ const checkRun = (jobId: number, overrides: Record<string, unknown> = {}) => ({ 
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_CI_PROOFS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 19);
-  database = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), 'graphyard-ci-proofs-')), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('ci-proofs'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('ci_proofs_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ci_proofs_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository);

@@ -50,7 +50,7 @@ export const faultClassMeaning: Record<FaultClass, string> = {
  */
 export const faultCatalogue = {
   'session-liveness': ['session', 'launch-review', 'launch-producer', 'consent-hold', 'overlong-session', 'unanswered-request', 'stuck-request', 'escalation:lease-loss',
-    'action:close', 'action:dispatch', 'action:session', 'action:preserve'],
+    'action:close', 'action:dispatch', 'action:session', 'action:preserve', 'action:wake'],
   'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'escalation:security-concern', 'action:review'],
   'decision': ['approver-launch', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
     'action:decision', 'action:escalation'],
@@ -58,13 +58,13 @@ export const faultCatalogue = {
   'overlap-hold': ['hold-overdue'],
   'observation': ['github-budget', 'integration-job', 'action:refresh'],
   'deployment': ['production', 'throughput', 'action:deployment', 'action:smoke'],
-  'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'action:config'],
+  'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'workflow-permission', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
   'merge': ['base-conflict', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
   'proof': ['proof-gap', 'timing-failure', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
   'unclassified': ['unclassified'],
@@ -100,7 +100,7 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['decision-stale', (_, text) => /^Decision \S+ \(\S+\) is stale/.test(text)],
   ['decision-unanswered', (_, text) => /^Decision \S+ \(\S+\) is unanswered/.test(text)],
   ['approver-launch', (_, text) => /is awaiting an approver for/.test(text)],
-  ['stalled-action', (_, text) => /action is stalled, not retrying/.test(text)],
+  ['stalled-action', (_, text) => /\S+ action is stalled\b/.test(text)],
   ['stalled-item', (_, text) => /has held its \S+ gate for .+ with no action named/.test(text)],
   ['actorless', (_, text) => /no rework request and no named wait/.test(text)], ['unanswered-request', (_, text) => /has stood unanswered for/.test(text)],
   ['stuck-request', (_, text) => /^\S+ request \S+ on \S+ \(session \S+\) is pending/.test(text)],
@@ -165,8 +165,24 @@ export function workFaults(work: Work, now: number): FaultObservation[] {
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
   const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait, a refused scope request */ (work.humanRequest && !work.humanRequest.answer) || (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker));
-  if (work.blocker && !restated) found.push(observe(/sandbox|refused path|--add-dir|Operation not permitted/i.test(work.blocker) ? 'sandbox-blocker' : 'blocker', work.key, work.blocker));
+  if (work.blocker && !restated) found.push(observe(blockerKind(work.blocker), work.key, work.blocker));
   return found;
+}
+
+/**
+ * The kind of a recorded blocker. A blocker is a stalled gate only when it names nothing the
+ * installation lacks: one quoting a sandbox refusal is the sandbox rule (`sandbox-blocker`), and one
+ * quoting GitHub's refusal to let an App write `.github/workflows` without the `workflows`
+ * permission is that permission (`workflow-permission`, GY-1097). Worker push tokens are narrowed
+ * to contents and pull requests by design, so every worker whose push carries a workflow-file
+ * change — its own, or main's brought in by a base sync — meets that refusal however long the gate
+ * is held: on 2 October 2026 GY-793 and GY-1094 were both filed as stalled gates for it, within
+ * three minutes of main taking GY-1093's workflow changes.
+ */
+export function blockerKind(blocker: string): 'sandbox-blocker' | 'workflow-permission' | 'blocker' {
+  if (/sandbox|refused path|--add-dir|Operation not permitted/i.test(blocker)) return 'sandbox-blocker';
+  if (/refusing to allow an? .{0,40}App to create or update workflow/i.test(blocker)) return 'workflow-permission';
+  return 'blocker';
 }
 
 // ---------------------------------------------------------------------------
@@ -212,16 +228,16 @@ export function openFaultClassItem(work: readonly Work[], faultClass: FaultClass
 export interface ClassRecurrence { faultClass: FaultClass; count: number; recent: FaultInstance[]; unlinked: FaultInstance[]; item: Work | null; file: boolean }
 /**
  * Every class with an instance inside the window. A class files an item when the instances in the
- * window that no item accounts for yet reach the threshold and no open item names the class; with
- * an open item, every instance not yet linked is linked to it instead, however many there are.
+ * window no item accounts for reach the threshold and no item stands for the class (`standing`,
+ * GY-439); with one, every unlinked instance links to it.
  * Instances linked to an item that has since closed stay counted by it, never by a second one.
  */
-export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number): ClassRecurrence[] {
+export function recurringClasses(instances: readonly FaultInstance[], work: readonly Work[], policy: FaultClassPolicy, now: number, standing = openFaultClassItem): ClassRecurrence[] {
   const from = now - policy.windowHours * 3_600_000;
   return faultClasses.flatMap(faultClass => {
     const all = instances.filter(entry => entry.faultClass === faultClass);
     const recent = all.filter(entry => Date.parse(entry.at) >= from && Date.parse(entry.at) <= now && !entry.linkedTo);
-    const item = openFaultClassItem(work, faultClass);
+    const item = standing(work, faultClass);
     const unlinked = item ? all.filter(entry => !entry.linkedTo) : recent;
     if (!unlinked.length) return [];
     return [{ faultClass, count: recent.length, recent, unlinked, item, file: !item && recent.length >= policy.threshold }];
