@@ -25,7 +25,7 @@ Every launch runs with the checkout unwritable to shell commands (GY-888). A cod
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), relaunches on the next account or awaits reset. So does a working session auto-retrying (`[retrying in 4s]`).
+A runtime's limit notice (never agent text), even while auto-retrying, makes the loop commit worker changes as unpushed `WIP:`, record `capacity.exhausted`, relaunch on the next account or await reset.
 
 ## The loop's own master session
 
