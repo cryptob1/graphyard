@@ -347,6 +347,17 @@ export class SimulatedGitHub {
     }
     return this.runs.get(head)!.filter(run => run.at <= now);
   }
+  /** Heads whose CI finished and whose check_run webhook was already delivered (GY-806). */
+  private announced = new Set<string>();
+  /** The check_run webhooks GitHub sends by `now`: one per open pull request head whose CI has finished, delivered once. */
+  completedChecks(now: number): { pr: number; sha: string }[] {
+    const deliveries: { pr: number; sha: string }[] = [];
+    for (const pr of this.prs.values()) {
+      if (!pr.open || pr.merged || this.announced.has(pr.head) || now - (pr.pushed.get(pr.head) ?? now) < this.options.ciMs) continue;
+      this.announced.add(pr.head); deliveries.push({ pr: pr.number, sha: pr.head });
+    }
+    return deliveries;
+  }
   /** GitHub's "rerun failed jobs": the failed run's job runs again on the same commit, reporting `ciMs` later. A documentation-budget breach is not a flake: the rerun judges the commit's pages again (GY-574). */
   rerun(checkRunId: number) {
     const [head, runs] = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId)) ?? [];
