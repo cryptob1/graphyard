@@ -4,7 +4,7 @@ import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
-import { reconcileCandidatesSql, reconcileItemLockSql, reconcileRereadSql, reconcileSettledSql, reconcileVersionsSql } from './store/coordination-sql.js';
+import { reconcileCandidatesSql, reconcileCommitBlockingSql, reconcileItemLockSql, reconcileRereadSql, reconcileSettledSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
@@ -2142,7 +2142,7 @@ export class Engine {
    * attempts per batch made a busy fleet's tick take 4-6 minutes.
    */
   reconcileMaxAttempts = 3;
-  /** How long a batch that wrote waits in line for the coordination lock at its commit (GY-1115). */
+  /** How long a batch that wrote waits in line for the coordination lock at its commit (GY-1115); well under `deadlock_timeout`. */
   reconcileCommitLockWaitMs = 200;
   /** The last reconciliation ticks, newest last (GY-1115): what each evaluated, deferred and how many attempts its worst batch took. */
   readonly reconcileTicks: ReconcileTick[] = [];
@@ -2180,7 +2180,7 @@ export class Engine {
    * Every item is evaluated against the whole fleet (dependencies, the merge queue,
    * capacity), so a batch that wrote anything commits only after it holds the coordination lock
    * and finds no other item moved since it evaluated in a way another item's evaluation reads: it
-   * waits for that lock only briefly, since a mutation holding it may be waiting for one of the
+   * waits for that lock only briefly, and never while its holder waits on the batch, since a mutation holding it may be waiting for one of the
    * batch's rows, and a moved item whose only change is a live lease's renewal (a heartbeat:
    * its revision, time stamp and lease expiry) is adopted rather than counted (GY-1115). On either
    * failure the batch rolls back and runs again on the refreshed view, over half the items it
@@ -2306,11 +2306,16 @@ export class Engine {
   }
   /**
    * Take the coordination lock for a batch's commit, waiting in line for at most `ms` (GY-1115). A
-   * try-lock polled for it lost to every mutation queued on the lock, so under steady traffic a
-   * batch that wrote never committed. A wait past `ms` (or a deadlock with a mutation that holds the
-   * lock and waits for one of the batch's rows) aborts the batch, which rolls back as contended.
+   * try-lock lost to every mutation queued on the lock, so under steady traffic a batch that wrote
+   * never committed. A mutation holding the lock may be waiting for one of the batch's rows, so the
+   * batch queues only when no lock holder waits on it; one that starts waiting later has its
+   * deadlock check (`deadlock_timeout`, 1 s by default) fire long after the batch's own `ms` wait
+   * gives up, so the batch, never the mutation, is the side that yields. A wait past `ms`, a holder
+   * blocked on the batch, or a deadlock reported all the same aborts the batch as contended.
    */
   private async coordinationLockWithin(db: PoolClient, ms: number) {
+    const blocking = (await db.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0].blocking;
+    if (blocking) return false;
     await db.query(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(ms))}ms'`);
     try { await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.coordination]); }
     catch (error) { if (['55P03', '40P01'].includes((error as { code?: string }).code ?? '')) return false; throw error; }

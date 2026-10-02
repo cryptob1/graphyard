@@ -134,3 +134,11 @@ export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM w
  * the item is locked or gone; the pass tries it once more at its end.
  */
 export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE SKIP LOCKED';
+/**
+ * Whether a session holding the coordination lock (`$1`, a single-key advisory lock) waits on this
+ * session (GY-1115): a reconciliation batch queuing for that lock then would deadlock with it.
+ */
+export const reconcileCommitBlockingSql = `SELECT EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND l.granted
+  AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND l.classid = ($1::bigint >> 32)::oid AND l.objid = ($1::bigint & 4294967295)::oid AND l.objsubid = 1
+  AND pg_backend_pid() = ANY(pg_blocking_pids(l.pid))) AS blocking`;
