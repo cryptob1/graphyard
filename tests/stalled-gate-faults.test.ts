@@ -15,6 +15,9 @@ import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { evaluate } from '../src/model/gates.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
+import { faultClassOf, workFaults } from '../src/model/fault-classes.js';
+import { restatements } from '../src/daemon/faults.js';
+import { actionStallThreshold } from '../src/model/action-progress.js';
 // The executor process as it runs in production: its modules loaded by its own entry point, one
 // `tsImport` each, and its effects built by the same function (scripts/graphyard-executor.mjs).
 // @ts-expect-error The standalone executor is a dependency-free entry point script.
@@ -259,4 +262,66 @@ test('manual:fault-class-stalled-gate — a submission with nothing named for it
   const named = actorlessSubmissions([work], new Date(instance.at));
   assert.equal(named.length, 1);
   assert.match(named[0].text, /no review request, no producer request, no rework request and no named wait/);
+});
+
+// ---- GY-1097: the four instances filed on 2 October 2026 -------------------------------------------
+//
+// The loop filed GY-1097 for four more stalled-gate faults within seven minutes of main taking
+// 947d2b6212 (GY-1093's workflow changes, and GY-1090 itself). They share that move, not one reading:
+//
+//   - resync (GY-1023, GY-1072): the same wait GY-1090 fixed — a claim that woke the observation job,
+//     three identical failures inside minutes. GY-1090 merged at 00:50:08Z, five minutes before the
+//     first of them; the loop that recorded them was still running the release it had loaded before
+//     it (55193b8c's rule: three identical failures are a stall, whatever the wait). Against this
+//     candidate's base the rows read as waits already; they are replayed here so the shape stays
+//     covered, and the pre-GY-1090 rule is shown to flag them.
+//   - blocker (GY-793, GY-1094): each worker's push was refused by GitHub — "refusing to allow a
+//     GitHub App to create or update workflow ... without workflows permission". Worker push tokens
+//     never carry workflows, by design, so the gate is held by a permission the worker identity
+//     lacks, not by nothing: a configuration fault (`workflow-permission`), as a sandbox refusal is
+//     (`sandbox-blocker`). The push itself is GY-1098's control-plane path. Against the base each was
+//     read as `blocker`, a stalled gate: these subtests fail there.
+
+interface Gy1097Instance { id: string; at: string; kind: 'stalled-action' | 'blocker'; subject: string; action?: 'resync'; reason?: string; failures?: string[]; detected?: number; blocker?: string }
+const gy1097: Gy1097Instance[] = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1097-stalled-gate.json', import.meta.url)), 'utf8'));
+
+test('manual:fault-class-stalled-gate — GY-1097 lists 4 instances, and every one is replayed below', () => {
+  assert.deepEqual(gy1097.map(instance => instance.subject), ['GY-1023', 'GY-1072', 'GY-793', 'GY-1094']);
+  assert.deepEqual(gy1097.map(instance => instance.kind), ['stalled-action', 'stalled-action', 'blocker', 'blocker']);
+});
+
+for (const instance of gy1097.filter(entry => entry.action === 'resync')) {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: the resync waited on its woken observation job, inside the job's bound`, () => {
+    const replay = instance as unknown as Instance;
+    assert.ok(instance.reason!.startsWith(`${instance.subject}: ${resyncUnobservedPrefix}; ${observationJobScheduled};`), 'the recorded reason names a scheduled job with no hold and no error');
+    // The release the loop was running read a stall from the count alone: the instance's shape.
+    assert.ok(instance.detected! >= actionStallThreshold, 'three identical failures were on the row when the loop recorded it');
+    assert.ok(Date.parse(instance.failures!.at(-1)!) - Date.parse(instance.failures![0]) < observationWaitBoundMs, 'the whole run sat inside the observation job\'s bound');
+    const detected = resyncRow({ ...replay, failures: instance.failures!.slice(0, instance.detected) });
+    const work = { id: detected.work, key: instance.subject, title: instance.subject, stage: 'merge', actionQueue: { actions: [detected], history: [] } } as unknown as Work;
+    assert.deepEqual(stalledActionAttention({ work: [work], now: instance.at }).filter(entry => entry.subject === instance.subject), [], 'master status raises no stalled-action attention');
+    for (let count = 1; count <= instance.failures!.length; count++)
+      assert.equal(actionStall(resyncRow({ ...replay, failures: instance.failures!.slice(0, count) })), null, `${count} failure(s) are a wait in progress`);
+  });
+}
+
+/** The blocked item as the loop read it: a live attempt's blocker, nothing else standing. */
+const blockedItem = (instance: Gy1097Instance, blocker: string) => ({ id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, stage: 'build', blocker,
+  escalations: [], violations: [], proofGaps: [], containmentQuarantine: null, humanRequest: null, scopeRequest: null, lease: null }) as unknown as Work;
+
+for (const instance of gy1097.filter(entry => entry.kind === 'blocker')) {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: a push GitHub refused for the workflows permission is a configuration fault, not a stalled gate`, () => {
+    const faults = workFaults(blockedItem(instance, instance.blocker!), Date.parse(instance.at));
+    assert.deepEqual(faults.map(fault => [fault.kind, fault.faultClass]), [['workflow-permission', 'configuration']]);
+    assert.equal(faults.filter(fault => fault.faultClass === 'stalled-gate').length, 0, 'the instance does not recur as a stalled gate');
+    // The derived line for the gate it holds restates that fault rather than counting a second one.
+    assert.ok(restatements['stalled-item']?.includes('workflow-permission' as never), 'a stalled-item line on the item restates its workflow-permission blocker');
+  });
+}
+
+test('manual:fault-class-stalled-gate — a blocker naming nothing the installation lacks is still a stalled gate', () => {
+  const instance = gy1097.find(entry => entry.kind === 'blocker')!;
+  const faults = workFaults(blockedItem(instance, 'The PR conflicts with main and the resolution needs a decision about which migration wins'), Date.parse(instance.at));
+  assert.deepEqual(faults.map(fault => [fault.kind, fault.faultClass]), [['blocker', 'stalled-gate']]);
+  assert.equal(faultClassOf('workflow-permission'), 'configuration');
 });
