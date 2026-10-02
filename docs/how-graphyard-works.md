@@ -16,7 +16,7 @@ A card stops at its first refusing gate, naming what is missing; nothing sets st
 
 ## Risk lanes
 
-`src/model/policy.ts` puts each item in a **risk lane** from its changed paths (renames by both endpoints), setting what landing requires; `master status` shows its p50 target.
+`src/model/policy.ts` assigns each item a **risk lane** from its changed paths (renames by both endpoints); `master status` shows its p50 target.
 
 - **High** (4 h): schema, persistence, auth, credentials, principals, public API, operator agent, proof grants, install, deploy; unobserved changes. Needs producer proofs, `manual:` attestations, a two-party decision per rework.
 - **Medium** (60 min): everything else; adds producer-run proofs (`unit:`, `integration:`).
@@ -40,7 +40,7 @@ Text equivalent: the operator sends human-only decisions; Herdr hosts master, sl
 
 Text equivalent: callers use the API; the engine applies each mutation in one locked Postgres transaction; the reconciliation worker syncs GitHub, publishes the required check, runs the guarded merge; webhooks only wake jobs.
 
-- Gates deterministically check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates evidence.
+- Gates check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates evidence.
 - Each claim bumps the epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its authenticated producer; the latest trusted record per proof and candidate wins, even a failure.
 - History is append-only (routine rows compacted after retention); a retry within a day replays its result.

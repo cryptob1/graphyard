@@ -3,7 +3,7 @@
 
 ## The one command
 
-One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; `/healthz` reports version and `commit` (`?strict`: 503 if unhealthy).
+One stateless container and Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; `/healthz` reports version and `commit` (`?strict`: 503 if unhealthy).
 
 ## Variables
 
@@ -31,7 +31,7 @@ Unset limits derive from the principals (`delegationLimits` drift).
 
 ### Production deployment observation
 
-A new `GRAPHYARD_BUILD_SHA` checks undeployed merges once (`delivery.deployment-contained`, `production.deployment-pending`); one unserved after five minutes is a `delivery.deployment-incident`, and `master status` reports `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+A new `GRAPHYARD_BUILD_SHA` checks undeployed merges once (`delivery.deployment-contained`, `production.deployment-pending`); one unserved after five minutes is a `delivery.deployment-incident` (`master status`: `main is N commits ahead of production`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 
