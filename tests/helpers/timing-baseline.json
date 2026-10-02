@@ -313,6 +313,7 @@
     "tests/exited-worker-pane.test.ts": 1768,
     "tests/failed-launch-pane.test.ts": 1877,
     "tests/failed-manual-proof-rework.test.ts": 1485,
+    "tests/fault-class-scope.test.ts": 1200,
     "tests/fault-classes.test.ts": 2268,
     "tests/proof-attempts.test.ts": 340,
     "tests/required-checks-gate.test.ts": 360,
@@ -556,6 +557,7 @@
     "tests/status-conflict-probe-bounded.test.ts": 2983,
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
-    "tests/tmp-cleanup.test.ts": 13603
+    "tests/tmp-cleanup.test.ts": 13603,
+    "tests/unblock-stale-revision.test.ts": 4873
   }
 }
