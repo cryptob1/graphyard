@@ -15,6 +15,7 @@ import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
+import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage } from '../provider-usage.js';
 export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './connect-accounts.js';
 
 // ---------------------------------------------------------------------------
@@ -213,16 +214,57 @@ async function codexAccount(environment: AgentEnvironment, probe: EnvironmentPro
   return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
 }
 
+async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
+  const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
+  const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
+  const fileKey = await readFile(resolve(environment.home, 'zai.key'), 'utf8').catch(() => null);
+  const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
+  const key = zaiKey ?? fileKey?.trim() ?? auth?.ZAI_API_KEY ?? auth?.key ?? process.env.ZAI_API_KEY;
+  const loggedIn = !!key || (!!opencodeAuth && Object.keys(opencodeAuth).length > 0) || (!!auth && Object.keys(auth).length > 0);
+  if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
+  if (!key) return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+  try {
+    const response = await (probe.fetch ?? fetch)('https://api.z.ai/api/monitor/usage/quota/limit', {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(probe.timeoutMs ?? 5_000),
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      const parsed = parseZaiUsage(text);
+      return { loggedIn: true, usage: parsed.windows, note: parsed.reason };
+    }
+    const body = await response.json();
+    const parsed = parseZaiUsage(body);
+    return { loggedIn: true, usage: parsed.windows, note: null };
+  } catch (error) {
+    return { loggedIn: true, usage: [], note: `the provider usage endpoint is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}` };
+  }
+}
+
 export async function checkAgentEnvironment(environment: AgentEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
+  const planId = (environment as any).plan ?? (
+    environment.kind === 'opencode' || /zai|glm/i.test(environment.name)
+      ? (/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)?.[1]
+        ? `zai-${/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)![1].toLowerCase()}`
+        : 'zai')
+      : null
+  );
   const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
-  // The probe is an external call like any other: one of a second or more is named on the cycle
-  // or status build that made it, with the account it read (GY-377).
-  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } = environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
-    : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
-    : environment.kind === 'opencode' ? { loggedIn: Object.keys((await readJsonFile(resolve(environment.home, 'opencode/auth.json'))) ?? {}).length > 0, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' }
-    : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+
+  const cachedPlan = planId ? getCachedPlanUsage(planId, now, probe.cacheMs ?? 30_000) : null;
+  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } =
+    cachedPlan && cachedPlan.reported
+      ? { loggedIn: true, usage: cachedPlan.windows, note: cachedPlan.reason }
+      : environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
+      : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
+      : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe))
+      : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+
+  if (planId && account.usage.length > 0) {
+    setCachedPlanUsage(planId, { reported: true, status: 'reported', windows: account.usage, resetsAt: account.usage.map(u => u.resetsAt).filter(Boolean).sort().at(-1) ?? null, reason: account.note }, now);
+  }
   const future = (usage: AccountUsage) => !usage.resetsAt || Date.parse(usage.resetsAt) > now;
   const spent = account.usage.filter(usage => usage.percent >= ceiling && future(usage));
   const exhausted = spent.length > 0 || !!account.reached && account.usage.some(future);

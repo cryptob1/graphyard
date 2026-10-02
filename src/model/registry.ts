@@ -102,6 +102,8 @@ export const accountSchema = z.object({
   enabled: z.boolean().default(true),
   /** How many sessions may run on this account at once, across every role; null is unbounded. */
   maxSessions: z.number().int().min(1).max(100).nullable().default(null),
+  /** The provider plan this account draws on (GY-1121); derived from credentials/runtime when omitted. */
+  plan: text(100).optional(),
   note: text(300).optional(),
 }).strict();
 export type FleetAccountInput = z.infer<typeof accountSchema>;
@@ -317,3 +319,4 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
 export * from './registry-keys.js';
 export * from './registry-sessions.js';
 export * from './registry-proposal.js';
+export * from '../provider-usage.js';

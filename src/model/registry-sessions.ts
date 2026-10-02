@@ -2,6 +2,7 @@ import type { Work } from './work.js';
 import { fleetRoles, rolePolicy } from './registry.js';
 import { foldObservation } from './registry.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
+import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../provider-usage.js';
 
 /**
  * Which sessions of the agent registry are live, which accounts may take another, the choice an
@@ -114,6 +115,9 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && runtime.launch.kind === 'pi');
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   if (account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
+  const plan = deriveAccountPlan(account, registry.accounts);
+  const otherExhausted = registry.accounts.find(other => other.name !== account.name && deriveAccountPlan(other, registry.accounts).planId === plan.planId && other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now));
+  if (otherExhausted) return `${account.name} quota is exhausted on plan ${plan.planName} (${otherExhausted.name} quota is exhausted${until(otherExhausted.quota.resetsAt)}${otherExhausted.quota.reason ? `: ${otherExhausted.quota.reason}` : ''})`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
   return null;
@@ -213,6 +217,8 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
 export interface FleetAccountView {
   name: string; runtime: string; model: string; modelId: string | null; cost: FleetModel['cost'] | null; capability: FleetModel['capability'] | null;
   host: string; home: string | null; enabled: boolean; maxSessions: number | null; note: string | null;
+  /** The provider plan this account draws on (GY-1121). */
+  plan?: string;
   /** Every role that names the account, with its place in that role's order. */
   roles: { role: FleetRoleName; preference: number; of: number }[];
   liveSessions: { id: string; role: FleetRoleName; work: string | null; host: string; since: string }[];
@@ -229,6 +235,7 @@ export interface FleetRoleView { role: FleetRoleName; accounts: string[]; concur
 export interface FleetView {
   revision: number; updatedAt: string | null; configured: boolean; host: string | null;
   runtimes: FleetRuntime[]; models: FleetModel[]; accounts: FleetAccountView[]; roles: FleetRoleView[];
+  plans?: FleetPlanView[];
   sessions: FleetSession[]; refusals: FleetRefusal[]; lastMutation: AgentRegistry['lastMutation'];
   attention: string[];
 }
@@ -243,8 +250,10 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
   const accounts: FleetAccountView[] = registry.accounts.map(account => {
     const model = registry.models.find(entry => entry.name === account.model);
     const ineligible = accountIneligibility(registry, account, now, host);
+    const planInfo = deriveAccountPlan(account, registry.accounts);
     return { name: account.name, runtime: account.runtime, model: account.model, modelId: model?.id ?? null, cost: model?.cost ?? null, capability: model?.capability ?? null,
       host: account.credential.host, home: account.credential.home, enabled: account.enabled, maxSessions: account.maxSessions, note: account.note ?? null,
+      plan: account.plan ?? planInfo.planName,
       roles: registry.roles.filter(role => role.accounts.includes(account.name)).map(role => ({ role: role.name, preference: role.accounts.indexOf(account.name) + 1, of: role.accounts.length })),
       liveSessions: live.filter(session => session.account === account.name).map(session => ({ id: session.id, role: session.role, work: session.work, host: session.host, since: session.selectedAt })),
       quota: account.quota.state, loggedIn: account.quota.loggedIn, usage: account.quota.usage, resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source,
@@ -262,7 +271,8 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
   const missing = registry.accounts.length ? fleetRoles.filter(name => !registry.roles.some(role => role.name === name)).map(name => name === 'master'
     ? 'role master is not configured; the durable loop launches no master session until graphyard master registry role set master ACCOUNT[,ACCOUNT…] --reason REASON names its accounts'
     : `role ${name} is not configured; its sessions launch from local profiles until it is`) : [];
-  return { revision: registry.revision, updatedAt: registry.updatedAt, configured: registry.roles.length > 0, host, runtimes: registry.runtimes, models: registry.models, accounts, roles,
+  const plans = groupAccountsByPlan({ accounts: registry.accounts }, now);
+  return { revision: registry.revision, updatedAt: registry.updatedAt, configured: registry.roles.length > 0, host, runtimes: registry.runtimes, models: registry.models, accounts, roles, plans,
     sessions: registry.sessions.slice(-30), refusals: registry.refusals, lastMutation: registry.lastMutation,
     attention: [...roles.filter(role => role.blocked).map(role => role.blocked!), ...unassigned, ...missing] };
 }
