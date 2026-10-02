@@ -17,6 +17,8 @@ import { branchContamination, nextQueueEntries, disprovedConflict, withDisproved
 import { queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
+import { retroCheckRefusals } from './model/retro-synthesis.js';
+import { readRetroArtefacts } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
 import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
@@ -523,7 +525,7 @@ export class Engine {
    * job outside any transaction: `requested` holds the failure until the rerun concludes,
    * `refused` lets it stand, and the entry is re-evaluated at once either way.
    */
-  async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string }) {
+  async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: { state: 'requested' | 'refused'; runId?: number; attempt?: number; detail?: string }) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
@@ -532,13 +534,49 @@ export class Engine {
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
       if (index < 0 || work.checkReruns![index].state !== 'owed') return work;
-      const rerun: CheckRerun = { ...work.checkReruns![index], state: outcome.state, ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}), ...(outcome.detail ? { detail: outcome.detail } : {}), ...(outcome.state === 'refused' ? { resolvedAt: now.toISOString() } : {}) };
+      const rerun: CheckRerun = { ...work.checkReruns![index], state: outcome.state, ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}), ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), ...(outcome.detail ? { detail: outcome.detail } : {}), ...(outcome.state === 'refused' ? { resolvedAt: now.toISOString() } : {}) };
       work.checkReruns = work.checkReruns!.map((entry, at) => at === index ? rerun : entry).slice(-checkRerunLimit);
       const queuedBefore = work.queue?.sequence ?? null;
       this.evaluate(work, all, now);
       await this.recordEjection(db, work, all, queuedBefore, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', `check.rerun.${outcome.state}`, now, rerun);
+      return work;
+    });
+  }
+  /**
+   * Records what GitHub said of an accepted rerun's workflow run once no new check run appeared
+   * within the visibility bound (GY-1096), read by the integration job outside any transaction:
+   * `waiting` (queued or running) keeps holding the failure and names the runner-queue wait,
+   * `failed` is the rerun concluding failing, `rerequested` is the one further request made for a
+   * rerun not found at all, and `refused` or `expired` let the failure stand.
+   */
+  async recordCheckRerunProbe(id: string, jobToken: string, rerun: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome:
+    { kind: 'waiting'; status: string } | { kind: 'failed'; conclusion: string } | { kind: 'rerequested'; runId: number; attempt?: number } | { kind: 'refused' | 'expired'; detail: string }) {
+    return this.store.transaction(async (db, now) => {
+      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
+      requireCurrent(job, 'Integration job lease expired or superseded');
+      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const work = all.find(w => w.id === id);
+      demand(work, 'Work item not found', 404);
+      const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === rerun.sha && entry.check === rerun.check && entry.failedRunId === rerun.failedRunId);
+      if (index < 0 || work.checkReruns![index].state !== 'requested') return work;
+      const at = now.toISOString(), current = work.checkReruns![index];
+      const next: CheckRerun = outcome.kind === 'waiting' ? { ...current, probedAt: at, waiting: current.waiting?.status === outcome.status ? current.waiting : { status: outcome.status, at } }
+        : outcome.kind === 'failed' ? { ...current, state: 'failed', probedAt: at, detail: `its workflow run concluded ${outcome.conclusion}`, resolvedAt: at }
+        : outcome.kind === 'rerequested' ? { ...current, runId: outcome.runId, ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), probedAt: at, rerequestedAt: at, waiting: undefined }
+        : { ...current, state: outcome.kind, probedAt: at, detail: outcome.detail, resolvedAt: at };
+      work.checkReruns = work.checkReruns!.map((entry, position) => position === index ? next : entry).slice(-checkRerunLimit);
+      // A wait whose status is unchanged is not a new fact: it refreshes the probe without a ledger entry.
+      if (outcome.kind === 'waiting' && current.waiting?.status === outcome.status) {
+        await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
+        return work;
+      }
+      const queuedBefore = work.queue?.sequence ?? null;
+      this.evaluate(work, all, now);
+      await this.recordEjection(db, work, all, queuedBefore, now);
+      await this.recordDispatch(db, work, now);
+      await save(db, work, 'github', `check.rerun.${outcome.kind}`, now, next);
       return work;
     });
   }
@@ -1115,12 +1153,15 @@ export class Engine {
         // coordinator that asked — can assert a widening the item does not already imply.
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         const request = work.scopeRequest;
+        // One request is decided once (GY-955): the loop's scope step and an executor's approve-scope
+        // can both ask for one undecided request, and whichever lands second is answered, not failed.
+        // A request no longer open answers with the item and the decision it recorded; one already
+        // decided answers with its standing decision. Neither is rewritten. A refusal is decided
+        // again only when the rules as they stand now would approve it.
+        if (!request && work.scopeDecision && (work.scopeDecision.epoch ?? data.epoch) === data.epoch) return work;
         demand(request, 'No scope request is open for this item', 404);
         demand(request!.epoch === data.epoch, 'Scope request belongs to another attempt; reload before deciding');
-        // A refusal may be decided again when the rules as they stand now would approve it; an
-        // approval never is, and a refusal the current rules still give is not rewritten.
-        demand(!request!.decision || request!.decision.state === 'refused', 'This scope request was already decided');
-        demand(!request!.decision || decideScopeRequest(work, request!).state === 'approved', 'The current rules still refuse this scope request');
+        if (request!.decision && (request!.decision.state !== 'refused' || decideScopeRequest(work, request!).state !== 'approved')) return work;
         demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
         decision = applyScopeDecision(work, request!, now);
@@ -1239,6 +1280,9 @@ export class Engine {
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
           const regressions = regressionRefusals(work, observation, all);
           demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
+          // Checks registered by approved retro artefacts (GY-970) run against the observed candidate.
+          const retroChecks = retroCheckRefusals(work, observation, await readRetroArtefacts(db));
+          demand(!retroChecks.length, `Submission refused for ${work.key}: ${retroChecks.join('; ')}`);
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
         if (work.documentation) work.documentation = { ...work.documentation, submission: recordDocumentationSubmission(work.documentation, work.submission, observation?.files ?? null, data.documentation, now) };
@@ -1871,8 +1915,9 @@ export class Engine {
       work.baseRefresh = { ...refresh, carry: null };
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : 'branch.unrepairable', now,
-        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, trigger: refresh.trigger ?? null, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason, ...(refresh.conflict ? { conflict: refresh.conflict } : {}) });
+      await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : restore!.outcome === 'unpublished' ? 'branch.restore-unpublished' : 'branch.unrepairable', now,
+        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, trigger: refresh.trigger ?? null, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason,
+          ...(refresh.conflict ? { conflict: refresh.conflict } : {}), ...(restore!.failure ? { failure: restore!.failure } : {}), ...(restore!.failureKind ? { failureKind: restore!.failureKind } : {}), ...(restore!.attempts ? { attempts: restore!.attempts } : {}), ...(restore!.escalated ? { escalated: restore!.escalated } : {}) });
       await wakeJob(db, work.id);
       return work;
     });

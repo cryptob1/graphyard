@@ -83,6 +83,8 @@ node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a 
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
+`--concurrency` counts settled sessions: any registry read ends those whose lease or request lapsed (`sessions-settled`, with reasons, in `master registry history`).
+
 ### Size review and proof capacity
 
 Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions without a restart:

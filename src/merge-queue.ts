@@ -1,4 +1,5 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
+import { CHECK_NAME } from './model/work.js';
 import { carriedApproval, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
@@ -627,9 +628,36 @@ export interface BranchRestore {
   requested: { by: string; at: string; reason: string } | null;
   reason: string;
   performedAt: string | null;
-  /** `restored`: the branch holds `own` merged onto the base; `conflict`: it holds `own`, and the merge is the worker's; `unrepairable`: no own head could be found under the foreign commits. */
-  outcome: 'restored' | 'conflict' | 'unrepairable' | null;
+  /**
+   * `restored`: GitHub shows the branch at `own` merged onto the base tip read at the restore;
+   * `conflict`: it holds `own`, and the merge is the worker's; `unrepairable`: no own head could be
+   * found under the foreign commits; `unpublished`: GitHub does not show the branch at the commit
+   * the restore produced, and `failure` says what it shows or what refused the write (GY-854).
+   */
+  outcome: 'restored' | 'conflict' | 'unrepairable' | 'unpublished' | null;
+  /**
+   * Why the restore is not recorded done, on a `conflict` or `unpublished` one (GY-854): the
+   * conflict itself, or what GitHub showed (or refused) instead of the restored commit. Absent on
+   * records that predate the field and on every other outcome.
+   */
+  failure?: string | null;
+  /**
+   * The stable category of `failure` (GY-854): what a repeat is judged by, never the diagnostic
+   * string, whose commits move with the base tip and the produced head between attempts. Absent
+   * on records that predate the field and on every other outcome.
+   */
+  failureKind?: RestoreFailureKind | null;
+  /** How many times the restore has run for this contaminated head; absent on records that predate the count. */
+  attempts?: number;
+  /**
+   * Set when a restore failed twice without the item's candidate changing (GY-854), whatever
+   * the kinds of the two failures: the reason it stops repeating, which `master status` names.
+   * Null while the first failure stands or a retry published its result.
+   */
+  escalated?: string | null;
 }
+/** What kind of refusal or shortfall a restore's `failure` records, stable across attempts. */
+export type RestoreFailureKind = 'branch reset refused' | 'merge refused' | 'read-back failed' | 'read-back mismatch' | 'conflict';
 
 /**
  * The base a candidate stays bound to while Graphyard has not yet brought it onto a moved branch
@@ -679,9 +707,11 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   // A head found carrying another item's unlanded commits is not brought onto a moved base: a
   // repair requested for it runs first and replaces it, and a head found unrepairable would only
   // carry the foreign commits along, with the record that names the remedy (rework) replaced by
-  // a refresh that says nothing of them (GY-127).
+  // a refresh that says nothing of them (GY-127). A restore that could not publish its result is
+  // likewise held: its retry rebuilds the reviewed head onto the tip read afresh, and a refresh
+  // of the contaminated head would only build a new tip on the foreign commits (GY-854).
   const restore = currentRestore(work)?.restore;
-  if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable')) return null;
+  if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable' || restore.outcome === 'unpublished')) return null;
   return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
 }
 
@@ -929,6 +959,34 @@ export function latestCheck(checks: Observation['checks']): Observation['checks'
   }, undefined);
 }
 
+/** The conclusions of a run that failed, as the failed-CI rework rule reads them. */
+export const failedCheckResults: readonly string[] = ['failure', 'timed_out', 'action_required', 'cancelled', 'startup_failure'];
+/** One check a candidate must pass: a policy check, or one only the base branch's protection or rulesets require. */
+export interface RequiredCheck { name: string; policy: boolean; appId: number | null }
+/**
+ * GY-430. The checks a candidate must pass: the policy's, then every check the base branch's
+ * protection or active rulesets require that the policy does not name (the observation records
+ * them, never `Graphyard / merge`). GitHub refuses the merge while any of them has not passed, so a
+ * failing protection-only check — PR #221's `secrets` scan — is judged exactly as a policy check is.
+ */
+export function requiredChecksOf(work: Pick<Work, 'policy' | 'observation'>): RequiredCheck[] {
+  const policy = work.policy.checks.map(name => ({ name, policy: true, appId: null }));
+  const extra = (work.observation?.requiredChecks ?? []).filter(check => check.name !== CHECK_NAME && !work.policy.checks.includes(check.name))
+    .map(check => ({ name: check.name, policy: false, appId: check.appId }));
+  return [...policy, ...extra];
+}
+/**
+ * The newest run that counts for a required check: a policy check's from the configured CI apps,
+ * as ever; a protection-only check's from the app protection binds it to, or from any app.
+ */
+export function requiredCheckRun(check: RequiredCheck, checks: Observation['checks'], ciAppIds: readonly number[] | null): Observation['checks'][number] | undefined {
+  return latestCheck(checks.filter(run => run.name === check.name && (check.policy ? !ciAppIds || ciAppIds.includes(run.appId) : check.appId === null || run.appId === check.appId)));
+}
+/** Whether a run satisfies its required check: success, or for a protection-only check any conclusion GitHub accepts (neutral, skipped). */
+export function requiredCheckPassed(check: RequiredCheck, run: Observation['checks'][number] | undefined): boolean {
+  return !!run && (run.result === 'success' || !check.policy && ['neutral', 'skipped'].includes(run.result));
+}
+
 declare module './model/work.js' {
   interface Gate {
     /** The server's trusted CI Apps, recorded on the test gate for downstream decisions. */
@@ -1031,8 +1089,12 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   if (landing) return landing;
   // Observations retain every run, including superseded ones; only the newest trusted run
   // for a required check decides, exactly as the test gate does, so a successful retry
-  // never leaves an entry ejected by the failure it replaced.
-  const check = failedRequiredCheck(work, observation, ciAppIds);
+  // never leaves an entry ejected by the failure it replaced — nor one its rerun (GY-516)
+  // holds. GY-430: this includes both policy checks and branch-protection required checks.
+  const check = requiredChecksOf(work).find(required => {
+    const run = requiredCheckRun(required, observation.checks, ciAppIds);
+    return !!run && (required.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result)) && !holdingCheckRerun(work, candidate.sha, required.name, run);
+  })?.name;
   // Under a parallel-tip window (GY-498) the prefix tips isolate the culprit in one round instead
   // of a bisection. Outside the window nothing is required of the entry yet, and a failure on a
   // tip it still holds is inherited from the entries ahead (the waiting batch's rule); a head that
@@ -1041,6 +1103,9 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // the failure is what this entry's change added. An earlier failing tip, or a published tip
   // whose prediction moved on (a predecessor landed or left; the tip is rebuilt there before it is
   // judged again), means the failure is inherited: the entry stays queued.
+  // A batch member's tip holds every member ahead of it, so a failure there is not yet its own
+  // (GY-330): it is ejected only when the batch plan isolates it — its tip fails on a prefix known
+  // to pass, or on the base — and otherwise stays queued while the bisection runs.
   const speculation = work.queue.speculation;
   const publishedTip = speculation?.tip === candidate!.sha && speculation.base === candidate!.baseSha;
   if (check && window) {
@@ -1153,14 +1218,20 @@ export function branchContamination(work: Work, all: Work[]): Contamination | nu
 }
 /**
  * The restore an ejection owes: the ejected tip is still the branch head and carries entries that
- * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed.
+ * have not landed. Nothing is owed once a restore for that head is recorded, pending or performed
+ * — except a restore that could not publish its result (GY-854): that one is retried once, with
+ * the record of the first attempt carried so a second failure escalates, whatever its kind,
+ * instead of a third attempt running. An escalated restore, or one already attempted twice, is
+ * never retried by the loop.
  */
-export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string } | null {
+export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: string; foreign: string[]; own: string | null; reason: string; previous: BranchRestore | null } | null {
   const ejection = work.queueEjection;
-  if (!ejection || ejection.sha !== work.candidate?.sha || currentRestore(work)) return null;
+  if (!ejection || ejection.sha !== work.candidate?.sha) return null;
+  const current = currentRestore(work);
+  if (current && (current.restore!.outcome !== 'unpublished' || current.restore!.escalated || (current.restore!.attempts ?? 1) >= 2)) return null;
   const contamination = branchContamination(work, all);
   if (!contamination) return null;
-  return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}` };
+  return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}`, previous: current?.restore ?? null };
 }
 
 /**
@@ -1200,6 +1271,8 @@ export function restoringAfterEjection(work: Work, all: Work[]): string | null {
   if (!stale) return null;
   const refresh = currentRestore(work), restore = refresh?.restore;
   if (restore?.outcome === 'unrepairable') return null;
+  if (restore?.outcome === 'unpublished' && restore.escalated)
+    return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing; Graphyard's restore of the branch failed twice and stopped repeating: ${restore.failure ?? restore.escalated}. The escalation stands until what GitHub refuses is fixed or the master decides`;
   const restored = restore?.performedAt && refresh!.head && refresh!.head !== stale.tip ? refresh!.head : null;
   const own = stale.own ? `its own reviewed head ${stale.own.slice(0, 12)}` : 'its own reviewed head';
   return `${restoringAfterEjectionPrefix}candidate ${stale.tip.slice(0, 12)} is a speculative tip built behind ${stale.departed.join(', ')}, which left the merge queue without landing, so its tree holds their unlanded work; ${restored
@@ -1313,7 +1386,7 @@ export function enqueueRequestCurrent(work: Work, request: Pick<MergeEnqueueRequ
   return !!request && !!work.candidate && request.sha === work.candidate.sha && request.baseSha === work.candidate.baseSha && request.policyRevision === work.policyRevision;
 }
 export type MergeQueueAction =
-  | { kind: 'enqueue'; reason: string }
+  | { kind: 'enqueue'; reason: string; mergeNow?: boolean }
   | { kind: 'dequeue'; reason: string }
   | { kind: 'hold'; reason: string };
 /**
@@ -1344,7 +1417,10 @@ export function mergeStalls(work: Work[], now: number): { key: string; pr: numbe
   return work.flatMap(item => {
     const state = item.observation?.githubQueue, candidate = item.candidate;
     if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || state.refused || !state.requestedAt
-      || state.head !== candidate.sha || !mergeableNow(state)) return [];
+      || state.head !== candidate.sha) return [];
+    const blocked = blockedMergeStall(item, state, now);
+    if (blocked) return [blocked];
+    if (!mergeableNow(state)) return [];
     const ageMs = now - Date.parse(state.requestedAt);
     if (ageMs <= mergeStallMs) return [];
     const status = state.mergeStateStatus!;
@@ -1353,7 +1429,42 @@ export function mergeStalls(work: Work[], now: number): { key: string; pr: numbe
       next: `graphyard master create files the control-plane defect for merge state ${status} on ${item.key}; gh pr view ${candidate.pr} shows what GitHub is waiting on` }];
   });
 }
-export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null): MergeQueueAction {
+/** How long a merge may stay pending under auto-merge on a head GitHub reports BLOCKED before master status names why (GY-430). */
+export const blockedMergeStallMs = 10 * 60_000;
+/**
+ * GY-430. A merge pending under auto-merge for more than `blockedMergeStallMs` on a head GitHub
+ * reports BLOCKED, named with what blocks it: a required check that failed or has not passed, or a
+ * missing approving review. On 2026-09-25 PR #221 sat so for over ten minutes behind a failed
+ * `secrets` scan while master status said only "merge waiting".
+ */
+function blockedMergeStall(item: Work, state: GitHubMergeQueueState, now: number) {
+  const candidate = item.candidate!, observation = item.observation!;
+  if (state.mode !== 'auto-merge' || state.mergeStateStatus !== 'BLOCKED') return null;
+  const ageMs = now - Date.parse(state.requestedAt!);
+  if (!(ageMs > blockedMergeStallMs)) return null;
+  const runs = observation.candidate.sha === candidate.sha ? observation.checks : [];
+  const judged = requiredChecksOf(item).map(check => ({ check, run: requiredCheckRun(check, runs, null) }));
+  const failed = judged.filter(entry => !!entry.run && failedCheckResults.includes(entry.run.result)).map(entry => entry.check.name);
+  const missing = judged.filter(entry => !requiredCheckPassed(entry.check, entry.run) && !failed.includes(entry.check.name)).map(entry => entry.check.name);
+  const approved = observation.reviews.some(review => review.sha === candidate.sha && review.state === 'APPROVED') || observation.agentReview?.sha === candidate.sha && observation.agentReview.approved;
+  const plural = (names: string[]) => names.length === 1 ? '' : 's';
+  const reasons = [
+    ...(failed.length ? [`required check${plural(failed)} ${failed.join(', ')} failed`] : []),
+    ...(missing.length ? [`required check${plural(missing)} ${missing.join(', ')} ha${missing.length === 1 ? 's' : 've'} not passed`] : []),
+    ...(!failed.length && !missing.length && !approved ? ['a required approving review is missing'] : []),
+  ];
+  const why = reasons.join('; ') || 'GitHub names no failing required check or missing review Graphyard observed';
+  return { key: item.key, pr: candidate.pr, head: state.head, mergeStateStatus: 'BLOCKED', requestedAt: state.requestedAt!, ageMs,
+    text: `merge-stalled: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been set to auto-merge for ${Math.floor(ageMs / 60_000)} minutes (since ${state.requestedAt}) while GitHub reports mergeStateStatus BLOCKED: ${why}`,
+    next: failed.length ? `the failed-CI rework rule returns ${item.key} to a worker; gh pr checks ${candidate.pr} shows the failing run` : `gh pr view ${candidate.pr} shows what GitHub is waiting on` };
+}
+/**
+ * How long auto-merge may wait on an authorized head GitHub reports BLOCKED before the control plane
+ * asks GitHub to merge that head at once: GitHub never says why auto-merge does not fire, but a
+ * head-bound merge either lands or is refused with the rule that blocks it, recorded as the reason.
+ */
+export const blockedAutoMergeProbeMs = 10 * 60_000;
+export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null, now = Date.now()): MergeQueueAction {
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
   const withdrawn = !mergeAuthorized(work) ? `${work.key} is no longer authorized to merge: ${[...work.gates.flatMap(gate => gate.reasons), ...work.violations].join('; ') || 'no all-gates authorization binds the current candidate'}`
@@ -1361,6 +1472,9 @@ export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, reque
       : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
         : null;
   if (withdrawn) return held ? { kind: 'dequeue', reason: withdrawn } : { kind: 'hold', reason: withdrawn };
+  const waitedMs = request ? now - Date.parse(request.at) : 0;
+  if (state.mode === 'auto-merge' && state.mergeStateStatus === 'BLOCKED' && waitedMs > blockedAutoMergeProbeMs)
+    return { kind: 'enqueue', mergeNow: true, reason: `${work.key}: auto-merge has waited ${Math.floor(waitedMs / 60_000)} minutes at ${sha!.slice(0, 12)} while GitHub reports it BLOCKED with every gate passing; asking GitHub to merge that head now, so it merges or names the rule that blocks it` };
   if (held) return { kind: 'hold', reason: `${work.key} is ${state.mode === 'queued' ? `in GitHub's merge queue${state.entryState ? ` (${state.entryState.toLowerCase()}${state.position !== null ? `, position ${state.position}` : ''})` : ''}` : 'set to auto-merge'} at ${sha!.slice(0, 12)}; GitHub performs the merge` };
   return { kind: 'enqueue', reason: `${work.key}: every gate passes for ${sha!.slice(0, 12)} and the merge was requested; ${state.queue ? 'adding it to GitHub\'s merge queue' : mergeableNow(state) ? 'merging it now, bound to that head (GitHub reports it mergeable and the base branch has no merge queue)' : 'enabling auto-merge (the base branch has no merge queue)'}` };
 }
@@ -1764,13 +1878,33 @@ export interface CheckRerun {
   runId?: number;
   /** The check run of the rerun, once observed. */
   rerunId?: number;
+  /** The workflow run's attempt the rerun was requested from; GitHub's rerun is a later attempt (GY-1096). */
+  attempt?: number;
+  /**
+   * GY-1096: what GitHub last said of the rerun's workflow run once no new check run had appeared
+   * within `checkRerunVisibilityMs`: still `queued`, `waiting`, `in_progress` and the like is a
+   * runner-queue wait, which keeps holding the failure until the rerun concludes.
+   */
+  waiting?: { status: string; at: string };
+  /** When the workflow run was last read for this rerun (GY-1096). */
+  probedAt?: string;
+  /** When GitHub was asked a second time because no rerun was found at all (GY-1096); asked once only. */
+  rerequestedAt?: string;
   detail?: string;
   resolvedAt?: string;
 }
 /** The installation-ledger event recording the rerun count the master published (POST /api/merge-queue). */
 export const rerunFailedChecksEvent = 'merge-queue.rerun-failed-checks';
-/** An owed or accepted rerun with no new check run after this long no longer holds the failure. */
+/**
+ * An owed rerun with no new check run after this long no longer holds the failure. An accepted one
+ * is then asked of GitHub instead (GY-1096): a workflow run still queued or in progress is a wait,
+ * and a rerun not found at all is requested once more before it counts.
+ */
 export const checkRerunVisibilityMs = 15 * 60_000;
+/** How often an accepted rerun past `checkRerunVisibilityMs` with no check run has its workflow run read again. */
+export const checkRerunProbeMs = 5 * 60_000;
+/** An accepted rerun whose workflow run GitHub fails to return for this long no longer holds the failure. */
+export const checkRerunUnreadableMs = 2 * checkRerunVisibilityMs;
 /** Rerun records kept on an item; older ones remain on the ledger. */
 export const checkRerunLimit = 20;
 const holdingRerun = new Set<CheckRerun['state']>(['owed', 'requested']);
@@ -1802,6 +1936,10 @@ function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: rea
 }
 /** A transition of a rerun record, as the engine writes it to the item's ledger. */
 export interface CheckRerunTransition { kind: 'check.rerun.owed' | 'check.rerun.passed' | 'check.rerun.failed' | 'check.rerun.expired' | 'check.rerun.requested'; rerun: CheckRerun }
+/** The newest trusted run of `check` on the observed candidate. */
+function latestTrusted(observation: Observation, check: string, ciAppIds: readonly number[]) {
+  return latestCheck((observation.checks ?? []).filter(entry => entry.name === check && ciAppIds.includes(entry.appId)));
+}
 /**
  * Brings the rerun records up to the observation just taken, before the gates read it: a rerun
  * whose own run concluded is resolved with that conclusion, one that never appeared expires, and
@@ -1814,7 +1952,7 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
   const transitions: CheckRerunTransition[] = [];
   let reruns = checkReruns(work);
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return { reruns, transitions };
-  const latestOf = (name: string) => latestCheck((observation.checks ?? []).filter(entry => entry.name === name && ciAppIds.includes(entry.appId)));
+  const latestOf = (name: string) => latestTrusted(observation, name, ciAppIds);
   reruns = reruns.map(entry => {
     if (entry.sha !== candidate.sha || !holdingRerun.has(entry.state)) return entry;
     const run = latestOf(entry.check);
@@ -1825,6 +1963,9 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
       if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
       return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
     }
+    // An accepted rerun naming its workflow run is asked of GitHub by the integration job instead
+    // (GY-1096): queued behind busy runners it is a wait, not a failure, however long it takes.
+    if (entry.state === 'requested' && entry.runId !== undefined) return entry;
     if (now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
       const expired = { ...entry, state: 'expired' as const, detail: `${entry.state === 'owed' ? 'The rerun remained owed' : 'GitHub accepted the rerun'} but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
       transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
@@ -1847,8 +1988,44 @@ export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckR
   const observation = work.observation, candidate = work.candidate;
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
   return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'owed'
-    && latestCheck((observation.checks ?? []).filter(run => run.name === entry.check && ciAppIds.includes(run.appId)))?.id === entry.failedRunId);
+    && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId);
 }
+/**
+ * GY-1096: the accepted reruns on the current candidate whose new check run has not appeared within
+ * `checkRerunVisibilityMs` of the request, and whose workflow run is due to be read again: the
+ * integration job asks GitHub whether the run is queued, running, concluded or missing.
+ */
+export function dueCheckRerunProbes(work: Work, ciAppIds: readonly number[], now: Date): CheckRerun[] {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
+  return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'requested' && entry.runId !== undefined
+    && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId
+    && now.getTime() - Date.parse(entry.rerequestedAt ?? entry.at) >= checkRerunVisibilityMs
+    && (!entry.probedAt || now.getTime() - Date.parse(entry.probedAt) >= checkRerunProbeMs));
+}
+/** The workflow run GitHub reports for a rerun (GY-1096), or null when there is none. */
+export interface RerunWorkflowRun { status: string; conclusion: string | null; attempt: number | null }
+/** What an accepted rerun's workflow run says of it (GY-1096). */
+export type CheckRerunProbe =
+  | { kind: 'waiting'; status: string }
+  | { kind: 'failed'; conclusion: string }
+  | { kind: 'missing' };
+/**
+ * Classifies the workflow run read for an accepted rerun with no new check run: a run not yet
+ * completed is a runner-queue wait; a later attempt that concluded failing is the rerun failing;
+ * one that concluded otherwise holds until its check run is observed; no run, or no attempt after
+ * the one the rerun was requested from, is a rerun GitHub accepted but never created.
+ */
+export function classifyRerunRun(entry: Pick<CheckRerun, 'attempt'>, run: RerunWorkflowRun | null): CheckRerunProbe {
+  if (!run) return { kind: 'missing' };
+  if (run.status !== 'completed') return { kind: 'waiting', status: run.status };
+  const later = entry.attempt !== undefined && run.attempt !== null && run.attempt > entry.attempt;
+  if (!later) return { kind: 'missing' };
+  if (run.conclusion && failedConclusions.has(run.conclusion)) return { kind: 'failed', conclusion: run.conclusion };
+  return { kind: 'waiting', status: 'completed' };
+}
+const runnerWait = (entry: CheckRerun) => entry.waiting && entry.waiting.status !== 'completed'
+  ? `, waiting for a runner (its workflow run is ${entry.waiting.status.replace(/_/g, ' ')} in the runner queue)` : '';
 /** What the last rerun of `check` on `sha` came to, as a clause for the failure it did not clear. */
 function rerunOutcome(work: Work, sha: string, check: string): string {
   const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
@@ -1862,7 +2039,7 @@ export function checkRerunStatus(work: Work, check: string): string {
   const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
   if (!last) return '';
   const state = last.state === 'owed' ? 'one rerun of its failed jobs is owed'
-    : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}`
+    : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}${runnerWait(last)}`
     : last.state === 'failed' ? 'failed again after rerunning its failed jobs'
     : last.state === 'passed' ? 'passed'
     : `${last.state}: ${last.detail ?? 'no reason given'}`;
@@ -1872,5 +2049,5 @@ export function checkRerunStatus(work: Work, check: string): string {
 export function pendingCheckReruns(work: Work): string[] {
   const sha = work.candidate?.sha;
   return checkReruns(work).filter(entry => entry.sha === sha && holdingRerun.has(entry.state))
-    .map(entry => `${entry.sha.slice(0, 12)}: required CI check ${entry.check} failed and ${entry.state === 'owed' ? 'one rerun of its failed jobs is owed' : `its failed jobs are rerunning${entry.runId ? ` (workflow run ${entry.runId})` : ''}`}; the entry keeps its position and bindings until the rerun concludes`);
+    .map(entry => `${entry.sha.slice(0, 12)}: required CI check ${entry.check} failed and ${entry.state === 'owed' ? 'one rerun of its failed jobs is owed' : `its failed jobs are rerunning${entry.runId ? ` (workflow run ${entry.runId})` : ''}${runnerWait(entry)}`}; the entry keeps its position and bindings until the rerun concludes`);
 }

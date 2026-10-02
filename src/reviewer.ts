@@ -559,6 +559,27 @@ async function writeReviewerSession(directory: string, token: string) {
   return file;
 }
 
+/**
+ * Thrown instead of launching when a reviewer session already answers the item's current
+ * candidate (GY-124: one request, one session) — pending or being launched in the review ledger,
+ * or visible in Herdr for the request. The loop's tick and the control-plane executors both launch
+ * reviewers; whichever reaches the request second finds the other's session. A session on the
+ * requested head is that request being answered, and the executor settles its `request-review` row
+ * on it (`answeredByPendingReview`), as a proof dispatch settles on a pending producer (GY-415),
+ * rather than failing the row for as long as the review runs (GY-1090: those failures repeated one
+ * unchanged reason until the row read as stalled while the review was under way).
+ *
+ * Recognised by its brand rather than `instanceof`: the executor process loads this module more
+ * than once, each load its own class (see `ProducerSessionPending`).
+ */
+export class ReviewSessionPending extends Error {
+  readonly reviewSessionPending = true;
+  constructor(message: string, readonly work: string, readonly pending: { sha: string; agentName: string; requestId?: string }) { super(message); }
+}
+/** The reviewer session a launch was refused for, when it already answers the requested head. */
+export const answeredByPendingReview = (error: unknown, request: { sha: string }) =>
+  (error as { reviewSessionPending?: boolean } | null)?.reviewSessionPending === true && (error as ReviewSessionPending).pending.sha === request.sha ? (error as ReviewSessionPending).pending : null;
+
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun;
   mint?: (credential: ReviewerCredential, repository: string) => Promise<{ token: string; expiresAt: string }>;
@@ -596,11 +617,13 @@ export async function launchReview(root: string, work: Work, profileName: string
     // Only a record for the exact current candidate holds the key: one session per candidate.
     const pendings = ledger.reviews.filter(record => record.state === 'pending' && record.key === work.key);
     const current = pendings.find(pending => !staleReviewReason(pending, [work]));
-    if (current) return { refusal: new Error(`A reviewer session for ${work.key} is already ${current.launching ? 'being launched' : 'pending'} on ${current.sha.slice(0, 7)} (${current.agentName}${current.requestId ? `, request ${current.requestId}` : ''}); one review request is answered by one session, so no second one is launched`) };
+    if (current) return { refusal: new ReviewSessionPending(`A reviewer session for ${work.key} is already ${current.launching ? 'being launched' : 'pending'} on ${current.sha.slice(0, 7)} (${current.agentName}${current.requestId ? `, request ${current.requestId}` : ''}); one review request is answered by one session, so no second one is launched`,
+      work.key, { sha: current.sha, agentName: current.agentName, ...(current.requestId ? { requestId: current.requestId } : {}) }) };
     for (const pending of pendings) await closeReviewSession(root, pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: staleReviewReason(pending, [work])!, force: true });
     // A Herdr session already serving this request is the same launch twice, whatever the ledger says.
     const serving = requestSessionInHerdr(ledger.reviews, agents, config.reviewers, { key: work.key, sha: binding.sha, requestId: dependencies.requestId });
-    if (serving) return { refusal: new Error(`Reviewer session ${serving} is already visible in Herdr for ${work.key}${dependencies.requestId ? ` review request ${dependencies.requestId}` : ` on ${binding.sha.slice(0, 7)}`}; one review request is answered by one session`) };
+    if (serving) return { refusal: new ReviewSessionPending(`Reviewer session ${serving} is already visible in Herdr for ${work.key}${dependencies.requestId ? ` review request ${dependencies.requestId}` : ` on ${binding.sha.slice(0, 7)}`}; one review request is answered by one session`,
+      work.key, { sha: binding.sha, agentName: serving, ...(dependencies.requestId ? { requestId: dependencies.requestId } : {}) }) };
     // The profile's room (GY-107): one session per name, and no more sessions than it declares.
     // A name this session would take that Herdr already shows, or a launch in progress reserved,
     // is the same launch twice.
@@ -1035,14 +1058,27 @@ async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer
   if (!response.ok) throw new Error(`GitHub refused to dismiss review ${reviewId} (${response.status})`);
 }
 
-/** The loop's create of a follow-up item, as the master's operator-agent identity, idempotent on `key`. */
+/** The control-plane request that records an approval's follow-ups on the approved item (GY-896): its route under /api/ and body. */
+export function followUpRecordRequest(item: FollowUpItem) {
+  const parent = item.origin?.reviewFollowUps?.parent ?? item.dependencies[0];
+  if (!parent) throw new Error('the follow-up filing names no approved item to record its findings on');
+  return { parent, path: `work/${encodeURIComponent(parent)}/followups`, body: { findings: item.origin?.reviewFollowUps?.findings ?? [], reason: item.reason } };
+}
+/**
+ * The loop's filing of an approval's follow-ups, as the master's operator-agent identity, idempotent
+ * on `key` (GY-896): the findings are recorded against the approved item's own record
+ * (`POST /api/work/PARENT/followups`), where they wait as one batch for an operator to promote any
+ * of them; no work item is created. The key it answers is the approved item's, which each thread's
+ * reply then names.
+ */
 function operatorAgentCreate(root: string, config: MasterConfig): CreateFollowUpItem {
   return async (item, key) => {
     const token = await agentToken(root, config, 'operatorAgent');
-    const response = await fetch(`${config.url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(item), signal: AbortSignal.timeout(30_000) });
+    const { parent, path, body } = followUpRecordRequest(item);
+    const response = await fetch(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const result: any = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(`Graphyard refused the follow-up item (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
-    if (typeof result?.key !== 'string') throw new Error('Graphyard did not return the follow-up item key');
+    if (!response.ok) throw new Error(`Graphyard refused the follow-ups for ${parent} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    if (typeof result?.key !== 'string') throw new Error(`Graphyard did not return the key of ${parent}, which records the follow-ups`);
     return { key: result.key };
   };
 }

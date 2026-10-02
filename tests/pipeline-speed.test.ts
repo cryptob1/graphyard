@@ -85,7 +85,8 @@ async function submitted(title: string, plannedFiles?: string[], extra?: Record<
 const scoped = (path: string, overrides: Partial<ScopeFile> = {}): ScopeFile => ({ path, status: 'modified', sha: sha40('5'), additions: 2, deletions: 2, binary: false, baseSha: sha40('4'), ...overrides });
 function observed(item: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
   return { candidate: { ...candidate, pr: item.submission!.pr, branch: item.workspaces[0].branch, author: 'implementer' }, checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-    files: ['src/pipeline-speed.ts'], scopeFiles: [scoped('src/pipeline-speed.ts', { baseSha: undefined })], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
+    // GY-883: a public API path keeps the item in the high lane, whose full path still demands the producer proofs and dispatch cadence this file measures.
+    files: ['src/server/routes/pipeline-speed.ts'], scopeFiles: [scoped('src/server/routes/pipeline-speed.ts', { baseSha: undefined })], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -238,7 +239,7 @@ function stubEffects(items: () => Work[], log: { kind: string; key: string; sha:
 test('integration:speed-auto-dispatch — one passing observation records one producer request per proof group on the exact head in the same transaction, a single dispatcher tick launches every producer together within the 30-second bound, the review request follows the head\'s mechanical proofs (GY-115) and the next tick launches the reviewer, and no master command is involved', async () => {
   const directory = await temporaryDirectory('speed-dispatch');
   try {
-    let item = await submitted('Auto-dispatched head', ['src/pipeline-speed.ts'], { producerProofs: ['manual:speed-target-met'] });
+    let item = await submitted('Auto-dispatched head', ['src/server/routes/pipeline-speed.ts'], { producerProofs: ['manual:speed-target-met'] });
     assert.equal(item.autoDispatch?.review, null); assert.equal(item.autoDispatch?.producers.length, 0);
     const submittedAt = Date.now();
     item = await engine.observe(item.id, item.revision, observed(item, { sha: H, baseSha: B }));
@@ -356,7 +357,7 @@ test('integration:speed-ci-proofs — every unit:* and integration:* proof an it
   // Until a contract reaches main it is not run as trusted CI; the plan names why, so the producer session covers it.
   assert.match(planCiProofs(['integration:speed-metrics']).deferred[0].reason, /no registered contract; a producer session must run it until one reaches main/);
   // The manual proofs the item marks producer-runnable are requested the moment the build gate passes.
-  let item = await submitted('Manual proofs start at submit', ['src/pipeline-speed.ts'], { producerProofs: ['manual:speed-ci-proofs-live', 'manual:speed-target-met'] });
+  let item = await submitted('Manual proofs start at submit', ['src/server/routes/pipeline-speed.ts'], { producerProofs: ['manual:speed-ci-proofs-live', 'manual:speed-target-met'] });
   item = await engine.observe(item.id, item.revision, observed(item, { sha: H, baseSha: B }));
   const manual = item.autoDispatch!.producers.find(request => request.group === 'manual')!;
   assert.deepEqual(manual.proofs, ['manual:speed-ci-proofs-live', 'manual:speed-target-met']); assert.equal(manual.sha, H);

@@ -1,7 +1,10 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
 import { GitHub, landingCheck, scopeLookupBudget, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
-import type { Observation, Work } from '../../src/model.js';
+import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
@@ -13,6 +16,8 @@ import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../.
 // anything for Graphyard: the loop and the engine act, and this world only answers them.
 
 export const minute = 60_000, hour = 60 * minute;
+/** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
+export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
 const uuid = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 
@@ -106,6 +111,11 @@ export class SimulatedGitHub {
   exhaustedProfiles = new Set<string>();
   /** Items whose GitHub merge state settles as UNSTABLE (a failing optional check), and those GitHub is slow to recompute after their required check passes. */
   unstable = new Set<string>(); slowRecompute = new Set<string>();
+  /**
+   * Items GitHub keeps BLOCKED for `blockedMergeMs` after their required check passed (GY-430): a
+   * branch-protection condition Graphyard does not gate on, such as a review GitHub still requires.
+   */
+  blockedMerge = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
   /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
@@ -137,6 +147,17 @@ export class SimulatedGitHub {
    * listed, so the fault holds only the candidate it was staged for.
    */
   stuckHeads = new Set<string>();
+  /**
+   * GY-854. Items whose branch restores GitHub refuses once listed here: the restore's branch reset
+   * and its merge are each answered 403, as GitHub answers a protected branch update, so a restore
+   * the loop owes the item can never publish. Tip publications are left alone: the fault is the
+   * restore's, and a tip the queue owes before the ejection is not what it exercises.
+   */
+  refusedBranches = new Set<string>();
+  /** GY-854. Items GitHub takes this long to compute mergeable once their check passed, so they stay queued, unlanded. */
+  slowMergeable = new Map<string, number>();
+  /** Every write a branch restore made or was refused, per item, in order (GY-854). */
+  restoreWrites: { key: string; write: 'reset' | 'merge'; refused: boolean; at: number }[] = [];
   /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
   botReviewers = new Set<string>();
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
@@ -370,7 +391,7 @@ export class SimulatedGitHub {
   mergeState(pr: PullRequest, now: number) {
     const check = pr.graphyardCheck.get(pr.head);
     if (check?.conclusion !== 'success') return 'BLOCKED';
-    return now - check.at >= (this.slowRecompute.has(pr.key) ? 6 * minute : 0) ? pr.settledState : 'BLOCKED';
+    return now - check.at >= (this.blockedMerge.has(pr.key) ? blockedMergeMs : this.slowMergeable.get(pr.key) ?? (this.slowRecompute.has(pr.key) ? 6 * minute : 0)) ? pr.settledState : 'BLOCKED';
   }
   /** A merge somebody made on GitHub by hand, outside Graphyard's queue: nothing asked for it. */
   mergeOutside(pr: PullRequest, now: number) { this.merge(pr, now, 'outside'); return pr.merged!; }
@@ -536,20 +557,37 @@ export class SimulatedGitHub {
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },
       // Restores a branch that carries another item's unlanded commits (GY-127): back to the item's
-      // own reviewed head, then the base branch merged onto it, exactly as production moves it.
-      async restoreBranch(work: Work, restore: { contaminated: string; foreign: string[]; own: string | null; cause: string; requested: unknown; reason: string }): Promise<BaseRefresh> {
-        const pr = world.pr(work), at = new Date(clock.now()).toISOString();
-        const base = (fields: object, outcome: string, own: string | null, head = own ?? pr.head) => ({
-          from: { sha: own ?? pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head, conflict: null, merge: null, carry: null,
-          trigger: restore.cause === 'repair' ? 'repair' : 'ejection restore', ...fields, restore: { ...restore, own, performedAt: at, outcome } }) as BaseRefresh;
-        const own = restore.own;
-        if (!own || own === pr.head) return base({}, 'unrepairable', own);
-        pr.head = own; pr.pushed.set(own, clock.now());
-        const onto = world.commits.get(world.tip)!;
-        const merged = world.record({ sha: sha('restore', own, world.tip), tree: sha('tree', 'restore', own, world.tip), parents: [own, world.tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message: `Graphyard branch restore for ${work.key} onto ${world.options.baseBranch}` },
-          world.mergedContents(own, world.tip, work.plannedFiles ?? []));
-        pr.head = merged.sha; pr.base = world.tip; pr.pushed.set(merged.sha, clock.now());
-        return base({ head: merged.sha }, 'restored', own, merged.sha);
+      // own reviewed head, then the base branch merged onto it. The production restore runs over this
+      // repository, so what it records — published, refused, retried or escalated (GY-854) — is
+      // decided where production decides it; the world only answers its reads and writes.
+      async restoreBranch(work: Work, restore: Parameters<GitHub['restoreBranch']>[1]): Promise<BaseRefresh> {
+        const pr = world.pr(work), base = world.options.baseBranch;
+        const write = (kind: 'reset' | 'merge') => {
+          const refused = world.refusedBranches.has(work.key);
+          world.restoreWrites.push({ key: work.key, write: kind, refused, at: clock.now() });
+          if (refused) throw new Refusal(`GitHub ${kind === 'reset' ? 'PATCH /git/refs/heads/' + pr.branch : 'POST /merges'} failed (403): Protected branch update failed for refs/heads/${pr.branch}`, 502);
+        };
+        const provider: GitHub = Object.assign(Object.create(GitHub.prototype), {
+          config: { repository: world.options.repository, base },
+          request: async (path: string) => {
+            if (path === `/pulls/${pr.number}`) return { number: pr.number, head: { sha: pr.head, ref: pr.branch }, base: { ref: base }, state: pr.open ? 'open' : 'closed', draft: false };
+            throw new Error(`The simulated restore asked GitHub for ${path}`);
+          },
+          baseBranch: async () => ({ tip: world.tip, tree: world.tree }),
+          ownReviewedHead: async () => pr.head,
+          refHead: async () => pr.head,
+          describeMerge: async () => null,
+          updateBranch: async (_branch: string, own: string) => { write('reset'); pr.head = own; pr.pushed.set(own, clock.now()); },
+          mergeBranch: async (_branch: string, tip: string, message: string) => {
+            write('merge');
+            const own = pr.head, onto = world.commits.get(tip)!;
+            const merged = world.record({ sha: sha('restore', own, tip), tree: sha('tree', 'restore', own, tip), parents: [own, tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message },
+              world.mergedContents(own, tip, work.plannedFiles ?? []));
+            pr.head = merged.sha; pr.base = tip; pr.pushed.set(merged.sha, clock.now());
+            return merged.sha;
+          },
+        });
+        return provider.restoreBranch(work, restore);
       },
       async requestAgentReview(work: Work, profile: { name: string; reviewerApp: string; runtime: string }): Promise<ReviewRequest> {
         const pr = world.pr(work), request: ReviewRequest = { commentId: ++world.serial, sha: pr.head, baseSha: pr.base, policyRevision: work.policyRevision, body: `review ${profile.name}`, createdAt: new Date(clock.now()).toISOString(),
@@ -638,4 +676,52 @@ export class SimulatedHerdr {
   /** The pane inventory (`herdr pane list`): every pane, with or without an agent in it. */
   paneList(): { pane_id: string }[] { return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => ({ pane_id })); }
   byName(name: string) { return [...this.agents.values()].find(agent => agent.name === name); }
+}
+
+// ---------------------------------------------------------------------------
+// Pi: headless runs (GY-453), detached from the loop that started them. A run's process lives here,
+// in the world, not in the loop: the loop's restart (`detachRuns`) leaves it running, and the loop
+// that follows adopts it from its directory under the real run registry on disk. The world ends a
+// run with a submission, or kills it from outside so it ends without one: lost.
+// ---------------------------------------------------------------------------
+interface SimulatedRunProcess { state: 'live' | 'submitted' | 'killed' | 'cancelled'; payload: unknown; detail: string; wake: Set<() => void> }
+export class SimulatedPi implements Runner {
+  readonly name = 'pi';
+  processes = new Map<string, SimulatedRunProcess>();
+  started: string[] = [];
+  start<T>(_prompt: string, options: RunOptions<T>): Run<T> {
+    const directory = join(options.runs!, randomUUID());
+    mkdirSync(directory, { recursive: true });
+    this.processes.set(directory, { state: 'live', payload: null, detail: '', wake: new Set() });
+    this.started.push(directory);
+    return this.adopt(directory, options);
+  }
+  adopt<T>(directory: string, options: Pick<RunOptions<T>, 'tool' | 'validate'>): Run<T> {
+    const child = this.processes.get(directory)!, events: RunEvent[] = [], listeners = new Set<(event: RunEvent) => void>();
+    let resolve!: (result: RunResult<T>) => void, detached = false;
+    const result = new Promise<RunResult<T>>(done => { resolve = done; });
+    const settle = () => {
+      if (detached || child.state === 'live') return;
+      child.wake.delete(settle);
+      if (child.state === 'submitted') { const payload = options.validate(child.payload); resolve({ ok: true, tool: options.tool, payload, payloads: [payload] }); }
+      else resolve({ ok: false, failure: { reason: child.state === 'killed' ? 'lost' : 'cancelled', detail: child.detail }, payloads: [] });
+    };
+    child.wake.add(settle); settle();
+    return { id: directory, directory, events,
+      onEvent: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+      cancel: reason => this.end(directory, 'cancelled', null, reason ?? 'cancelled'),
+      detach: () => { detached = true; child.wake.delete(settle); },
+      result: () => result };
+  }
+  private end(directory: string, state: SimulatedRunProcess['state'], payload: unknown, detail: string) {
+    const child = this.processes.get(directory);
+    if (!child || child.state !== 'live') return;
+    Object.assign(child, { state, payload, detail });
+    for (const wake of [...child.wake]) wake();
+  }
+  /** The agent submits through its Graphyard tool and exits. */
+  submit(directory: string, payload: unknown) { this.end(directory, 'submitted', payload, ''); }
+  /** Killed from outside (OOM, a host reboot): gone, recording no exit. */
+  kill(directory: string) { this.end(directory, 'killed', null, 'the run\'s process is gone and recorded no exit'); }
+  live() { return [...this.processes.values()].filter(child => child.state === 'live').length; }
 }
