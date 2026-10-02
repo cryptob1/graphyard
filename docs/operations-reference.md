@@ -19,7 +19,7 @@ On the worker, `graphyard master settle-containment GY-N "reason"` verifies noth
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643 (2026-09-26): 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes).
 
 ## Retro synthesis
 
@@ -27,7 +27,7 @@ With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's pattern scan groups refu
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile, however long its workflow run waits for a runner (`check.rerun.waiting`; master status says *waiting for a runner*); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). Its passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile, however long it waits for a runner (`check.rerun.waiting`, *waiting for a runner*); one accepted but never created is requested again (`check.rerun.rerequested`); a second failure, failing rerun or refusal ejects (`check.rerun.*`). A run GitHub cancelled is no failure: it never supersedes a concluded run; a check left only cancelled reruns (at most 3) or stays pending. A passing rerun on that tip, or any pass after a cancelled ejecting run, lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 
@@ -66,7 +66,7 @@ A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges o
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also in `master status`): `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`; the 2026-09-26 mix replays at 54%.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also in `master status`): `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`.
 
 ### Webhook liveness
 

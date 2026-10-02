@@ -1499,8 +1499,9 @@ export class GitHub {
   async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]): Promise<TipDocs | undefined> {
     const required = new Set(work.policy.checks ?? []);
     const latest = new Map<string, string>();
-    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed') latest.set(check.name, check.conclusion ?? '');
-    const failed = [...latest.values()].filter(result => failedCheckConclusions.has(result)).length;
+    // A cancelled run never supersedes one that was not cancelled, nor counts as failing (GY-1109).
+    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed' && (check.conclusion !== 'cancelled' || !latest.has(check.name) || latest.get(check.name) === 'cancelled')) latest.set(check.name, check.conclusion ?? '');
+    const failed = [...latest.values()].filter(result => result !== 'cancelled' && failedCheckConclusions.has(result)).length;
     if (!failed) return undefined;
     // The counts only sharpen an ejection: a tip they cannot be read for is bisected as before, never left unobserved.
     try {

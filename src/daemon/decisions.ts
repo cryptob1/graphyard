@@ -262,7 +262,8 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
     const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, null);
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
+    // A run GitHub cancelled is no failure of the head (GY-1109): the check is rerun, never reworked.
+    return !!latest && ['failure', 'timed_out', 'action_required', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
   }).map(required => required.name).sort();
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
