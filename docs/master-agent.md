@@ -14,7 +14,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 1. `master status` on startup and events.
 2. `master run` dispatches ready work in `schedule.order`.
 3. Merge exact candidates passing every gate; rework findings.
-4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)).
+4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: set `productionEnvironment`.
 5. Close finished agent sessions; repeat.
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
@@ -52,7 +52,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` the loop launches the **doctor**: sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`); secrets unreadable. Runs post per-item events and a summary; unactionable findings escalate or file deduplicated faults. Every cycle settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` the loop launches the [doctor](coordination.md#the-doctor-fixes-stuck-work) to fix stuck work.
 
 ## Research and diagnosis
 

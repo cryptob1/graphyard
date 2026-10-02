@@ -114,7 +114,7 @@ Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.js
 
 ### The pipeline doctor (on by default)
 
-A **doctor** runs every 10 minutes (`run.doctor.intervalMinutes`) via [sanctioned commands](master-agent.md#the-pipeline-doctor); off: `run.doctor.enabled=false`.
+A **doctor** runs every 10 minutes (`run.doctor.intervalMinutes`) via [sanctioned commands](coordination.md#the-doctor-fixes-stuck-work); off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 
