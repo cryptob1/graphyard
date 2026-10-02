@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { readFile, statfs } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { describeTmpReclaim, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import type { Work } from './model.js';
 
 /**
@@ -23,7 +24,7 @@ import type { Work } from './model.js';
  * the reclaim pass gives each one back; and `/healthz` reports the plane unhealthy while it cannot record.
  */
 
-export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk'] as const;
+export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] as const;
 export type ResourceId = typeof resourceIds[number];
 export type ResourceState = 'ok' | 'low' | 'exhausted' | 'unknown';
 
@@ -59,7 +60,10 @@ export interface ResourceInputs {
   loop: { lagMs: number | null; stalledAfterMs: number; detail: string } | null;
   revision: { behind: number; loaded: string; checkout: string } | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
+  /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
+  tmp?: TmpInodes | null;
 }
+export interface TmpInodes { path: string; totalInodes: number; freeInodes: number; removed: number | null; removedAt: string | null }
 
 export interface ResourceDefinition {
   id: ResourceId; title: string; unit: string;
@@ -245,6 +249,20 @@ export const resourceRegistry: ResourceDefinition[] = [
     warnBelow: bound => bound, symptoms: [/ENOSPC|No space left on device|Disk quota exceeded/],
     read: input => [input.disk ? { id: '', used: input.disk.totalBytes - input.disk.freeBytes, bound: input.disk.totalBytes, detail: `${input.disk.path}`, reclaimable: 0 } : { id: '', used: null, bound: null, detail: 'free space could not be read', reclaimable: 0 }],
   },
+  {
+    id: 'tmp-inodes', title: 'Host /tmp inodes', unit: 'inodes',
+    // statfs reports the filesystem's free inodes, not what remains of this user's quota: a quota is
+    // not readable without quotactl, so the reading warns early rather than claiming to track it.
+    bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
+    usage: 'statfs of the host temporary directory (os.tmpdir())', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
+    reclaim: `the loop's reclaim pass removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
+    warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
+    read: input => [input.tmp
+      ? { id: '', used: input.tmp.totalInodes - input.tmp.freeInodes, bound: input.tmp.totalInodes, reclaimable: 0,
+        detail: `${input.tmp.path}: ${input.tmp.freeInodes} of ${input.tmp.totalInodes} inodes free; ${input.tmp.removed === null ? 'the loop has recorded no /tmp pass that removed anything' : `the loop's last /tmp pass to remove anything removed ${input.tmp.removed} entr${input.tmp.removed === 1 ? 'y' : 'ies'}${input.tmp.removedAt ? ` at ${input.tmp.removedAt}` : ''}`}` }
+      : { id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }],
+  },
 ];
 
 /**
@@ -412,6 +430,21 @@ export async function readDisk(root: string, config: MasterConfig) {
   return null;
 }
 
+/**
+ * The host temporary directory's inode headroom, and the count the loop's last /tmp pass to remove
+ * anything removed, from the reclaim record (GY-1074). Null when the volume cannot be read, or
+ * reports no inode count (a filesystem without fixed inodes).
+ */
+export async function readTmpInodes(root: string, path = tmpdir(), volume: (path: string) => Promise<{ files: number | bigint; ffree: number | bigint }> = statfs): Promise<TmpInodes | null> {
+  try {
+    const info = await volume(path);
+    const totalInodes = Number(info.files), freeInodes = Number(info.ffree);
+    if (!Number.isFinite(totalInodes) || totalInodes <= 0) return null;
+    const last = (await readReclaimReports(root)).filter(report => report.tmp?.removed).at(-1);
+    return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null };
+  } catch { return null; }
+}
+
 // ---- The reclaim pass --------------------------------------------------------------------------
 
 export interface ResourceReclaimReport {
@@ -419,7 +452,7 @@ export interface ResourceReclaimReport {
   reaped: { review: number; producer: number };
   closed: { name: string; pane: string; reason: string }[];
   released: { name: string; ledger: 'review' | 'producer'; reason: string }[];
-  /** The stale /tmp directories the pass removed and the bytes they freed (GY-421). */
+  /** The stale /tmp entries the pass removed and the bytes they freed (GY-421, GY-1074). */
   tmp: { removed: number; bytes: number };
   errors: string[];
 }
