@@ -557,6 +557,7 @@
     "tests/status-conflict-probe-bounded.test.ts": 2983,
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
-    "tests/tmp-cleanup.test.ts": 13603
+    "tests/tmp-cleanup.test.ts": 13603,
+    "tests/unblock-stale-revision.test.ts": 4873
   }
 }
