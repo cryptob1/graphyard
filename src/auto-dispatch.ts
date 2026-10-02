@@ -15,7 +15,7 @@ import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
-import { launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
 
@@ -914,7 +914,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             delete cursor.failures[review.id]; delete cursor.capacity.review;
             tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}), ...(skippedWaits.has(review.id) ? { reason: skippedWaits.get(review.id) } : {}) });
           }
-        } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
+        } catch (error) {
+          // A request a settled session already answered waits on the control plane reading that
+          // verdict (GY-1083): no launch was refused, so no failure counts against the request.
+          const answered = answeredByPendingReview(error, review);
+          if (answered?.answered) wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); the control plane settles the request once it reads that verdict`);
+          else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
+        }
         await persist();
       }
     }

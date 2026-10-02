@@ -16,6 +16,7 @@ import { documentationReviewSection, type DocumentationObligation } from './mode
 import { researchReviewSection } from './research.js';
 import { openFollowUpItem } from './model/machine-backlog.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
+import { conflictingVerdictStates } from './model/review-conflict.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
 export const reviewerCredentialSchema = z.object({
@@ -574,7 +575,21 @@ async function writeReviewerSession(directory: string, token: string) {
  */
 export class ReviewSessionPending extends Error {
   readonly reviewSessionPending = true;
-  constructor(message: string, readonly work: string, readonly pending: { sha: string; agentName: string; requestId?: string }) { super(message); }
+  constructor(message: string, readonly work: string, readonly pending: { sha: string; agentName: string; requestId?: string; answered?: { state: string; reviewId: number } }) { super(message); }
+}
+/**
+ * GY-1083: the session that already answered a review request — settled `completed` on a standing
+ * verdict of the requested head, neither dismissed nor withdrawn. The loop records a verdict the
+ * moment GitHub lists it, while the control plane closes the request only once its own observation
+ * reads it, minutes later; every launcher in between (the executor's request-review row, the loop's
+ * tick, master review) still reads the request as open and finds no pending session. Each of the
+ * eleven review conflicts this item was raised for was a second session launched in that window,
+ * whose verdict was then withheld together with the first. The request is answered: the verdict
+ * settles it as soon as the control plane reads it, so no second session is launched for it.
+ */
+export function answeringRecord(records: readonly ReviewRecord[], requestId: string, sha: string): ReviewRecord | null {
+  return records.filter(record => record.requestId === requestId && record.sha === sha && record.state === 'completed'
+    && !!record.verdict && conflictingVerdictStates.includes(record.verdict.state)).at(-1) ?? null;
 }
 /** The reviewer session a launch was refused for, when it already answers the requested head. */
 export const answeredByPendingReview = (error: unknown, request: { sha: string }) =>
@@ -619,6 +634,11 @@ export async function launchReview(root: string, work: Work, profileName: string
     const current = pendings.find(pending => !staleReviewReason(pending, [work]));
     if (current) return { refusal: new ReviewSessionPending(`A reviewer session for ${work.key} is already ${current.launching ? 'being launched' : 'pending'} on ${current.sha.slice(0, 7)} (${current.agentName}${current.requestId ? `, request ${current.requestId}` : ''}); one review request is answered by one session, so no second one is launched`,
       work.key, { sha: current.sha, agentName: current.agentName, ...(current.requestId ? { requestId: current.requestId } : {}) }) };
+    // A request a settled session already answered is answered (GY-1083): its verdict awaits only the
+    // control plane's observation, and a second session's verdict would conflict with it.
+    const answered = dependencies.requestId ? answeringRecord(ledger.reviews, dependencies.requestId, binding.sha) : null;
+    if (answered) return { refusal: new ReviewSessionPending(`Reviewer session ${answered.agentName} already answered ${work.key} review request ${dependencies.requestId} on ${binding.sha.slice(0, 7)} with ${answered.verdict!.state} (review ${answered.verdict!.reviewId}); one request yields one verdict, so no second session is launched and the control plane settles the request once it observes that verdict`,
+      work.key, { sha: binding.sha, agentName: answered.agentName, requestId: dependencies.requestId!, answered: { state: answered.verdict!.state, reviewId: answered.verdict!.reviewId } }) };
     for (const pending of pendings) await closeReviewSession(root, pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: staleReviewReason(pending, [work])!, force: true });
     // A Herdr session already serving this request is the same launch twice, whatever the ledger says.
     const serving = requestSessionInHerdr(ledger.reviews, agents, config.reviewers, { key: work.key, sha: binding.sha, requestId: dependencies.requestId });
