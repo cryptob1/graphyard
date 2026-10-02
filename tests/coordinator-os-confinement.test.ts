@@ -487,6 +487,35 @@ test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is pro
     assert.ok(next && next.startsWith('graphyard: gy-n: '), 'the next launch reports the endpoint instead');
     assert.equal(probes, 6);
     assert.equal(verdicts.size, 1);
+    // When the launch that started a shared probe fails, a racing launch that succeeds reports
+    // the endpoint instead of staying silent (GY-1039 follow-up 14).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const racing = await Promise.all([
+      keyringEndpointWarning('gy-o', bound(), unheld, endpoint, verdicts, Promise.resolve(false)),
+      keyringEndpointWarning('gy-p', bound(), unheld, endpoint, verdicts, Promise.resolve(true)),
+    ]);
+    assert.equal(racing[0], null, 'the failed launch that started the probe logs nothing');
+    assert.ok(racing[1] && racing[1].startsWith('graphyard: gy-p: '), 'the racing launch that succeeded reports the unmigrated endpoint');
+    assert.equal(probes, 7, 'and they shared one probe');
+    assert.equal(await keyringEndpointWarning('gy-q', bound(), unheld, endpoint, verdicts), null, 'a later launch on that socket repeats nothing');
+    assert.equal(probes, 7);
+    // When every racing launch on a shared probe fails, nothing is logged and the verdict is
+    // forgotten, so the next launch reports the endpoint (follow-up 14).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const allFailed = await Promise.all([
+      keyringEndpointWarning('gy-r', bound(), unheld, endpoint, verdicts, Promise.resolve(false)),
+      keyringEndpointWarning('gy-s', bound(), unheld, endpoint, verdicts, Promise.resolve(false)),
+    ]);
+    assert.deepEqual(allFailed, [null, null], 'all failed launches log nothing');
+    assert.equal(probes, 8, 'sharing one probe');
+    const recovered = await keyringEndpointWarning('gy-t', bound(), unheld, endpoint, verdicts);
+    assert.ok(recovered && recovered.startsWith('graphyard: gy-t: '), 'the next launch after all failed racing launches probes again and reports');
+    assert.equal(probes, 9);
+    assert.equal(verdicts.size, 1);
   } finally {
     await new Promise<void>(done => server.close(() => done()));
     rmSync(base, { recursive: true, force: true });

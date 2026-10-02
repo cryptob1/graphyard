@@ -508,31 +508,58 @@ export async function secretsBusEndpointProblem(run: ChildRun | undefined, path:
  * or its answer is unreadable — is not remembered, so a later launch, and any launch that was
  * awaiting that probe, asks again and still reports an unmigrated endpoint once the user manager
  * answers. The line is the launch's own: when `started` settles false (the launch failed and its
- * pane was closed) nothing is returned and the verdict is forgotten, so the next launch reports it.
+ * pane was closed) nothing is returned under that session's name. A racing launch that succeeds
+ * reports the endpoint instead of staying silent, and the verdict is forgotten only when every
+ * racing launch has failed without reporting it, so the next launch reports it.
  */
 export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true)): Promise<string | null> {
   if (!confinement || !path) return null;
   let endpoint: string, socket: string;
   try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
   if (!confinement.wrapper.includes(endpoint)) return null;
-  const judging = () => { const held = verdicts.get(endpoint); return held?.socket === socket ? held.verdict : undefined; };
-  // A launch that finds a probe in flight shares it and logs nothing of its own, unless that probe
-  // could not judge the socket: its entry is gone by then, so this launch asks again itself.
-  for (let judged = judging(); judged; judged = judging()) if (await judged !== undefined) return null;
-  // A probe that could not judge the socket is not its verdict: its entry is dropped before any
-  // launch awaiting it resumes, so the next launch, or one racing this one, asks again.
+  const judging = () => { const held = verdicts.get(endpoint); return held?.socket === socket ? held : undefined; };
+  // A launch that finds a probe in flight or already judged shares it, logging the warning if it
+  // succeeds and no racing launch has yet reported it. If that probe could not judge the socket,
+  // its entry is gone by then, so this launch asks again itself.
+  for (let held = judging(); held; held = judging()) {
+    const outcome = await held.claim(name, started);
+    if (outcome !== undefined) return outcome;
+  }
+  let waiters = 0;
+  let reported = false;
+  let problemResult: string | null | undefined;
   const forget = () => { if (verdicts.get(endpoint)?.verdict === verdict) verdicts.delete(endpoint); return undefined; };
   const verdict: Promise<string | null | undefined> = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? forget() : problem ? `${problem.text}; migrate: ${problem.next}` : null, forget);
+  const claim = async (sessionName: string, sessionStarted: Promise<boolean>): Promise<string | null | undefined> => {
+    waiters++;
+    try {
+      const problem = await verdict;
+      problemResult = problem;
+      if (problem === undefined) return undefined;
+      if (!problem) return null;
+      if (reported) return null;
+      let ok: boolean;
+      try { ok = await sessionStarted; } catch { ok = false; }
+      if (ok && !reported) {
+        reported = true;
+        return `graphyard: ${sessionName}: ${problem}`;
+      }
+      return null;
+    } finally {
+      waiters--;
+      if (waiters === 0 && !reported && problemResult) forget();
+    }
+  };
   // The endpoint's earlier socket, if any, is replaced: only the latest incarnation is kept.
-  verdicts.set(endpoint, { socket, verdict });
-  const problem = await verdict;
-  if (!problem) return null;
-  if (await started) return `graphyard: ${name}: ${problem}`;
-  forget();
-  return null;
+  verdicts.set(endpoint, { socket, verdict, claim });
+  return (await claim(name, started)) ?? null;
 }
 /** One keyring endpoint path's latest socket (`dev:inode:ctime`) and its verdict (keyringEndpointWarning). */
-export interface KeyringEndpointVerdict { socket: string; verdict: Promise<string | null | undefined> }
+export interface KeyringEndpointVerdict {
+  socket: string;
+  verdict: Promise<string | null | undefined>;
+  claim: (name: string, started: Promise<boolean>) => Promise<string | null | undefined>;
+}
 /** The latest socket's verdict per keyring endpoint path in this process (keyringEndpointWarning). */
 const keyringEndpointVerdicts = new Map<string, KeyringEndpointVerdict>();
 
