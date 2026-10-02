@@ -142,8 +142,8 @@ the API, and appends an attributable audit entry. On a Confirm-access page the f
 triggers GitHub Mobile (on a passkey-first page, through the "Use GitHub Mobile" link
 under "Having problems?", following its href if the click fails; a failed click is
 recorded with agent-browser's own error) and reports the two-digit code in
-`master status`; approving
-that prompt on their device, and the three human-only decisions above, are the only
+`master status`; approving that prompt on their device, and the three human-only
+decisions above, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
 
