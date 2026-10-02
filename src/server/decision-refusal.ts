@@ -46,11 +46,14 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
  * refusal is lifted in the same transaction, for exactly the candidate it named, so the entry
  * re-enters the queue on the loop's next cycle and the guarded merge re-checks every gate.
  */
-export const refusedReworkLiftsMergeRefusal = (work: Pick<Work, 'mergeRefusal' | 'candidate'>, decision: { action: string }) => {
+export const refusedReworkLiftsMergeRefusal = (work: Pick<Work, 'mergeRefusal' | 'candidate'>, decision: { action: string; input?: any }) => {
   const refusal = work.mergeRefusal, candidate = work.candidate;
-  return decision.action === 'rework' && refusal?.action === 'rework' && !!candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha;
+  // Only the rework requested on the merge-refusal ground judges it: a rework of the same head on
+  // another ground (a failed check, a thread — each its own binding, GY-407) says nothing of it.
+  return decision.action === 'rework' && refusal?.action === 'rework' && !!candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha
+    && decision.input?.binding === `${refusal.sha}:merge-refused`;
 };
-async function liftRefusedReworkMergeRefusal(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string }, actor: Principal, reason: string, now: Date) {
+async function liftRefusedReworkMergeRefusal(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string; input?: any }, actor: Principal, reason: string, now: Date) {
   if (!refusedReworkLiftsMergeRefusal(work, decision)) return;
   const refusal = work.mergeRefusal!;
   work.mergeRefusal = null;
