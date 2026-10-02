@@ -27,7 +27,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 #### A contaminated branch
 
-Listed under `branches.contaminated`; run `master repair GY-42 REASON`.
+Listed under `branches.contaminated`; run `master repair GY-42`.
 
 A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where only a page exists,
 | `installation-accept` | Accepts pending requests |
 | `protection` | Reconciles branch protection |
 
-Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `record.json` and `ledger.json` under `.graphyard/master-actions/`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, and must never use a merge bypass, push code or read a worker credential.
+Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `record.json` under `.graphyard/master-actions/`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 ## Harness permissions
 
@@ -55,9 +55,7 @@ A `resync` needs a fresh observation: the executor calls `POST /api/work/:id/res
 
 A `dispatch` or `request-review` whose launch finds a session already answering the requested head completes on it. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
-### Loop failure recovery
-
-A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
+A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
 ## Resources and disk
 
@@ -65,7 +63,7 @@ A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
+A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 
@@ -73,7 +71,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. Scope requests count past 15 minutes open, or refused with no approver left. Settled requests turn `unanswered-request` past `settledAnswerGraceMs` (5 minutes), naming an owed relaunch or `request-remedy` decision. Failed sections are listed only in `unavailable`. Sandbox or `workflows`-permission refusals are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity). Scope requests count past 15 minutes open, or refused with no approver left. Settled requests turn `unanswered-request` past `settledAnswerGraceMs` (5 minutes), naming an owed relaunch or `request-remedy` decision. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
 
 ## Pipeline speed
 
