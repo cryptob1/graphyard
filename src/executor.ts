@@ -10,6 +10,7 @@ import { describeObservationJob, resyncUnobservedPrefix } from './model/action-k
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
+import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
@@ -256,8 +257,17 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // The fixed name is busy only for a profile that runs one session; one that runs several names each session for its request (GY-1072).
       if (profileConcurrency(profile) === 1 && agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
       // A launch refused by a resource at its bound — the review ledger's cap — records that resource.
-      await registeredLaunch(record(work), launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace),
-        () => effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); }), launched => launched, attachTo);
+      try {
+        await registeredLaunch(record(work), launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace),
+          () => effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); }), launched => launched, attachTo);
+      } catch (error) {
+        // The loop's tick launches reviewers beside the executors: a session already answering this
+        // head is the request being answered, as a pending producer is for a proof dispatch (GY-415),
+        // not a failure to repeat until the review is posted (GY-1090).
+        const pending = answeredByPendingReview(error, request);
+        if (!pending) throw error;
+        return `${work.key}'s review of ${request.sha.slice(0, 12)} is left to reviewer session ${pending.agentName} already answering that head; its verdict settles the request`;
+      }
       return `launched reviewer ${profile.name} on ${request.sha.slice(0, 12)}`;
     },
     'approve-scope': async action => {
