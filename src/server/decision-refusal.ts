@@ -29,12 +29,32 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
     demand(decision!.state === 'requested', `Decision ${decision!.id} is already ${decision!.state}; only a requested decision can be refused`, 409);
     await record(db, work!, actor.id, 'decision.declined', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
     await answerScopeRequest(db, work!, decision!, actor, data.reason, now);
+    await liftRefusedReworkMergeRefusal(db, work!, decision!, actor, data.reason, now);
     // A refused triage closure returns the item to triage (GY-402).
     if (decision!.action === 'close') await refuseTriageClosure(db, work!, decision!, actor.id, data.reason, now);
     const result = (await readDecisions(db, work!)).find(entry => entry.id === decision!.id)!;
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
+}
+
+/**
+ * A `rework` merge refusal (GY-831) holds the candidate out of the merge queue until a rework
+ * decision rebinds it. When the independent approver refuses that rework — the candidate needs no
+ * change, every gate passes — nothing else ever lifts the refusal, and the entry waited forever
+ * (GY-973 for 14 hours, GY-1005 for hours on 2026-10-01; approval→merge p90 reached 59 h). The
+ * refusal is lifted in the same transaction, for exactly the candidate it named, so the entry
+ * re-enters the queue on the loop's next cycle and the guarded merge re-checks every gate.
+ */
+export const refusedReworkLiftsMergeRefusal = (work: Pick<Work, 'mergeRefusal' | 'candidate'>, decision: { action: string }) => {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  return decision.action === 'rework' && refusal?.action === 'rework' && !!candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha;
+};
+async function liftRefusedReworkMergeRefusal(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string }, actor: Principal, reason: string, now: Date) {
+  if (!refusedReworkLiftsMergeRefusal(work, decision)) return;
+  const refusal = work.mergeRefusal!;
+  work.mergeRefusal = null;
+  await save(db, work, actor.id, 'merge.refusal.lifted', now, { decision: decision.id, sha: refusal.sha, baseSha: refusal.baseSha, approver: actor.id, reason: reason.slice(0, 2000) });
 }
 
 const withdrawalSchema = z.object({ decision: z.string().uuid(), reason: decisionRequestSchema.shape.reason }).strict();
