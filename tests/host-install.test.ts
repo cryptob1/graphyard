@@ -104,6 +104,7 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.equal(files.get('/home/graphyard/.config/systemd/user/graphyard-herdr.service')?.owner, '1001:1001');
     assert.ok(lines.includes('systemctl enable --now graphyard-postgres.service'));
     assert.ok(lines.includes('systemctl restart graphyard-server.service graphyard-proxy.service'));
+    assert.ok(!lines.some(line => line.startsWith('docker build ')), 'a pulled release image is not rebuilt');
     assert.ok(lines.some(line => line.startsWith('npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai @mariozechner/pi-coding-agent')));
     assert.ok(lines.some(line => line.includes('systemctl --user enable --now graphyard-herdr.service')));
     assert.ok(lines.some(line => line.includes('workspace create --cwd /home/graphyard/code/owner-project --label graphyard-owner-project')));
@@ -182,6 +183,34 @@ test('unit:host-install-plan — every installed worker profile passes the launc
     assert.deepEqual(profiles.map(profile => profile.kind).sort(), ['claude', 'codex', 'opencode']);
     for (const profile of profiles) assert.equal(workerConfinementRefusal(profile), null, profile.name);
     assert.equal(profiles.find(profile => profile.kind === 'opencode').environment.OPENCODE_PERMISSION, OPENCODE_WORKER_PERMISSION);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — the Graphyard server starts on the host even when the registry has no release image: the host builds it from its own checkout before the server unit starts', async () => {
+  const image = 'ghcr.io/cryptob1/graphyard:';
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
+    extraResponses: [{ match: 'docker image inspect', result: { stdout: '', stderr: 'Error response from daemon: No such image', code: 1 } }] });
+  try {
+    const { plan } = await applyHost(fixture, hostInputs());
+    assert.match(plan.actions.find(action => action.id === 'host.image')!.title, /when the registry does not have it, build it on the host from \/home\/graphyard\/graphyard/);
+    const lines = hostLines(fixture);
+    const build = lines.findIndex(line => line.startsWith('docker build ') && line.includes(`--tag ${image}`) && line.endsWith(' /home/graphyard/graphyard'));
+    assert.ok(build >= 0, 'the image is built from the host\'s Graphyard checkout');
+    assert.match(lines[build], /--build-arg GRAPHYARD_BUILD_REVISION=\S+/);
+    assert.ok(build > lines.findIndex(line => line.includes('compose.yaml pull')), 'the build is the fallback after the pull');
+    assert.ok(build < lines.indexOf('systemctl restart graphyard-server.service graphyard-proxy.service'), 'the image exists before the server unit starts');
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — a server image that can be neither pulled nor built fails the install with the reason', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
+    extraResponses: [
+      { match: 'docker image inspect', result: { stdout: '', stderr: 'No such image', code: 1 } },
+      { match: 'docker build', result: { stdout: '', stderr: 'failed to solve: npm ci exited 1', code: 1 } },
+    ] });
+  try {
+    await assert.rejects(applyHost(fixture, hostInputs()), /could not be pulled, and building it from \/home\/graphyard\/graphyard at \S+ failed: failed to solve: npm ci exited 1/);
+    assert.ok(!hostLines(fixture).includes('systemctl restart graphyard-server.service graphyard-proxy.service'), 'no server is started without an image');
   } finally { await fixture.cleanup(); }
 });
 

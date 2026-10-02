@@ -6,6 +6,7 @@ import { composeBundle, composeRunning, emptyObservation, hetznerAddress, httpHe
 import { fingerprint, generateToken, workerPrincipals } from './secrets.js';
 import { shellQuote, type Transport } from './transport.js';
 import { REDACTED, type EnvValue, type PlanAction, type PlannedPrincipal, type PreflightItem } from './types.js';
+import { packageVersion } from '../release.js';
 import { proposedConcurrency, proposedRuntimes } from '../model/registry-proposal.js';
 import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRoleName, FleetRuntime } from '../model/registry.js';
 import type { ProfileRegistration } from './index.js';
@@ -13,8 +14,9 @@ import type { ProfileRegistration } from './index.js';
 /**
  * The self-contained Graphyard host (GY-717).
  *
- * One machine runs everything: Postgres and the server (the release image, as system units, so they
- * come back after a reboot with nobody logged in), and — under one dedicated `graphyard` account
+ * One machine runs everything: Postgres and the server (the release image, built on the host when
+ * the registry does not have it, as system units, so they come back after a reboot with nobody
+ * logged in), and — under one dedicated `graphyard` account
  * with lingering enabled — Herdr, the master loop, the executors and every agent runtime. Sessions no
  * longer compete with the operator's own processes, and the dashboard reaches Herdr on the same
  * machine, so the session viewer needs no relay.
@@ -574,6 +576,7 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
     { id: 'host.bootstrap', target: 'host', state, title: `Prepare the machine: Docker, Node 24, git, gh and bubblewrap when missing, the ${HOST_USER} account with lingering, and ${plan.configDirectory} (mode 0700)`, command: 'sh -c <bootstrap script>' },
     { id: 'host.credentials', target: 'host', state, title: `Write every Graphyard credential on the host only, mode 0600, owned by ${HOST_USER}; the provisioning token never leaves this machine`, values: plan.credentials.map(entry => ({ name: entry.path, value: REDACTED, secret: true, note: entry.holds })) },
     { id: 'host.graphyard', target: 'host', state, title: `Check out Graphyard at ${host.ref} in ${host.layout.graphyard} for the loop, the executors and restores`, command: `git clone ${GRAPHYARD_SOURCE} ${host.layout.graphyard}` },
+    { id: 'host.image', target: 'host', state, title: `Pull the server image ${ctx.image}; when the registry does not have it, build it on the host from ${host.layout.graphyard} at ${host.ref}`, command: `docker image inspect ${ctx.image} || docker build --tag ${ctx.image} ${host.layout.graphyard}` },
     ...plan.units.filter(unit => unit.scope === 'system').map(unit => ({ id: `host.unit.${unit.role}`, target: 'host' as const, state, title: `Supervise ${unit.role} with the system unit ${unit.path} (Restart=always, starts at boot)`, command: `systemctl enable --now ${unit.name}` })),
     ...(host.migrate ? migrationSteps.map(step => ({ id: step.id, target: 'host' as const, state: 'create' as const, title: step.title })) : []),
     { id: 'host.runtimes', target: 'host', state, title: `Install the agent runtimes: ${plan.runtimes.map(runtime => `${runtime.kind} (${runtime.package})`).join(', ')}`, command: `npm install -g ${plan.runtimes.map(runtime => runtime.package).join(' ')}` },
@@ -747,6 +750,21 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
 }
 
 /**
+ * The server image must exist on the host before its unit starts. When the registry has no such
+ * image (the release was never published, or the pull is denied), the host builds it from its own
+ * Graphyard checkout, which provision placed at the installer's commit, so one command still ends
+ * in a running server.
+ */
+export async function ensureServerImage(ctx: AdapterContext, remote: Transport) {
+  const present = await remote.exec('docker', ['image', 'inspect', '--format', '{{.Id}}', ctx.image], { allowFailure: true, timeout: 120_000 });
+  if (present.code === 0) return 'pulled' as const;
+  const source = ctx.host!.layout.graphyard;
+  const built = await remote.exec('docker', ['build', '--build-arg', `GRAPHYARD_VERSION=${packageVersion}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${ctx.host!.ref}`, '--tag', ctx.image, source], { allowFailure: true, timeout: 1_800_000 });
+  if (built.code !== 0) throw new Error(`The server image ${ctx.image} could not be pulled, and building it from ${source} at ${ctx.host!.ref} failed: ${failure(ctx, built)}`);
+  return 'built' as const;
+}
+
+/**
  * Wraps a provider adapter that yields a machine (the Hetzner one, or an existing machine) with the
  * self-contained layer: bootstrap, the bundle and credentials written on the host, system units in
  * place of `docker compose up`, and a migrated ledger restored before the server first starts.
@@ -783,6 +801,7 @@ export function selfContainedAdapter(base: ProviderAdapter): ProviderAdapter & {
       const remote = await hostRemote(ctx);
       await remote.exec('systemctl', ['daemon-reload'], { timeout: 120_000 });
       await remote.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'pull', '--quiet'], { allowFailure: true, timeout: 900_000 });
+      await ensureServerImage(ctx, remote);
       await remote.exec('systemctl', ['enable', '--now', 'graphyard-postgres.service'], { timeout: 300_000 });
       for (let attempt = 0; attempt < 60; attempt++) {
         const ready = await remote.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'exec', '-T', 'db', 'pg_isready', '-U', 'graphyard'], { allowFailure: true, timeout: 60_000 });
