@@ -1153,12 +1153,15 @@ export class Engine {
         // coordinator that asked — can assert a widening the item does not already imply.
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         const request = work.scopeRequest;
+        // One request is decided once (GY-955): the loop's scope step and an executor's approve-scope
+        // can both ask for one undecided request, and whichever lands second is answered, not failed.
+        // A request no longer open answers with the item and the decision it recorded; one already
+        // decided answers with its standing decision. Neither is rewritten. A refusal is decided
+        // again only when the rules as they stand now would approve it.
+        if (!request && work.scopeDecision && (work.scopeDecision.epoch ?? data.epoch) === data.epoch) return work;
         demand(request, 'No scope request is open for this item', 404);
         demand(request!.epoch === data.epoch, 'Scope request belongs to another attempt; reload before deciding');
-        // A refusal may be decided again when the rules as they stand now would approve it; an
-        // approval never is, and a refusal the current rules still give is not rewritten.
-        demand(!request!.decision || request!.decision.state === 'refused', 'This scope request was already decided');
-        demand(!request!.decision || decideScopeRequest(work, request!).state === 'approved', 'The current rules still refuse this scope request');
+        if (request!.decision && (request!.decision.state !== 'refused' || decideScopeRequest(work, request!).state !== 'approved')) return work;
         demand(work.lease && work.lease.epoch === request!.epoch && Date.parse(work.lease.expiresAt) > now.getTime(),
           'The requesting attempt no longer holds the lease; a fresh attempt asks afresh');
         decision = applyScopeDecision(work, request!, now);

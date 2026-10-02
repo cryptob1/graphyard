@@ -1,6 +1,7 @@
 // Concern: cycle step 2 — decide open scope requests and measure the decision budget.
 import type { Work } from '../model.js';
-import { type ScopeRequestState, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, testFile, unplannedPaths } from '../model/scope.js';
+import { type ScopeRequestState, companionGround, decideScopeRequest, itemDocumentationPaths, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeDecisionBinding, testFile, unplannedPaths } from '../model/scope.js';
+import { importingTestGround, newProofTestGround } from '../model/scope-companions.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
@@ -14,8 +15,8 @@ import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { findingRecheckMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 
-/** A requested path the loop grants without an approver, and the audited ground it stands on. */
-export interface ScopeGround { path: string; ground: string }
+/** A requested path the loop grants without an approver, and the audited ground it stands on; `companion` marks a GY-955 companion. */
+export interface ScopeGround { path: string; ground: string; companion?: boolean }
 /**
  * GY-199. What grants each requested path without an approver: a trusted review finding naming it
  * (review-scope.ts findingScope), a file on the base that succeeds a planned file main split or
@@ -28,16 +29,32 @@ export interface ScopeGround { path: string; ground: string }
  * ground a path, and `mentions` searches the base tree for the identifiers a phrase-spelled call
  * would ground on. The grounded paths are returned with the refusal of the rest, so what the rules
  * ground is granted and only what they do not goes to the approver.
+ *
+ * GY-955: each path is judged on its own, so one ungrounded path never refuses the rest. A path the
+ * engine's rule implies on its own (a criterion names it, documentation, a companion such as the
+ * docs-budget gate beside a documentation path) is granted here too, and so are the companions only
+ * the base can ground: a test importing a module a planned file is or re-exports
+ * (importingTestGround), and a new test file the criteria's unit proofs need when no base file holds
+ * them (newProofTestGround, searched by `held`).
  */
-export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>, mentions?: (identifier: string) => Promise<number>): Promise<{ grounds: ScopeGround[] } | { grounds?: ScopeGround[]; refusal: string }> {
+export async function automaticScopeGrounds(item: Work, request: ScopeRequestState, paths: readonly string[], findings: readonly ReviewFinding[], exists: (path: string) => boolean, read?: (path: string) => Promise<string | null>, successors?: () => Promise<readonly Successor[]>, mentions?: (identifier: string) => Promise<number>, held?: (proof: string) => Promise<number>): Promise<{ grounds: ScopeGround[] } | { grounds?: ScopeGround[]; refusal: string }> {
   const grounds: ScopeGround[] = [], refusals: string[] = [];
   let planned: { path: string; text: string | null }[] | null = null;
   let succeeding: readonly Successor[] | null = null;
   const symbols = criterionSymbols(item.criteria);
   const searched = new Map<string, number>();
+  const documentation = itemDocumentationPaths(item);
   for (const path of paths) {
     const named = findingScope([path], findings, exists);
     if ('grounds' in named) { grounds.push(...named.grounds); continue; }
+    const implied = decideScopeRequest(item, { paths: [path] });
+    if (implied.state === 'approved') { grounds.push({ path, ground: implied.reason.replace(/^additive scope the item already implies — /, ''), companion: true }); continue; }
+    const companion = companionGround(path, item, paths, documentation);
+    if (companion) { grounds.push({ path, ground: companion, companion: true }); continue; }
+    if (held && !pathScope(path).prefix && !path.includes('*') && !exists(path)) {
+      const proofs = await newProofTestGround(path, item.criteria, held);
+      if (proofs) { grounds.push({ path, ground: proofs, companion: true }); continue; }
+    }
     if (successors && !pathScope(path).prefix && exists(path)) {
       succeeding ??= await successors();
       const successor = succeeding.find(entry => entry.path === path);
@@ -50,6 +67,8 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
       if (barrel) { grounds.push({ path, ground: barrel }); continue; }
       const pinning = testFile(path) ? pinningTestGround(path, request.reason, text, planned) ?? criterionTestGround(path, text, symbols) : null;
       if (pinning) { grounds.push({ path, ground: pinning }); continue; }
+      const importing = await importingTestGround(path, text, item.plannedFiles ?? [], read);
+      if (importing) { grounds.push({ path, ground: importing, companion: true }); continue; }
       if (mentions) for (const identifier of phraseCallees(text, symbols).slice(0, 20)) if (!searched.has(identifier)) searched.set(identifier, await mentions(identifier));
       const symbol = criterionSymbolGround(path, text, symbols, searched);
       if (symbol) { grounds.push({ path, ground: symbol }); continue; }
@@ -82,12 +101,13 @@ export async function scopeStep(cycle: Cycle) {
   //     end that clears that request meanwhile makes the control plane refuse it, never apply it.
   //     It answers with the time the control plane recorded the widening, or null when it did not widen.
   // What an automatic widening stood on, in the audit detail: the grounds it actually used.
-  const widenedOn = (grounds: { ground: string }[], count: number): string => {
-    const kinds = new Set(grounds.map(entry => entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
+  const widenedOn = (grounds: ScopeGround[], count: number): string => {
+    const kinds = new Set(grounds.map(entry => entry.companion ? 'companion' : entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
+    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, the test its proofs live in or the docs-budget gate`;
     if (kinds.size === 1 && kinds.has('successor')) return `the base branch's split or rename of a planned file`;
     if (kinds.size === 1 && kinds.has('finding')) return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
     if (kinds.size === 1) return `what the item's criteria name: a symbol a file defines or calls, or text a test pins`;
-    return [kinds.has('finding') && 'a review finding', kinds.has('successor') && `the base branch's split or rename of a planned file`, kinds.has('criteria') && `what the item's criteria name`].filter(Boolean).join(' and ');
+    return [kinds.has('finding') && 'a review finding', kinds.has('successor') && `the base branch's split or rename of a planned file`, kinds.has('criteria') && `what the item's criteria name`, kinds.has('companion') && 'the companions the change inevitably carries'].filter(Boolean).join(' and ');
   };
   const widenOnFindings = async (item: Work, request: ScopeRequestState): Promise<string | null> => {
     if (!(effects.reviewFindings || effects.baseSuccessions || effects.baseText) || !effects.widenScope || request.remove?.length || request.criteria?.length) return null;
@@ -103,7 +123,7 @@ export async function scopeStep(cycle: Cycle) {
     try {
       const findings = await effects.reviewFindings?.(item) ?? [];
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
-      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText, baseSuccessors(effects, item), effects.baseMentions);
+      const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText, baseSuccessors(effects, item), effects.baseMentions, effects.baseMentions);
       // A path no rule grounds goes to the approver; the ones the rules do ground are granted now,
       // so the approver judges only the rest (routableScopeRequest reads what is still unplanned).
       if ('refusal' in scoped && !scoped.grounds?.length) {
@@ -125,7 +145,7 @@ export async function scopeStep(cycle: Cycle) {
         return null;
       }
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...granted])] },
-        `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split, renamed or re-exports, a test pins text a planned file holds or a criterion changes, or it defines or calls a symbol a criterion names: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+        `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split, renamed or re-exports, a test pins text a planned file holds or a criterion changes, it defines or calls a symbol a criterion names, or it is a companion the change inevitably carries: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, granted, reason) as Work | undefined;
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;
@@ -154,6 +174,10 @@ export async function scopeStep(cycle: Cycle) {
     if (!effects.decideScope || !request || (request.decision && !redecide)) return;
     // A request whose attempt no longer holds the lease is moot: a fresh attempt asks afresh.
     if (!item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= clock) return;
+    // One decider per request (GY-955): while an executor holds the control plane's approve-scope
+    // row for it, that executor is the decider and the loop reads the outcome on a later cycle. A
+    // row nobody has claimed is the loop's to answer, so a fleet serving no approve-scope never waits.
+    if (executorDecidesScope(item, request, clock)) return;
     const key = redecide ? `${scopeKey(item, request)}:redecide:${item.policyRevision}` : scopeKey(item, request);
     const previous = state.actions[key];
     if (!readyToRetry(previous, state.cycle)) return;
@@ -165,6 +189,14 @@ export async function scopeStep(cycle: Cycle) {
       const decision = decided.scopeDecision;
       if (!decision) throw new Error('The control plane answered without a decision');
       settled.set(item.id, decided);
+      // Decided meanwhile (GY-955): an executor's approve-scope, or a closing attempt, answered the
+      // request between this cycle's snapshot and its post. The control plane answers with what it
+      // recorded; a request it no longer holds is closed, so nothing is routed or escalated for it.
+      if (decision.requestedAt !== request.at || !decided.scopeRequest && decision.state === 'refused') {
+        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
+          detail: boundDetail(`${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} was already answered: ${decision.requestedAt === request.at ? `${decision.state} — ${decision.reason}` : 'it is no longer open'}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       // An additive refusal no finding grounds is put to the independent approver in step 4c, on
       // this same cycle: naming `master scope` would leave it waiting for a master to be around. Its
       // wait is measured when the approver answers, the decision the worker actually waits on.
@@ -205,6 +237,18 @@ export async function scopeStep(cycle: Cycle) {
     performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   }
   return { settled, budget };
+}
+
+/**
+ * True when an executor is deciding this request: the item's queue holds the approve-scope row
+ * computed for it (bound to the request, or to its re-decision) under a live claim. A claim taken
+ * after the loop's snapshot still races the loop's post; the control plane answers the second with
+ * the standing decision, which the loop records as done (GY-955).
+ */
+export function executorDecidesScope(item: Pick<Work, 'actionQueue'>, request: Pick<ScopeRequestState, 'epoch' | 'at'>, clock: number) {
+  const binding = scopeDecisionBinding(request);
+  return (item.actionQueue?.actions ?? []).some(row => row.kind === 'approve-scope' && row.state === 'claimed' && (row.binding === binding || row.binding === `${binding}:redecide`)
+    && !!row.claim && Date.parse(row.claim.expiresAt) > clock);
 }
 
 /** The successors of the item's planned files on the base since the item was planned, as a lazy read for `automaticScopeGrounds`. */
