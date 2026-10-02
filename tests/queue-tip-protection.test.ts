@@ -103,7 +103,13 @@ class Repo {
         for (const [number, pull] of this.pulls) if (pull.head === base) this.dismiss(number, this.pushDismissal, merged);
         return { sha: merged };
       }
-      if (method === 'PATCH' && path.startsWith('/git/refs/')) { this.refs.set(decodeURIComponent(path.slice('/git/refs/'.length)), (body as { sha: string }).sha); return { object: { sha: (body as { sha: string }).sha } }; }
+      if (method === 'PATCH' && path.startsWith('/git/refs/')) {
+        const name = decodeURIComponent(path.slice('/git/refs/'.length)), sha = (body as { sha: string }).sha, moved = this.refs.get(name) !== sha;
+        this.refs.set(name, sha);
+        // Moving a pull-request branch to a tip built off it is a push too (GY-1087), and stales its approvals the same way.
+        if (moved) for (const [number, pull] of this.pulls) if (`heads/${pull.head}` === name && this.commits.get(sha)?.author?.login === APP) this.dismiss(number, this.pushDismissal, sha);
+        return { object: { sha } };
+      }
       if (method === 'POST' && path === '/git/refs') { this.refs.set((body as { ref: string }).ref.replace(/^refs\//, ''), (body as { sha: string }).sha); return {}; }
       if (method !== 'GET') return { id: 12 };
       if (path.startsWith('/git/ref/heads/')) { const name = decodeURIComponent(path.slice('/git/ref/'.length)); return { ref: `refs/${name}`, object: { type: 'commit', sha: this.refs.get(name) } }; }
