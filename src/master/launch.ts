@@ -1,14 +1,16 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, chmodSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
 import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
 import { withAutonomyContract } from '../autonomy.js';
+import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -98,15 +100,103 @@ export function writeLaunchFiles(directory: string, name: string, text: { role?:
   };
   return { stem, role: write('role', text.role), request: write('request', text.request) };
 }
-/** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), the runtime, its arguments and the file references. */
-export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = []) {
+
+// ---- The confinement a session launch carries (GY-888) -------------------------------------------
+//
+// Every session the launcher starts — worker, reviewer, producer and approver, in a Herdr pane or
+// headless — runs so that the coordinator checkout this launcher itself runs from is unwritable at
+// the OS level: a codex workspace-write sandbox confines it by leaving it ungranted, every other
+// runtime runs inside a bubblewrap mount namespace that bind-mounts the checkout read-only (see
+// profiles.ts). A launch that can carry no confinement is refused with the reason named, never
+// started unconfined. The master session opts out (`confinement: false`): it runs the loop's own
+// configuration and administration commands from the coordinator root, under its own harness rules.
+
+/**
+ * Whether `argv1` is one of the launcher's own entries: `bin/graphyard.mjs`, the `src/cli.ts` child
+ * it spawns, or `scripts/graphyard-executor.mjs`, whose slots launch workers in-process — in each
+ * the checkout is two levels up. Missing the executor entry started every executor-dispatched
+ * worker unconfined (2026-09-30).
+ */
+const cliEntry = (argv1: string) => ['graphyard.mjs', 'cli.ts', 'graphyard-executor.mjs'].includes(basename(argv1));
+/**
+ * The coordinator checkout the launching process itself runs from, or null when this is not the
+ * Graphyard CLI or the test runner is driving: nothing is confined there. Both entries count —
+ * `bin/graphyard.mjs`, which operators and prompts invoke, and the `src/cli.ts` child it spawns,
+ * which is what `process.argv[1]` holds inside the loop — so a launch is never confined against
+ * the wrong tree, and never silently unconfined in production (GY-888).
+ */
+export const launcherCoordinatorRoot = (argv1: string | undefined = process.argv[1], testRunner: boolean = underTestRunner()): string | null => {
+  if (!argv1 || testRunner || !cliEntry(argv1)) return null;
+  const root = coordinatorCheckoutRoot(resolve(argv1));
+  return root && root !== '/' ? root : null;
+};
+/** Why the running process is the launcher yet its own coordinator checkout cannot be derived — the launch would start unconfined, so the caller refuses (GY-888); null when there is nothing to refuse on. */
+export const launcherRootUndetermined = (argv1: string | undefined = process.argv[1], testRunner: boolean = underTestRunner()): string | null => {
+  if (!argv1 || testRunner || !cliEntry(argv1)) return null;
+  const root = coordinatorCheckoutRoot(resolve(argv1));
+  return root && root !== '/' ? null : `this launcher's coordinator checkout could not be derived from its entry ${argv1}`;
+};
+/**
+ * The shared Git paths a confined session's linked worktree writes that may not exist yet — the
+ * `graphyard/` branch namespace and its reflogs — plus an empty FETCH_HEAD for the fetches a
+ * reviewer or producer runs from the coordinator root. Each is created before the confinement is
+ * built, so coordinatorConfinement re-exposes it; the launcher itself is not confined. The paths
+ * resolve through `checkoutGitDirectory`/`checkoutWorktreeAdminDirectory`: when the coordinator is
+ * itself a linked worktree its `.git` is a pointer file, and creating them there would fail under a
+ * file instead of preparing the real common Git directory and the checkout's own worktree admin
+ * (GY-957, review finding).
+ */
+export function prepareConfinedGitPaths(root: string): void {
+  const gitDir = checkoutGitDirectory(root);
+  if (!existsSync(gitDir)) return;
+  for (const path of [join(gitDir, 'refs', 'heads', 'graphyard'), join(gitDir, 'logs', 'refs', 'heads', 'graphyard'), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')]) mkdirSync(path, { recursive: true });
+  const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
+  if (!existsSync(fetchHead)) closeSync(openSync(fetchHead, 'a'));
+}
+/** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. The sandbox-claim check models the runtime's workspace root as its working directory (`cwd` when the pane starts elsewhere, GY-888); the read-only mount re-exposes the allocated `directory` separately, so a terminal reviewer or producer that starts from the coordinator root still gets its own checkout writable while the root stays read-only (GY-888, review finding). */
+export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
+  const root = coordinatorRoot !== undefined ? coordinatorRoot : launcherCoordinatorRoot();
+  if (!root) {
+    const undetermined = launcherRootUndetermined();
+    if (undetermined) throw new Error(confinementRefusalText(kind, options.directory, { undetermined }));
+    return null;
+  }
+  const workspaceRoot = resolve(options.cwd ?? options.directory), allocated = resolve(options.directory);
+  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }) };
+  const refusal = await coordinatorConfinementRefusal(input);
+  if (refusal) throw new Error(refusal);
+  prepareConfinedGitPaths(root);
+  return coordinatorConfinement(input);
+}
+/**
+ * The confinement words for a headless run whose working directory is `cwd`, or the refusal that
+ * keeps it from starting (GY-888). Synchronous: the headless runner spawns without awaiting, so a
+ * host whose namespaces are known-refused refuses here, and one whose probe has not answered yet
+ * lets bubblewrap itself fail the spawn — either way the run fails instead of starting unconfined.
+ * The spawner that applies these words is src/runner/roles.ts confiningSpawn, which hands them to
+ * the runner's own spawn.
+ */
+export function headlessConfinementWrapper(root: string, cwd: string | undefined, bwrap: string | null = bwrapOnPath()): readonly string[] {
+  const head = `A headless session cannot be started with the coordinator checkout at ${root} unwritable at the OS level`;
+  if (cwd === undefined) throw new Error(`${head}: the run has no working directory to confine around. Graphyard never starts a session unconfined.`);
+  if (!bwrap) throw new Error(`${head}: bubblewrap (bwrap) is not installed. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap).`);
+  if (mountNamespaceProbeResult(bwrap) === false) throw new Error(`${head}: this host refuses the unprivileged namespaces bubblewrap needs. Graphyard never starts a session unconfined; allow unprivileged user namespaces on this host.`);
+  const gitProblem = checkoutGitProblem(root);
+  if (gitProblem) throw new Error(`${head}: the Git directory it writes through cannot be resolved — ${gitProblem}. Graphyard never starts a session unconfined.`);
+  prepareConfinedGitPaths(root);
+  return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap });
+}
+/** The command that starts a runtime of `kind`: its recipe's `program` (Cursor's `agent`, GY-976), otherwise the kind's own name. */
+export const launchProgram = (kind: string) => nonInteractiveLaunch[kind]?.program ?? kind;
+/** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
+export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = []) {
   const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
   const own = launchRequestContracts[kind];
   const request = files.request && own ? own(requestReference) : undefined;
   // A registry runtime's request goes where its contract places `{request}`; a built-in one drops the marker.
   const placed = args.map(argument => argument !== requestPlaceholder ? shellWord(argument) : files.request && !own ? requestReference : null).filter((word): word is string => word !== null);
   const binding = role || request || placed.includes(requestReference) ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
-  const runtime = [...prefix.map(shellWord), kind, ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  const runtime = [...prefix.map(shellWord), ...wrap.map(shellWord), launchProgram(kind), ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
   let command = [...binding, runtime].join(' ');
   // The runtime's flags can name long paths (a producer's checkout and the shared Git directory as
   // Codex writable roots), so a line over the bound moves them into `STEM.launch`, beside the other
@@ -161,13 +251,13 @@ export const runtimeScreens: Record<string, RegExp> = {
   claude: /Claude Code|Welcome to Claude|esc to interrupt|bypass permissions on|shift\+tab to cycle|for shortcuts|^\s*[∙✻✶✳✢]/m,
   codex: /\bCodex\b|esc to interrupt/, cursor: /\bCursor\b/, opencode: /\bOpenCode\b/, gemini: /\bGemini\b/,
 };
-export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent';
+export type StartState = 'ready' | 'starting' | 'absent' | 'blocked' | 'consent' | 'exited';
 export interface StartObservation { state: StartState; agent: HerdrAgent | null; detail: string; line: string; prompt?: ConsentPrompt }
 export interface StartBounds { timeoutMs?: number; ceilingMs?: number; pollMs?: number; clock?: () => number; /** The pause between polls; a test's advances a virtual clock, the process's awaits a timer. */ wait?: (ms: number) => void | Promise<void>; /** The states that count as ready; `startedStates` unless the runtime is still to be prompted. */ readyStates?: string[];
   /** Whether a session stopped on a consent prompt the launcher does not answer is held for a human (a worker, whose supervisor bounds the hold) rather than refused. */ holdConsent?: boolean;
   /** Where the start's duration is logged (GY-413); standard error unless a caller collects it. */ log?: (line: string) => void }
 export class SessionStartError extends Error {
-  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
+  constructor(readonly startCase: 'never started' | 'still starting' | 'blocked' | 'awaiting consent' | 'exited', readonly pane: string, readonly screen: string, readonly waitedMs: number, message: string) { super(message); }
 }
 /**
  * How many times the launcher answers one allow-listed prompt before it treats the prompt as one it
@@ -186,6 +276,36 @@ export function paneLastLine(text: string | null, limit = paneLineLimit) {
 }
 /** Whether the pane's last line is the launch command itself — typed, or still being typed — and not yet answered: it opens with the stem binding and names the runtime. */
 export const commandEchoing = (line: string, command: string) => !!line && (line.includes(command.slice(0, 24)) || (line.includes(`${launchVariable}=`) && line.includes(` ${command.replace(/^GY=\S+; /, '').split(' ')[0]}`)));
+/** How many of the runtime's last printed lines an exit at start quotes. */
+export const exitedLineLimit = 5;
+/**
+ * What the runtime printed after the launch command, when the pane's screen shows that command
+ * echoed with output below it (GY-976): the lines below its last echo, less the shell's new prompt
+ * (the echo line's own text before the command), bounded to the last `exitedLineLimit`. Null when
+ * the command is not on screen or nothing follows it yet. Output below the command proves the
+ * runtime ran only together with the shell back in the pane's foreground (shellInForeground).
+ */
+export function outputAfterCommand(screen: string | null, command: string) {
+  const lines = (screen ?? '').split('\n').map(entry => entry.replace(/\s+/g, ' ').trim());
+  const echoed = lines.findLastIndex(line => commandEchoing(line, command));
+  if (echoed < 0) return null;
+  const echo = lines[echoed], start = [command.slice(0, 24), `${launchVariable}=`].map(marker => echo.indexOf(marker)).filter(index => index >= 0);
+  const prompt = echo.slice(0, Math.min(...start)).trim();
+  const after = lines.slice(echoed + 1).filter(Boolean);
+  let prompted = false;
+  while (prompt && after.length && after.at(-1) === prompt) { after.pop(); prompted = true; }
+  // A two-line prompt draws its first line again above the new prompt line.
+  if (prompted && echoed > 0 && lines[echoed - 1] && after.at(-1) === lines[echoed - 1]) after.pop();
+  return after.length ? after.slice(-exitedLineLimit).map(line => line.length > paneLineLimit ? `${line.slice(0, paneLineLimit)}…` : line) : null;
+}
+/** Whether the pane's own shell holds its terminal's foreground, as `herdr pane process-info` reports it: nothing the launch typed is still running. False when Herdr cannot say. */
+export async function shellInForeground(pane: string, run?: ChildRun) {
+  try {
+    const raw = await herdrJson(['pane', 'process-info', '--pane', pane], run);
+    const info = raw?.process_info ?? raw;
+    return Number.isSafeInteger(info?.shell_pid) && info.shell_pid > 0 && info.foreground_process_group_id === info.shell_pid;
+  } catch { return false; }
+}
 export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates): Promise<StartObservation> {
   let agent: HerdrAgent | null = null;
   try { const raw = await herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
@@ -194,6 +314,11 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // started one is, and has not read its request (GY-130).
   if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
+  // A runtime that printed below its command and handed the terminal back to the shell has exited
+  // before it was ready — Cursor's IDE launcher saying "No Cursor IDE installation found", a
+  // command not found — and nothing will start in that pane however long the bound (GY-976).
+  const printed = outputAfterCommand(screen, command);
+  if (printed && await shellInForeground(pane, run)) return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
   const prompt = detectConsentPrompt(screen);
   if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
   // A runtime stopped on its own settings warning has not started either, whatever Herdr reports,
@@ -247,6 +372,7 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
       if (bounds.holdConsent) return { ...observed, waitedMs, extended, consent, awaiting: { prompt: prompt.text, kind: prompt.kind, why } };
       throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime is awaiting consent in pane ${pane} on a ${prompt.kind} prompt, and ${why}: "${prompt.text}"`);
     }
+    if (observed.state === 'exited') throw new SessionStartError('exited', pane, observed.line, waitedMs, `the ${kind} runtime exited back to the shell in pane ${pane} before it was ready; it last printed: "${observed.line}"`);
     const quoted = observed.line ? `; the pane last showed: "${observed.line}"` : '; the pane showed nothing';
     if (observed.state === 'blocked') throw new SessionStartError('blocked', pane, observed.line, waitedMs, `the ${kind} runtime is blocked before it is ready in pane ${pane} (${observed.detail})${quoted}`);
     if (waitedMs >= timeoutMs && observed.state !== 'starting') throw new SessionStartError('never started', pane, observed.line, waitedMs, `the ${kind} runtime never started within ${seconds(timeoutMs)} in pane ${pane} (${observed.detail})${quoted}`);
@@ -269,6 +395,10 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
  * the runtime says about its arguments (GY-101).
  */
 export interface SessionStart extends PromptDelivery, StartBounds { directory: string; role?: string | null; prefix?: string[]; confirm?: 'inline' | 'follow'; retry?: string; contract?: RegisteredLaunch | null;
+  /** Opts this launch out of the coordinator confinement (GY-888): only the master session, which runs the loop's own commands from the coordinator root, does. */
+  confinement?: false;
+  /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
+  coordinatorRoot?: string;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
@@ -282,12 +412,16 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // A runtime whose trust prompt no flag suppresses has its working directory recorded as trusted
   // first, or the launch is refused naming it (GY-184): nothing is typed into a session that would wait.
   const trust = await nonInteractiveLaunch[kind]?.trust?.(options.cwd ?? options.directory, options.environment ?? {}, args);
+  // The coordinator checkout is unwritable for this session at the OS level (GY-888), or the
+  // launch is refused with the reason named — never started unconfined. A failure here is a
+  // launch failure like any other: the caller releases the claim and closes what it created.
+  const confinement = options.confinement === false ? null : await sessionConfinement(kind, args, options, options.coordinatorRoot);
   // Every session carries the autonomy contract: in its role file when the runtime loads one,
   // otherwise at the start of its first request (GY-184).
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
   text = carried.request;
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
-  const command = launchCommand(kind, args, files, options.prefix);
+  const command = launchCommand(kind, args, files, options.prefix, confinement?.wrapper ?? []);
   await herdrRun(['pane', 'run', pane, command], run);
   options.onRun?.();
   const log = options.log ?? (line => process.stderr.write(`${line}\n`));
@@ -313,6 +447,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // The request is already the runtime's own first argument, so nothing waits to be pasted: a
   // session held on a consent dialog reads it once the dialog is answered.
   return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
+    confinement,
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 

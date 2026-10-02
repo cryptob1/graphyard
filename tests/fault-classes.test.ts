@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -21,6 +20,7 @@ import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-173: recurring faults were fixed one instance at a time, and noticing that several symptoms
 // share a cause was a coordinator's memory. Every fault the loop records now carries a class from
@@ -67,7 +67,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless']],
-    ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker']],
+    ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
   for (const [source, kinds] of sources) for (const kind of kinds) {
     assert.ok(isFaultKind(kind), `${source}: ${kind} is in the catalogue`);
@@ -96,6 +96,15 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   ]);
   assert.deepEqual(worded.map(entry => entry.faultClass), ['scope', 'review-convergence', 'observation', 'stalled-gate', 'stalled-gate', 'unclassified']);
   assert.equal(worded[4].kind, 'actorless');
+  // GY-729: GY-185 reworded the stalled-action line and the signature still named the old wording, so
+  // every stalled action since read as unclassified. These are the three recorded instances verbatim.
+  const stalledLines = classifyAttention([
+    { subject: 'GY-646', text: "GY-646's request-review action is stalled, retried only on a widening backoff: 3 attempts in a row failed for one unchanged reason — GY-646 GitHub observation is missing or older than two minutes — and it has been open 12m over 4 attempt(s); next attempt at 2026-09-26T16:04:33.888Z. Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-446', text: "GY-446's resync action is stalled, retried only on a widening backoff: 4 attempts in a row failed for one unchanged reason — The operation was aborted due to timeout — and it has been open 29m over 4 attempt(s). Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-551', text: "GY-551's resync action is stalled, retried only on a widening backoff: 4 attempts in a row failed for one unchanged reason — The operation was aborted due to timeout — and it has been open 29m over 4 attempt(s); next attempt at 2026-09-26T16:58:11.374Z. Nothing changes by attempting it again while that condition stands" },
+    { subject: 'GY-131', text: "GY-131's request-review action is stalled, not retrying: 3 attempts in a row failed for one unchanged reason — reviewer busy" },
+  ]);
+  assert.deepEqual(stalledLines.map(entry => [entry.kind, entry.faultClass]), Array(4).fill(['stalled-action', 'stalled-gate']), 'a stalled action is classified in its current wording and its pre-GY-185 one');
   // Escalations on an item, one class per trigger.
   const escalated = item('GY-7', { escalations: escalationTriggers.map(trigger => ({ trigger, reason: `${trigger} raised`, actor: 'graphyard', at: iso(0) })) } as Partial<Work>);
   assert.deepEqual(workFaults(escalated, clock).map(entry => entry.faultClass), ['session-liveness', 'proof', 'review-convergence', 'scope']);
@@ -260,7 +269,7 @@ test('unit:recurring-class-item — a class past the threshold files one item as
 });
 
 test('unit:recurring-class-item — the loop files through the master operator-agent identity', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-fault-root-')), secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const root = await temporaryDirectory('fault-root'), secrets = await temporaryDirectory('fault-secrets');
   try {
     execFileSync('git', ['init', '-q', root]);
     const token = join(secrets, 'operator.token');
@@ -517,7 +526,7 @@ test('unit:recurring-class-item — a failing run ends when its action is retire
 });
 
 test('unit:recurring-class-item — the loop reads status-level faults with coordinator visibility, so held jobs and production recur', async () => {
-  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const secrets = await temporaryDirectory('fault-secrets');
   try {
     const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
     await writeFile(coordinatorToken, 'coordinator-token-'.padEnd(48, 'c'), { mode: 0o600 });
@@ -632,7 +641,7 @@ test('unit:recurring-class-item — distinct faults of one kind on one subject a
 });
 
 test('unit:recurring-class-item — the loop reads the attention master status adds with the coordinator credential, so intervention patterns recur', async () => {
-  const secrets = await mkdtemp(join(tmpdir(), 'graphyard-fault-secrets-'));
+  const secrets = await temporaryDirectory('fault-secrets');
   try {
     const coordinatorToken = join(secrets, 'coordinator.token'), operatorToken = join(secrets, 'operator.token');
     const coordinator = 'coordinator-token-'.padEnd(48, 'c'), operator = 'operator-token-'.padEnd(48, 'o');
@@ -652,7 +661,7 @@ test('unit:recurring-class-item — the loop reads the attention master status a
     }) as typeof fetch;
     const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' }, fetcher };
     const source = { ...config(), credentialFile: coordinatorToken, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operatorToken } } as MasterConfig;
-    const effects = daemonEffects(await mkdtemp(join(secrets, 'root-')), source, deps);
+    const effects = daemonEffects(await temporaryDirectory('root', secrets), source, deps);
     const { items: reported } = await effects.reportedAttention!([], { github: true } as any, { agents: [], approvals: [], loop: {} as any, now: iso(0) });
     const interventionReads = reads.filter(entry => entry.path.startsWith('interventions'));
     assert.ok(interventionReads.length > 0, `the intervention report is read: ${reads.map(entry => entry.path).join(', ')}`);

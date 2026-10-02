@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,9 +11,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createHash, generateKeyPairSync, randomUUID, verify } from 'node:crypto';
 import { realpath } from 'node:fs/promises';
 import { executionAttestationPayload } from '../src/runner-collector.js';
+import { ancestryRefusal, attestable } from './helpers/attestor-ancestry.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, isConfirmedCoordinationRefusal, revalidateContainment, settleContainment } from '../src/quarantine.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const exec = promisify(execFile);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -96,7 +98,7 @@ test('fresh prelaunch state rejects stale receipt replay, expiry, workspace and 
 });
 
 test('stale quarantine replay never launches or settles against another owner', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-stale-replay-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('stale-replay'), marker = join(cwd, 'launched');
   const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
   let settlements = 0;
   try {
@@ -110,7 +112,7 @@ test('stale quarantine replay never launches or settles against another owner', 
 });
 
 test('authorized prelaunch mismatch settles once without launching', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-owned-mismatch-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('owned-mismatch'), marker = join(cwd, 'launched');
   const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
   let settlements = 0;
   try {
@@ -188,7 +190,7 @@ test('containment settlement does not retry confirmed refusal and fails closed o
 });
 
 test('containment settlement bounds persistent ambiguity after one child launch without capability leakage', async () => {
-  const credentials = containmentCredentials(); const cwd = await mkdtemp(join(tmpdir(), 'graphyard-settlement-')); const launches = join(cwd, 'launches'); let attempts = 0;
+  const credentials = containmentCredentials(); const cwd = await temporaryDirectory('settlement'); const launches = join(cwd, 'launches'); let attempts = 0;
   const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
   const child = `const fs=require('node:fs'),crypto=require('node:crypto');const hash=${JSON.stringify(credentials.settlementHash)};if(Object.values(process.env).some(value=>crypto.createHash('sha256').update(value??'').digest('hex')===hash))process.exit(91);fs.appendFileSync(${JSON.stringify(launches)},'launched\\n')`;
   const containment = { command: process.execPath, args: ['-e', child], signal: () => {}, empty: () => true };
@@ -211,7 +213,7 @@ test('containment settlement bounds persistent ambiguity after one child launch 
 test('a prelaunch signal reconciles and settles a committed quarantine without launching a child', async () => {
   const credentials = containmentCredentials();
   const expected = { epoch: 9, settlementHash: credentials.settlementHash, exclusiveResources: ['staging'], requestId: credentials.requestId };
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-prelaunch-signal-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('prelaunch-signal'), marker = join(cwd, 'launched');
   const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
   const establishKeys: string[] = [], settleKeys: string[] = []; const settleBodies: unknown[] = [];
   let establishCalls = 0, settleCalls = 0;
@@ -254,7 +256,7 @@ test('a prelaunch signal reconciles and settles a committed quarantine without l
 
 test('a prelaunch signal fails closed on persistent establishment ambiguity and cleans up handlers', async () => {
   const credentials = containmentCredentials(); const expected = { epoch: 6, settlementHash: credentials.settlementHash, exclusiveResources: [], requestId: credentials.requestId };
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-prelaunch-ambiguous-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('prelaunch-ambiguous'), marker = join(cwd, 'launched');
   const baselineInt = process.listenerCount('SIGINT'), baselineTerm = process.listenerCount('SIGTERM');
   let attempts = 0, settlements = 0;
   const containment = { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], signal: () => {}, empty: () => true };
@@ -282,7 +284,7 @@ test('foreground establishment refusal removes prelaunch signal handlers without
 });
 
 test('master-only commands ignore an unrelated unavailable worker token file', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-master-lazy-token-'));
+  const cwd = await temporaryDirectory('master-lazy-token');
   try {
     await exec('git', ['init', '-q'], { cwd });
     await mkdir(join(cwd, '.graphyard')); await writeFile(join(cwd, '.graphyard/connection.json'), '{broken', { mode: 0o644 });
@@ -292,7 +294,7 @@ test('master-only commands ignore an unrelated unavailable worker token file', a
 });
 
 test('github-setup --update-permissions is a migration command that needs no deployment URL and reports what is missing locally', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-permissions-'));
+  const cwd = await temporaryDirectory('permissions');
   try {
     await exec('git', ['init', '-q'], { cwd }); await exec('git', ['remote', 'add', 'origin', 'git@github.com:owner/repo.git'], { cwd });
     const env = { ...process.env, GRAPHYARD_TOKEN: undefined, GRAPHYARD_TOKEN_FILE: undefined, GRAPHYARD_URL: undefined };
@@ -305,7 +307,7 @@ test('github-setup --update-permissions is a migration command that needs no dep
 });
 
 test('installed CLI resolves its runtime from another repository and includes submitted rework in next using the work snapshot clock', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard cli '));
+  const cwd = await temporaryDirectory('cli ');
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({now:'2026-01-01T00:01:00Z',work:[{ id: 'rework', stage: 'build', ready: true, reworkRequested: true, submission: { pr: 1 }, dependencies: [], priority: 1 },{id:'active',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:02:00Z'}},{id:'expired',stage:'build',ready:true,dependencies:[],priority:1,lease:{expiresAt:'2026-01-01T00:00:00Z'}},{id:'quarantined',key:'GY-Q',stage:'build',ready:true,dependencies:[],priority:1,exclusiveResources:['staging'],lease:{expiresAt:'2026-01-01T00:00:00Z'},containmentQuarantine:{epoch:1}},{id:'shared',stage:'ready',ready:true,dependencies:[],priority:1,exclusiveResources:['staging']},{id:'unrelated',stage:'ready',ready:true,dependencies:[],priority:1,exclusiveResources:['other']}]})); });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   try {
@@ -316,7 +318,7 @@ test('installed CLI resolves its runtime from another repository and includes su
 });
 
 test('CLI preserves admin ready and sends the current revision and audit reason for scoped mutations', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-operator-cli-'));
+  const cwd = await temporaryDirectory('operator-cli');
   const requests: { url: string; body: any }[] = [];
   const work = { id: 'task-id', key: 'GY-7', revision: 12 };
   const http = createServer(async (req, res) => {
@@ -340,7 +342,7 @@ test('CLI preserves admin ready and sends the current revision and audit reason 
 });
 
 test('watch refuses the wrong workspace and uses a fresh heartbeat key despite command retry configuration', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-watch-'));
+  const cwd = await temporaryDirectory('watch');
   let registeredPath = tmpdir(), role = 'worker'; const keys: string[] = [];
   const http = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -392,7 +394,7 @@ test('Muse remains inside the common supervisor and is terminated on lease loss 
 });
 
 test('supervisor kills surviving descendants even after their group leader exits successfully', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-descendants-')), output = join(cwd, 'ticks');
+  const cwd = await temporaryDirectory('descendants'), output = join(cwd, 'ticks');
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); process.send('ready'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
   const leader = `const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore','ignore','ignore','ipc']}); c.on('message',()=>process.exit(0))`;
   try {
@@ -403,7 +405,7 @@ test('supervisor kills surviving descendants even after their group leader exits
 });
 
 test('foreground Herdr containment kills a descendant forked after SIGTERM and reparented', { skip: !hasSystemdUserScope }, async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-foreground-descendants-')), output = join(cwd, 'ticks');
+  const cwd = await temporaryDirectory('foreground-descendants'), output = join(cwd, 'ticks');
   const descendant = `const fs=require('node:fs'); process.on('SIGTERM',()=>{}); fs.appendFileSync(${JSON.stringify(output)},'.'); setInterval(()=>fs.appendFileSync(${JSON.stringify(output)},'.'),10)`;
   const leader = `process.on('SIGTERM',()=>{require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});process.exit(0)});setInterval(()=>{},20)`;
   try {
@@ -588,7 +590,7 @@ test('foreground containment refuses to launch before a durable quarantine exist
 });
 
 test('macOS foreground Herdr supervision refuses before launch without durable containment', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-darwin-refusal-')), marker = join(cwd, 'launched');
+  const cwd = await temporaryDirectory('darwin-refusal'), marker = join(cwd, 'launched');
   try {
     await assert.rejects(supervise(process.execPath, ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'yes')`], 1, async () => renewal(), { detached: false, platform: 'darwin' }), /not supported on darwin/);
     await assert.rejects(stat(marker), { code: 'ENOENT' });
@@ -596,7 +598,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
 });
 
  test('handoff pairs ownership with its work observation rather than a later status clock', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-handoff-'));const requests:string[]=[];
+  const cwd=await temporaryDirectory('handoff');const requests:string[]=[];
   const http=createServer((req,res)=>{requests.push(req.url!);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url==='/api/status'?{actor:{id:'worker-a',role:'worker'},now:'2026-01-01T00:02:00Z'}:{now:'2026-01-01T00:00:00Z',work:[{id:'task',key:'GY-1',lease:{owner:'worker-a',epoch:7,expiresAt:'2026-01-01T00:01:00Z'},workspaces:[{epoch:7,host:'machine-a',path:cwd}]}]}))});
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
   try{const result=await exec(process.execPath,[launcher,'handoff','GY-1'],{cwd,env:{...process.env,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`}});assert.match(JSON.parse(result.stdout).commands.join(' '),/watch/);assert.deepEqual(requests.sort(),['/api/status','/api/work-snapshot']);}
@@ -604,7 +606,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
  });
 
  test('worktree verifies the checkout before reserving a workspace or creating a branch', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-repository-fence-'));let reservations=0;
+  const cwd=await temporaryDirectory('repository-fence');let reservations=0;
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
     if(req.url==='/api/status')res.end(JSON.stringify({repository:'OWNER/project',actor:{id:'worker-a',role:'worker'}}));
     else if(req.method==='POST'){reservations++;res.end('{}');}
@@ -627,7 +629,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
  });
 
 test('rework worktree reopens the exact observed PR branch while preserving its prior checkout', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-rework-'));let reservations=0;let candidate='';
+  const cwd=await temporaryDirectory('rework');let reservations=0;let candidate='';
   const branch='graphyard/gy-1-1';
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
     if(req.url==='/api/status')res.end(JSON.stringify({repository:'owner/project',actor:{id:'worker-a',role:'worker'}}));
@@ -657,7 +659,7 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
 });
 
  test('handoff uses the active CLI or explicit override instead of a stale saved launcher', async () => {
-  const cwd=await mkdtemp(join(tmpdir(),'graphyard-active-cli-'));
+  const cwd=await temporaryDirectory('active-cli');
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url==='/api/status'?{actor:{id:'worker-a',role:'worker'}}:{now:'2026-01-01T00:00:00Z',work:[{id:'task',key:'GY-1',lease:{owner:'worker-a',epoch:1,expiresAt:'2026-01-01T00:01:00Z'},workspaces:[{epoch:1,host:'machine-a',path:cwd}]}]}));});
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${(http.address() as any).port}`;
   const env:NodeJS.ProcessEnv={...process.env,GRAPHYARD_URL:url,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a'};delete env.GRAPHYARD_CLI;
@@ -673,7 +675,7 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
  });
 
 test('the packaged runner path is usable from the CLI and refuses evidence-producer credentials', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-runner-cli-'));
+  const cwd = await temporaryDirectory('runner-cli');
   let role = 'producer';
   let collectionAuthority: unknown;
   const posts: string[] = [];
@@ -767,8 +769,25 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('the runner holds authority while the host attestor executes and signs the attempt', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-supervision-'));
+/**
+ * One `runner supervise` over a pipe. The attestor reads its supervision request from stdin,
+ * so the two lines have to be written to a live pipe and the stream closed — `execFile` has
+ * no `input` option, and an unwritten pipe would leave a command that gets as far as reading
+ * waiting forever.
+ */
+const superviseOnce = (cwd: string, settings: NodeJS.ProcessEnv, request: string) => new Promise<string>((settled, refused) => {
+  const child = spawn(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings, stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '', diagnostics = '';
+  child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { out += chunk; });
+  child.stderr.on('data', chunk => { diagnostics += chunk; });
+  child.on('error', refused);
+  child.on('close', code => code === 0 ? settled(out) : refused(new Error(diagnostics || `supervise exited ${code}`)));
+  child.stdin.end(`${request}\n{"proceed":true}\n`);
+});
+
+test('the runner holds authority while the host attestor executes and signs the attempt', async t => {
+  const cwd = await temporaryDirectory('supervision');
   const posts: string[] = [];
   const requestId = randomUUID(), attemptId = randomUUID();
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -831,6 +850,14 @@ test('the runner holds authority while the host attestor executes and signs the 
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
       oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser,
       supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    // Where a worker sandbox stats the directories above the fixture as another account, the
+    // attestor refuses it at preflight: asserted and noted, with nothing acknowledged (GY-966).
+    const sandboxed = JSON.stringify({ plan: { grant: authority(), imageRepository: 'example/graphyard-runner', oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser } });
+    if (!await attestable(t, oracle, () => superviseOnce(cwd, attestorEnv, sandboxed))) {
+      assert.deepEqual(authorityReads, ['dispatched'], 'the refusal precedes the execution re-read');
+      assert.deepEqual(posts, [], 'nothing was dispatched or acknowledged');
+      return;
+    }
     const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
     // Acknowledgement sits between the attestor's preflight and its first container.
@@ -854,19 +881,7 @@ test('the runner holds authority while the host attestor executes and signs the 
     const attempt2Grant = attempted.record.grant;
     const supervision = JSON.stringify({ plan: { grant: attempt2Grant, imageRepository: 'example/graphyard-runner',
       oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser } });
-    // The attestor reads its supervision request from stdin, so the two lines have to be
-    // written to a live pipe and the stream closed — `execFile` has no `input` option, and
-    // an unwritten pipe would leave a command that gets as far as reading waiting forever.
-    const supervise = (settings: NodeJS.ProcessEnv, request = supervision) => new Promise<string>((settled, refused) => {
-      const child = spawn(process.execPath, [launcher, 'runner', 'supervise'], { cwd, env: settings as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'] });
-      let out = '', diagnostics = '';
-      child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
-      child.stdout.on('data', chunk => { out += chunk; });
-      child.stderr.on('data', chunk => { diagnostics += chunk; });
-      child.on('error', refused);
-      child.on('close', code => code === 0 ? settled(out) : refused(new Error(diagnostics || `supervise exited ${code}`)));
-      child.stdin.end(`${request}\n{"proceed":true}\n`);
-    });
+    const supervise = (settings: NodeJS.ProcessEnv, request = supervision) => superviseOnce(cwd, settings, request);
     await assert.rejects(supervise(env), /GRAPHYARD_ATTESTOR_KEY/);
 
     // `proceed: true` on the pipe is a sequencing signal, not authority. Whatever the
@@ -892,8 +907,8 @@ test('the runner holds authority while the host attestor executes and signs the 
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('the runner retries a lost acknowledgement response idempotently and starts nothing before the replay confirms it', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-ack-retry-'));
+test('the runner retries a lost acknowledgement response idempotently and starts nothing before the replay confirms it', async t => {
+  const cwd = await temporaryDirectory('ack-retry');
   const requestId = randomUUID(), attemptId = randomUUID();
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   const attestationPublicKey = publicKey.export({ type: 'spki', format: 'pem' }).toString();
@@ -961,6 +976,14 @@ test('the runner retries a lost acknowledgement response idempotently and starts
     await writeFile(plan, JSON.stringify({ registration: { id: 'preview-runner', revision: 1 }, imageRepository: 'example/graphyard-runner',
       oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${containerUid}:${process.getgid!()}`,
       supervisor: { command: process.execPath, args: [launcher, 'runner', 'supervise'] } }));
+    const grant = { requestId, attemptId, epoch: 1, runner: { id: 'preview-runner', revision: 1 }, executionHost: 'unix:///var/run/docker.sock', attestationPublicKey,
+      executionNetwork: 'gy-isolated', bundleDigest, runnerImageDigest: `sha256:${'b'.repeat(64)}`, targetUrl: 'https://preview.example.test/', deadline, testAccountDigest: null };
+    const sandboxed = JSON.stringify({ plan: { grant, imageRepository: 'example/graphyard-runner', oraclePath: oracle, outputPath: output, timeoutMs: 60_000, runAsUser: `${containerUid}:${process.getgid!()}` } });
+    // A worker sandbox's refusal at preflight is asserted and noted instead (GY-966).
+    if (!await attestable(t, oracle, () => superviseOnce(cwd, attestorEnv, sandboxed))) {
+      assert.deepEqual(events, ['authority:dispatched'], 'nothing is acknowledged for a refused boundary');
+      return;
+    }
     const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
     // The lost response was retried as the same acknowledgement: one request key, one
@@ -981,8 +1004,8 @@ test('the runner retries a lost acknowledgement response idempotently and starts
 });
 
 test('master run executes the durable loop as a supervised process and master status reports its cursor', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'graphyard-master-run-'));
-  const credentialDirectory = await mkdtemp(join(tmpdir(), 'graphyard-master-run-credentials-'));
+  const root = await temporaryDirectory('master-run');
+  const credentialDirectory = await temporaryDirectory('master-run-credentials');
   const credentialFile = join(credentialDirectory, 'coordinator.token');
   let proofScoped = false, skewed = false;
   const now = () => new Date().toISOString();
@@ -1044,7 +1067,7 @@ test('master run executes the durable loop as a supervised process and master st
 });
 
 test('sync merges origin/BASE without rebasing, passes in-scope and new files, and refuses every out-of-scope file that no longer matches the base', async () => {
-  const cwd = await mkdtemp(join(tmpdir(), 'graphyard-sync-'));
+  const cwd = await temporaryDirectory('sync');
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
     const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] };
     res.end(JSON.stringify(req.url === '/api/status' ? { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }
@@ -1092,4 +1115,61 @@ test('sync merges origin/BASE without rebasing, passes in-scope and new files, a
     await git(clone, 'checkout', '-q', '-b', 'graphyard/gy-9-1');
     await assert.rejects(sync(), /not one/);
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
+});
+
+// GY-966: inside a worker sandbox root's /tmp and /home stat as uid 65534, and the host
+// attestor refuses every fixture beneath them. Every test that needs an attested run guards
+// on that (tests/helpers/attestor-ancestry.ts); the two tests below run those tests under the simulated
+// sandbox (tests/helpers/unprivileged-stat.mjs) and requires them all to pass, each with its
+// environment note, so a new ownership-dependent test without the guard fails here.
+
+const repository = fileURLToPath(new URL('..', import.meta.url));
+const simulated = fileURLToPath(new URL('./helpers/unprivileged-stat.mjs', import.meta.url));
+
+/** Run ARGS as a node test process; SANDBOXED loads the simulated sandbox into it and every child. */
+function nodeTest(args: string[], sandboxed = true) {
+  const options = `${process.env.NODE_OPTIONS ?? ''}${sandboxed ? ` --import ${simulated}` : ''}`.trim();
+  return new Promise<{ code: number | null; out: string }>((settled, refused) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=tap', ...args],
+      { cwd: repository, env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_OPTIONS: options || undefined } as NodeJS.ProcessEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stdout.on('data', chunk => { out += chunk; });
+    child.stderr.on('data', chunk => { out += chunk; });
+    child.on('error', refused);
+    child.on('close', code => settled({ code, out }));
+  });
+}
+const count = (out: string, name: string) => Number(out.match(new RegExp(`^# ${name} (\\d+)$`, 'm'))?.[1] ?? NaN);
+const notes = (out: string) => out.match(/environment note \(GY-966\)/g)?.length ?? 0;
+
+const runnerAttestorTests = '--test-name-pattern=^the runner (holds authority while the host attestor|retries a lost acknowledgement)';
+
+test('unit:attestor-test-sandbox-conditional — the runner-attestor CLI test passes in full where the attestor ownership rule holds and passes with a recorded environment note where the sandbox stats /tmp and /home as uid 65534', async () => {
+  // This host, unsimulated: where the ancestry of a fresh fixture holds, the tests run their
+  // attested path and record no note; where this host is itself a sandbox, they note it.
+  const holds = !await ancestryRefusal(await temporaryDirectory('gy-966'));
+  const host = await nodeTest([runnerAttestorTests, 'tests/cli.test.ts'], false);
+  assert.equal(count(host.out, 'fail'), 0, host.out);
+  assert.equal(host.code, 0, host.out);
+  assert.equal(count(host.out, 'pass'), 2, host.out);
+  assert.equal(notes(host.out), holds ? 0 : 2, host.out);
+
+  // The simulated sandbox: the same tests still pass, each asserting the attestor's ownership
+  // refusal and recording its environment note in place of an attested run.
+  const sandbox = await nodeTest([runnerAttestorTests, 'tests/cli.test.ts']);
+  assert.equal(count(sandbox.out, 'fail'), 0, sandbox.out);
+  assert.equal(sandbox.code, 0, sandbox.out);
+  assert.equal(count(sandbox.out, 'pass'), 2, sandbox.out);
+  assert.equal(notes(sandbox.out), 2, sandbox.out);
+});
+
+test('unit:sandbox-ownership-tests-guarded — every runner-executor and runner-attestor test asserting ownership of the oracle bundle paths passes under a simulated sandbox that stats /tmp and /home as uid 65534, with zero ownership-attributable failures', async () => {
+  const units = await nodeTest(['tests/runner-executor.test.ts', 'tests/runner-attestor.test.ts']);
+  assert.equal(count(units.out, 'fail'), 0, units.out);
+  assert.equal(units.code, 0, units.out);
+  assert.ok(count(units.out, 'pass') > 0, units.out);
+  // Thirteen executor tests, the sticky-ancestor test and all seven attestor tests took the
+  // sandbox branch; none of them passed by running an attestation the host cannot make.
+  assert.equal(notes(units.out), 21, units.out);
 });

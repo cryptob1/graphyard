@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { test, expect, type Page } from '@playwright/test';
 import { NOW, boardApi } from './ui-board';
+import { VERIFY_TIMEOUT_MS } from '../web/pages/login';
 
 // GY-161: every page of the dashboard, at desktop and phone width, over the board fixture
 // (browser-tests/ui-board.ts). The images land in browser-tests/screenshots/after/ and are the
@@ -58,7 +59,7 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
   await expect(page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Settings', exact: true })).toBeVisible();
   const entries = await page.getByRole('navigation', { name: 'Primary' }).getByRole('button').allTextContents();
   if (phone) await page.getByRole('button', { name: 'Menu' }).click();
-  expect(entries).toEqual(['Work', 'Workers', 'Shipped', 'Insights', 'Settings']);
+  expect(entries).toEqual(['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
   for (const entry of entries) {
     await nav(page, entry, phone);
     const tabs = page.getByRole('navigation', { name: 'Pages in this section' });
@@ -116,7 +117,7 @@ for (const width of loginWidths) test(`the sign-in page is captured in every sta
   mkdirSync(loginOut, { recursive: true });
   await page.setViewportSize({ width, height: 800 });
   await page.clock.install({ time: new Date(NOW) });
-  // The status read never answers, so the page stays verifying until the clock passes the 10 second bound.
+  // The status read never answers, so the page stays verifying until the clock passes VERIFY_TIMEOUT_MS.
   await page.route('**/api/**', () => {});
   const shot = async (state: typeof loginStates[number]) => {
     // Nothing overflows sideways, every block of the column shares one left edge, and no text sits beside a button:
@@ -142,7 +143,7 @@ for (const width of loginWidths) test(`the sign-in page is captured in every sta
   await expect(page.getByRole('status')).toHaveText('Verifying connection…');
   await expect(page.getByRole('button', { name: 'Use another token' })).toHaveClass(/text-button/);
   await shot('verifying');
-  await page.clock.fastForward(10_000);
+  await page.clock.fastForward(VERIFY_TIMEOUT_MS);
   await expect(page.getByRole('alert')).toHaveText(/^Can't reach the control plane at 127\.0\.0\.1:4319$/);
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
   await shot('unreachable');

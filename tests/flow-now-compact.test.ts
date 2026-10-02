@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import { stepIds } from '../src/model/pr-steps.js';
-import InsightsFlow, { NowLane, flowNow, nowColumnLimit, nowPerRow, readFlow } from '../web/pages/insights-flow.js';
+import InsightsFlow, { NowLane, flowNow, nowColumnLimit, nowPerRow, nowRowCapacity, readFlow } from '../web/pages/insights-flow.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 
 // GY-705: the Insights Flow panel reads its report apart from the replay rows, and its Now view
@@ -96,4 +96,13 @@ test('unit:flow-now-renders-first — before any read answers, the page draws th
   assert.ok(entries.length > 0);
   for (const { item } of entries) assert.match(page, new RegExp(`class="now-dot[^"]*"[^>]*data-key="${item.key}"`));
   assert.equal([...page.matchAll(/class="flow-median" data-median=""> · median —/g)].length, stepIds.length);
+});
+
+
+test('Now row density fits targets at phone, compact desktop, and labelled desktop widths', () => {
+  assert.equal(nowRowCapacity(343, true), 1);
+  assert.equal(nowRowCapacity(840, true), 4);
+  assert.equal(nowRowCapacity(1232, false), 2);
+  assert.equal(nowRowCapacity(0, true), 1);
+  assert.equal(nowRowCapacity(10000, true), nowColumnLimit);
 });

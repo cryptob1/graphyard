@@ -3,12 +3,13 @@ import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { reconcilePendingActions } from './reconcile.js';
-import { setAsideFollowUpThreads } from './decisions.js';
+import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
+import { masterSessionStep } from './cycle-master.js';
 import { scopeStep, successorStep } from './cycle-scope.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
@@ -150,6 +151,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   /** The item a worker profile holds a live lease on, which a failure while handling that profile is recorded against. */
   const heldBy = (profile: WorkerProfile) => open.find(item => !!item.lease && item.lease.owner === profile.principal && Date.parse(item.lease.expiresAt) > clock) ?? null;
 
+  let exhausted: Promise<ExhaustedProof[]> | undefined;
+  const exhaustedProofs = () => exhausted ??= effects.exhaustedProofs?.().catch(() => []) ?? Promise.resolve([]);
   /**
    * Hand one launch to the launcher and move on (GY-616). `key` is the cursor key the launch records
    * its `started` entry under, so a launch in flight is neither repeated nor reconciled as
@@ -159,14 +162,27 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     try { await body(sink); }
     catch (error) {
       const failed = `isolated:${kind}:${item?.id ?? key}`;
+      const why = `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`;
       try {
         sink.push(await record(state, failed, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
-          detail: `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`,
+          detail: why,
           attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       } catch { /* a cursor that cannot be written is the next cycle's failure */ }
+      // The launch's own `started` entry is what holds the cycle off the same work until it settles,
+      // and a body that threw after recording it, before settling it itself, left it started until a
+      // restart reconciled it (GY-714). It is settled failed here for the same throw, so the cursor
+      // is truthful now and the gates that read the key see a failure they can retry.
+      const started = state.actions[key];
+      if (started?.state === 'started') {
+        try {
+          sink.push(await record(state, key, { kind: started.kind, work: started.work, principal: started.principal, epoch: started.epoch, state: 'failed',
+            detail: `${why} Its own started entry is settled failed for that throw, so no restart is needed to reconcile it`,
+            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist));
+        } catch { /* a cursor that cannot be written is the next cycle's failure */ }
+      }
     }
   });
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle };
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, exhaustedProofs };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
   await timings.step('close', () => closeStep(cycle));
@@ -174,6 +190,11 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
   const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock);
+
+  // 1m. The loop's own master session (GY-898): launch, adopt, supervise, rotate, wake. Isolated
+  //     like every step: a failed launch or wake is its own action, and the cycle goes on.
+  await timings.step('master session', () => masterSessionStep(cycle));
+  await settleLaunches();
 
   spent('close');
 
@@ -264,6 +285,8 @@ export interface Cycle {
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
   /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
   timings: Timings;
+  /** The producer requests the dispatcher stopped attempting (GY-496), read once per cycle for the proof and decision steps. */
+  exhaustedProofs: () => Promise<ExhaustedProof[]>;
   /** The launcher beside the cycle (GY-616): what is in flight, and what it holds. */
   launcher: Launcher;
   /** Hands a launch to the launcher without waiting on it; false when one under `key` is already in flight. */

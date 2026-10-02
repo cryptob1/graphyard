@@ -1,12 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { baseTree, derivedIntent } from '../src/cli/master.js';
 import { derivePlannedFiles, describedAsNew, impliedScopeRequests } from '../src/model/work.js';
 import type { Work } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-140: plannedFiles is derived from the criteria and resolved against the base branch the item
 // will be worked on, instead of being accepted as hand-written. `master create` and
@@ -18,8 +18,8 @@ const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c
 const baseFiles = ['src/supervisor.ts', 'src/executor.ts', 'src/model/escalation-context.ts', 'src/master.ts', 'docs/master-agent.md', 'tests/existing.test.ts'];
 
 before(async () => {
-  root = await mkdtemp(join(tmpdir(), 'gy140-'));
-  dir = await mkdtemp(join(tmpdir(), 'gy140-intent-'));
+  root = await temporaryDirectory('gy140');
+  dir = await temporaryDirectory('gy140-intent');
   git('init', '--quiet', '--initial-branch=main');
   for (const file of baseFiles) { await mkdir(join(root, dirname(file)), { recursive: true }); await writeFile(join(root, file), `// ${file}\n`); }
   git('add', '.'); git('commit', '--quiet', '-m', 'base');
@@ -70,7 +70,8 @@ test('integration:nonexistent-planned-path-refused — master requirements resol
   await derivedIntent(root, { baseBranch: 'main' }, 'requirements', ['GY-9', await intentFile({ plannedFiles: ['src/supervisor.ts', 'src/executor.ts'] }), 'widen'], accepted.deps);
   assert.equal(accepted.sent[0].path, `work/${work.id}/requirements`);
   assert.equal(accepted.sent[0].data.expectedPolicyRevision, 3);
-  assert.deepEqual(accepted.sent[0].data.plannedFiles, ['src/supervisor.ts', 'src/executor.ts']);
+  // The plan holds no test file, so the one AC-1's proof will live in is carried in too (GY-955).
+  assert.deepEqual(accepted.sent[0].data.plannedFiles, ['src/supervisor.ts', 'src/executor.ts', 'tests/x.test.ts']);
 });
 
 test('integration:criterion-named-files-carried — a file a criterion names is carried into plannedFiles with that criterion as its source; a path mentioned only in prose is not', async () => {
@@ -109,4 +110,39 @@ test('unit:implied-scope-requests-reported — master status reports and counts,
     ['GY-130', 'open', [{ path: 'src/supervisor.ts', criterion: 'AC-3' }]],
     ['GY-131', 'approved', [{ path: 'src/supervisor.ts', criterion: 'AC-3' }]],
   ]);
+});
+
+test('unit:planned-files-carry-companions — authoring carries the test file the proofs live in and the docs-budget gate, so items authored like GY-945 and GY-883 report no implied scope request', () => {
+  const tree = new Set(['src/model/policy.ts', 'src/model/gates.ts', 'src/model.ts', 'docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/docs-budget.test.ts', 'tests/auto-rebase.test.ts', 'tests/existing.test.ts']);
+  // GY-945: web-UI prose criteria whose two proofs share `fleet-panel`, and a documentation guide.
+  const fleet = [
+    { id: 'AC-1', text: 'A fleet panel in the web UI lists every registry account.', proofs: ['unit:fleet-panel-renders-registry'] },
+    { id: 'AC-2', text: 'Stale or probe-failed accounts are visually distinguished from healthy ones.', proofs: ['unit:fleet-panel-marks-stale-probe'] },
+  ];
+  const gy945 = derivePlannedFiles({ plannedFiles: ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css'], criteria: fleet }, tree);
+  assert.deepEqual(gy945.added, [{ path: 'tests/fleet-panel.test.ts', criterion: 'AC-1' }, { path: 'tests/docs-budget.test.ts', criterion: 'DOCS' }]);
+  assert.deepEqual(gy945.missing, []);
+  // GY-883: criteria naming src/model/policy.ts, src/model/gates.ts and the new tests/risk-lanes.test.ts.
+  const lanes = [
+    { id: 'AC-1', text: 'src/model/policy.ts assigns every item a lane. A new test file tests/risk-lanes.test.ts that this item creates asserts it.', proofs: ['unit:risk-lane-assigned'] },
+    { id: 'AC-2', text: 'In src/model/gates.ts a low-lane item is landable with its checks green.', proofs: ['unit:lane-sets-required-gates'] },
+  ];
+  const gy883 = derivePlannedFiles({ plannedFiles: ['tests/risk-lanes.test.ts', 'docs/how-graphyard-works.md'], criteria: lanes }, tree);
+  assert.deepEqual(gy883.plannedFiles, ['tests/risk-lanes.test.ts', 'docs/how-graphyard-works.md', 'src/model/policy.ts', 'src/model/gates.ts', 'tests/docs-budget.test.ts'], 'a planned test file holds the proofs; the gate rides beside documentation');
+  // No documentation and no test proof: nothing is carried.
+  assert.deepEqual(derivePlannedFiles({ plannedFiles: ['src/model/gates.ts'], criteria: [{ id: 'AC-1', text: 'Gates change.', proofs: ['manual:x'] }] }, tree).added, []);
+
+  // The measure (GY-140 AC-3): authored as before, the worker asked for the companions and each
+  // ask counted; authored with them carried in, the same worker never needs to ask.
+  const now = '2026-09-29T06:30:57.512Z';
+  const open = (plannedFiles: string[], paths: string[], criteria: typeof fleet) => ({ key: 'GY-945', stage: 'build', criteria, plannedFiles, scopeDecision: null,
+    scopeRequest: paths.length ? { epoch: 1, paths, reason: 'the feature', requestedBy: 'w', at: now } : null }) as unknown as Work;
+  const asked = ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts', 'tests/docs-budget.test.ts'];
+  const before = impliedScopeRequests([open([], asked, fleet)]);
+  assert.equal(before.count, 1);
+  assert.deepEqual(before.items[0].named.map(entry => entry.path), ['web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts', 'tests/docs-budget.test.ts']);
+  const carried = derivePlannedFiles({ plannedFiles: ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css'], criteria: fleet }, tree).plannedFiles;
+  const unplanned = asked.filter(path => !carried.includes(path));
+  assert.deepEqual(unplanned, [], 'every path GY-945 asked for is planned at authoring');
+  assert.equal(impliedScopeRequests([open(carried, unplanned, fleet), open(gy883.plannedFiles, [], lanes)]).count, 0);
 });

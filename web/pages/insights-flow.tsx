@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { classify, shippedThisWeek } from '../groups';
 import { releaseView } from '../../src/model/release';
 import { prSteps, stepIds, stepLabel, type StepId } from '../../src/model/pr-steps';
@@ -7,6 +7,7 @@ import { formatDuration } from '../../src/model/duration';
 import { readStepRows } from '../step-moves';
 import { ShippingPulse, usePulse, type PulseRead } from '../shipping-pulse';
 import FlowAnalytics from '../flow-analytics';
+import OptimisticMerges from '../optimistic-merges';
 import type { Work } from '../../src/model';
 import type { HumanRequestRow } from '../../src/model/human-request';
 import type { Dashboard } from './dashboard';
@@ -111,7 +112,30 @@ export function LandedPerDay({ report }: { report: any }) {
       : <div key={entry.bucket} className="landed-day uncovered" data-bucket={entry.bucket} data-uncovered="true" title={`${entry.bucket.slice(0, 10)} was not read`}>
         <span>—</span><small>{new Date(entry.bucket).toISOString().slice(5, 10)} not read</small>
       </div>)}</div> : <p className="muted">{report ? coverage ? 'No day of this window was read.' : 'Nothing landed in this window.' : 'Reading the recorded deliveries…'}</p>}
+    <MergeQueuePace report={report}/>
   </section>;
+}
+
+/**
+ * The merge queue's pace (GY-498), from the flow report's `mergeQueue`: merges per hour over the
+ * window the merges were read for, and the median time a merged entry waited in the queue. An
+ * unmeasured figure reads Unavailable, never zero; a figure from fewer than `sparseSamples` merges
+ * reads '—' with its sample count, the report's sparse-data convention, so a quiet repository never
+ * shows a rate or median drawn from two samples as if it were the week's.
+ */
+export function MergeQueuePace({ report }: { report: any }) {
+  const pace = report?.mergeQueue;
+  if (!report) return null;
+  const sparse = (n: number | undefined) => typeof n === 'number' && n < sparseSamples;
+  const rateSparse = sparse(pace?.merges) && typeof pace?.mergesPerHour === 'number';
+  const perHour = typeof pace?.mergesPerHour === 'number' ? (rateSparse ? '—' : String(pace.mergesPerHour)) : 'Unavailable';
+  const waitSparse = sparse(pace?.queueWait?.n) && typeof pace?.queueWait?.medianMs === 'number';
+  const wait = typeof pace?.queueWait?.medianMs === 'number' ? (waitSparse ? '—' : minutes(pace.queueWait.medianMs)) : 'Unavailable';
+  const figure = { display: 'flex', flexDirection: 'column', gap: '2px' } as const, value = { margin: 0, fontWeight: 600 } as const;
+  return <dl className="merge-pace" data-flow="merge-queue" aria-label="Merge queue pace" style={{ display: 'flex', gap: '24px', margin: '12px 0 0' }}>
+    <div data-pace="merges-per-hour" style={figure}><dt className="muted">Merges per hour</dt><dd style={value} data-sparse={rateSparse || undefined} title={rateSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{perHour}</dd>{rateSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.merges} merges</small>}</div>
+    <div data-pace="median-queue-wait" style={figure}><dt className="muted">Median queue wait</dt><dd style={value} data-sparse={waitSparse || undefined} title={waitSparse ? `Fewer than ${sparseSamples} merges` : undefined}>{wait}{typeof pace?.queueWait?.n === 'number' && pace.queueWait.n > 0 && !waitSparse && <small> of {pace.queueWait.n} merged</small>}</dd>{waitSparse && <small className="muted step-sparse" data-sparse="sparse">{pace.queueWait.n} merged</small>}</div>
+  </dl>;
 }
 
 /** Fewer samples than this make a step's median sparse (src/flow-analytics.ts `sparseSampleSize`). */
@@ -182,16 +206,19 @@ export function flowNow(work: Dashboard['work'], now: number, status: Dashboard[
 
 /** The dots one Now column shows before its '+N more' control (GY-705); the step header above it carries the column's full count. */
 export const nowColumnLimit = 12;
-/** How many Now dots wrap into one row of a step column. */
+/** Initial density before the lane is measured (also used by server rendering). */
 export const nowPerRow = 2;
-const nowRowHeight = 22;
+const nowRowHeight = 28;
+/** Reserve a 24px target plus spacing, or enough room for a labelled pill. */
+export const nowRowCapacity = (width: number, compact: boolean) =>
+  Math.max(1, Math.min(nowColumnLimit, Math.floor(width / stepIds.length / (compact ? 28 : 88))));
 /** Where the `index`th dot of a step column stands: its wrapped row, and its slot in that row. */
-const nowSlot = (step: StepId, index: number) => `${(stepIds.indexOf(step) + (index % nowPerRow + 0.5) / nowPerRow) / stepIds.length * 100}%`;
+const nowSlot = (step: StepId, index: number, nowPerRow: number) => `${(stepIds.indexOf(step) + (index % nowPerRow + 0.5) / nowPerRow) / stepIds.length * 100}%`;
 const nowTop = (row: number) => `${10 + row * nowRowHeight}px`;
 
 /**
  * The Now view (GY-705): every item in the flow at its true step, its column wrapping the dots
- * `nowPerRow` to a row and showing at most `nowColumnLimit` of them before a '+N more' control
+ * to the measured width and showing at most `nowColumnLimit` of them before a '+N more' control
  * that expands the column (and folds it again). The lane is only as tall as its fullest shown
  * column, and CSS caps it (an expanded column scrolls inside it), so a busy step never makes the
  * panel tall. A dot is keyed by its item, so it moves only when that item changes step.
@@ -203,19 +230,32 @@ export function NowLane({ entries, blocked, expanded, onToggle, onSelect }: {
   onToggle: (step: StepId) => void;
   onSelect: (id: string) => void;
 }) {
+  const laneRef = useRef<HTMLDivElement>(null);
+  const [perRow, setPerRow] = useState(nowPerRow);
+  useEffect(() => {
+    const lane = laneRef.current;
+    if (!lane) return;
+    const compact = window.matchMedia('(max-width:1250px)');
+    const measure = () => setPerRow(nowRowCapacity(lane.clientWidth, compact.matches));
+    const observer = new ResizeObserver(measure);
+    observer.observe(lane);
+    compact.addEventListener('change', measure);
+    measure();
+    return () => { observer.disconnect(); compact.removeEventListener('change', measure); };
+  }, []);
   const columns = stepIds.map(step => {
     const all = entries.filter(entry => entry.steps.current === step);
     const open = expanded.has(step) && all.length > nowColumnLimit;
     return { step, all, open, shown: open ? all : all.slice(0, nowColumnLimit) };
   });
   // A column with more than the limit gives its control a row of its own under its dots.
-  const rows = Math.max(1, ...columns.map(({ all, shown }) => Math.ceil(shown.length / nowPerRow) + (all.length > nowColumnLimit ? 1 : 0)));
-  return <div className="flow-lane now-lane" data-flow="now" style={{ height: `${20 + rows * nowRowHeight}px` }}>
+  const rows = Math.max(1, ...columns.map(({ all, shown }) => Math.ceil(shown.length / perRow) + (all.length > nowColumnLimit ? 1 : 0)));
+  return <div ref={laneRef} className="flow-lane now-lane" data-flow="now" style={{ height: `${20 + rows * nowRowHeight}px` }}>
     {columns.flatMap(({ step, all, open, shown }) => [
       ...shown.map(({ item, steps }, index) => <button type="button" key={item.id} className={`now-dot group-${blocked.has(item.id) ? 'blocked' : 'moving'}`} data-step={steps.current} data-key={item.key}
-        data-row={Math.floor(index / nowPerRow)} style={{ left: nowSlot(step, index), top: nowTop(Math.floor(index / nowPerRow)) }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[step]}: ${steps.label}`} onClick={() => onSelect(item.id)}><span className="mono">{item.key}</span></button>),
+        data-row={Math.floor(index / perRow)} style={{ left: nowSlot(step, index, perRow), top: nowTop(Math.floor(index / perRow)) }} title={`${item.key}: ${steps.label}`} aria-label={`${item.key} at ${stepLabel[step]}: ${steps.label}`} onClick={() => onSelect(item.id)}><span className="mono">{item.key}</span></button>),
       all.length > nowColumnLimit && <button type="button" key={`more-${step}`} className="now-more" data-step={step} data-hidden={open ? 0 : all.length - shown.length} aria-expanded={open}
-        style={{ left: column(step), top: nowTop(Math.ceil(shown.length / nowPerRow)) }} aria-label={open ? `Show fewer items at ${stepLabel[step]}` : `Show all ${all.length} items at ${stepLabel[step]}`}
+        style={{ left: column(step), top: nowTop(Math.ceil(shown.length / perRow)) }} aria-label={open ? `Show fewer items at ${stepLabel[step]}` : `Show all ${all.length} items at ${stepLabel[step]}`}
         onClick={() => onToggle(step)}>{open ? 'Show fewer' : <>+{all.length - shown.length}<span className="now-more-word"> more</span></>}</button>,
     ])}
   </div>;
@@ -393,6 +433,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
       <LandedPerDay report={report}/>
       <WhereTimeGoes report={report}/>
     </div>
+    <OptimisticMerges work={work} enabled={status?.mergeQueue?.optimistic}/>
     <details className="insight-details" onToggle={event => { if (event.currentTarget.open) setDetailed(true); }}><summary>Show details</summary>
       {detailed && <div className="insight-details-body"><InsightsDetails pulse={pulse} repository={status?.repository} api={api} token={token} canAudit={['admin', 'coordinator', 'producer'].includes(status?.actor?.role)}/></div>}
     </details>

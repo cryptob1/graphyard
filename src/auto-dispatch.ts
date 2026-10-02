@@ -12,12 +12,12 @@ import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
-import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
 import { launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
-import { currentEvidence } from './model/evidence.js';
+import { unexercisedFindings } from './model/mechanical-proofs.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
@@ -80,6 +80,8 @@ export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
 export const abandonedRequestSchema = z.object({
   kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40), at: z.string(),
   reason: z.string().max(cursorTextLimit), attempts: z.array(z.string().max(cursorTextLimit)).max(30),
+  /** Producer only (GY-496): the proof group and proofs the request stood for, which the attention and the rework name. */
+  group: z.string().min(1).max(40).optional(), proofs: z.array(z.string().min(1).max(200)).max(50).optional(),
 }).strict();
 export type AbandonedRequest = z.infer<typeof abandonedRequestSchema>;
 const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(capacityReasonLimit) }).strict();
@@ -155,21 +157,8 @@ export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatch
  */
 export const reviewerReminderBoundMs = reviewVerdictReminderMs, verdictIngestGraceMs = 5 * 60_000;
 
-/**
- * The producer's finding that a proof on this head does not exercise its criterion (GY-135): the
- * pass also held with the change removed. Such evidence is the worker's to fix, so the request is
- * never launched again for the head and the loop requests the rework instead (GY-193 AC-3).
- */
-export function unexercisedFindings(work: Work, sha: string | undefined = work.candidate?.sha, proofs?: readonly string[]): { proof: string; finding: string }[] {
-  if (!sha) return [];
-  const findings = new Map<string, string>();
-  for (const entry of work.evidence ?? []) {
-    if (!entry.unexercised || entry.sha !== sha || entry.policyRevision !== work.policyRevision || (proofs && !proofs.includes(entry.proof))) continue;
-    findings.set(entry.proof, entry.unexercised);
-  }
-  // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
-  return [...findings].filter(([proof]) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass')).map(([proof, finding]) => ({ proof, finding }));
-}
+// The producer's finding that a proof does not exercise its criterion is read by the planner too (GY-817).
+export { unexercisedFindings };
 /** A session record as the dispatcher reads it from either ledger. */
 type DispatchedSession = { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string; profile?: string; attempt?: number; acknowledgedAt?: string; verdict?: { state: string } };
 const requestSessions = (records: DispatchedSession[], requestId: string) => records.filter(record => record.requestId === requestId);
@@ -265,8 +254,12 @@ export async function writeDispatchCursor(config: MasterConfig, cursor: Dispatch
   await rename(temporary, file); await chmod(file, 0o600);
 }
 
-/** The reviewer profile that answers automatic requests: the configured one, else the only one. */
-export function selectReviewerProfile(config: MasterConfig): { profile: ReviewerProfile | null; reason: string | null } {
+/**
+ * The reviewer profile that answers automatic requests: the configured one, else the only one.
+ * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
+ */
+export function selectReviewerProfile(input: MasterConfig): { profile: ReviewerProfile | null; reason: string | null } {
+  const config = withReviewerDefaults(input);
   if (!config.reviewer) return { profile: null, reason: 'no reviewer identity is registered; run master reviewer setup or master reviewer bind' };
   if (config.run.reviewerProfile) {
     const profile = config.reviewers.find(item => item.name === config.run.reviewerProfile) ?? null;
@@ -317,7 +310,8 @@ export interface DispatchEffects {
   /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
   agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
-  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[] }>;
+  /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
+  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
@@ -637,7 +631,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
   const herdr = await timings.step('herdr', () => effects.agents());
-  const { reviews, threads } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
+  const { reviews, threads, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
   if (threads?.length) tick.threads = threads;
   const { producers } = await timings.step('reconcile producers', () => effects.reconcileProducers(snapshot.work, herdr));
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
@@ -678,7 +672,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
-  const agents = herdr ?? [];
+  const agents = (herdr ?? []).filter(agent => !released?.some(entry => entry.pane === agent.pane_id && entry.agentName === agent.name));
   const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
   // The sessions this tick has started join the inventory at once, so two requests in one tick
   // never both take a profile's last slot. A launcher that does not report its session name is
@@ -766,7 +760,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // A request whose automatic sessions all ended unanswered is left to the master, once, naming
   // every attempt; the wait says no further attempt follows, and status raises the attention item.
   const abandon = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[], why: string) => {
-    if (!cursor.abandoned[request.id]) cursor.abandoned[request.id] = { kind, work: item.key, sha: request.sha, at: new Date(now()).toISOString(), reason: bounded(why, dispatchFailureReasonLimit), attempts: describeAttempts(records, request.id) };
+    if (!cursor.abandoned[request.id]) cursor.abandoned[request.id] = { kind, work: item.key, sha: request.sha, at: new Date(now()).toISOString(), reason: bounded(why, dispatchFailureReasonLimit), attempts: describeAttempts(records, request.id),
+      ...(kind === 'producer' && request.group ? { group: request.group, proofs: (request.proofs ?? []).slice(0, 50) } : {}) };
     wait(kind, item, request, `${why}; no further automatic attempt, raised as attention for the master`);
   };
   // Whether the request already has its session, waits to relaunch one that ended, or may launch now.
@@ -905,7 +900,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       // The selected profile answers; the other reviewer profiles are its failover when none of
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
-      const candidates = profile ? [profile, ...config.reviewers.filter(other => other.name !== profile.name)] : [];
+      const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
       const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, review.id);
       const busy = () => wait('review', item, review, `every reviewer profile is busy: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
       if (!profile) wait('review', item, review, reason!);
@@ -1234,12 +1229,15 @@ export function dispatchFailureAttention(dispatch: { consecutiveFailures?: numbe
 }
 /**
  * One attention item per request the loop has stopped attempting (GY-193): the request, the head,
- * and every session it launched with how each ended, addressed to the master.
+ * and every session it launched with how each ended, addressed to the master. A producer request's
+ * item also names its proof group, and says the loop itself requests the rework (GY-496).
  */
 export function abandonedAttention(entry: AbandonedRequest & { requestId: string }): AttentionItem {
   const role = entry.kind === 'review' ? 'reviewer' : 'producer';
-  return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
-    ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}` : `Fix what the attempts name (a producer profile or its credential), or return the head to its worker with graphyard master decide ${entry.work} rework REASON`) };
+  const group = entry.kind === 'producer' && entry.group ? ` for the ${entry.group} proof group${entry.proofs?.length ? ` (${entry.proofs.join(', ')})` : ''}` : '';
+  return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId}${group} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
+    ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}`
+      : `The loop requests a rework decision for ${entry.work} on its next cycle, quoting these attempts, and the approver judges it; if the attempts name a launcher fault (a producer profile or its credential), fix that first`) };
 }
 function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
   if (dispatch.error) return [{ subject: 'dispatch', text: `The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: ${dispatch.error}`,

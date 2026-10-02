@@ -35,7 +35,9 @@ function observation(overrides: Partial<Observation> = {}): Observation {
     clockOffset: { min: 0, max: 0 },
     candidate: { sha: head, baseSha: base, pr: 188, branch: 'graphyard/gy-188-1', author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }],
-    reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/planner.ts'], scopeFiles: [], at: at(1),
+    // GY-883: a public API path keeps the item in the high lane, which still demands the manual proofs the planner splits on.
+    reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: ['src/server/routes/planner.ts'],
+    scopeFiles: [{ path: 'src/server/routes/planner.ts', status: 'added' as const, sha: 'f'.repeat(40), baseSha: null, additions: 1, deletions: 0, binary: false }], at: at(1),
     prState: 'open', draft: false, baseTip: base, baseTipContained: true, ...overrides,
   };
 }

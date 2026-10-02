@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { budgetedPage, docsWordBudgetOf, parseRepositoryConfig } from '../src/model/documentation.js';
 
 /**
  * The documentation is a short set an operator or agent can actually read: a word budget for the
@@ -11,15 +12,17 @@ import { fileURLToPath } from 'node:url';
  */
 const root = fileURLToPath(new URL('..', import.meta.url));
 const read = (path: string) => readFileSync(`${root}${path}`, 'utf8');
-const pages = ['README.md', ...readdirSync(`${root}docs`, { recursive: true, withFileTypes: true })
-  .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
-  .map(entry => `${entry.parentPath.slice(root.length)}/${entry.name}`)].sort();
-
-// Graphyard's own documentation budget (this repository's rule, not a product rule for managed
-// projects; GY-574 moves it into graphyard.json). Raised from 12,000 on 2026-09-26: at exactly
-// 12,000 every queued change that documented itself overflowed on its merge-queue tip and was
-// ejected. The per-page budget is unchanged, so no page grows past 1,200 words.
-const TOTAL_BUDGET = 13_000, PAGE_BUDGET = 1_200;
+// Graphyard's own documentation budget is this repository's configuration, not a product rule for
+// managed projects (GY-574): graphyard.json's documentation.wordBudget sets the total, the per-page
+// cap and the pages counted, exactly as the control plane reads any project's. It is 12,000 words,
+// per page 1,200, as the criterion requires. The total is never a merge gate: over it this test
+// warns and passes, and the loop's headroom step and its one trim item restore the room; a page
+// over its cap still fails here.
+const budget = docsWordBudgetOf(parseRepositoryConfig(read('graphyard.json')).documentation)!;
+const { total: TOTAL_BUDGET, perPage: PAGE_BUDGET } = budget;
+const pages = ['README.md', 'AGENTS.md', ...readdirSync(`${root}docs`, { recursive: true, withFileTypes: true })
+  .filter(entry => entry.isFile())
+  .map(entry => `${entry.parentPath.slice(root.length)}/${entry.name}`)].filter(page => budgetedPage(page, budget)).sort();
 /** Words as `wc -w` counts them: maximal runs of non-whitespace, markup and code included. */
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 
@@ -40,17 +43,41 @@ function headings(text: string) {
   return [...text.replace(/```[\s\S]*?```/g, '').matchAll(/^#{1,6}\s+(.+)$/gm)].map(match => normalize(match[1])).filter(heading => !GENERIC_HEADINGS.has(heading));
 }
 
-test('unit:docs-word-budget — README.md plus every docs page total at most 13,000 words and no page exceeds 1,200, counted as wc -w counts them', () => {
+/**
+ * The budget's judgement (GY-574): a page over its per-page cap fails here by name; a total over
+ * the budget never does — the word budget is never a merge gate, so an over-budget total is the
+ * warning that passes, naming the total and the largest pages, and `master status` reports it.
+ */
+const budgetJudgement = (counts: { page: string; words: number }[]) => {
+  const over = counts.filter(entry => entry.words > PAGE_BUDGET).map(entry => `${entry.page} (${entry.words} words)`);
+  const total = counts.reduce((sum, entry) => sum + entry.words, 0);
+  const largest = [...counts].sort((a, b) => b.words - a.words).slice(0, 5).map(entry => `${entry.page} ${entry.words}`).join(', ');
+  return {
+    failed: over.length ? `pages over the ${PAGE_BUDGET}-word page budget: ${over.join(', ')}` : null,
+    warning: total > TOTAL_BUDGET ? `README.md and docs/ total ${total} words; the budget is ${TOTAL_BUDGET} (largest: ${largest})` : null,
+  };
+};
+
+test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget, counted as wc -w counts them; a total over the budget warns and passes', () => {
+  assert.ok(budget, 'graphyard.json configures documentation.wordBudget');
   assert.equal(words('one  two\tthree\n\nfour — `five six` [seven](eight.md)'), 8, 'words are whitespace-separated runs, as wc -w counts them');
   const wc = spawnSync('wc', ['-w', 'README.md'], { cwd: root, encoding: 'utf8' });
   if (wc.status === 0) assert.equal(Number(wc.stdout.trim().split(/\s+/)[0]), words(read('README.md')), 'the count agrees with wc -w');
   const counts = pages.map(page => ({ page, words: words(read(page)) }));
   assert.ok(counts.length > 0 && counts.some(entry => entry.page === 'docs/README.md'), 'the generated index is counted');
-  const over = counts.filter(entry => entry.words > PAGE_BUDGET).map(entry => `${entry.page} (${entry.words} words)`);
-  assert.deepEqual(over, [], `pages over the ${PAGE_BUDGET}-word page budget: ${over.join(', ')}`);
-  const total = counts.reduce((sum, entry) => sum + entry.words, 0);
-  const largest = [...counts].sort((a, b) => b.words - a.words).slice(0, 5).map(entry => `${entry.page} ${entry.words}`).join(', ');
-  assert.ok(total <= TOTAL_BUDGET, `README.md and docs/ total ${total} words; the budget is ${TOTAL_BUDGET} (largest: ${largest})`);
+  const judgement = budgetJudgement(counts);
+  assert.equal(judgement.failed, null, `a page over its budget fails here: ${judgement.failed}`);
+  if (judgement.warning) console.warn(`unit:docs-word-budget: ${judgement.warning}`);
+});
+
+test('unit:docs-budget-reports-not-blocks — an over-budget total passes with the warning recorded; a page over its per-page cap still fails', () => {
+  // Thirteen pages of 1,000 words: 13,000 in total, every page inside its cap.
+  const overTotal = budgetJudgement(Array.from({ length: 13 }, (_, index) => ({ page: `docs/page-${index}.md`, words: 1_000 })));
+  assert.equal(overTotal.failed, null, 'a total over the budget is not a failure: the budget is never a merge gate');
+  assert.match(overTotal.warning!, /^README\.md and docs\/ total 13000 words; the budget is 12000 \(largest: /, 'the warning records the total and is reported');
+  const breach = budgetJudgement([{ page: 'README.md', words: PAGE_BUDGET + 1 }, { page: 'docs/a.md', words: 10 }]);
+  assert.equal(breach.warning, null, 'a set within its total raises no warning');
+  assert.match(breach.failed!, /^pages over the 1200-word page budget: README\.md \(1201 words\)$/, 'a page over its per-page cap still fails');
 });
 
 test('unit:docs-no-duplication — no two pages share a heading or a paragraph of 25+ words, and every internal link and anchor resolves', () => {

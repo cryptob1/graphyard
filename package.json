@@ -10,8 +10,8 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "dev:web": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build",
+    "dev:web": "vite --configLoader runner --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build --configLoader runner",
     "start": "tsx src/server.ts",
     "cli": "tsx src/cli.ts",
     "test": "node --import tsx tests/helpers/run-tests.ts",
