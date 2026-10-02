@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
@@ -35,9 +35,15 @@ export const producerEnvNames = ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY'
 export const liveInstallProofEnv: readonly { proof: RegExp; names: readonly (typeof producerEnvNames)[number][] }[] = [
   { proof: /^manual:install-hetzner-live$/, names: producerEnvNames },
 ];
+const liveInstallRules = (proofs: readonly string[]) => liveInstallProofEnv.filter(rule => proofs.some(proof => rule.proof.test(proof)));
 export function missingProducerEnv(proofs: readonly string[], env: Record<string, string>) {
-  return [...new Set(liveInstallProofEnv.filter(rule => proofs.some(proof => rule.proof.test(proof))).flatMap(rule => rule.names.filter(name => !env[name])))];
+  return [...new Set(liveInstallRules(proofs).flatMap(rule => rule.names.filter(name => !env[name])))];
 }
+/**
+ * Only a launch whose proofs need the .env secrets reads .env (GY-1071): a unit, integration or
+ * other proof gets none of them, so a malformed .env line never refuses a launch that needs no secret.
+ */
+export const needsProducerEnv = (proofs: readonly string[]) => liveInstallRules(proofs).length > 0;
 
 /**
  * One .env value as a shell would read it: a value in a matching pair of quotes is the text
@@ -86,12 +92,17 @@ export async function readProducerEnvironment(root: string): Promise<Record<stri
  * written to a 0600 file in the session's own directory, and the runtime is started under `sh`,
  * which exports that file's assignments and execs the runtime. `herdr tab create --env NAME=VALUE`
  * would put each value in the host's process list while the command runs.
+ *
+ * The directory is the session directory, beside its git checkout (`checkout/`), never inside it,
+ * so no `git add -A` or `git stash -u` in the checkout can stage the file; it is removed with the
+ * session. The file is always created new (O_EXCL), so its first byte is written under 0600: a
+ * file already there is removed first rather than rewritten under whatever mode it had.
  */
 export async function producerSecretsPrefix(directory: string, env: Record<string, string>): Promise<string[]> {
   if (!Object.keys(env).length) return [];
   const file = resolve(directory, 'producer.env');
-  await writeFile(file, Object.entries(env).map(([name, value]) => `${name}='${value.replaceAll("'", "'\\''")}'\n`).join(''), { mode: 0o600 });
-  await chmod(file, 0o600);
+  await rm(file, { force: true });
+  await writeFile(file, Object.entries(env).map(([name, value]) => `${name}='${value.replaceAll("'", "'\\''")}'\n`).join(''), { mode: 0o600, flag: 'wx' });
   return ['sh', '-c', 'set -a; . "$1"; set +a; shift 2; exec "$@"', 'sh', file, '--'];
 }
 
@@ -381,8 +392,10 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
   const credential = await readProducerCredential(root, profile.credentialFile);
   // A live-install proof on a host whose .env was never provisioned is a host-configuration fault,
-  // refused before any account or session is taken (GY-1071, docs/install.md).
-  const producerEnv = await readProducerEnvironment(root);
+  // refused before any account or session is taken (GY-1071, docs/install.md). The dispatcher records
+  // the refusal against the request and retries it on its widening backoff, up to its attempt limit
+  // (auto-dispatch.ts), so it surfaces once per attempt and launches once .env is provisioned.
+  const producerEnv = needsProducerEnv(binding.proofs) ? await readProducerEnvironment(root) : {};
   const missingEnv = missingProducerEnv(binding.proofs, producerEnv);
   if (missingEnv.length) throw new Error(`Graphyard refuses to launch the ${binding.key} ${binding.group} proofs (${binding.proofs.join(', ')}): ${missingEnv.join(' and ')} ${missingEnv.length > 1 ? 'are' : 'is'} not set in ${resolve(root, '.env')} on this coordinator; add ${missingEnv.length > 1 ? 'them' : 'it'} there (docs/install.md) and the request is launched again`);
   // A closed question answers in seconds what a session takes most of an hour to; the session is

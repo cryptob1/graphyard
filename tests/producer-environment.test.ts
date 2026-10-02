@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster } from '../src/master.js';
-import { launchProducer, missingProducerEnv, parseEnvValue, producerSecretsPrefix, readProducerEnvironment, readProducerLedger } from '../src/producer.js';
+import { emptyDispatchCursor, runDispatchTick, dispatchFailureLimit, dispatchRetryMaxMs, dispatchRetryMinMs, type DispatchEffects } from '../src/auto-dispatch.js';
+import { launchProducer, missingProducerEnv, needsProducerEnv, parseEnvValue, producerSecretsPrefix, readProducerEnvironment, readProducerLedger } from '../src/producer.js';
 import { clearRuns } from '../src/runner/registry.js';
 import type { RunOptions, Runner } from '../src/runner/types.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
@@ -64,6 +65,8 @@ test('unit:producer-environment the secrets file is private and exports each val
   const { directory, cleanup } = await scratch();
   try {
     assert.deepEqual(await producerSecretsPrefix(directory, {}), [], 'no secrets, no wrapper');
+    // A file already there, readable by others, is replaced by a new file, never rewritten under its old mode.
+    await writeFile(join(directory, 'producer.env'), 'stale\n', { mode: 0o644 });
     const prefix = await producerSecretsPrefix(directory, { HCLOUD_TOKEN: token, HETZNER_SPEND_CAP_USD_MONTHLY: '25' });
     assert.ok(!prefix.some(word => word.includes(token)), 'the value is on no command line');
     assert.equal((await stat(join(directory, 'producer.env'))).mode & 0o777, 0o600);
@@ -77,6 +80,8 @@ test('unit:producer-environment a live-install proof names each .env value it la
   assert.deepEqual(missingProducerEnv(['manual:install-hetzner-live'], { HCLOUD_TOKEN: 'x' }), ['HETZNER_SPEND_CAP_USD_MONTHLY']);
   assert.deepEqual(missingProducerEnv(['manual:install-hetzner-live'], { HCLOUD_TOKEN: 'x', HETZNER_SPEND_CAP_USD_MONTHLY: '5' }), []);
   assert.deepEqual(missingProducerEnv(['manual:install-railway-live', 'unit:install-plan'], {}), []);
+  assert.equal(needsProducerEnv(['unit:install-plan', 'manual:install-hetzner-live']), true);
+  assert.equal(needsProducerEnv(['manual:install-railway-live', 'unit:install-plan', 'integration:x']), false, '.env is read only for a proof that needs it');
 });
 
 async function installation(pi = false) {
@@ -128,6 +133,22 @@ test('integration:producer-environment a Herdr producer gets the .env secrets fr
     assert.deepEqual(typed.words.slice(0, 6), ['sh', '-c', 'set -a; . "$1"; set +a; shift 2; exec "$@"', 'sh', join(launched.checkout, 'producer.env'), '--']);
     assert.equal(typed.kind, 'codex', 'the runtime is what the wrapper execs');
     assert.equal(await readFile(join(launched.checkout, 'producer.env'), 'utf8'), `HCLOUD_TOKEN='${secret}'\nHETZNER_SPEND_CAP_USD_MONTHLY='25'\n`);
+    // The file is in the session directory, beside the git checkout the producer works in, so nothing
+    // run in that checkout can stage it.
+    assert.ok(relative(join(launched.checkout, 'checkout'), join(launched.checkout, 'producer.env')).startsWith('..'), 'producer.env is outside the git checkout');
+  } finally { await cleanup(); }
+});
+
+test('integration:producer-environment a launch whose proofs need no secret neither reads .env nor gets a secrets file', async () => {
+  const { root, cleanup } = await installation();
+  try {
+    await writeFile(join(root, '.env'), 'HCLOUD_TOKEN="unpaired\nHETZNER_SPEND_CAP_USD_MONTHLY=25\n');
+    const item = work('GY-75', 'manual', ['manual:install-railway-live']), calls: string[][] = [];
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.notEqual(typed.words[0], 'sh', 'no secrets wrapper');
+    assert.ok(!calls.flat().some(word => word.includes('HETZNER_SPEND_CAP_USD_MONTHLY')));
+    await assert.rejects(stat(join(launched.checkout, 'producer.env')), { code: 'ENOENT' });
   } finally { await cleanup(); }
 });
 
@@ -143,10 +164,10 @@ test('integration:producer-environment a live-install launch on a host without i
   } finally { await cleanup(); }
 });
 
-test('integration:producer-environment a headless producer receives the .env secrets in its run environment', async () => {
+test('integration:producer-environment a headless unit producer gets no .env secret, and a malformed .env does not refuse it', async () => {
   const { root, cleanup } = await installation(true);
   try {
-    await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc\nHETZNER_SPEND_CAP_USD_MONTHLY=25\nGITHUB_TOKEN=ghp_never\n');
+    await writeFile(join(root, '.env'), 'HCLOUD_TOKEN="unpaired\nHETZNER_SPEND_CAP_USD_MONTHLY=25\nGITHUB_TOKEN=ghp_never\n');
     const seen: RunOptions<unknown>[] = [];
     const runner: Runner = { name: 'fake', start<T>(_prompt: string, options: RunOptions<T>) {
       seen.push(options as RunOptions<unknown>);
@@ -155,8 +176,46 @@ test('integration:producer-environment a headless producer receives the .env sec
     const item = work('GY-74', 'unit', ['unit:install-plan']);
     const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { runner, filesystem: durable }) as any;
     await launched.settled.catch(() => {});
-    assert.equal(seen[0].env?.HCLOUD_TOKEN, 'abc');
-    assert.equal(seen[0].env?.HETZNER_SPEND_CAP_USD_MONTHLY, '25');
+    assert.equal(seen.length, 1, 'the run started');
+    assert.equal(seen[0].env?.HCLOUD_TOKEN, undefined);
+    assert.equal(seen[0].env?.HETZNER_SPEND_CAP_USD_MONTHLY, undefined);
     assert.equal(seen[0].env?.GITHUB_TOKEN, undefined);
+  } finally { await cleanup(); }
+});
+
+test('integration:producer-environment the dispatcher records a missing-credential refusal once per attempt on its backoff, and launches once .env is provisioned', async () => {
+  const { root, cleanup } = await installation();
+  try {
+    await writeFile(join(root, '.env'), 'HETZNER_SPEND_CAP_USD_MONTHLY=25\n');
+    const config = await loadMasterConfig(root), item = work('GY-73', 'manual', ['manual:install-hetzner-live']), calls: string[][] = [];
+    let clock = Date.parse('2026-10-02T00:00:00Z'), launches = 0;
+    const effects: DispatchEffects = {
+      snapshot: async () => ({ work: [item], now: new Date(clock).toISOString() }), agents: () => [],
+      credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+      reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }), launchReview: async () => {},
+      launchProducer: (work, request, profile, agents, observedAt) => { launches++; return launchProducer(root, work, request, profile, agents, observedAt, { run: herdr(calls), filesystem: durable }); },
+      persist: async () => {},
+    };
+    const cursor = emptyDispatchCursor(config), requestId = item.autoDispatch!.producers[0].id;
+    const first = await runDispatchTick(config, cursor, effects, () => clock);
+    assert.equal(first.refused.length, 1); assert.equal(first.refused[0].attempts, 1);
+    assert.match(first.refused[0].reason, /HCLOUD_TOKEN is not set/);
+    assert.deepEqual(calls, [], 'no tab was created');
+    clock += 1000;
+    const held = await runDispatchTick(config, cursor, effects, () => clock);
+    assert.equal(launches, 1, 'inside the backoff the refusal is not retried');
+    assert.match(held.waiting[0].reason, /launch refused 1 time\(s\): .*HCLOUD_TOKEN is not set.*next attempt at/);
+    // Each later attempt is one more refusal, until the limit stops automatic attempts.
+    while (cursor.failures[requestId].attempts < dispatchFailureLimit) { clock += dispatchRetryMaxMs + 1; await runDispatchTick(config, cursor, effects, () => clock); }
+    assert.equal(launches, dispatchFailureLimit);
+    clock += dispatchRetryMaxMs + 1;
+    const stopped = await runDispatchTick(config, cursor, effects, () => clock);
+    assert.equal(launches, dispatchFailureLimit); assert.match(stopped.waiting[0].reason, /no further automatic attempt/);
+    // Provisioned within the limit, the next attempt launches and clears the failure.
+    cursor.failures[requestId] = { ...cursor.failures[requestId], attempts: 1, nextAt: new Date(clock).toISOString() };
+    await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc\nHETZNER_SPEND_CAP_USD_MONTHLY=25\n');
+    clock += dispatchRetryMinMs;
+    const launched = await runDispatchTick(config, cursor, effects, () => clock);
+    assert.equal(launched.launched.length, 1); assert.equal(cursor.failures[requestId], undefined);
   } finally { await cleanup(); }
 });
