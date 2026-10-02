@@ -10,6 +10,9 @@ import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-s
 import { bindReviewer, launchReview, readReviewLedger, reviewHistory, reviewPrompt, reviewRetryPrompt, reviewRoundCap, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
+import { cappedReview, neededDecision } from '../src/daemon/decisions.js';
+import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
 
 // GY-167, 2026-09-24: every review round re-read the whole change and found new edge cases, and
 // nothing bounded the rounds. From the second review of a pull request the reviewer judges only
@@ -153,3 +156,66 @@ function work(): Work {
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation, blocker: null, gates: [], violations: [] } as unknown as Work;
 }
+
+// GY-1118: past the item's review-round cap only a BLOCKING: finding holds the head, and it escalates.
+const pipeline = (reworkRounds: number) => ({ attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds, interventions: { blocked: 0, requirements: 0 } });
+const blockingWording = 'on its own line starting BLOCKING: in the body of REQUEST_CHANGES';
+
+test('unit:review-rounds-capped — a change request past the cap is read for BLOCKING: lines: one naming none is filed as follow-ups, one naming one escalates, and neither is reworked; the round shows per item', () => {
+  assert.deepEqual(blockingFindings('Looks fine.\nBLOCKING: AC-1 is not met\n- **BLOCKING**: the token is logged in clear\nBLOCKING: none\nNot blocking: naming'), ['AC-1 is not met', 'the token is logged in clear']);
+  assert.deepEqual(blockingFindings('Nothing here is BLOCKING: it is all follow-up material.'), [], 'the word in prose names no finding');
+  assert.deepEqual(followUpFindingsOf('BLOCKING: AC-1 is not met\n\nRename the helper.\n- Add a table test.\n- Trim the comment.'), ['Rename the helper.', '- Add a table test.', '- Trim the comment.']);
+
+  assert.equal(defaultReviewRoundCap, 3);
+  assert.deepEqual([0, 1, 2, 3].map(rounds => reviewRoundStatus({ pipeline: pipeline(rounds) }, 3)), [{ round: 1, cap: 3, capped: false }, { round: 2, cap: 3, capped: false }, { round: 3, cap: 3, capped: false }, { round: 4, cap: 3, capped: true }]);
+  assert.deepEqual(withReviewRounds([{ key: 'GY-64' }, { key: 'GY-65' }], [{ key: 'GY-64', pipeline: pipeline(3) }], 3), [{ key: 'GY-64', reviewRound: { round: 4, cap: 3, capped: true } }, { key: 'GY-65', reviewRound: null }], 'master status shows each item\'s round');
+
+  const config = { autoMerge: true, reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' } };
+  const changed = (rounds: number, body: string, from = reviewer) => {
+    const item = work();
+    item.pipeline = pipeline(rounds);
+    item.observation = { ...item.observation!, reviews: [{ reviewer: from, sha: H, state: 'CHANGES_REQUESTED', id: 4242, submittedAt: '2026-09-24T12:00:00Z', body }] };
+    return item;
+  };
+  // Within the cap a change request is reworked exactly as before, whatever it names.
+  assert.equal(cappedReview(changed(2, 'Rename the helper.'), config), null);
+  assert.equal(neededDecision(changed(2, 'Rename the helper.'), config)?.action, 'rework');
+  // Past it, the reviewer App's request naming no blocking finding is a follow-up filing, never a rework.
+  const followUp = cappedReview(changed(3, 'Rename the helper.\n\n- Add a table test.'), config)!;
+  assert.deepEqual([followUp.kind, followUp.round, followUp.cap, followUp.reviewId, followUp.findings], ['follow-up', 4, 3, 4242, ['Rename the helper.', '- Add a table test.']]);
+  assert.equal(neededDecision(changed(3, 'Rename the helper.'), config), null);
+  // One naming a blocking finding escalates, and is not reworked either.
+  const blocking = cappedReview(changed(3, 'BLOCKING: AC-1 is not met'), config)!;
+  assert.deepEqual([blocking.kind, blocking.blocking], ['escalate', ['AC-1 is not met']]);
+  assert.match(blocking.reason, /GY-64 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding/);
+  assert.equal(neededDecision(changed(3, 'BLOCKING: AC-1 is not met'), config), null);
+  assert.match(cappedEscalation({ key: 'GY-64' }, blocking), /an independent approver decides whether the finding is blocking — graphyard master decide GY-64 rework REASON/);
+  // A request Graphyard cannot withdraw as its reviewer App — a person's — escalates rather than being filed.
+  assert.equal(cappedReview(changed(3, 'Rename the helper.', 'a-person'), config)!.kind, 'escalate');
+  assert.equal(cappedReview(changed(3, 'Rename the helper.'), { ...config, reviewer: undefined })!.kind, 'escalate');
+  // The cap is configuration: at 5, round 4 is ordinary.
+  assert.equal(cappedReview(changed(3, 'Rename the helper.'), { ...config, reviewRoundCap: 5 }), null);
+  assert.equal(neededDecision(changed(3, 'Rename the helper.'), { ...config, reviewRoundCap: 5 })?.action, 'rework');
+
+  // The reviewer is told the form past the cap, from the item's own round and the configured cap.
+  const prompt = (rounds: number, cap = 3) => reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, criteria, { changesRequested: 0 }, undefined, null, reviewRoundStatus({ pipeline: pipeline(rounds) }, cap));
+  assert.ok(prompt(3).includes('This is review round 4 of this item, past its cap of 3 rounds'));
+  assert.ok(prompt(3).includes(capWording) && prompt(3).includes(blockingWording));
+  assert.ok(!prompt(2).includes(blockingWording) && !prompt(3, 4).includes(blockingWording));
+});
+
+test('unit:review-rounds-capped — the reviewer launched for an item past its cap is told to name blocking findings on BLOCKING: lines', async () => {
+  const master = await boundMaster();
+  try {
+    let request = null as string | null;
+    const run = (_command: string, args: string[]) => {
+      if (args[0] === 'pane' && args[1] === 'run') { const typed = expandTypedCommand(args[3]); request = requestOf(typed.kind, typed.args); }
+      return herdrRun(_command, args);
+    };
+    const item = work();
+    item.pipeline = pipeline(3);
+    await launchReview(master.root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint });
+    assert.ok(request!.includes('This is review round 4 of this item, past its cap of 3 rounds'), request!);
+    assert.ok(request!.includes(blockingWording));
+  } finally { await master.cleanup(); }
+});

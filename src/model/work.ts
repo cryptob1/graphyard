@@ -110,7 +110,8 @@ export interface Observation {
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
+  // `body` is a change request's text, bounded (GY-1118): past the review-round cap its `BLOCKING:` lines decide whether it escalates or is filed as follow-ups.
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).

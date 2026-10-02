@@ -40,6 +40,7 @@ import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
 import { coordinationStep } from './coordination-snapshot.js';
+import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget daemon metric, read from here as it always was.
@@ -126,6 +127,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals);
+  // Each item's review round against the configured cap (GY-1118): past it, only a blocking finding holds the head, and it escalates.
+  withReviewRounds(status.work, snapshot.work as Work[], reviewRoundCapOf(master));
   // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
   // inventory (GY-725); a failed read marks the section.
   try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot, 100, { root }); }

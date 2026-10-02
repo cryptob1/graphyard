@@ -328,6 +328,9 @@ export const masterConfigSchema = z.object({
   herdrWorkspace: z.string().trim().min(1).max(200).optional(),
   masterAgentName: sessionNameField,
   autoMerge: z.boolean().default(true),
+  // The review rounds an item takes before only a blocking finding stands against it (GY-1118):
+  // past the cap a change request naming none is filed as follow-ups and one naming one escalates. Default 3 (review-cap.ts).
+  reviewRoundCap: z.number().int().min(1).max(20).optional(),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
   workers: z.array(workerProfileSchema).max(100).default([]),
   reviewer: reviewerIdentitySchema.optional(),
