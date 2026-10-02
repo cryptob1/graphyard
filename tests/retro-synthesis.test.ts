@@ -314,7 +314,9 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
 
   // The boot migration never builds the index (a plain build would hold the ledger's writes); it is
   // built CONCURRENTLY after startup, once, by one replica, and a build left INVALID is rebuilt (follow-up 24).
-  assert.doesNotMatch(events.ddl, /INDEX[^;]*events_retro_id/);
+  // Not even a comment about it: migrationDigests hashes the DDL verbatim, so any text here would
+  // re-run the events DDL (and its trigger rebuild under the table lock) on deploy (follow-up 25).
+  assert.doesNotMatch(events.ddl, /retro/i);
   const holder = await store.pool.connect();
   try {
     await holder.query('SELECT pg_advisory_lock($1)', [advisoryLocks.retroIndex]);

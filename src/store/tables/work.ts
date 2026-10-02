@@ -9,6 +9,10 @@ export const workItems = defineTable({
   id uuid PRIMARY KEY, number bigserial UNIQUE, document jsonb NOT NULL
 );`,
 });
+// The retro artefacts' payload-id index (events_retro_id) is not built in this DDL: a plain build
+// inside the migration's transaction would hold writes to the whole ledger while it scans it, and
+// retro-synthesis.ts builds it CONCURRENTLY once the server has started (GY-1048). This note stays
+// outside the DDL string because migrationDigests hashes the DDL verbatim (store/schema.ts).
 export const events = defineTable({
   name: 'events', orderBy: 'seq', serial: 'seq',
   ddl: `CREATE TABLE IF NOT EXISTS events (
@@ -33,9 +37,6 @@ CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DES
   WHERE kind='delivery.deployment-contained' AND work_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)
   WHERE kind='production.deployment-pending';
--- The retro artefacts' payload-id index (events_retro_id) is not built here: a plain build inside
--- this transaction would hold writes to the whole ledger while it scans it. retro-synthesis.ts
--- builds it CONCURRENTLY once the server has started (GY-1048).
 ${eventWorkFunctions}
 -- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
 ${eventsImmutableDdl}`,
