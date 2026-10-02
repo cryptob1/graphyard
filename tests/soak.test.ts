@@ -497,7 +497,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
   // marker and retries for ever, so Herdr keeps the session `working` and only the screen tells.
   const screens = new Map<string, string>(), heldAccounts = new Map<string, { resetsAt: string | null }>(), approverAccounts: { key: string; account: string }[] = [];
-  const retryReset = new Date(dayStart + 2 * 24 * hour);
+  // The banner names whole seconds: a reset on a fractional one would never read back as itself.
+  const retryReset = new Date(Math.ceil((dayStart + 2 * 24 * hour) / 1000) * 1000);
   const hostWallClock = (instant: Date) => { const pad = (value: number) => String(value).padStart(2, '0'); return `${instant.getFullYear()}-${pad(instant.getMonth() + 1)}-${pad(instant.getDate())} ${pad(instant.getHours())}:${pad(instant.getMinutes())}:${pad(instant.getSeconds())}`; };
   const retryBanner = `┃ Reading src/model/capacity.ts\n\n  ■⬝⬝⬝⬝⬝⬝⬝  Weekly/Monthly Limit Exhausted. Your limit will reset at ${hostWallClock(retryReset)} [retrying in 4s attempt #5]${' '.repeat(96)}… esc interrupt • OpenCode 1.18.32  \n`;
   const accountHeld = (account: string) => { const hold = heldAccounts.get(account); return !!hold && (!hold.resetsAt || Date.parse(hold.resetsAt) > clock.now()); };
@@ -2362,6 +2363,7 @@ test('unit:soak-invariants-hold — sessions Herdr reports working whose runtime
     hours: 6, retrying: { worker, approver },
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([approver]), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
+  console.error('GY973TRACE', items.map(item => item.key).join(' '), JSON.stringify(final.map(item => [item.key, item.stage, item.candidate?.pr])));
   assert.deepEqual(violations, [], 'every system invariant holds across the failovers');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost: the retrying attempt was ended by the loop');
