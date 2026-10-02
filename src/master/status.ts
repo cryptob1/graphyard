@@ -1,5 +1,6 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
-import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchOrder } from '../coordination.js';
+import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchSort } from '../coordination.js';
+import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
@@ -387,12 +388,13 @@ export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work'])
 }
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
- * would be offered (smallest planned scope first within a priority), and the broad scopes that
+ * would be offered (within a priority: starving first, then cold before hot, then smallest planned
+ * scope, by the loop's own comparator over the same hot set and clock), and the broad scopes that
  * make a weak change-scope contract. Nothing is held for planned-file overlap: dispatch is
  * optimistic, and the merge queue and a sync round integrate whichever overlapping item lands second.
  */
 export function dispatchSchedule(work: Work[], now: number) {
-  const ready = work.filter(item => dispatchable(item, now)).sort(dispatchOrder);
+  const ready = dispatchSort(work.filter(item => dispatchable(item, now)), hotFileSet(work, now), now);
   return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles) })),
     highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
 }
