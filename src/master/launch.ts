@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 
@@ -455,7 +455,6 @@ export async function startAgentSession(name: string, kind: string, pane: string
     started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
 }
 
-const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
 /** secretsBusEndpointProblem's answer when the user manager could not judge the endpoint. */
 export const secretsBusUnjudged = 'unjudged' as const;
 export const secretsBusMigration = 'copy deploy/systemd/graphyard-secrets-bus.socket, graphyard-secrets-bus.service and graphyard-secrets-bus-filter.service to ~/.config/systemd/user/, then systemctl --user daemon-reload && systemctl --user disable --now graphyard-secrets-bus.service && systemctl --user enable --now graphyard-secrets-bus.socket';
@@ -495,21 +494,24 @@ export async function secretsBusEndpointProblem(run: ChildRun | undefined, path:
  * proxy — is judged afresh. Null when the confinement binds no endpoint (an unconfined session, a
  * runtime's own sandbox, a session with a credential of its own), the endpoint is held or cannot be
  * judged, or this socket was already judged. A probe that cannot judge the socket — no user manager
- * answers, or its answer is unreadable — is not remembered, so a later launch asks again and still
- * reports an unmigrated endpoint once the user manager answers.
+ * answers, or its answer is unreadable — is not remembered, so a later launch, and any launch that
+ * was awaiting that probe, asks again and still reports an unmigrated endpoint once the user manager
+ * answers.
  */
 export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, Promise<string | null | undefined>> = keyringEndpointVerdicts): Promise<string | null> {
   if (!confinement || !path) return null;
   let endpoint: string, socket: string;
   try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
   if (!confinement.wrapper.includes(endpoint)) return null;
-  const judged = verdicts.get(socket);
-  if (judged) { await judged; return null; }
-  const verdict = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? undefined : problem ? `${problem.text}; migrate: ${problem.next}` : null, () => undefined);
+  // A launch that finds a probe in flight shares it and logs nothing of its own, unless that probe
+  // could not judge the socket: its entry is gone by then, so this launch asks again itself.
+  for (let judged = verdicts.get(socket); judged; judged = verdicts.get(socket)) if (await judged !== undefined) return null;
+  // A probe that could not judge the socket is not its verdict: its entry is dropped before any
+  // launch awaiting it resumes, so the next launch, or one racing this one, asks again.
+  const forget = () => { if (verdicts.get(socket) === verdict) verdicts.delete(socket); return undefined; };
+  const verdict: Promise<string | null | undefined> = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? forget() : problem ? `${problem.text}; migrate: ${problem.next}` : null, forget);
   verdicts.set(socket, verdict);
   const problem = await verdict;
-  // A probe that could not judge the socket is not its verdict: the next launch asks again.
-  if (problem === undefined) { if (verdicts.get(socket) === verdict) verdicts.delete(socket); return null; }
   return problem ? `graphyard: ${name}: ${problem}` : null;
 }
 /** Each keyring endpoint socket's verdict in this process, by `dev:inode:ctime` (keyringEndpointWarning). */

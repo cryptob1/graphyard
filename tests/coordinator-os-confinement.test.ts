@@ -464,6 +464,17 @@ test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is pro
     assert.equal(probes, 3);
     assert.equal(await keyringEndpointWarning('gy-j', bound(), unheld, endpoint, verdicts), null, 'and that judged verdict is kept');
     assert.equal(probes, 3);
+    // A launch racing a probe that turns out unjudged asks again itself (GY-1039 follow-up 9).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const raced = await Promise.all([
+      keyringEndpointWarning('gy-k', bound(), async () => { await new Promise(done => setTimeout(done, 20)); throw new Error('Failed to connect to bus'); }, endpoint, verdicts),
+      keyringEndpointWarning('gy-l', bound(), unheld, endpoint, verdicts),
+    ]);
+    assert.equal(raced[0], null, 'the unjudged probe logs nothing');
+    assert.ok(raced[1] && raced[1].startsWith('graphyard: gy-l: '), 'the launch that awaited it probes again and reports the unmigrated endpoint');
+    assert.equal(probes, 4);
   } finally {
     await new Promise<void>(done => server.close(() => done()));
     rmSync(base, { recursive: true, force: true });
