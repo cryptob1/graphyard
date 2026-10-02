@@ -15,7 +15,7 @@ Leases expire 120 s after last heartbeat (one further lease period after a recor
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies only an idle pane shell (childless, parent `herdr server`) survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes).
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies only an idle pane shell (childless, parent `herdr server`) survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle bounds clock skew via `HEAD`.
 
 ## Submitted implementation needs rework
 
