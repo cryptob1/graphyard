@@ -73,7 +73,7 @@ Every paste goes to the **pane on the attempt's own session handle**, never the 
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; when the loop ends that session it closes the pane in the same step. Research and triage run headless. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host** whose session has ended or whose worktree is gone, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
+Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session has ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
 
 ### The dispatcher's own state
 
