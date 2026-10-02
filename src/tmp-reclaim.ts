@@ -20,8 +20,19 @@ import { lstat, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-/** How old an ownerless directory must be before the pass removes it. */
+/** How old an ownerless directory must be before the pass removes it: the tsx cache's bound, and the default for a caller's own prefixes. */
 export const tmpReclaimMinAgeMs = 6 * 3_600_000;
+/**
+ * The names test runs leave in the host's temporary directory (GY-1074): the helper's own
+ * `graphyard-*` directories and markers, other suites' `gy-*` scratch, `landing-merge-result*` and
+ * `native-*` from GitHub fixture runs, embedded Postgres's `pg-password-*` files (written by
+ * initdb's caller and left behind when that process is killed mid-init) and Playwright's
+ * `playwright_chromiumdev_profile-*` browser profiles. On 1 October 2026 these filled /tmp to
+ * three quarters of its inodes within hours and the per-user quota broke every worker shell.
+ */
+export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^landing-merge-result/, /^native-/, /^pg-password/, /^playwright_chromiumdev_profile/];
+/** How old a test temp entry — file or directory — must be before the loop's pass removes it. */
+export const testTempMinAgeMs = 2 * 3_600_000;
 /** The most directories one pass removes: reclaim is bounded per cycle, whatever the backlog. */
 export const tmpReclaimLimitPerCycle = 100;
 /** The most wall-clock time one pass spends removing, so a cycle is never stalled by a backlog of large directories. */
@@ -123,6 +134,8 @@ async function lastWritten(path: string, own: number): Promise<number> {
 
 /** Recursively sum the sizes of the regular files under `path`, following no symlink. */
 async function sizeOf(path: string): Promise<number> {
+  const own = await lstat(path).catch(() => null);
+  if (own && !own.isDirectory()) return own.size;
   let total = 0;
   const entries = await readdir(path, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
@@ -150,33 +163,39 @@ export interface TmpReclaimOptions {
   now?: number;
   /** The directory scanned; the host's temporary directory by default. */
   tmpRoot?: string;
-  /** Entry-name prefixes considered; the default is Graphyard's own directories and the tsx cache. */
+  /** Entry-name prefixes considered, all judged by `maxAgeMs`; the default is `testTempPatterns` (by `testTempMinAgeMs`) and the tsx cache (by `tmpReclaimMinAgeMs`). */
   prefixes?: readonly string[];
   /** The most directories one pass removes; `tmpReclaimLimitPerCycle` by default. */
   limit?: number;
-  /** How old an ownerless, unheld directory must be; `tmpReclaimMinAgeMs` by default. */
+  /** How old an ownerless, unheld entry must be; with `prefixes`, `tmpReclaimMinAgeMs` by default, else each default pattern's own bound. */
   maxAgeMs?: number;
   /** The most wall-clock time the pass spends removing, when set; the loop passes `tmpReclaimWorkMsPerCycle`. */
   workMs?: number;
   /** The live-holder set, when the caller has one; a fresh /proc scan runs when omitted. */
   held?: Set<string>;
 }
-const defaultCandidate = (name: string) => name.startsWith('graphyard-') || /^tsx-\d+$/.test(name);
+/** The age an entry of this name must reach before the default pass removes it, or null when the name is not the pass's. */
+const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : /^tsx-\d+$/.test(name) ? tmpReclaimMinAgeMs : null;
 
 /**
- * One bounded pass over the host's temporary directory. A marked directory whose owner still runs
- * is kept whatever its age; one whose owner has exited is removed at once, however young — that is
- * the test runner's sweep of a run that just ended; an unmarked directory is removed only once it
- * is older than `maxAgeMs` and no live process holds it open. The oldest removable directories go
- * first, at most `limit` of them, and every removal is reported with the bytes it freed. Nothing
- * here throws for a directory it cannot read: the error is reported instead.
+ * One bounded pass over the host's temporary directory. Only this user's entries are considered —
+ * directories, and plain files such as a `pg-password-*` — whose names the pass matches. A marked
+ * directory whose owner still runs is kept whatever its age; one whose owner has exited is removed
+ * at once, however young — that is the test runner's sweep of a run that just ended; any other
+ * entry is removed only once it is older than its age bound and no live process holds it open. The
+ * oldest removable entries go first, at most `limit` of them, and every removal is reported with
+ * the bytes it freed. Nothing here throws for an entry it cannot read: the error is reported instead.
  */
 export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Promise<TmpReclaimReport> {
   const now = options.now ?? Date.now(), root = options.tmpRoot ?? tmpdir(), limit = options.limit ?? tmpReclaimLimitPerCycle;
-  const maxAgeMs = options.maxAgeMs ?? tmpReclaimMinAgeMs;
   const report: TmpReclaimReport = { at: new Date(now).toISOString(), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [] };
-  const match = options.prefixes ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) : defaultCandidate;
+  const minAge = options.prefixes
+    ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) ? options.maxAgeMs ?? tmpReclaimMinAgeMs : null
+    : (name: string) => { const age = defaultMinAge(name); return age === null ? null : options.maxAgeMs ?? age; };
+  const uid = process.getuid?.();
   const dirents = await readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
+  // A marker goes with its directory, never as an entry of its own; a symlink is never followed or taken.
+  const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && minAge(entry.name) !== null;
   const removable: { path: string; mtime: number }[] = [];
   let held: Set<string> | null = null;
   for (const entry of dirents) {
@@ -186,9 +205,13 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
       try { await rm(path, { force: true }); } catch { /* the next pass tries again */ }
       continue;
     }
-    if (!match(entry.name) || !entry.isDirectory()) continue;
+    if (!candidate(entry)) continue;
+    let info;
+    try { info = await lstat(path); } catch { continue; }
+    // Another user's entry is theirs to clear: on a sticky /tmp it could not be removed anyway.
+    if (uid !== undefined && info.uid !== uid) continue;
     report.scanned++;
-    const owner = await readTempOwner(path);
+    const owner = entry.isDirectory() ? await readTempOwner(path) : null;
     const gone = owner ? tempOwnerGone(owner) : false;
     // A live owner keeps its directory only when its start could be recorded: without it a recycled
     // pid would pass for the dead run's owner for as long as it lives, so such a directory is judged
@@ -196,10 +219,9 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
     if (owner && !gone && owner.startedAt !== null) { report.kept++; continue; }
     if (owner && gone) { removable.push({ path, mtime: 0 }); }
     else {
-      let info;
-      try { info = await stat(path); } catch { continue; }
-      // The entries are read only once the directory itself is old: a young one is kept on one stat.
-      const written = now - info.mtimeMs < maxAgeMs ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
+      const maxAgeMs = minAge(entry.name)!;
+      // A directory's entries are read only once the directory itself is old: a young one is kept on one stat.
+      const written = now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
       if (now - written < maxAgeMs) { report.kept++; continue; }
       // Only holders under the scanned root can hold a candidate, and on a host with a backlog the
       // raw scan holds thousands of paths elsewhere: reduce it once to the root's entries, then
@@ -214,7 +236,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   }
   // The candidates the bound left unexamined are the next pass's: they are counted as kept, from
   // the dirent list already in hand, so the report still accounts for every candidate exactly once.
-  report.kept += Math.max(0, dirents.reduce((total, entry) => total + (match(entry.name) && entry.isDirectory() ? 1 : 0), 0) - report.scanned);
+  report.kept += Math.max(0, dirents.reduce((total, entry) => total + (candidate(entry) ? 1 : 0), 0) - report.scanned);
   removable.sort((first, second) => first.mtime - second.mtime);
   // The work bound is real elapsed time, not the caller's clock: a mocked `now` must not change
   // how long a cycle spends taking directories back.
@@ -237,5 +259,5 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
 export function describeTmpReclaim(removed: number, bytes: number) {
   if (!removed) return null;
   const gb = bytes / 1e9;
-  return `freed ${gb >= 0.1 ? `${gb.toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`} from ${removed} stale /tmp director${removed === 1 ? 'y' : 'ies'}`;
+  return `freed ${gb >= 0.1 ? `${gb.toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`} from ${removed} stale /tmp entr${removed === 1 ? 'y' : 'ies'}`;
 }

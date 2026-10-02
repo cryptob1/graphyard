@@ -60,7 +60,7 @@ const blank = (overrides: Partial<ResourceInputs> = {}): ResourceInputs => ({ no
 // ---- AC-1 --------------------------------------------------------------------------------------
 
 test('unit:resource-registry-complete — every entry states its bound, usage, owner and reclaim, and a resource the loop consumes but the registry omits fails', async () => {
-  const required = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk'];
+  const required = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'];
   assert.deepEqual([...resourceIds].sort(), [...required].sort(), 'the registry covers at least the resources GY-132 names');
   assert.deepEqual(resourceRegistry.map(entry => entry.id).sort(), [...resourceIds].sort(), 'one entry per resource id, none twice');
   for (const entry of resourceRegistry) {
@@ -82,7 +82,7 @@ test('unit:resource-registry-complete — every entry states its bound, usage, o
     for (const match of source.matchAll(/(\w+LedgerSchema)\.parse\([^\n]*boundSessionLedger\(/g)) ledgers.push(match[1]);
   }
   assert.ok(ledgers.includes('reviewLedgerSchema') && ledgers.includes('producerLedgerSchema'), `found the capped ledgers (${ledgers.join(', ')})`);
-  const consumed = { ledgers, resources: ['session-slots', 'agent-names', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk'] };
+  const consumed = { ledgers, resources: ['session-slots', 'agent-names', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] };
   assert.deepEqual(registryGaps(consumed), [], 'every resource the loop consumes is registered');
   // Every session role has a slot reading, and every launch profile a namespace reading.
   const profiles = { workers: [{ name: 'worker-a', agentName: 'worker-a', principal: 'agent-a', mode: 'launch' }], reviewers: [reviewerProfile], producers: [{ name: 'producer-a', agentName: 'producer-a' }] };
