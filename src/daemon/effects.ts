@@ -1,6 +1,7 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -47,6 +48,7 @@ import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -231,6 +233,14 @@ export interface DaemonEffects {
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   /**
+   * Run one master browser flow as a child command and resolve with what it reported (GY-949): the
+   * remedy step applies the installation-accept remedy through it. A refusal resolves; only a child
+   * that printed no result rejects. Absent, no remedy is applied.
+   */
+  browserFlow?: (flow: RemedyFlow) => Promise<FlowResult>;
+  /** Record the loop's attempt of a remedy on the stalled row it was applied for (`POST /api/actions/:id/remedy`). */
+  recordRemedy?: (row: string, attempt: Omit<RemedyRecord, 'at' | 'by'>) => Promise<unknown>;
+  /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
    * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
@@ -351,6 +361,23 @@ export async function record(state: DaemonState, key: string, action: Omit<Daemo
   const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() }, faultKind);
   await persist(state);
   return entry;
+}
+
+/** How long a remedy's browser flow may run: a sudo confirmation it waits on is bounded inside it (passSudo). */
+export const remedyFlowTimeoutMs = 15 * 60_000;
+const graphyardCli = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
+/**
+ * `graphyard master browser FLOW` as a child of the loop (GY-949), the same command the master
+ * runs by hand, so the flow is recorded, verified through the API and audited exactly as it is
+ * then. It prints its ledger entry whether it applied or refused, and exits non-zero on a refusal.
+ */
+export async function browserFlowChild(run: ChildRun, root: string, flow: RemedyFlow): Promise<FlowResult> {
+  let printed: string;
+  try { printed = String(await run(process.execPath, [graphyardCli, 'master', 'browser', flow], { cwd: root, timeoutMs: remedyFlowTimeoutMs })); }
+  catch (error) { printed = String((error as { stdout?: unknown } | null)?.stdout ?? ''); if (!printed.includes('{')) throw error; }
+  const entry = JSON.parse(printed.slice(printed.indexOf('{'))) as { outcome?: unknown; verified?: unknown; reason?: unknown };
+  const outcome = entry.outcome === 'applied' || entry.outcome === 'unchanged' ? entry.outcome : 'refused';
+  return { outcome, verified: entry.verified === true, reason: String(entry.reason ?? `master browser ${flow} printed no reason`) };
 }
 
 /** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
@@ -552,6 +579,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
+    browserFlow: flow => browserFlowChild(run, root, flow),
+    recordRemedy: (row, attempt) => mutate(`actions/${row}/remedy`, attempt),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

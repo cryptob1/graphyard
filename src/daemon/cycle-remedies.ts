@@ -1,0 +1,74 @@
+// Concern: cycle step 6b — apply the remedy a stalled row's unchanged reason binds to (GY-949).
+import { actionStall, type ActionRow } from '../model/actions.js';
+import type { Work } from '../model.js';
+import { applyInstallationAccept, stallRemedy, standingRemedy, type BoundRemedy } from '../stall-remedies.js';
+import { record } from './effects.js';
+import { message } from './state.js';
+import type { Cycle } from './cycle.js';
+
+/** A stalled row whose reason binds to a remedy the loop applies, with no attempt recorded for its run. */
+export interface OwedRemedy { work: Work; row: ActionRow; reason: string; bound: BoundRemedy }
+
+/**
+ * The rows a loop-applied remedy is owed for: open, stalled (`actionStall`) on a reason the
+ * registry binds to a remedy the loop applies, and with no attempt of it recorded for the run.
+ */
+export function owedRemedies(work: Work[]): OwedRemedy[] {
+  return work.filter(item => item.stage !== 'done').flatMap(item => (item.actionQueue?.actions ?? []).flatMap(row => {
+    const stall = actionStall(row);
+    const bound = stall && stallRemedy(stall.reason);
+    return bound?.applies === 'loop' && !standingRemedy(item, row.id, stall!.reason) ? [{ work: item, row, reason: stall!.reason, bound }] : [];
+  }));
+}
+
+/**
+ * The runs this loop process has applied a remedy for, by row: the reason applied for. It covers
+ * the instant between a remedy settling and the next snapshot showing its record, so a cycle that
+ * read the world before the record landed does not apply it again; an entry goes once the snapshot
+ * shows the record, or the row no longer stalls on that reason. A restart forgets it, and by then
+ * the record is on the row: it is written before the launch settles.
+ */
+const applied = new Map<string, string>();
+/** Test seam: forget what this process applied. */
+export function resetAppliedRemedies() { applied.clear(); }
+
+/**
+ * Step 6b. For every stalled row the registry binds to a remedy the loop applies, apply it once for
+ * the row's unchanged run and record the attempt on the row. Rows held by the same condition share
+ * one application: the permission hold that stalls two items' resyncs is one installation to
+ * accept, so the flow runs once and its outcome is recorded on each row. The flow runs beside the
+ * cycle (the launcher), since a sudo confirmation inside it may wait minutes; nothing forces a retry
+ * of the row afterwards — its own stall recheck picks the cleared condition up. A refusal is
+ * recorded like any outcome and is not applied again for the run: the liveness rule escalates it
+ * once with the refusal and the remedy named (src/model/liveness.ts).
+ */
+export async function remedyStep(cycle: Cycle) {
+  const { effects, snapshot, state, now, launch } = cycle;
+  if (!effects.browserFlow || !effects.recordRemedy) return;
+  for (const [id, reason] of [...applied]) {
+    const item = snapshot.work.find(entry => (entry.actionQueue?.actions ?? []).some(row => row.id === id));
+    const row = item?.actionQueue!.actions.find(entry => entry.id === id);
+    if (!row || actionStall(row)?.reason !== reason || standingRemedy(item!, id, reason)) applied.delete(id);
+  }
+  const owed = owedRemedies(snapshot.work).filter(entry => applied.get(entry.row.id) !== entry.reason);
+  const groups = new Map<string, OwedRemedy[]>();
+  for (const entry of owed) groups.set(entry.bound.kind, [...(groups.get(entry.bound.kind) ?? []), entry]);
+  for (const [kind, rows] of groups) {
+    if (kind !== 'installation-accept') continue;
+    const key = `remedy:${kind}`;
+    if (cycle.launcher.busy(key)) continue;
+    for (const entry of rows) applied.set(entry.row.id, entry.reason);
+    launch('config', rows[0].work, key, [], async sink => {
+      const outcome = await applyInstallationAccept(effects.browserFlow!);
+      const recorded: string[] = [], refused: string[] = [];
+      for (const entry of rows) {
+        try { await effects.recordRemedy!(entry.row.id, { remedy: 'installation-accept', reason: entry.reason, ...outcome }); recorded.push(`${entry.work.key}'s ${entry.row.kind}`); }
+        catch (error) { refused.push(`${entry.work.key}'s ${entry.row.kind} (${message(error)})`); }
+      }
+      sink.push(await record(state, key, { kind: 'config', work: rows[0].work.key, principal: null, epoch: null,
+        state: outcome.outcome === 'refused' ? 'failed' : 'done',
+        detail: `Applied the ${kind} remedy (${outcome.flows.join(', then ')}) for the stalled ${recorded.concat(refused).join(', ')}: ${outcome.outcome} — ${outcome.detail}${recorded.length ? `. Recorded on ${recorded.join(', ')}` : ''}${refused.length ? `. Not recorded on ${refused.join(', ')}` : ''}`.slice(0, 2000),
+        attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    });
+  }
+}

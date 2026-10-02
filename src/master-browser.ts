@@ -8,6 +8,7 @@ import { atomicPrivateWrite, privateFile, type MasterBrowser, type MasterConfig 
 import { protectionPlan, readProtection, type ProtectionRun } from './protection.js';
 import type { Work } from './model.js';
 import type { InstallationState } from './github.js';
+import { controlPlanePermissions as declaredPermissions, requiredPermissions } from './github-permissions.js';
 
 /**
  * GitHub administration the master performs itself, through the operator's own authenticated
@@ -23,11 +24,12 @@ import type { InstallationState } from './github.js';
 export const browserFlows = ['app-permissions', 'installation-accept', 'protection'] as const;
 export type BrowserFlow = typeof browserFlows[number];
 
-// What the control-plane App must hold for every path Graphyard exercises: contents write for
-// published speculative queue tips, checks write for the gate check, administration read for
-// protection observation, and pull-request write plus issue read for review dispatch.
-export const controlPlanePermissions: Record<string, 'read' | 'write'> = { metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' };
-const level = (value: unknown) => value === 'write' ? 2 : value === 'read' ? 1 : 0;
+// What the control-plane App must hold for every path Graphyard exercises, read from the one
+// declaration of it (src/github-permissions.ts) so a permission a feature adds there — actions write
+// for failed CI reruns — is one these flows raise and accept, not one they report already granted
+// while the integration jobs it holds stay held (GY-949).
+export const controlPlanePermissions: Record<string, 'read' | 'write' | 'admin'> = requiredPermissions(declaredPermissions);
+const level = (value: unknown) => value === 'admin' ? 3 : value === 'write' ? 2 : value === 'read' ? 1 : 0;
 /** Permissions still below what the control plane needs. */
 export function missingPermissions(actual: Record<string, unknown> | null | undefined, desired = controlPlanePermissions) {
   return Object.entries(desired).filter(([name, wanted]) => level(actual?.[name]) < level(wanted)).map(([name, wanted]) => `${name}: ${String(actual?.[name] ?? 'none')} to ${wanted}`);

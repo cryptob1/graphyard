@@ -55,6 +55,8 @@ A `resync` completes only on a fresh observation. The executor calls `POST /api/
 
 A `dispatch` or `request-review` whose launch finds a producer or reviewer session already answering the requested head completes on that session instead of failing. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): once in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
+Attention and escalation name a stall reason's bound remedy (`src/stall-remedies.ts`). On an App permission hold the loop runs `master browser installation-accept` (`app-permissions` first if needed) once per unchanged run, recording it on the row (`POST /api/actions/:id/remedy`); a refusal escalates once. A full role names `master registry role set ROLE … --concurrency N`.
+
 ### Loop failure recovery
 
 A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.

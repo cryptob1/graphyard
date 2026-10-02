@@ -260,6 +260,27 @@ test('integration:stall-raises-attention — a stalled row is raised as an atten
   assert.ok(actionStallLatencyMs < actionIdleMs);
 });
 
+test('unit:stall-remedy-recorded-once — the control plane records the loop\'s remedy on the stalled row once per unchanged run, refuses a second record and a non-coordinator, and master status names what the remedy did (GY-949)', async () => {
+  const item = await release(await created());
+  const hold = `${item.key}: no observation newer than the claim was saved; its observation job is held: App graphyard-owner-project lacks Actions: write, which failed CI reruns needs to rerun failed workflow jobs on the unchanged candidate; accept the pending permission request at https://github.com/settings/installations/91011; the claim woke it and leaves the row waiting for the observation`;
+  let last: ActionRow | undefined;
+  for (let failure = 0; failure < actionStallThreshold; failure++) {
+    last = await attempt(item, async () => hold);
+    if (failure < actionStallThreshold - 1) await elapse(item, actionRetryMaxMs);
+  }
+  const body = { remedy: 'installation-accept', reason: hold, outcome: 'refused', detail: 'Confirm access was not approved within 300s; approve the GitHub Mobile prompt (code 42)', flows: ['installation-accept'] };
+  await assert.rejects(engine.recordActionRemedy(worker, last!.id, body), /Coordinator permission required/);
+  const recorded = await engine.recordActionRemedy(coordinator, last!.id, body);
+  assert.equal(recorded.action.remedy?.outcome, 'refused');
+  assert.equal(recorded.action.remedy?.by, coordinator.id);
+  await assert.rejects(engine.recordActionRemedy(coordinator, last!.id, { ...body, outcome: 'applied' }), /already recorded for this unchanged run/);
+  const stored = dispatchRow(await reload(item));
+  assert.equal(stored.remedy?.outcome, 'refused', 'one record, the first');
+  const raised = stalledActionAttention(await snapshotOf()).filter(entry => entry.subject === item.key);
+  assert.match(raised[0].next, /installation-accept remedy \(installation-accept\) was refused at .*Confirm access was not approved/);
+  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
+});
+
 // ---- AC-4: backoff does not outlive the condition it was earned against ----------------------
 
 test('integration:cleared-condition-retries-promptly — a row starved against a busy exclusive resource is claimed a recheck after the resource is freed, not at the ceiling its attempts against the impossibility had earned', async () => {

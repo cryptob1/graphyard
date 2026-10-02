@@ -17,6 +17,7 @@ import { decisionStep } from './cycle-decisions.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { triageBacklogStep } from './cycle-triage.js';
+import { remedyStep } from './cycle-remedies.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
@@ -216,6 +217,12 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   await timings.step('reviews and proofs', () => shepherdStep(cycle));
   spent('dispatch');
+
+  // 6b. A stalled row whose unchanged reason binds to a remedy the loop applies gets it, once per
+  //     run (GY-949): the browser flow runs beside the cycle, and its outcome is recorded on the row.
+  await timings.step('remedies', () => cycle.isolate('config', null, 'stall remedies', () => remedyStep(cycle)));
+  await settleLaunches();
+  spent('decisions');
 
   await timings.step('merges', () => mergeStep(cycle));
   spent('merge');

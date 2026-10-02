@@ -3,6 +3,7 @@ import { demand } from './refusal.js';
 import { actionRecordLimit, actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
+import type { RemedyRecord } from '../stall-remedies.js';
 
 /**
  * The durable action queue.
@@ -76,6 +77,12 @@ export interface ActionRow {
    * `actionStall` recomputes it from the history so the two can never disagree.
    */
   stall?: ActionStall;
+  /**
+   * The loop's attempt of the remedy its stall reason binds to (GY-949, src/stall-remedies.ts):
+   * recorded once per unchanged run, with what the remedy did, so the attention and the
+   * escalation name it and the loop never applies it twice for the same run.
+   */
+  remedy?: RemedyRecord;
   resolvedAt?: string; result?: 'done' | 'failed'; resolution?: string;
   history: ActionRecord[];
 }

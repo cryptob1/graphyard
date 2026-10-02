@@ -12,6 +12,7 @@ import { masterHarnessPlan, writeHarnessPermissions } from '../src/harness.js';
 import { agentBrowserArguments, agentBrowserPage, appendAdministrationEntry, browserFlows, controlPlanePermissions, detectSudo, missingPermissions, passSudo, readAdministrationLedger, readSudoState, recordingPage, runBrowserFlow, sudoAttention, summarizeAdministration, type BrowserPage, type Located, type SudoState } from '../src/master-browser.js';
 import type { Work } from '../src/model.js';
 import { GitHub, type InstallationState } from '../src/github.js';
+import { controlPlanePermissions as declaredPermissions, requiredPermissions } from '../src/github-permissions.js';
 import { statusRoutes } from '../src/server/routes/status.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -41,7 +42,7 @@ function work(overrides: Partial<Work> = {}) {
  * the real pages behave, and the API stub reads the same state.
  */
 class StubGitHub {
-  app: Record<string, string> = { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' };
+  app: Record<string, string> = { actions: 'write', metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' };
   installation: Record<string, string> = { ...this.app };
   pendingRequest = false;
   protection = { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true, strict: true, enforce_admins: true, hasCheck: true, hasRule: true };
@@ -479,6 +480,23 @@ test('the master CLI stores the browser profile, refuses flows without one, and 
 test('permission comparison treats write as satisfying read and reports only what is below the requirement', () => {
   assert.deepEqual(missingPermissions({ ...controlPlanePermissions }), []);
   assert.deepEqual(missingPermissions({ ...controlPlanePermissions, metadata: 'write', issues: 'write' }), []);
-  assert.deepEqual(missingPermissions({ ...controlPlanePermissions, contents: 'read', checks: undefined as any }), ['contents: read to write', 'checks: none to write']);
+  assert.deepEqual(missingPermissions({ ...controlPlanePermissions, contents: 'read', checks: undefined as any }), ['checks: none to write', 'contents: read to write']);
   assert.equal(missingPermissions(null).length, Object.keys(controlPlanePermissions).length);
+});
+
+test('the permission flows hold the App to every permission github-permissions.ts declares, so the Actions: write hold that stalled GY-864 and GY-515 is one installation-accept accepts (GY-949)', async () => {
+  assert.deepEqual(controlPlanePermissions, requiredPermissions(declaredPermissions), 'one declaration, read by the flows too');
+  assert.equal(controlPlanePermissions.actions, 'write');
+  const { root, config, cleanup } = await master();
+  try {
+    const github = new StubGitHub();
+    github.app = { ...controlPlanePermissions };
+    github.installation = { ...controlPlanePermissions, actions: 'read' };
+    github.pendingRequest = true;
+    github.sudo.pending = 0;
+    const accepted = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), api: github.api, installation: github.installationState, sleep: noSleep });
+    assert.equal(accepted.outcome, 'applied', accepted.reason);
+    assert.equal(accepted.verified, true);
+    assert.equal(github.installation.actions, 'write');
+  } finally { await cleanup(); }
 });
