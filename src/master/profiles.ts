@@ -345,10 +345,13 @@ export const masterConfigSchema = z.object({
   // The loop publishes all of these to the control plane on every change.
   // `optimisticExclude` (GY-503): the repository's own shared-infrastructure globs, master init
   // written with the product defaults; a change to an excluded path never merges optimistically.
+  // `ciConcurrency` (GY-501): the repository's concurrent Actions job limit as the operator declares
+  // it (GitHub does not report it); master protection compares it with parallelTips × jobs per run.
   mergeQueue: z.object({
     batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(),
     optimistic: z.boolean().optional(),
     parallelTips: z.number().int().min(1).max(maxParallelTips).optional(),
+    ciConcurrency: z.number().int().min(1).max(10000).optional(),
     rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
     optimisticExclude: z.array(z.string().trim().min(1).max(200)
       .refine(glob => !glob.startsWith('/') && !/[\s\u0000-\u001f]/.test(glob) && !glob.split('/').some(segment => segment === '.' || segment === '..'),

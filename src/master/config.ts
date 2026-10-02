@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions, onboardingMergeQueue
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitName, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema } from './profiles.js';
+import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, mergeParallelTips, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema } from './profiles.js';
 import { managedMasterInstructions } from './instructions.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
@@ -229,9 +229,12 @@ export async function setupMaster(root: string, input: { url: string; token: str
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
-    // What this setup left under `mergeQueue` (GY-503): onboarding wrote the product-default
-    // shared-infrastructure globs on a first setup and keeps the repository's own list afterwards.
-    mergeQueue: { optimisticExclude: config.mergeQueue?.optimisticExclude ?? null, source: previous?.mergeQueue ? 'kept from the existing master config' : 'onboarding wrote the product defaults; tune mergeQueue.optimisticExclude in .graphyard/master.json' },
+    // What this setup left under `mergeQueue` (GY-503, GY-501): onboarding wrote the recommended
+    // parallel-tip window and the product-default shared-infrastructure globs on a first setup, and
+    // keeps the repository's own values afterwards; the report explains what parallelTips costs.
+    mergeQueue: { parallelTips: mergeParallelTips(config), optimisticExclude: config.mergeQueue?.optimisticExclude ?? null,
+      parallelTipsExplained: `The merge queue validates ${mergeParallelTips(config)} queue positions at once, each on its own speculative tip, so one CI duration can land that many entries; CI then needs parallelTips × jobs per pull-request run concurrent Actions jobs. Declare your limit as mergeQueue.ciConcurrency and graphyard master protection reports when it is too low; set mergeQueue.parallelTips to 1 to validate one tip at a time`,
+      source: previous?.mergeQueue ? 'kept from the existing master config' : 'onboarding wrote the product defaults; tune mergeQueue.parallelTips and mergeQueue.optimisticExclude in .graphyard/master.json' },
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.
