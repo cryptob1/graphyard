@@ -117,6 +117,11 @@ test('unit:retro-artefact-governed-application — retro checks judge the item\'
   // Only a check the item's policy requires that failed on its head refuses; one still running or not required does not.
   assert.equal(runRetroCheck('checks-passed', work, observed([], { checks: [{ name: 'lint', result: 'failure', appId: 1 }, { name: 'test', result: 'pending', appId: 1 }] })), null);
   assert.match(String(runRetroCheck('checks-passed', work, observed([], { checks: [{ name: 'typecheck', result: 'failure', appId: 1 }] }))), /failed required checks on its head: typecheck/);
+  // An item requiring no checks — an empty list or none at all — is never refused by a failed check it does not require.
+  const failedLint = observed([], { checks: [{ name: 'lint', result: 'failure', appId: 1 }] });
+  assert.equal(runRetroCheck('checks-passed', { ...work, policy: { checks: [] } }, failedLint), null);
+  assert.equal(runRetroCheck('checks-passed', { ...work, policy: null }, failedLint), null);
+  assert.equal(runRetroCheck('checks-passed', { plannedFiles: work.plannedFiles }, failedLint), null);
 
   // A principal declaring no session kind fails closed; an operator agent is an agent identity.
   const draft = { id: 'draft-1', draftedBy: 'drafter' };
@@ -225,6 +230,13 @@ test('unit:retro-artefact-governed-application — an applied check runs on ever
   // The submit transaction reads only the checks in force, never the whole retro ledger.
   assert.deepEqual((await readAppliedRetroChecks(store.pool)).map(artefact => artefact.id), artefacts.filter(artefact => artefact.state === 'applied' && artefact.kind === 'mechanical-check').map(artefact => artefact.id));
   assert.equal(retroCheckRefusals({ plannedFiles: ['docs/'] }, observe(['docs/a.md']), [check]).length, 0);
+  // Both retro reads probe a judgement by its draft id through the partial expression index, not a scan of the retro kinds.
+  const client = await store.pool.connect();
+  try {
+    await client.query('BEGIN'); await client.query('SET LOCAL enable_seqscan = off');
+    const plan = await client.query(`EXPLAIN SELECT 1 FROM events judged WHERE judged.kind IN ('retro.applied', 'retro.refused') AND judged.payload->>'id' = $1`, [check.id]);
+    assert.match(plan.rows.map(row => row['QUERY PLAN']).join('\n'), /events_retro_judged/);
+  } finally { await client.query('ROLLBACK'); client.release(); }
 
   // Catalogue update: the intervention report files every instance of the catalogued cause under its entry and fault class.
   const report = await call(operator, 'GET', 'interventions?window=7');

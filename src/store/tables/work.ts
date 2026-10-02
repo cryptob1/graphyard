@@ -33,6 +33,10 @@ CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DES
   WHERE kind='delivery.deployment-contained' AND work_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)
   WHERE kind='production.deployment-pending';
+-- Retro judgements by the draft id they judge (GY-1048): the submit transaction's applied-check
+-- read and the unjudged-draft NOT EXISTS probe each draft id here instead of scanning the kinds.
+CREATE INDEX IF NOT EXISTS events_retro_judged ON events(kind,(payload->>'id'))
+  WHERE kind IN ('retro.applied','retro.refused','retro.drafted');
 ${eventWorkFunctions}
 -- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
 ${eventsImmutableDdl}`,

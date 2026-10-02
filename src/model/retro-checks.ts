@@ -31,7 +31,8 @@ type RetroCheckObservation = Pick<Observation, 'files' | 'conflicting' | 'checks
  * One applied check run against a submission's observed candidate: null when it passes, else why it
  * refuses. Each rule judges only the submitting item's own candidate: its scope, GitHub's computed
  * conflict for its pull request, and the checks its policy requires that reported a failure on its
- * head — a check still running, or one the item does not require, never refuses it.
+ * head — a check still running, or one the item does not require, never refuses it. An item with
+ * no required-check list (absent or empty) requires none, so `checks-passed` never refuses it.
  */
 export function runRetroCheck(rule: RetroCheckRule, work: RetroCheckWork, observation: RetroCheckObservation): string | null {
   if (rule === 'planned-files') {
@@ -39,8 +40,8 @@ export function runRetroCheck(rule: RetroCheckRule, work: RetroCheckWork, observ
     return outside.length ? `changes ${outside.length} file(s) outside plannedFiles: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ', …' : ''}` : null;
   }
   if (rule === 'merges-onto-base') return observation.conflicting ? 'does not merge onto the current base without a conflict; run graphyard sync first' : null;
-  const required = work.policy?.checks ? new Set(work.policy.checks) : null;
-  const failed = observation.checks.filter(check => check.result === 'failure' && (!required || required.has(check.name)));
+  const required = new Set(work.policy?.checks ?? []);
+  const failed = observation.checks.filter(check => check.result === 'failure' && required.has(check.name));
   return failed.length ? `has failed required checks on its head: ${[...new Set(failed.map(check => check.name))].join(', ')}` : null;
 }
 
