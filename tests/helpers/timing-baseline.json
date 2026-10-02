@@ -489,6 +489,7 @@
     "tests/store-locks.test.ts": 46626,
     "tests/successor-scope.test.ts": 1658,
     "tests/supervisor-renewal.test.ts": 83958,
+    "tests/sync-restore.test.ts": 1800,
     "tests/system-invariants.test.ts": 1175,
     "tests/system.test.ts": 29095,
     "tests/test-isolation.test.ts": 5273,
