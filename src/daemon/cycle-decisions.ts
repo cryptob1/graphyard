@@ -1,6 +1,7 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
+import { interruptedLaneRework } from '../model/policy.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
@@ -301,7 +302,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       }
       // A request whose response was lost is already standing on the item, and the server refuses a
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
-      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
+      // A lane-approved rework whose application was interrupted stands for no approver (GY-1057): the
+      // loop requests the rework again, and the control plane resumes that one in answering it.
+      let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved') && !interruptedLaneRework(entry));
       // Only a merge decision names what it binds. One standing for an earlier candidate can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
       if (standing && decision.action === 'merge' && !(standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision)) {

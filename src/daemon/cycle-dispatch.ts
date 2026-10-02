@@ -8,6 +8,7 @@ import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
+import { interruptedLaneRework } from '../model/policy.js';
 import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
 import { clearProfileFailure, profileHealth, readyToRetry, recordProfileFailure } from './sessions.js';
@@ -345,7 +346,9 @@ async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
     if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
   const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
-  const standing = history?.filter(entry => entry.action === 'rework' && ['requested', 'approved'].includes(entry.state));
+  // A lane-approved rework whose application was interrupted is not waited on (GY-1057): requesting
+  // the cap's round makes the control plane resume it, and its outcome answers the cap.
+  const standing = history?.filter(entry => entry.action === 'rework' && ['requested', 'approved'].includes(entry.state) && !interruptedLaneRework(entry));
   const mine = standing?.find(entry => entry.input?.binding === binding);
   const refused = history?.find(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding);
   const liveLease = item.lease && Date.parse(item.lease.expiresAt) > clock;

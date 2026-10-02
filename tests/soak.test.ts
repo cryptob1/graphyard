@@ -298,7 +298,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number; neverFrom?: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; plan?: Partial<typeof basePlan> }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -508,8 +508,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const idling = options.reassigned === n && attempt === 1;
     // GY-999: a session whose push is refused for want of a valid GitHub login blocks on it. The
     // recovering item's first two attempts do; the other item's every attempt does — a failure no
-    // freshly minted credential cures, which the retry ladder must bound.
-    const credentialBlocks = !!options.credentialBlocked && ((n === options.credentialBlocked.recovers && attempt <= 2) || n === options.credentialBlocked.never);
+    // freshly minted credential cures, which the retry ladder must bound — from its first attempt, or
+    // from `neverFrom`, after an earlier attempt submitted (GY-1057: so its change is observed).
+    const credentialBlocks = !!options.credentialBlocked && ((n === options.credentialBlocked.recovers && attempt <= 2) || (n === options.credentialBlocked.never && attempt >= (options.credentialBlocked.neverFrom ?? 1)));
     const pane = herdr.open(profile.agentName, idling ? 'done' : 'working', path);
     sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: idling ? Number.MAX_SAFE_INTEGER : clock.now() + plan.workMs,
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
@@ -2067,4 +2068,28 @@ test('unit:soak-invariants-hold — sessions blocked on a GitHub credential fail
   assert.match(state.actions[`retry:held:${held.id}`]?.detail ?? '', /held: 3 attempts in a row ended without submitting.*credential-blocked attempt on epoch 1.*credential-blocked attempt on epoch 3/, 'the hold names every credential failure');
   assert.ok(state.actions[`retry:cap-request:${held.id}`], 'the loop asked for the decision that alone resumes the item, rather than relaunching it');
   assert.ok(theirs.every(session => session.state === 'reclaimed'), 'no blocked session was left holding its lease');
+});
+
+test('unit:soak-invariants-hold — a low-lane item held at the attempt cap has its cap rework applied by the control plane as it is requested, with no approver session', { timeout: 300_000 }, async () => {
+  // GY-1057: the attempt-cap branch that records a lane-applied or lane-failed rework without
+  // launching an approver rides the soak too. The never-curing item of the credential day rides the
+  // low lane here: its first attempt submits a one-module change and is sent back by its review —
+  // the lane's first application, refused by the engine once and applied when requested again — and
+  // every attempt after it is credential-blocked, so it reaches the cap as an observed low item and
+  // its cap decision is applied as it is requested, with no approver session.
+  const recovers = 2, never = 3;
+  const { items, violations, failures, state, laneApplications, approverWorks } = await simulateDay({
+    hours: 8, credentialBlocked: { recovers, never, neverFrom: 2 },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([never]), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 }, lowLane: never },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds across the lane-applied cap rework');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  const held = items[never - 1];
+  assert.match(state.actions[`retry:held:${held.id}`]?.detail ?? '', /held: 3 attempts in a row ended without submitting/, 'the item reached the attempt cap');
+  assert.deepEqual(approverWorks.filter(key => key === held.key), [], 'no approver session was launched for the low-lane cap decision');
+  assert.deepEqual(laneApplications.slice(0, 2).map(entry => entry.refused), [true, false], 'the review rework was refused once, then applied when requested again');
+  assert.ok(laneApplications.length >= 3, `the cap rework was a later lane application: ${laneApplications.length}`);
+  const capRequest = state.actions[`retry:cap-request:${held.id}`];
+  assert.equal(capRequest?.state, 'done', capRequest?.detail);
+  assert.match(capRequest.detail, /its risk lane needs no approver, and the control plane applied it at once/, 'the cap branch recorded the lane-applied rework without launching an approver');
 });

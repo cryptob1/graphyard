@@ -31,11 +31,14 @@ export function bootstrapObligations(all: Work[]): BootstrapObligation[] {
  * Obligations another change deferred that this item's planned files now touch. A criterion
  * of this item cannot defer an inherited proof a second time: its own bootstrap declaration is
  * deliberately not consulted here, so the deferral can never be renewed by the change that
- * inherits it.
+ * inherits it. An obligation is folded into a criterion of this item only where the item's risk
+ * lane requires that criterion's proof (GY-1057): a low-lane criterion naming the inherited proof
+ * waives its own copy, never the obligation, which no lane waives.
  */
 export function inheritedObligations(work: Work, all: Work[]): BootstrapObligation[] {
   if (work.stage === 'done') return [];
-  const alreadyRequired = new Set(work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs));
+  const lane = itemLane(work);
+  const alreadyRequired = new Set(work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs.filter(proof => laneRequiresProof(lane, proof))));
   const inherited: BootstrapObligation[] = [];
   for (const obligation of bootstrapObligations(all)) {
     if (obligation.workId === work.id || alreadyRequired.has(obligation.proof)) continue;

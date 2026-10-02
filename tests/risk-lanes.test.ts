@@ -81,6 +81,21 @@ test('unit:risk-lane-assigned — the repository\u2019s real schema and authenti
   assert.equal(determineLane(['src/store/tables/work.ts', 'src/store/schema.ts']), 'high', 'not lowered by the single-module rule');
 });
 
+// GY-1057: the authority surfaces a single-module change could otherwise slip through as low —
+// the mutation engine, the two-party decision enforcement and the trusted-evidence chain.
+test('unit:risk-lane-assigned — the mutation engine, decision enforcement and trusted-evidence chain are high-risk', () => {
+  assert.equal(determineLane(['src/engine.ts']), 'high', 'the engine every lifecycle mutation is dispatched through is high-risk');
+  for (const path of ['src/server/decisions.ts', 'src/server/decision-ledger.ts', 'src/server/decision-refusal.ts', 'src/model/approval.ts'])
+    assert.equal(determineLane([path]), 'high', `${path} enforces independent approval`);
+  for (const path of ['.github/workflows/acceptance.yml', '.github/workflows/ci.yml', '.github/workflows/release.yml'])
+    assert.equal(determineLane([path]), 'high', `${path} reads producer credentials or publishes what merges rest on`);
+  for (const script of ['contracts', 'acceptance-contract', 'unit-contract', 'enumerate-ci-proofs', 'prepare-acceptance', 'run-acceptance', 'run-unit-acceptance', 'publish-acceptance'])
+    assert.equal(determineLane([`scripts/${script}.mjs`]), 'high', `scripts/${script}.mjs plans, runs or publishes trusted evidence`);
+  assert.equal(determineLane(['src/model/approval.ts', 'src/model/gates.ts']), 'high', 'not lowered by the single-module rule');
+  assert.equal(determineLane(['scripts/check-docs.mjs']), 'low', 'a script outside the evidence chain keeps the module rule');
+  assert.equal(determineLane(['src/model/engine-notes.ts']), 'low', 'only the engine itself, not a namesake');
+});
+
 test('unit:risk-lane-assigned — test-only, docs-only and single-module changes are low', () => {
   assert.equal(determineLane(['tests/risk-lanes.test.ts']), 'low');
   assert.equal(determineLane(['tests/helpers/a.ts', 'tests/helpers/b.ts']), 'low');
@@ -192,6 +207,28 @@ test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap 
   assert.equal(gate.reasons.some(reason => reason.includes('unit:core-flow')), false, 'the item’s own producer-run proof is not required in low');
 });
 
+// GY-1057: a low-lane criterion naming the same proof as an inherited obligation waives its own copy,
+// never the obligation — both the required set and the verdict keep it.
+test('unit:lane-sets-required-gates — an inherited obligation stands in the low lane when the item’s own waived criterion names the same proof', () => {
+  const defer = { reason: 'harness ships with this change', contractPaths: ['src/model/policy.ts'], declaredBy: 'operator', declaredAt: new Date().toISOString(), policyRevision: 1 };
+  const source = {
+    ...item([], ['unit:deferred-contract']), id: 's', key: 'GY-0', stage: 'done', candidate: null, submission: null, observation: null,
+    criteria: [{ id: 'AC-1', text: 'The contract is proven.', proofs: ['unit:deferred-contract'], bootstrap: defer }], plannedFiles: ['src/model/policy.ts'],
+  } as unknown as Work;
+  const work = item(['src/model/gates.ts'], ['unit:deferred-contract'], ['src/model/policy.ts']);
+  const result = evaluate(work, [work, source], new Date(), [15368]);
+  assert.equal(result.lane, 'low');
+  assert.deepEqual(requiredProofs(work, [work, source]), ['unit:deferred-contract'], 'the inherited obligation is still required of the low item');
+  const gate = result.gates.find(gate => gate.name === 'acceptance')!;
+  assert.equal(gate.passed, false);
+  assert.equal(gate.reasons.some(reason => reason.includes('Bootstrap obligation inherited from GY-0 AC-1') && reason.includes('unit:deferred-contract')), true,
+    `the verdict refuses on the inherited obligation: ${gate.reasons.join('; ')}`);
+  // In a lane that requires the criterion's proof, the criterion carries it and the obligation is not named twice.
+  const medium = item(['src/model/gates.ts', 'src/cli/b.ts'], ['unit:deferred-contract'], ['src/model/policy.ts']);
+  assert.deepEqual(requiredProofs(medium, [medium, source]), ['unit:deferred-contract']);
+  assert.deepEqual(evaluate(medium, [medium, source], new Date(), [15368]).gates.find(gate => gate.name === 'acceptance')!.reasons.filter(reason => reason.includes('unit:deferred-contract')).length, 1);
+});
+
 // The rework waiver is applied where the decision is requested: a low- or medium-lane rework is
 // applied at once, recorded as approved by the risk lane; a high-lane one waits for its approver.
 let teardown: (() => Promise<void>) | null = null;
@@ -240,6 +277,47 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
   const pending = await call(master.token, `work/${high.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' });
   assert.equal(pending.state, 'requested', 'a high-lane rework waits for its independent approver');
   assert.equal((await store.list()).find(item => item.id === high.id)!.reworkRequested, false);
+
+  // GY-1057: an application the server fault interrupts leaves the rework approved by the lane with
+  // no outcome. The next rework request on the item, under any key, resumes it rather than being
+  // refused for the rework already standing.
+  const execute = engine.execute.bind(engine);
+  let faults = 0;
+  engine.execute = (async (...args: Parameters<typeof engine.execute>) => {
+    if (args[1] === 'rework' && faults-- > 0) throw new Error('simulated server fault mid-application');
+    return execute(...args);
+  }) as typeof engine.execute;
+  const decide = async (token: string, key: string) => {
+    const response = await fetch(`${url}/api/work/${key}/decide`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' }) });
+    return { status: response.status, body: await response.json() as any };
+  };
+  const decisions = async (key: string) => (await (await fetch(`${url}/api/work/${key}/decisions`, { headers: { Authorization: `Bearer ${master.token}` } })).json() as any).decisions as any[];
+  const interrupted = await submitted('interrupted-rework', ['src/model/lanes.ts']);
+  faults = 1;
+  assert.notEqual((await decide(master.token, interrupted.key)).status, 200, 'the fault interrupts the application');
+  const [stuck] = await decisions(interrupted.key);
+  assert.equal(stuck.state, 'approved'); assert.equal(stuck.approvedBy, 'graphyard-risk-lane');
+  const resumed = await decide(master.token, interrupted.key);
+  assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+  assert.equal(resumed.body.id, stuck.id, 'the interrupted rework is resumed, not a new one recorded');
+  assert.equal(resumed.body.state, 'applied');
+  assert.equal((await store.list()).find(item => item.id === interrupted.id)!.reworkRequested, true);
+
+  // GY-1057: the requester's authority is re-read when the lane applies its rework, as an approver's
+  // application re-reads it: a requester revoked before the application is declined, not applied.
+  const second = { id: 'lane-second', token: `lane-second-${'s'.repeat(32)}` };
+  await call(credentials[0].token, 'operator-agents', { id: second.id, displayName: second.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: second.token, reason: 'A second requester' });
+  const revoked = await submitted('revoked-rework', ['src/model/lanes.ts']);
+  faults = 1;
+  assert.notEqual((await decide(second.token, revoked.key)).status, 200);
+  await call(credentials[0].token, `operator-agents/${second.id}/revoke`, { reason: 'Revoked between the request and its application' });
+  const declined = await decide(master.token, revoked.key);
+  assert.equal(declined.status, 200, JSON.stringify(declined.body));
+  assert.equal(declined.body.requestedBy, second.id);
+  assert.equal(declined.body.state, 'refused', 'a revoked requester no longer carries its request');
+  assert.match(declined.body.refusal.reason, /no longer a live agent identity/);
+  assert.equal((await store.list()).find(item => item.id === revoked.id)!.reworkRequested, false, 'the rework was not applied');
+  engine.execute = execute;
 });
 
 // AC-3: lanes are inputs to the single landability verdict (GY-878), not separate required-check
