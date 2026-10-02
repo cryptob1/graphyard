@@ -13,7 +13,7 @@ import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { runChild } from '../child-runner.js';
-import { releaseHeldBranch, releaseUnderFailure, submittedBranchRefusal, type PreservedWorktree } from '../master/worktrees.js';
+import { releaseUnderFailure, reserveReleasingHold, submittedBranchRefusal } from '../master/worktrees.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
@@ -223,16 +223,8 @@ export const workspaceCommands = defineCommands([
         startPoint = remoteBranch;
       }
       const hostId = context.individualHostId();
-      // GY-860: an earlier attempt's worktree holding this branch (checked out, or mid rebase, merge or
-      // cherry-pick) is recorded with the reservation, then released; the branch ref never moves.
-      // A refused reservation or a failed release is a workspace failure that costs no attempt.
-      let released: { preserved: PreservedWorktree; reused: boolean } | null;
-      try { released = await releaseHeldBranch(root, branch, path, runChild, preserved => mutate('workspace', { epoch, host: hostId, path, branch, ...(preserved ? { preserved } : {}) })); }
-      catch (error) {
-        const detail = error instanceof Error ? error.message : 'git failed';
-        await releaseUnderFailure(mutate, epoch, `Reserving ${branch} or releasing an earlier attempt's hold on it failed: ${detail}`);
-        throw new Error(`Git worktree creation failed while reserving ${branch} or releasing an earlier attempt's hold on it: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; repair the host and it redispatches.`);
-      }
+      // GY-860: an earlier attempt's hold on this branch is recorded with the reservation, then released; the branch ref never moves.
+      const released = await reserveReleasingHold(root, branch, path, runChild, mutate, epoch, hostId);
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
       try {

@@ -662,3 +662,16 @@ export async function submittedBranchRefusal(root: string, branch: string, remot
     return !candidateSha || remoteSha !== candidateSha ? 'Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace' : null;
   } catch (error) { return `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`; }
 }
+
+/**
+ * GY-860: record the reservation with any earlier attempt's preserved hold on the branch, then
+ * release that hold. A refused reservation or a failed release is a workspace failure that costs no attempt.
+ */
+export async function reserveReleasingHold(root: string, branch: string, path: string, run: ChildRun, mutate: (name: string, data: unknown) => Promise<unknown>, epoch: number, host: string) {
+  try { return await releaseHeldBranch(root, branch, path, run, preserved => mutate('workspace', { epoch, host, path, branch, ...(preserved ? { preserved } : {}) })); }
+  catch (error) {
+    const detail = failureText(error);
+    await releaseUnderFailure(mutate, epoch, `Reserving ${branch} or releasing an earlier attempt's hold on it failed: ${detail}`);
+    throw new Error(`Git worktree creation failed while reserving ${branch} or releasing an earlier attempt's hold on it: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; repair the host and it redispatches.`);
+  }
+}
