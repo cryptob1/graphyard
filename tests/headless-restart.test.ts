@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type DecidePayload } from '../src/runner/payloads.js';
-import { cancelScratchRuns, detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, signalRun } from '../src/runner/pi.js';
+import { cancelScratchRuns, cgroupService, detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, scratchBoundMarginSeconds, scratchRunsDirectory, signalRun, sweepScratchRuns } from '../src/runner/pi.js';
 import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, liveRunCheckouts, runsDirectory, unendedRunOnDisk, type Applied } from '../src/runner/registry.js';
 import { approverRunAdopter, approverRunContext, approverRunOptions, runConfinement, startNarrowRun } from '../src/runner/roles.js';
 import { sessionMountNamespaceWorks } from '../src/master/profiles.js';
@@ -265,7 +267,14 @@ test('unit:restart-leaves-runs the loop\'s shutdown signals no headless run, log
 test('unit:restart-leaves-runs a run launched from a systemd service gets its own transient scope, so a service restart never reaches it', () => {
   assert.equal(runContainment({ cgroup: '0::/user.slice/user-1000.slice/user@1000.service/app.slice/graphyard-master.service', systemd: () => true }), 'systemd');
   assert.equal(runContainment({ cgroup: '0::/user.slice/user-1000.slice/user@1000.service/app.slice/graphyard-watch-1-x.scope', systemd: () => true }), 'setsid');
-  assert.equal(runContainment({ cgroup: '0::/system.slice/graphyard-executor@a.service', systemd: () => false }), 'setsid', 'no user manager: its own session only');
+  const logged: string[] = [];
+  assert.equal(runContainment({ cgroup: '0::/system.slice/graphyard-executor@a.service', systemd: () => false, log: line => logged.push(line) }), 'setsid', 'no user manager: its own session only');
+  assert.equal(logged.length, 1, 'the setsid fallback inside a service is logged');
+  assert.match(logged[0], /graphyard-executor@a\.service get no transient scope .* still ends them/);
+  // The user manager's own unit is no service a stop could take: a process directly under it needs no scope.
+  assert.equal(cgroupService('0::/user.slice/user-1000.slice/user@1000.service'), null);
+  assert.equal(cgroupService('0::/user.slice/user-1000.slice/user@1000.service/'), null);
+  assert.equal(runContainment({ cgroup: '0::/user.slice/user-1000.slice/user@1000.service', systemd: () => { throw new Error('never asked'); } }), 'setsid');
   const scoped = detachedLaunch('/runs/r1', 'r1', 'pi', ['--mode', 'json'], 'systemd');
   assert.equal(scoped.file, 'systemd-run');
   assert.deepEqual(scoped.args.slice(0, 5), ['--user', '--scope', '--quiet', '--collect', '--unit=graphyard-run-r1.scope']);
@@ -380,4 +389,61 @@ test('unit:headless-run-survives-restart a lost approver run is relaunched witho
   assert.equal(approvalStep(watch(maxLostApproverRuns - 1), { state: 'requested' }, gone, Date.now()).step, 'relaunch');
   assert.equal(approvalStep(watch(maxLostApproverRuns), { state: 'requested' }, gone, Date.now()).step, 'exhausted', 'past the bound a lost run spends its launch, and the decision escalates');
   assert.equal(approvalStep({ ...watch(0), run: null }, { state: 'requested' }, gone, Date.now()).step, 'exhausted', 'a session that is merely gone always spent its launch');
+});
+
+test('unit:restart-leaves-runs a scratch run writes under the loop\'s checkout, bounds itself, and one a killed loop left is ended and removed by the next scratch run', async () => {
+  const root = await temporaryDirectory('headless-scratch');
+  const children: import('node:child_process').ChildProcess[] = [];
+  try {
+    // Its output lies under the checkout it reads, which an over-quota /tmp does not reach.
+    const spawned: { command: string; args: readonly string[]; detached?: boolean }[] = [];
+    const run = piRunner({ command: 'pi', spawn: capturingSpawn(spawned), pollMs: 20, exitGraceMs: 1_000 }).start('Triage it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd: root });
+    assert.match(spawned[0].args[1], new RegExp(`>'${join(root, '.graphyard', 'scratch-runs')}/[^']+/stdout\\.jsonl'`));
+    // Its bound holds without a watcher: coreutils' timeout past the watcher's own bound.
+    assert.ok(spawned[0].args[1].includes(`sleep ${61 + scratchBoundMarginSeconds}; kill -TERM -$$; sleep 5; kill -KILL -$$ ) & watchdog=$!; `), spawned[0].args[1]);
+    assert.match(spawned[0].args[1], /kill -KILL "\$watchdog" 2>\/dev\/null; printf/, 'the watchdog ends once Pi has exited');
+    run.cancel('the test only inspects the launch');
+    await run.result();
+    // A checkout it cannot write to falls back to the temp directory.
+    assert.equal(scratchRunsDirectory('/proc'), join(tmpdir(), 'graphyard-runs'));
+    // A registry run carries no bound of its own: its adopter enforces it after a restart.
+    assert.doesNotMatch(detachedLaunch('/runs/r1', 'r1', 'pi', [], 'setsid').args[1], /watchdog/);
+    // The bound holds with no watcher at all: the watchdog stops the run's group and its shell records the exit.
+    const bounded = join(root, 'bounded');
+    await mkdir(bounded);
+    const launch = detachedLaunch(bounded, 'b1', process.execPath, ['-e', 'setInterval(() => {}, 1000)'], 'setsid', [], 1);
+    const shell = spawn(launch.file, launch.args, { detached: true, stdio: 'ignore' });
+    children.push(shell);
+    for (let waited = 0; !existsSync(join(bounded, 'exit')) && waited < 10_000; waited += 100) await delay(100);
+    assert.equal((await readFile(join(bounded, 'exit'), 'utf8')).trim(), '143', 'Pi was stopped by TERM at the bound');
+
+    // A loop killed outright (SIGKILL) left a run: its launcher is gone, the run is not.
+    const scratchRoot = scratchRunsDirectory(root);
+    const dead = spawn(process.execPath, ['-e', '']);
+    await new Promise(resolve => dead.on('exit', resolve));
+    const orphan = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: 'ignore' });
+    children.push(orphan);
+    const orphaned = join(scratchRoot, 'orphan');
+    await mkdir(orphaned, { recursive: true });
+    const meta = { version: 1, id: 'orphan', command: 'pi', pid: orphan.pid, identity: processIdentity(orphan.pid!), containment: 'setsid', unit: null, startedAt: new Date().toISOString(), timeoutMs: 60_000, exitGraceMs: 1_000, launcher: { pid: dead.pid, identity: 'gone' } };
+    await writeFile(join(orphaned, 'run.json'), JSON.stringify(meta));
+    // One whose launcher still lives is that process's to end.
+    const owned = join(scratchRoot, 'owned');
+    await mkdir(owned, { recursive: true });
+    await writeFile(join(owned, 'run.json'), JSON.stringify({ ...meta, id: 'owned', pid: null, identity: null, launcher: { pid: process.pid, identity: processIdentity(process.pid) } }));
+    assert.equal(sweepScratchRuns(scratchRoot), 1);
+    for (let waited = 0; runAlive(meta as never) && waited < 5_000; waited += 50) await delay(50);
+    assert.equal(runAlive(meta as never), false, 'the orphaned run was ended');
+    assert.equal(existsSync(orphaned), false, 'and its directory removed');
+    assert.equal(existsSync(owned), true);
+    // The next scratch run sweeps before it starts.
+    await mkdir(join(scratchRoot, 'orphan-3'), { recursive: true });
+    await writeFile(join(scratchRoot, 'orphan-3', 'run.json'), JSON.stringify({ ...meta, id: 'orphan-3', pid: null, identity: null }));
+    const next = piRunner({ command: 'pi', spawn: capturingSpawn(spawned), pollMs: 20 }).start('Triage it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd: root });
+    assert.equal(existsSync(join(scratchRoot, 'orphan-3')), false);
+    next.cancel('done'); await next.result();
+  } finally {
+    for (const child of children) { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+    await rm(root, { recursive: true, force: true });
+  }
 });
