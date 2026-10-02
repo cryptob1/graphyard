@@ -29,6 +29,7 @@ import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
 import { applyDecision, approverRunContext, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, runOutcome, startNarrowRun } from '../runner/roles.js';
 import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
+import { attemptKey, unblockWithRetry } from './unblock.js';
 
 type AutonomyFetch = typeof fetch;
 async function adminCall(config: MasterConfig, token: string, fetcher: AutonomyFetch, path: string, body?: unknown) {
@@ -683,9 +684,8 @@ async function jsonArgument(value: string) { return JSON.parse(value.startsWith(
  */
 export async function runAutonomyCommand(root: string, config: MasterConfig, id: string, args: string[], deps: AutonomyDependencies) {
   if (!(autonomySubcommands as readonly string[]).includes(id)) throw new Error(`Unknown autonomy command ${id}`);
-  const fetcher = deps.fetcher ?? fetch;
-  const call = async (token: string, path: string, body?: unknown) => {
-    const response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': process.env.GRAPHYARD_REQUEST_ID ?? randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
+  const fetcher = deps.fetcher ?? fetch, call = async (token: string, path: string, body?: unknown, key = attemptKey(1)) => {
+    const response = await fetcher(`${config.url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
     const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
   };
   const operator = () => agentToken(root, config, 'operatorAgent');
@@ -718,8 +718,8 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     return call(await operator(), 'work', { ...input, reason: guardBroadScope(input, reason(args.slice(1)), { allow: allowBroad, command: 'master create' }) });
   }
   if (id === 'release' || id === 'unblock') {
-    const work = await item(args[0]);
-    return call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: reason(args.slice(1)) });
+    const work = await item(args[0]), text = reason(args.slice(1)), write = async (work: Work, attempt = 1) => call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: text }, attemptKey(attempt));
+    return id === 'release' ? write(work) : unblockWithRetry(work, write, item);
   }
   if (id === 'repair') {
     // The coordinator's own request (GY-127): the control plane resets a branch found carrying
