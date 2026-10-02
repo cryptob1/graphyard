@@ -176,8 +176,17 @@ export async function mergeStep(cycle: Cycle) {
   // The cycle snapshot is 30-45 s old by now, and observations and bookkeeping write to the item
   // throughout. The merge is invoked on the item as it stands immediately before the call, under
   // the same action key; one whose candidate or queue turn moved is left to the next cycle.
-  const readMergeItem = async (item: Work, key: string) => {
-    const current = (await effects.snapshot()).work.find(candidate => candidate.id === item.id);
+  // The step reads the ledger once for all its candidates, not once each (GY-1088): a read per
+  // candidate made a merge step over sixteen of them twenty seconds of whole-ledger reads. The
+  // guarded merge re-reads and re-binds the item itself, and a candidate that lost a race to a
+  // write — a sibling's enqueue among them — is read afresh before it is retried.
+  let fresh: Promise<Map<string, Work>> | null = null;
+  const readFresh = (again: boolean) => {
+    if (again || !fresh) fresh = effects.snapshot().then(read => new Map(read.work.map(candidate => [candidate.id, candidate])), error => { fresh = null; throw error; });
+    return fresh;
+  };
+  const readMergeItem = async (item: Work, key: string, again = false) => {
+    const current = (await readFresh(again)).get(item.id);
     return current && current.stage === 'merge' && !mergedWithoutAuthorization(current) && !waitingInMergeQueue(current) && candidateKey('merge', current) === key ? current : null;
   };
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
@@ -223,7 +232,7 @@ export async function mergeStep(cycle: Cycle) {
         // retried at once on a fresh read, and never counted toward the backoff (GY-192).
         const race = transientMergeRace(error);
         if (race && retries < mergeRaceRetries) {
-          const reread = await readMergeItem(item, key);
+          const reread = await readMergeItem(item, key, true);
           if (reread) { target = reread; continue; }
         }
         // A refusal is the gate working, not a daemon fault: record it (no fault kind, so it is no
