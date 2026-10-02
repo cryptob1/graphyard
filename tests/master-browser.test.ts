@@ -41,7 +41,7 @@ function work(overrides: Partial<Work> = {}) {
  * the real pages behave, and the API stub reads the same state.
  */
 class StubGitHub {
-  app: Record<string, string> = { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read' };
+  app: Record<string, string> = { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read', workflows: 'read' };
   installation: Record<string, string> = { ...this.app };
   pendingRequest = false;
   protection = { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true, strict: true, enforce_admins: true, hasCheck: true, hasRule: true };
@@ -265,7 +265,7 @@ test('a flow that cannot find its page, verify its result, or sign in refuses wi
     github.protection.hasCheck = true;
     const appBehind = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), ...common });
     assert.equal(appBehind.outcome, 'refused'); assert.match(appBehind.reason!, /run master browser app-permissions first/);
-    github.app.contents = 'write';
+    github.app.contents = 'write'; github.app.workflows = 'write';
     const notPending = await runBrowserFlow(root, config, 'installation-accept', { page: github.page(), ...common });
     assert.equal(notPending.outcome, 'refused'); assert.match(notPending.reason!, /no pending permission request/);
     github.login = null;
