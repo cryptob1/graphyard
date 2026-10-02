@@ -1,8 +1,15 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { demand } from '../../model.js';
 import { defineRoutes } from '../routes.js';
+import { observationEvents } from '../../github.js';
+import { wakeFromWebhook } from '../../store/store.js';
 
-/** GitHub webhook: HMAC-verified, deduplicated in Postgres, wakes the durable jobs. */
+/**
+ * GitHub webhook: HMAC-verified, deduplicated in Postgres, wakes the durable jobs. Observation
+ * events (pull_request, pull_request_review, check_run, check_suite, push) also stamp the woken
+ * jobs' webhook wake, so any replica claims them ahead of polled jobs, and base-branch pushes and
+ * protection events end the receiving adapter's shared reads (GY-806).
+ */
 export const githubRoutes = defineRoutes('github', [
   {
     method: 'POST', path: '/api/github/webhook',
@@ -18,23 +25,29 @@ export const githubRoutes = defineRoutes('github', [
       // Our own check publications must not create an endless webhook/publish loop.
       if (payload.check_run?.app?.id === github?.config.appId) return context.send(202, { accepted: true, ignored: 'own check' });
       const delivery = String(req.headers['x-github-delivery'] ?? ''); demand(delivery && delivery.length < 200, 'Missing delivery ID', 400);
-      await engine.store.transaction(async db => {
+      const event = String(req.headers['x-github-event'] ?? '');
+      const delivered = await engine.store.transaction(async db => {
         const result = await db.query('INSERT INTO webhook_receipts(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id', [delivery]);
-        if (!result.rowCount) return;
+        if (!result.rowCount) return null;
         // Wake only the items the event is about; a move of the base branch or a queue ref touches them all.
-        const { all, prs, shas } = webhookSubjects(payload, github?.config.base ?? 'main');
-        if (!all && !prs.length && !shas.length) return;
-        await db.query(`UPDATE jobs SET available_at=LEAST(available_at, now()),generation=generation+1 WHERE $1::boolean OR work_id IN (SELECT id FROM work_items
-          WHERE document->'submission'->>'pr' = ANY($2::text[]) OR document->'candidate'->>'sha' = ANY($3::text[]) OR document->'queue'->'speculation'->>'tip' = ANY($3::text[]))`,
-          [all, prs.map(String), shas]);
+        const subjects = webhookSubjects(payload, github?.config.base ?? 'main');
+        if (!subjects.all && !subjects.prs.length && !subjects.shas.length && !subjects.branches.length) return [];
+        // An observation event also stamps the job's webhook wake (GY-806), which every replica's claim puts first.
+        return wakeFromWebhook(db, subjects, (observationEvents as readonly string[]).includes(event));
       });
+      // Only after the wake committed, and once per delivery: the receiving adapter's shared reads end here.
+      if (delivered) github?.noteWebhook?.(event, payload);
       return context.send(202, { accepted: true });
     },
   },
 ]);
 
-/** The pull requests and commits a webhook names, or `all` when it moved the base branch or a merge-queue ref. */
-export function webhookSubjects(payload: any, base: string): { all: boolean; prs: number[]; shas: string[] } {
+/**
+ * The pull requests, commits and branches a webhook names, or `all` when it moved the base branch
+ * or a merge-queue ref. A push to any other branch names that branch and its new head, so a
+ * worker's push to its pull-request branch reaches the item before its candidate names the SHA.
+ */
+export function webhookSubjects(payload: any, base: string): { all: boolean; prs: number[]; shas: string[]; branches: string[] } {
   const ref = typeof payload?.ref === 'string' ? payload.ref : '';
   const all = !!payload?.after && (ref === `refs/heads/${base}` || ref.startsWith('refs/graphyard/'));
   const prs = new Set<number>(); const shas = new Set<string>();
@@ -48,6 +61,8 @@ export function webhookSubjects(payload: any, base: string): { all: boolean; prs
     for (const linked of Array.isArray(run.pull_requests) ? run.pull_requests : []) pr(linked?.number);
   }
   if (payload?.state && payload?.sha) sha(payload.sha);
-  return { all, prs: [...prs], shas: [...shas] };
+  const branches = !all && ref.startsWith('refs/heads/') && payload?.after ? [ref.slice('refs/heads/'.length)] : [];
+  if (branches.length) sha(payload.after);
+  return { all, prs: [...prs], shas: [...shas], branches };
 }
 

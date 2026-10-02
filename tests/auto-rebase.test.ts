@@ -63,7 +63,8 @@ function provider(options: { head: string; boundBase: string; branchTip: string;
     submission: { pr: PR, epoch: 1 }, candidate: { sha: options.head, baseSha: options.boundBase, pr: PR, branch: 'graphyard/gy-82-1', author: 'implementer' },
     policyRevision: 1, revision: 3, reworkRequested: false, gates: [], violations: [], evidence: [], observation: null, stage: 'review' } as unknown as Work;
   return { github, work, calls,
-    branch: (tip: string, tree?: string) => { branchTip = tip; branchTree = tree ?? treeOf(tip); },
+    // A move of the branch reaches the adapter as GitHub's push webhook, ending its shared base-ref read (GY-806).
+    branch: (tip: string, tree?: string) => { branchTip = tip; branchTree = tree ?? treeOf(tip); github.noteWebhook('push', { ref: 'refs/heads/main' }); },
     merges: (result: { sha: string } | 'conflict' | null) => { mergeResult = result; },
     ancestry: (map: Record<string, boolean>) => { contains = { ...contains, ...map }; },
     changed: (files: string[]) => { baseChanges = files.map(filename => ({ filename })); },
