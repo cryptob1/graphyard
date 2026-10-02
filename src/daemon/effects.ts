@@ -21,6 +21,7 @@ import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
+import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
@@ -210,7 +211,9 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
-  containment?: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number } }) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
+  containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
+  /** Bounds this host's clock against the control plane with a light timed read just before containment is assessed (GY-811). */
+  controlPlaneClock?: () => Promise<ControlPlaneClock>;
   /** Settles one quarantine this host verified dead, so the item can be claimed again. */
   settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
@@ -401,20 +404,7 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
   }
 }
 
-/** The pause before the one retry of a failed snapshot read: a second or so, jittered so loops never retry in step. */
-export const snapshotRetryDelayMs = (random: () => number = Math.random) => Math.round(500 + random() * 1000);
-/**
- * The coordination snapshot read, retried once. The read is an idempotent GET, and one timed-out or
- * refused read is usually the network or a busy server, not a fault worth a failed cycle and its
- * backoff: it is tried again after a jittered pause, and only a second failure fails the cycle
- * (GY-187). `master run` wraps its snapshot effect in this.
- */
-export function retriedSnapshot<T>(read: () => Promise<T>, pause: () => number = snapshotRetryDelayMs): () => Promise<T> {
-  return async () => {
-    try { return await read(); }
-    catch { await delay(pause()); return read(); }
-  };
-}
+export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
@@ -724,7 +714,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
-    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
+    controlPlaneClock: () => readControlPlaneClock(current().url, { fetcher }),
+    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
       () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
