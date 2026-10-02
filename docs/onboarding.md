@@ -114,7 +114,7 @@ Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.js
 
 ### The pipeline doctor (on by default)
 
-A **doctor** runs every 10 minutes (`run.doctor.intervalMinutes`) via [sanctioned commands](coordination.md#the-doctor-fixes-stuck-work); off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session that finds stuck and overdue work and fixes it through sanctioned commands only (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`); it never merges, dispatches or submits evidence, and secrets stay unreadable. Each run posts per-item findings and a summary (`doctor` in `master status`); unactionable findings escalate or file deduplicated fault items. Every cycle, the loop itself settles submitted lapsed fences, clears covered blockers and relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

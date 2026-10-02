@@ -52,7 +52,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` the loop launches the [doctor](coordination.md#the-doctor-fixes-stuck-work) to fix stuck work.
+Every `run.doctor.intervalMinutes` the loop launches the [doctor](onboarding.md#the-pipeline-doctor-on-by-default) to fix stuck work.
 
 ## Research and diagnosis
 

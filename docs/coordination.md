@@ -50,7 +50,3 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 ## Explain stalls
 
 `graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
-
-## The doctor fixes stuck work
-
-Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session that finds stuck and overdue work and fixes it through sanctioned commands only (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`); it never merges, dispatches or submits evidence, and secrets stay unreadable. Each run posts per-item findings and a summary (`doctor` in `master status`); unactionable findings escalate or file deduplicated fault items. Every cycle, the loop itself settles submitted lapsed fences, clears covered blockers and relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
