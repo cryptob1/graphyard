@@ -55,6 +55,9 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
     tradeoff: 'Copilot CLI runs every tool and reaches every path it proposes without asking.' },
   muse: { args: ['--approval-mode', 'never', '--trust-workspace'], environment: {}, prompts: 'approval and workspace-trust prompts',
     tradeoff: 'Muse never asks for approval and trusts the assigned worktree without asking.' },
+  // Google Antigravity CLI (agy 1.2+): one flag auto-approves every tool permission request.
+  agy: { args: ['--dangerously-skip-permissions'], environment: {}, prompts: 'per-tool permission prompts',
+    tradeoff: 'Antigravity CLI (`agy`) approves every tool permission request it proposes without asking.' },
 };
 
 /**
@@ -174,7 +177,7 @@ export async function trustClaudeFolder(directory: string, environment: Record<s
  * that waits for a keypress no one sends (GY-184). A runtime moves out of this list by gaining a
  * recipe above and a request contract in master.ts `launchRequestContracts`.
  */
-export const refusedLaunchKinds = ['kimi', 'amp', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
+export const refusedLaunchKinds = ['kimi', 'amp', 'devin', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
 export class LaunchRefusedError extends Error { constructor(readonly kind: string, message?: string) {
   super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind} (no-approval flags and a first request on its command line), so the session would stop at its own approval or trust prompt or never receive its instruction. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
 } }
