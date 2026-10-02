@@ -15,7 +15,7 @@ A lease expires 120 seconds after the last heartbeat, or one further lease perio
 
 ## Supervisor died leaving a containment quarantine
 
-The loop settles a lapsed, verified-dead quarantine: its clock bound is a light timed read (HEAD / of a static route, at most once a cycle, only while a quarantine awaits assessment), not the multi-second snapshot, judging every containment assessment this cycle, re-probes included. An intermediary's dated error page is refused; snapshot bounds stand. A slow read refuses naming its round trip: settlement awaits a faster read. The escalation is recorded once; master status shows each cycle's round trip.
+The loop settles a lapsed, verified-dead quarantine, its clock bounded by a timed HEAD / (once a cycle, only while a quarantine awaits assessment), not the slow snapshot, judging that cycle's re-probes too. A proxy's dated error page is refused; a slow read refuses naming its round trip, awaiting a faster one. Escalation is recorded once; master status shows each round trip.
 
 `graphyard master settle-containment GY-N "reason"` verifies nothing survives; only the loop excuses an idle pane shell (childless, parent `herdr server`). If refused, confirm the stop, then `rework` or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
 
