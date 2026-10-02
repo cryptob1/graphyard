@@ -46,5 +46,3 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 ## Explain stalls
 
 `graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
-
-A rework or guarded merge awaiting freshness wakes its observation job and retries once that observation lands, not on backoff: a merge the gate calls stale is not asked; one the server refuses (`Merge authorization is no longer current`) awaits its wake's observation. A wake stands five minutes (a failed one retries next cycle); GitHub pauses suppress wakes.
