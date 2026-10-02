@@ -195,7 +195,9 @@ test('unit:pi-account-key-by-reference — a registry write that carries a key-l
   // A key with no prefix (GY-463): a raw z.ai key, or another provider's random token, anywhere in the text.
   refuses(account({ key: zaiKey }, { note: 'the key is 0123456789abcdef0123456789abcdef.AbCdEfGh12345678 for now' }), /input\.account\.note looks like a credential/);
   refuses({ ...account({ key: zaiKey }), reason: 'rotated to Zq8vK2mN4pR7tX1wB5yC9dF3gH6jL0sA' }, /input\.reason looks like a credential/);
-  for (const plain of ['1d8fe666b4dade5e263cddb19c70e7e95b772a68', '7f9551b6-3f4f-48d2-a30d-74aa1e423752', 'claude-haiku-4-5-20251001', '/home/vish/.graphyard/agents/pi-a', 'coordinator-token-'.padEnd(40, 'x'), 'ClaudeQuaternaryReviewerAccountNumber2', 'ZAI_API_KEY'])
+  refuses({ ...account({ key: zaiKey }), reason: 'see https://example.invalid/?token=Zq8vK2mN4pR7tX1wB5yC9dF3gH6jL0sA&x=1' }, /input\.reason looks like a credential/);
+  refuses({ ...account({ key: zaiKey }), reason: 'https://example.invalid/keys/Zq8vK2mN4pR7tX1wB5yC9dF3gH6jL0sA#v2' }, /input\.reason looks like a credential/);
+  for (const plain of ['1d8fe666b4dade5e263cddb19c70e7e95b772a68', '7f9551b6-3f4f-48d2-a30d-74aa1e423752', 'claude-haiku-4-5-20251001', '/home/vish/.graphyard/agents/pi-a', 'coordinator-token-'.padEnd(40, 'x'), 'ClaudeQuaternaryReviewerAccountNumber2', 'ZAI_API_KEY', 'https://github.com/cryptob1/graphyard/pull/385#discussion_r4113452046'])
     assert.equal(looksLikeSecret(plain), false, plain);
   // A reference outside the login home, or on a variable the launcher owns, is not a reference.
   refuses(account({ key: { file: '/etc/zai.key', variable: 'ZAI_API_KEY' } }), /inside the account home/);

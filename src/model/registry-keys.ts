@@ -23,7 +23,8 @@ const randomToken = (token: string) => {
   const entropy = [...counts.values()].reduce((sum, count) => sum - (count / token.length) * Math.log2(count / token.length), 0);
   return entropy >= 4.2;
 };
-const secretLike = (value: string) => secretValue.test(value) || zaiKey.test(value) || value.split(/[\s,;:'"`()<>[\]{}]+/).some(randomToken);
+// Text and URL punctuation split tokens apart, so a key in a query string or path is tested alone (GY-463).
+const secretLike = (value: string) => secretValue.test(value) || zaiKey.test(value) || value.split(/[\s,;:'"`()<>[\]{}/?&#@%|\\!*=]+/).some(randomToken);
 export const notSecret = (value: string) => !secretLike(value);
 /** Whether a value looks like a pasted credential: the dashboard refuses to send one, and the registry to store one. */
 export const looksLikeSecret = (value: string) => secretLike(value.trim());
