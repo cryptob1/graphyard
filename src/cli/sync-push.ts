@@ -57,7 +57,7 @@ export function describeSyncCommit(git: Git, bytes: GitBytes, commit: string, ep
 
 /**
  * `graphyard sync GY-N --push-via-control-plane COMMIT`: the worker's own push of a base sync is
- * refused for want of the `workflows` permission, which worker credentials never carry, so the
+ * refused for want of the `workflows` permission (the installation has not granted it), so the
  * control plane pushes COMMIT to the worker's assigned branch with its own App — only when the
  * commit fast-forwards the branch, merges origin/BASE, and leaves every workflow file as the base
  * has it (except paths in plannedFiles). Any other commit is refused naming the differing paths.

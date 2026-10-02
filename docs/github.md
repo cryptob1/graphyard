@@ -29,7 +29,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Base syncs carrying workflow changes
 
-Worker push tokens never carry Workflows, so no worker changes CI; GitHub refuses their merge of a base that changed `.github/workflows`. `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT if it fast-forwards the worker's branch, merges `origin/BASE` and keeps its workflow files (plannedFiles aside), else names the differing paths; history records `sync.workflow-push`.
+Worker push tokens carry `workerPushPermissions` (`src/worker-credential.ts`): Contents, Pull requests, Workflows write, so workers push base syncs carrying main's workflow changes. Refused (Workflows ungranted), `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT if it fast-forwards, merges `origin/BASE` and keeps its workflow files (plannedFiles aside), else names the differing paths; history records `sync.workflow-push` per worker and epoch.
 
 ## Require the check
 

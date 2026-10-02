@@ -94,9 +94,9 @@ export function attributeConflicts(paths: string[], all: Work[], landed: (sha: s
 
 /**
  * A base sync that carries the base branch's own workflow changes (GY-1098). A worker's push
- * credential is narrowed to `contents` and `pull_requests` and never carries `workflows`, so
- * GitHub refuses any push whose commits change `.github/workflows` — including the merge of a base
- * that changed them. The worker names the merge commit instead and the control plane pushes it
+ * credential carries `workerPushPermissions`; when GitHub still refuses a push whose commits change
+ * `.github/workflows` (an installation that has not granted Workflows) — including the merge of a
+ * base that changed them — the worker names the merge commit instead and the control plane pushes it
  * with its own App, which holds `workflows: write`, only when the commit is a pure base sync:
  * a merge whose first parent is the assigned branch's head on GitHub (a fast-forward), whose
  * second parent is in origin/BASE, and whose workflow files are byte-identical to that parent

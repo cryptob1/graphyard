@@ -172,11 +172,11 @@ test('unit:workflow-sync-push-guarded — a base sync that only carries main\'s 
   } finally { await cleanup(); }
 });
 
-test('unit:workflow-sync-push-attributed — the App declares workflows: write, worker credentials stay narrowed, and the push lands in the item history under the worker and epoch', async () => {
+test('unit:workflow-sync-push-attributed — the App declares workflows: write, worker credentials carry exactly workerPushPermissions, and the push lands in the item history under the worker and epoch', async () => {
   assert.equal(requiredPermissions(controlPlanePermissions).workflows, 'write');
   assert.deepEqual(controlPlanePermissions.filter(requirement => requirement.permission === 'workflows').map(requirement => requirement.feature), ['workflow-sync'], 'the base sync is the only reason for Workflows: write');
   assert.match(permissionTable(controlPlanePermissions), /\| Workflows \| Read and write \| push base syncs carrying/);
-  assert.deepEqual({ ...workerPushPermissions }, { contents: 'write', pull_requests: 'write' }, 'a worker push credential never carries workflows');
+  assert.deepEqual({ ...workerPushPermissions }, { contents: 'write', pull_requests: 'write', workflows: 'write' }, 'a worker push credential carries contents, pull requests and workflows write');
 
   const { origin, git, bytes, cleanup } = await stranded();
   try {
