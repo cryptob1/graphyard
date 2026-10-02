@@ -25,7 +25,7 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 ## CI
 
-`test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips all (`scripts/ci-tests.mjs`).
+`test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips every pre-merge file (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).
 
 ## Documentation
 
