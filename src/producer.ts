@@ -222,15 +222,23 @@ export class ClosedQuestionsDecided extends Error {
  * (`answeredByPendingSession`) rather than failing it for as long as the session runs — which read
  * as a stalled dispatch. A session pending on another head is still a refusal: it must be
  * reconciled before the group is launched again.
+ *
+ * Recognised by its brand, never by `instanceof` (GY-1090): the executor process loads this module
+ * once for its effects and once more through `executor.ts`, each `tsImport` its own module
+ * instance, so the class the launch threw was never the class the handler tested for. Every proof
+ * dispatch an executor claimed while the loop's session ran failed for that reason until the row
+ * stalled — the same refusal this class exists to settle.
  */
 export class ProducerSessionPending extends Error {
+  readonly producerSessionPending = true;
   constructor(readonly work: string, readonly group: string, readonly pending: Pick<ProducerRecord, 'id' | 'sha' | 'requestId' | 'agentName'>) {
     super(`A producer session for ${work} ${group} proofs is already pending on ${pending.sha.slice(0, 7)}; reconcile it with master status before launching another`);
   }
 }
+const producerSessionPending = (error: unknown): error is ProducerSessionPending => (error as { producerSessionPending?: boolean } | null)?.producerSessionPending === true;
 /** The pending session a launch was refused for, when it is already producing the requested head. */
 export const answeredByPendingSession = (error: unknown, request: Pick<DispatchRequest, 'sha'>) =>
-  error instanceof ProducerSessionPending && error.pending.sha === request.sha ? error.pending : null;
+  producerSessionPending(error) && error.pending.sha === request.sha ? error.pending : null;
 
 /**
  * `checkout` is the session directory a launch allocated under the managed worktree root; a
