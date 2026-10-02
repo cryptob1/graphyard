@@ -22,7 +22,7 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     // A producer that recorded its proofs as not exercising their criterion answered the request
     // with a finding (GY-817): the head awaits rework, which the loop requests as it does for a
     // failing proof, and no producer is launched for it again.
-    if (request.unexercised?.length) return { subject: row.key, requestId: request.requestId,
+    if (request.unexercised?.length) return { subject: row.key, requestId: request.requestId, kind: 'nonexercising-proof' as const,
       text: `${row.key} is awaiting rework for a non-exercising proof: ${request.unexercised.join('; ')}. The ${request.group ?? 'producer'} proofs are a defect of the candidate's tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh`,
       ...agentOwner('master', `the loop requests the rework decision for ${row.key}, approved by the approver agent; graphyard master decide ${row.key} rework REASON only when the loop cannot`, 'approver') };
     const subject = request.kind === 'review' ? 'Review request' : `Producer request for ${request.group ?? 'its'} proofs`;
