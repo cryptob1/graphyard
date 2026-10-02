@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, checkRerunHeld, requiredCheck, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -254,12 +254,16 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
-  const failed = work.policy.checks.filter(name => {
-    const latest = requiredCheck(work, name);
+  // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
+  // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
+  // check's run is read through the test gate's trust boundary (GY-731); a protection-only
+  // check's through the app protection binds it to, or any app.
+  const failed = requiredChecksOf(work).filter(required => {
+    const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, null);
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name);
-  }).sort();
+    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
+  }).map(required => required.name).sort();
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
+import { Store, resolvedPayloadSql } from '../src/store.js';
 import { Engine, historicalAuthorizationRefusals, unauthorizedMergeViolation } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { buildMasterStatus, masterConfigSchema, mergedWithoutAuthorization, type MasterConfig, type MergeExecutor } from '../src/master.js';
@@ -106,7 +106,9 @@ async function candidate(options: { proven?: boolean; queue?: boolean; alone?: b
   }
   return w;
 }
-const snapshotsReporting = async (workId: string, mergeSha: string) => (await store.pool.query("SELECT created_at, payload->'work' AS work FROM events WHERE work_id=$1 AND payload->'work'->'observation'->>'mergeSha'=$2 ORDER BY seq", [workId, mergeSha])).rows as { created_at: Date; work: Work }[];
+// Every ledger row whose document already reports the merge, whole or resolved from its delta.
+const snapshotsReporting = async (workId: string, mergeSha: string) => (await store.pool.query(`SELECT created_at, whole, payload->'work' AS work FROM (SELECT created_at, payload ? 'work' AS whole, ${resolvedPayloadSql()} AS payload FROM events WHERE work_id=$1 ORDER BY seq) e
+  WHERE payload->'work'->'observation'->>'mergeSha'=$2`, [workId, mergeSha])).rows as { created_at: Date; whole: boolean; work: Work }[];
 
 test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a whole-second mergedAt and post-merge observations inside the whole-second cutoff window; the reconciliation re-checks the last snapshot that precedes the merge, never one that already reports it, and delivers', async () => {
   const work = await candidate({ alone: true });
@@ -129,12 +131,11 @@ test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a wh
   // carrying its consequences — the violation, no authorization, and a merge gate that only
   // reports the queue position the merge left behind.
   const poisoned = await snapshotsReporting(work.id, mergeSha);
-  // The second post-merge pass changed only its clock, so it is a delta row on the first poisoned
-  // snapshot (store/snapshot-delta.ts): it carries that snapshot's merged observation and is never
-  // carried onto a pre-merge record.
-  assert.equal(poisoned.length, 1);
-  const repeated = (await store.pool.query("SELECT created_at, payload->'delta' AS delta FROM events WHERE work_id=$1 AND payload ? 'delta' AND seq>(SELECT max(seq) FROM events WHERE work_id=$1 AND payload->'work'->'observation'->>'mergeSha'=$2)", [work.id, mergeSha])).rows;
-  assert.equal(repeated.length, 1); assert.ok(repeated[0].created_at.getTime() < oldCutoff);
+  // Both post-merge passes are routine observations with no delivery change, so each is a delta row
+  // (store/snapshot-delta.ts, GY-979) that resolves to a document reporting the merge; neither is
+  // ever carried onto a pre-merge record.
+  assert.equal(poisoned.length, 2);
+  assert.ok(poisoned.every(snapshot => !snapshot.whole), 'routine observations store only what changed');
   for (const snapshot of poisoned) {
     assert.ok(snapshot.created_at.getTime() < oldCutoff, `post-merge snapshot at ${snapshot.created_at.toISOString()} falls inside the old cutoff window ending ${new Date(oldCutoff).toISOString()}`);
     assert.ok(snapshot.work.observation!.merged); assert.equal(snapshot.work.mergeAuthorization, null);

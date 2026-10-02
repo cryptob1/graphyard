@@ -43,7 +43,7 @@ class Api {
     match = /^\/pulls\/(\d+)\/reviews$/.exec(route);
     if (match) return params.get('page') !== '1' ? [] : this.pulls.get(Number(match[1]))!.approved ? [{ id: 40 + Number(match[1]), user: { login: 'independent-reviewer' }, commit_id: this.pulls.get(Number(match[1]))!.head, state: 'APPROVED', submitted_at: '2026-09-21T10:05:00Z' }] : [];
     match = /^\/pulls\/(\d+)\/files$/.exec(route);
-    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
+    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/server/routes/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
     match = /^\/commits\/([a-f0-9]{40})\/check-runs$/.exec(route);
     if (match) {
       if (params.get('check_name')) return { check_runs: [] };
@@ -89,7 +89,7 @@ const observed = (work: Work, at = new Date(Date.now() - 30_000).toISOString(), 
   candidate: work.candidate!, checks: ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: CI, id: index + 1 })),
   reviews: approved ? [{ reviewer: 'independent-reviewer', sha: work.candidate!.sha, state: 'APPROVED', id: 900, submittedAt: at }] : [],
   merged: false, mergeSha: null, mergeable: true, prState: 'open' as const, draft: false,
-  baseTip: work.candidate!.baseSha, baseTipContained: true, protected: true, files: ['src/feature.ts'], at,
+  baseTip: work.candidate!.baseSha, baseTipContained: true, protected: true, files: ['src/server/routes/feature.ts'], at,
   scopeFiles: [{ path: 'src/feature.ts', status: 'modified' as const, sha: sha(`scope-${work.key}`), additions: 3, deletions: 1, binary: false }],
 });
 

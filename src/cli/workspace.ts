@@ -12,6 +12,7 @@ import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
+import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { defineCommands, workMutation } from './registry.js';
@@ -276,7 +277,11 @@ export const workspaceCommands = defineCommands([
           throw error;
         }
       };
-      process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
+      // The session's own push credential (GY-999), when the launcher minted one for this attempt:
+      // refreshed after each renewal before GitHub's expiry, and withdrawn when the session ends.
+      const mintPush = () => api(`work/${work.id}/push-credential`, { epoch }, randomUUID()) as Promise<MintedPushCredential>;
+      process.exitCode = await superviseSessionCredential(process.env.GH_CONFIG_DIR, work.key, epoch, mintPush, refresh =>
+        supervise(args[separator + 1], args.slice(separator + 2), epoch, async () => { const renewed = await renew(); await refresh(); return renewed; }, {
           detached: !foreground,
           ...(scoped ? { containment: scoped } : {}),
           quarantine: foreground ? {
@@ -299,7 +304,7 @@ export const workspaceCommands = defineCommands([
               { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
             ),
           } : undefined,
-        });
+        }));
     },
   },
 ]);

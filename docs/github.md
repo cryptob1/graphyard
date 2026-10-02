@@ -30,19 +30,19 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 On the base branch require `Graphyard / merge` from this App: `strict` **off**, admin-enforced, no force pushes or deletion; `master browser protection` reconciles it.
 
-The gate requires `GITHUB_CI_APP_IDS` CI checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
+The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head before rework or ejection, on the newest check-run ID from configured CI Apps; an owed or accepted rerun expires after 15 minutes without a new run; Actions: write is required: preflight diagnoses a missing grant, rerun requests hold until accepted.
+A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed or accepted rerun lapses after 15 runless minutes; lacking Actions: write, preflight diagnoses it and rerun requests hold.
 
-Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound.
+Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
 ### Bindings and carry
 
 Reviews and proofs bind one head, base and policy revision. On moved bases all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip over the same author head and patch, the App's own dismissal restoring when observed; never a person's, a moved head or a changed patch.
 
-Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review at once, and the entry yields the head to the next until a fresh approval re-enters. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`) an approver judges. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
+Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review at once, and the entry yields the head to the next until a fresh approval re-enters. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) and which is applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
 
 ### Parallel tips
 

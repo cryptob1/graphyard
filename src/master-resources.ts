@@ -229,9 +229,9 @@ export const resourceRegistry: ResourceDefinition[] = [
   },
   {
     id: 'database-capacity', title: 'Control-plane database', unit: 'bytes',
-    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane (default ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured bound also fails health): set it to the database volume's size`,
+    bound: `GRAPHYARD_DATABASE_MAX_BYTES on the plane, else the database volume's size when the plane can read it, else ${defaultDatabaseMaxBytes / 1024 ** 3} GiB, which only warns; a configured or measured bound also fails health`,
     usage: '/healthz resources.database: pg_database_size of the plane\'s database', owner: 'the control plane (src/store)',
-    reclaim: 'none automatic: the ledger is append-only history; grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
+    reclaim: 'receipts past one day are pruned and routine ledger rows past the retention window compacted (store/compaction.ts); space returns to Postgres for reuse, to the volume only after VACUUM FULL; otherwise grow the volume, or restore a backup onto a larger one (docs/operations-reference.md)',
     remedy: 'grow the database volume and raise GRAPHYARD_DATABASE_MAX_BYTES to match before writes fail',
     warnBelow: tenthOf, symptoms: [/could not extend file|No space left on device|disk full/i],
     read: input => [{ id: '', used: input.plane?.database?.used ?? null, bound: input.plane?.database?.bound ?? null, detail: input.plane?.database?.detail ?? (input.plane ? null : 'the plane\'s /healthz could not be read'), reclaimable: 0 }],
@@ -663,20 +663,42 @@ export async function probeWrites(pool: { connect(): Promise<{ query(sql: string
 }
 
 /**
- * The plane's database size against its declared bound. The default bound is a guess at a volume
- * nobody sized, so it is advisory: `master status` warns on it, but only a configured bound fails health.
+ * The size of the volume holding the database's data directory, when the plane can see it: the
+ * directory is readable to the database role (`data_directory` needs pg_read_all_settings) and the
+ * same path exists on this host — an embedded, compose or same-machine database. A database on its
+ * own host (a managed service) answers null and the default bound stands.
+ */
+export async function readDatabaseVolumeBytes(pool: { query(sql: string): Promise<{ rows: any[] }> }): Promise<{ bytes: number; path: string } | null> {
+  try {
+    const path = String((await pool.query("SELECT current_setting('data_directory') AS path")).rows[0]?.path ?? '');
+    if (!path) return null;
+    const volume = await statfs(path);
+    const bytes = Number(volume.blocks) * Number(volume.bsize);
+    return Number.isFinite(bytes) && bytes > 0 ? { bytes, path } : null;
+  } catch { return null; }
+}
+
+/**
+ * The plane's database size against its bound: GRAPHYARD_DATABASE_MAX_BYTES when set, else the
+ * size of the database's own volume when the plane can read it (GY-979: the fixed 10 GiB default
+ * reported headroom a 19 GB volume did not have, or lacked), else the default. Only the default is
+ * a guess at a volume nobody sized, so it alone is advisory: `master status` warns on it, but a
+ * configured or measured bound fails health.
  */
 export async function readDatabaseCapacity(pool: { query(sql: string): Promise<{ rows: any[] }> }, env: NodeJS.ProcessEnv = process.env): Promise<PlaneReading> {
   const configured = Number(env.GRAPHYARD_DATABASE_MAX_BYTES);
   const set = Number.isFinite(configured) && configured > 0;
-  const bound = set ? configured : defaultDatabaseMaxBytes;
+  const volume = set ? null : await readDatabaseVolumeBytes(pool);
+  const bound = set ? configured : volume?.bytes ?? defaultDatabaseMaxBytes;
+  const advisory = !set && !volume;
+  const against = set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : volume ? `the size of the database volume at ${volume.path}` : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset and the database volume not readable from the plane; it warns but does not fail health)';
   try {
     const used = Number((await pool.query('SELECT pg_database_size(current_database()) AS size')).rows[0].size);
     // The largest tables, so growth is attributed from outside the database (a catalogue read, no scan).
     const tables = await pool.query(`SELECT relname AS table, pg_total_relation_size(c.oid) AS bytes FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relkind = 'r' AND n.nspname = 'public' ORDER BY pg_total_relation_size(c.oid) DESC LIMIT 6`).then(r => r.rows.map(row => ({ table: String(row.table), bytes: Number(row.bytes) })), () => undefined);
-    return { used, bound, advisory: !set, ...(tables ? { tables } : {}), detail: `pg_database_size against ${set ? 'GRAPHYARD_DATABASE_MAX_BYTES' : 'the default bound (GRAPHYARD_DATABASE_MAX_BYTES unset; it warns but does not fail health)'}` };
-  } catch (error) { return { used: null, bound, advisory: !set, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
+    return { used, bound, advisory, ...(tables ? { tables } : {}), detail: `pg_database_size against ${against}` };
+  } catch (error) { return { used: null, bound, advisory, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
 }
 
 const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>();
