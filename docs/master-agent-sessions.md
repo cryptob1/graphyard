@@ -63,6 +63,8 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.
 
 When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again on that epoch ends the attempt and its blocker; a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
 
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
+
 Every paste goes to the **pane on the attempt's own session handle**, never the profile's reusable agent name another session may hold (GY-852); a gone pane hands the attempt on.
 
 ### Panes are closed and reclaimed

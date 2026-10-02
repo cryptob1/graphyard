@@ -78,10 +78,14 @@ export function classifyRuntimePrompt(screen: string | null | undefined): Runtim
   if (/[[(]\s*y(?:es)?\s*\/\s*n(?:o)?\s*[\])]/i.test(tail.at(-1) ?? '') && destructivePrompt(tail)) return { kind: 'destructive-command', text: collapse(tail), keys: ['n', 'Enter'], answer: 'n' };
   return { kind: 'unknown', text: collapse(tail), keys: null, answer: null };
 }
+const forcePush = /\bgit\s+push\b[^;&|]*(?:--force\b|--force-with-lease\b|\s-f\b|\s\+\S)/i;
 /** The one instruction a session gets after the loop declined its destructive-command prompt: carry on with a safe alternative. */
 export function continueAfterDecline(key: string, prompt: Pick<RuntimePrompt, 'text' | 'answer'>, directory: string | null) {
   const where = directory ? `explicit paths inside your worktree ${directory}` : 'explicit paths inside your own checkout';
-  return `Graphyard answered your runtime's destructive-command prompt for you with "${prompt.answer}", because no person will answer it: "${prompt.text}". Continue ${key} without that command. `
+  // A force push is how a worker tries to take back out-of-scope edits it already pushed; the
+  // remedy is one more commit, which `sync --restore` makes (GY-859).
+  const remedy = forcePush.test(prompt.text) ? `A force push is never needed or allowed: if files outside plannedFiles differ from the base, run graphyard sync ${key} --restore, which restores them in one new commit, then push with a plain git push. ` : '';
+  return `Graphyard answered your runtime's destructive-command prompt for you with "${prompt.answer}", because no person will answer it: "${prompt.text}". Continue ${key} without that command. ${remedy}`
     + `Use a safe alternative that needs no confirmation: name ${where}, or create a scratch directory with mktemp -d and remove only that directory by its exact path. `
     + 'Never give rm or mv a glob or a variable as its target outside a directory you created with mktemp -d. Do not stop or ask anyone; carry on with your task.';
 }
