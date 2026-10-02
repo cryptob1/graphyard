@@ -8,7 +8,7 @@ import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
 import { openPatternItems } from '../interventions.js';
-import { synthesizeRetro } from '../retro-synthesis.js';
+import { ensureRetroIndex, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
@@ -30,6 +30,9 @@ export async function main() {
   const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard');
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
+  // Built CONCURRENTLY beside startup, never awaited: a plain build in the migration would hold the ledger's writes (GY-1048).
+  void ensureRetroIndex(store.pool).then(outcome => console.log(`Retro index events_retro_id: ${outcome}`),
+    error => console.error('Retro index events_retro_id was not built; retro reads scan until the next start:', error instanceof Error ? error.message : 'unknown'));
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);

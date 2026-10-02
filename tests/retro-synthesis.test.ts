@@ -8,9 +8,11 @@ import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { Intervention, InterventionPolicy } from '../src/model/interventions.js';
 import { cataloguedCause, classifyGateRefusals, detectRecurringCauses, draftPrevention, retroApprovalConflict, retroCause, retroCheckRefusals, retroStanding, runRetroCheck, type RetroArtefact } from '../src/model/retro-synthesis.js';
-import { judgeRetroArtefact, readAppliedRetroChecks, readRetroArtefacts, retroLedgerLimit, retroReads, synthesizeRetro } from '../src/retro-synthesis.js';
+import { ensureRetroIndex, judgeRetroArtefact, readAppliedRetroChecks, readRetroArtefacts, retroLedgerLimit, retroReads, synthesizeRetro } from '../src/retro-synthesis.js';
 import { withRetroStanding } from '../src/cli/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { advisoryLocks } from '../src/store/locks.js';
+import { events } from '../src/store/tables/work.js';
 
 // GY-970: repeated refusal and rework causes are drafted into prevention artefacts for independent
 // approval, and an approved artefact applies through its governed registry, recording what it closes.
@@ -309,6 +311,20 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
   const read = await readRetroArtefacts(store.pool);
   assert.equal(read.find(artefact => artefact.id === waiting)?.state, 'drafted');
   assert.equal(read.filter(artefact => artefact.refusal?.reason === 'burst').length, retroLedgerLimit + 1);
+
+  // The boot migration never builds the index (a plain build would hold the ledger's writes); it is
+  // built CONCURRENTLY after startup, once, by one replica, and a build left INVALID is rebuilt (follow-up 24).
+  assert.doesNotMatch(events.ddl, /INDEX[^;]*events_retro_id/);
+  const holder = await store.pool.connect();
+  try {
+    await holder.query('SELECT pg_advisory_lock($1)', [advisoryLocks.retroIndex]);
+    assert.equal(await ensureRetroIndex(store.pool), 'building elsewhere');
+  } finally { await holder.query('SELECT pg_advisory_unlock($1)', [advisoryLocks.retroIndex]); holder.release(); }
+  assert.equal(await ensureRetroIndex(store.pool), 'built');
+  assert.equal(await ensureRetroIndex(store.pool), 'present');
+  await store.pool.query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'events_retro_id'::regclass");
+  assert.equal(await ensureRetroIndex(store.pool), 'built');
+  assert.equal((await store.pool.query("SELECT indisvalid FROM pg_index WHERE indexrelid = 'events_retro_id'::regclass")).rows[0].indisvalid, true);
 
   // Over thousands of judged retro rows, the applied-check read and the unjudged-draft probe go by
   // payload id through events_retro_id, never a scan of every retro row (follow-ups 18, 19, 22, 23).

@@ -7,6 +7,7 @@ import { detectRecurringCauses, draftPrevention, foldRetroArtefacts, retroApprov
 import { controlPlaneActor, foldInterventions, readInterventionLedger } from './interventions.js';
 import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
+import { advisoryLocks } from './store/locks.js';
 
 /**
  * Retro synthesis read from and written to the ledger (GY-970; see model/retro-synthesis.ts).
@@ -38,6 +39,30 @@ export const retroReads = {
       AND (kind = 'retro.applied' OR payload->'draft'->>'kind' = 'mechanical-check')
     ORDER BY seq`,
 };
+/** The payload-id index both retro reads go through; partial on the retro kinds, so the rest of the ledger never enters it. */
+export const retroIndexDdl = `CREATE INDEX CONCURRENTLY IF NOT EXISTS events_retro_id ON events(kind,(payload->>'id'))
+  WHERE kind IN ('retro.drafted','retro.applied','retro.refused')`;
+
+/**
+ * Build `events_retro_id` CONCURRENTLY, after startup and outside the boot migration's transaction:
+ * a plain build there holds every write to the ledger for as long as it scans the whole events
+ * table (GY-1048 follow-up 24). Until it exists the retro reads are correct, only slower. A build an
+ * earlier process left INVALID (killed mid-build) is dropped and built again; two replicas never
+ * build at once, the one that misses the advisory lock leaving it to the other. The connection is
+ * its own and is discarded afterwards, so neither the lock nor the lifted statement timeout outlives it.
+ */
+export async function ensureRetroIndex(pool: pg.Pool): Promise<'present' | 'built' | 'building elsewhere'> {
+  const db = await pool.connect();
+  try {
+    if (!(await db.query('SELECT pg_try_advisory_lock($1) AS locked', [advisoryLocks.retroIndex])).rows[0].locked) return 'building elsewhere';
+    const { rows } = await db.query("SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass('events_retro_id')");
+    if (rows[0]?.valid) return 'present';
+    await db.query('SET statement_timeout = 0');
+    if (rows.length) await db.query('DROP INDEX CONCURRENTLY IF EXISTS events_retro_id');
+    await db.query(retroIndexDdl);
+    return 'built';
+  } finally { db.release(true); }
+}
 const foldRows = (rows: any[]) => foldRetroArtefacts(rows.map((row): RetroLedgerRow => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), payload: row.payload })));
 
 /**
@@ -55,8 +80,8 @@ export async function readRetroArtefacts(db: Db): Promise<RetroArtefact[]> {
  * Only the applied mechanical checks, for the submit transaction: their approvals and the drafts
  * they applied, never the whole retro ledger, so a submission's cost is bounded by the checks in
  * force rather than by every draft ever recorded. The applied ids and the rows that carry them are
- * both read through the `events_retro_id` index on (kind, payload id), as is the unjudged-draft
- * probe above, so neither grows with the retro rows it does not return (GY-1048).
+ * both read through the `events_retro_id` index on (kind, payload id) once `ensureRetroIndex` has built
+ * it, as is the unjudged-draft probe above, so neither grows with the retro rows it does not return (GY-1048).
  */
 export async function readAppliedRetroChecks(db: Db): Promise<RetroArtefact[]> {
   const result = await db.query(retroReads.appliedChecks);

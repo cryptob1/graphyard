@@ -33,11 +33,9 @@ CREATE INDEX IF NOT EXISTS events_deployment_contained ON events(work_id,seq DES
   WHERE kind='delivery.deployment-contained' AND work_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_deployment_pending ON events(created_at DESC,seq DESC)
   WHERE kind='production.deployment-pending';
--- Retro artefacts are joined to their judgements by payload id (retro-synthesis.ts): the submit
--- transaction's applied checks and the unjudged-draft probe each read by id, never a scan of every
--- retro row (GY-1048). Partial on the retro kinds, so the rest of the ledger never enters it.
-CREATE INDEX IF NOT EXISTS events_retro_id ON events(kind,(payload->>'id'))
-  WHERE kind IN ('retro.drafted','retro.applied','retro.refused');
+-- The retro artefacts' payload-id index (events_retro_id) is not built here: a plain build inside
+-- this transaction would hold writes to the whole ledger while it scans it. retro-synthesis.ts
+-- builds it CONCURRENTLY once the server has started (GY-1048).
 ${eventWorkFunctions}
 -- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
 ${eventsImmutableDdl}`,
