@@ -409,6 +409,7 @@
     "tests/planned-files-derived.test.ts": 1572,
     "tests/pr-links.test.ts": 355,
     "tests/producer-already-pending.test.ts": 1082,
+    "tests/producer-environment.test.ts": 1300,
     "tests/production-watch.test.ts": 1712,
     "tests/proof-exercises-criterion.test.ts": 2724,
     "tests/proof-faults.test.ts": 1000,

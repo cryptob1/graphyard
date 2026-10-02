@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
@@ -26,6 +26,34 @@ import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js'
  * and none of these names can shadow a control-plane variable.
  */
 export const producerEnvNames = ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY'] as const;
+/**
+ * The proofs that provision real servers, and the .env names each cannot run without (GY-1071): a
+ * launch for one of them on a host whose .env lacks a name is refused before any session exists,
+ * as a host-configuration fault naming what is missing, rather than started into a proof that
+ * would fail for want of a credential.
+ */
+export const liveInstallProofEnv: readonly { proof: RegExp; names: readonly (typeof producerEnvNames)[number][] }[] = [
+  { proof: /^manual:install-hetzner-live$/, names: producerEnvNames },
+];
+export function missingProducerEnv(proofs: readonly string[], env: Record<string, string>) {
+  return [...new Set(liveInstallProofEnv.filter(rule => proofs.some(proof => rule.proof.test(proof))).flatMap(rule => rule.names.filter(name => !env[name])))];
+}
+
+/**
+ * One .env value as a shell would read it: a value in a matching pair of quotes is the text
+ * between them, with anything after the closing quote only a `# comment`; an unquoted value ends
+ * at a whitespace-led `#`. A value whose quotes do not pair is refused, never altered.
+ */
+export function parseEnvValue(raw: string): string | null {
+  const text = raw.trim(), quote = text[0];
+  if (quote === '"' || quote === "'") {
+    const close = text.indexOf(quote, 1);
+    if (close < 0 || !/^(\s+#.*)?$/.test(text.slice(close + 1).trimEnd())) return null;
+    return text.slice(1, close);
+  }
+  if (/['"]/.test(text.replace(/\s+#.*$/, ''))) return null;
+  return text.replace(/\s+#.*$/, '').trim();
+}
 
 /** Read the producer-approved environment variables from the repo-root .env file. */
 export async function readProducerEnvironment(root: string): Promise<Record<string, string>> {
@@ -38,16 +66,33 @@ export async function readProducerEnvironment(root: string): Promise<Record<stri
     throw error;
   }
   const env: Record<string, string> = {};
-  for (const line of content.split('\n')) {
-    const trimmed = line.trim();
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim().replace(/^export\s+/, '');
     if (!trimmed || trimmed.startsWith('#')) continue;
     const separator = trimmed.indexOf('=');
     if (separator <= 0) continue;
     const key = trimmed.slice(0, separator).trim();
-    const value = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/g, '');
-    if ((producerEnvNames as readonly string[]).includes(key) && value) env[key] = value;
+    if (!(producerEnvNames as readonly string[]).includes(key)) continue;
+    // The value is never named: a refusal says which line, not what it holds.
+    const value = parseEnvValue(trimmed.slice(separator + 1));
+    if (value === null) throw new Error(`${envFile}: the value of ${key} has unpaired quotes or text after its closing quote; write it unquoted or in one matching pair of quotes`);
+    if (value) env[key] = value;
   }
   return env;
+}
+
+/**
+ * The producer secrets a Herdr session receives, kept off every command line (GY-1071): they are
+ * written to a 0600 file in the session's own directory, and the runtime is started under `sh`,
+ * which exports that file's assignments and execs the runtime. `herdr tab create --env NAME=VALUE`
+ * would put each value in the host's process list while the command runs.
+ */
+export async function producerSecretsPrefix(directory: string, env: Record<string, string>): Promise<string[]> {
+  if (!Object.keys(env).length) return [];
+  const file = resolve(directory, 'producer.env');
+  await writeFile(file, Object.entries(env).map(([name, value]) => `${name}='${value.replaceAll("'", "'\\''")}'\n`).join(''), { mode: 0o600 });
+  await chmod(file, 0o600);
+  return ['sh', '-c', 'set -a; . "$1"; set +a; shift 2; exec "$@"', 'sh', file, '--'];
 }
 
 /**
@@ -335,6 +380,11 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   const sessions = profileSessions(profile, agents, ledger.producers);
   if (!sessions.free) throw new Error(profileAtLimit('Producer', profile, sessions));
   const credential = await readProducerCredential(root, profile.credentialFile);
+  // A live-install proof on a host whose .env was never provisioned is a host-configuration fault,
+  // refused before any account or session is taken (GY-1071, docs/install.md).
+  const producerEnv = await readProducerEnvironment(root);
+  const missingEnv = missingProducerEnv(binding.proofs, producerEnv);
+  if (missingEnv.length) throw new Error(`Graphyard refuses to launch the ${binding.key} ${binding.group} proofs (${binding.proofs.join(', ')}): ${missingEnv.join(' and ')} ${missingEnv.length > 1 ? 'are' : 'is'} not set in ${resolve(root, '.env')} on this coordinator; add ${missingEnv.length > 1 ? 'them' : 'it'} there (docs/install.md) and the request is launched again`);
   // A closed question answers in seconds what a session takes most of an hour to; the session is
   // launched only for the proofs no confident answer decided.
   if (binding.proofs.some(proof => closedQuestionFor(work, proof))) {
@@ -349,7 +399,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
   // below; `run.runtimes` covers only a producer role the registry does not define.
   const registry = await selectRegistryAccount(config, 'producer', profile, { ...dependencies.probe, work: work.key, group: binding.group });
   if (registry ? registry.account.kind === 'pi' && binding.group === 'unit' : narrowRoleRuntime(config.run, 'producer', binding.group) === 'pi')
-    return launchHeadlessProducer(root, config, work, binding, request, profile, { id, agentName, credential, attempt: prior.length + 1 }, { ...dependencies, now, registry });
+    return launchHeadlessProducer(root, config, work, binding, request, profile, { id, agentName, credential, attempt: prior.length + 1 }, { ...dependencies, now, registry, producerEnv });
   // Pi runs a producer headless for the unit group only; a Pi account chosen for any other group is
   // refused, its session given back, rather than started as a Herdr terminal session no launch path
   // supervises for Pi (GY-397).
@@ -371,15 +421,16 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
-      const producerEnv = await readProducerEnvironment(root);
+      // The producer secrets never reach Herdr's argv: they are exported from a 0600 file as the runtime starts.
       const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
-        GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}`, ...producerEnv };
+        GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
+      const prefix = await producerSecretsPrefix(checkout.directory, producerEnv);
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
         '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
       pane = created.pane; tabId = created.tab;
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
+      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, prefix, role: harness.role, contract: launch.contract }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
@@ -422,7 +473,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
  * the run ends its record is kept on the session record, and reconciliation settles it as usual.
  */
 async function launchHeadlessProducer(root: string, config: MasterConfig, work: Work, binding: ProducerBinding, request: DispatchRequest, profile: ProducerProfile,
-  session: { id: string; agentName: string; credential: string; attempt: number }, dependencies: { now: () => Date; runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe; registry?: Awaited<ReturnType<typeof selectFleetSession>> }) {
+  session: { id: string; agentName: string; credential: string; attempt: number }, dependencies: { now: () => Date; runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe; registry?: Awaited<ReturnType<typeof selectFleetSession>>; producerEnv: Record<string, string> }) {
   const pi = piRuntimeSchema.parse(config.run.pi ?? {}), registry = dependencies.registry ?? null;
   // The runner and the name evidence is attributed to come from the registry's choice when it made one.
   // A launch the registry's contract refuses (a tools allowlist with no tools flag) gives its session back.
@@ -443,8 +494,8 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   const ledger = await readProducerLedger(root);
   try { await saveProducerLedger(root, { ...ledger, producers: [...ledger.producers, record] }); }
   catch (error) { await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {}); await registry?.release('the producer record could not be written'); throw error; }
-  const producerEnv = await readProducerEnvironment(root);
-  const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`, ...producerEnv };
+  // The headless run's child receives them in its own environment, never on a command line.
+  const environment = { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`, ...dependencies.producerEnv };
   let started: ReturnType<typeof startNarrowRun>;
   try {
     started = startNarrowRun({ runner, name: session.agentName, role: 'producer', work: binding.key, subject: session.id, root,
