@@ -27,4 +27,4 @@ Below the summary: **What is left**; **Requirements** (✓/○ per criterion); *
 
 ## Insights
 
-**Flow**, landed/day, merges/hour, median queue wait, time spent, [optimistic merges](github.md#optimistic-merges). **Show details**: shipping pulse (PR-to-production via `POST /api/production-observations` or `master verify-deployment`), 24-hour to 90-day flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**. Missing values: `Unavailable`.
+**Flow**, landed/day, merges/hour, median queue wait, time spent, [optimistic merges](github.md#optimistic-merges). **Show details**: shipping pulse (PR-to-production via `POST /api/production-observations` or `master verify-deployment`), 24-hour to 90-day flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**.

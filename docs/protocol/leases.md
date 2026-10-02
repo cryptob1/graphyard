@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 3 | leases, workspaces, `watch`. -->
 # Leases, workspaces and supervision
 
-Claims last 120 s, renewed every ≤30 s; owner mutations carry the epoch; expired epochs stay refused. Before submitting, register branch, path, host ID (`graphyard register GY-1 workspace.json`): branches (`graphyard/…`) globally unique, paths per host (past reservations too), both with the epoch.
+Claims last 120 s, renewed every ≤30 s; owner mutations carry the epoch; expired epochs stay refused. Before submitting, register branch, path, host ID (`graphyard register GY-1 workspace.json`): branches (`graphyard/…`) globally unique, paths per host, both with the epoch.
 
 ## `watch`
 

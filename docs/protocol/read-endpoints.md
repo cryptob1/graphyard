@@ -3,7 +3,7 @@
 
 - `GET /healthz` (unauthenticated); `GET /api/status`: principal, integrations, `appPermissions`, held/failed jobs, `githubBudget`, clock.
 - `GET /api/github/installation` (coordinator): live App permissions.
-- `GET /api/work-snapshot`: `{work, now}` with `autoDispatch`; age leases against `now`. Open items whole, settled deliveries `summary: true` (no prose/histories); `view=coordination` trims open items, `view=full` exports all; others page visible work by `cursor` (last number), `pageSize` (≤1000, default 100) → `hasMore`, `nextCursor`.
+- `GET /api/work-snapshot`: `{work, now}` with `autoDispatch`. Open items whole, settled deliveries `summary: true` (no prose/histories); `view=coordination` trims open items, `view=full` exports all; others page visible work by `cursor` (last number), `pageSize` (≤1000, default 100) → `hasMore`, `nextCursor`.
 - `GET /api/work/ID|KEY` (one), `/api/work` (all).
 - `GET /api/interventions?window=7|30|90`: ledger rows (`ledger.since`), catalogue-recognised ones marked.
 - `GET /api/retro`: artefacts (newest first), each registry's `standing` revision; `/api/retro/standing` (any role): applied entries ([`retroStanding`](../operations-reference.md#retro-synthesis), `retroCatalogued`).

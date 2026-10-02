@@ -34,13 +34,13 @@ Require `Graphyard / merge` from the control-plane App on base: `strict` **off**
 
 A failed required check reruns once on the unchanged head (newest configured-CI-App run) before rework or ejection.
 
-Once gated, a speculative tip pushed onto the candidate branch and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Withdrawal dequeues. Queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+Once gated, a speculative tip pushed onto the candidate branch and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
 `mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order once all tips through theirs pass; a failing tip ejects its entry once those ahead pass; later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
 
 ### Bindings and carry
 
-Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. Republication reads PR reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch; never a person's, a moved head or changed patch.
+Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. On republication, the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch; never a person's, a moved head or changed patch.
 
 Before merging, the reviewer App re-posts a carried approval missing from the PR. None usable: `mergerefused`; the carried approval is cleared and a fresh review requested at once. A refusal repeating past 10 minutes raises attention; the loop clears a carried approval or requests a rework decision, each once per recovery phase.
 

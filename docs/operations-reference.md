@@ -15,7 +15,7 @@ Leases expire 120 s after last heartbeat (one further lease period after a recor
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies only an idle pane shell (childless, parent `herdr server`) survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle bounds clock skew via `HEAD`.
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies only an idle pane shell (childless, parent `herdr server`) survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes).
 
 ## Submitted implementation needs rework
 
@@ -76,7 +76,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Storage retention
 
-Receipts answer retries for a day; routine ledger rows store only the change unless moving stage or delivery; every 10 minutes, compaction deletes them past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1), each batch appending `ledger.compacted` (per-kind counts). Only `VACUUM FULL` frees disk.
+Receipts answer retries for a day; routine ledger rows store only the change unless moving stage or delivery; every 10 minutes, compaction deletes them past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1), each batch appending `ledger.compacted` (per-kind counts).
 
 ## Bootstrap mode for a self-proving change
 

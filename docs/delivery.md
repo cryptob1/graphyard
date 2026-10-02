@@ -39,4 +39,4 @@ Observers `POST /api/delivery/observe`:
 
 Only complete `provider`/`host-attestation` listings verify; repeated `snapshotId`s return the original receipt; `POST /api/delivery/notify` only hints. A 2 s sweep (`graphyard delivery sweep` forces one) verifies a generation once all services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to included items; else a named failure state. `graphyard delivery` shows state.
 
-Validation requests bind manifest, compatibility signature (manifest, build inputs, test bundle, configuration, source, policy, artifacts) and observed measurements; worker and client SHAs count for nothing (`POST /api/validation/result` refuses top-level SHAs). In-window mismatches record `attribution-undermined`, voiding the pass. `GET /api/analytics/attribution` reports mismatches, paid-run cost.
+Validation requests bind manifest, compatibility signature and observed measurements; worker and client SHAs count for nothing (`POST /api/validation/result` refuses top-level SHAs). In-window mismatches record `attribution-undermined`, voiding the pass. `GET /api/analytics/attribution` reports mismatches, paid-run cost.

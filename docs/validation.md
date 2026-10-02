@@ -5,7 +5,7 @@ An `e2e:` proof passes only from a pinned candidate, bundle and separate [collec
 
 ## Test cases
 
-`admin` defines them (**Settings → Test cases**, `graphyard scenario scenario.json`). Immutable revisions; an `e2e:ID` criterion pins the latest at creation (newer: follow-up). Each trusted attempt appends a commit- and run-bound **Tests** run; workers cannot.
+`admin` defines them (**Settings → Test cases**, `graphyard scenario scenario.json`). An `e2e:ID` criterion pins the latest immutable revision. Each trusted attempt appends a commit- and run-bound **Tests** run; workers cannot.
 
 ## Candidates, requests, reports
 

@@ -16,7 +16,7 @@ Cards stop at the first refusing gate, naming what's missing.
 
 ## Risk lanes
 
-`src/model/policy.ts` assigns a **risk lane** (`low`, `medium`, `high`) by changed paths; `master status` shows it, p50 target; the landability verdict requires facts by lane.
+`src/model/policy.ts` assigns a **risk lane** (`low`, `medium`, `high`) by changed paths; the landability verdict requires facts by lane.
 
 - **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential-loading bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework decisions.
 - **Medium** (60 min): the rest; adds producer-run `unit:`/`integration:`.

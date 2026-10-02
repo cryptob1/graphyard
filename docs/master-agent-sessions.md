@@ -7,7 +7,7 @@
 
 ### Session handles
 
-`master status` `sessions` lists handles (runtime, host, pane, transcript, attach).
+`master status` `sessions` lists handles.
 
 ### Approval modes
 
@@ -19,7 +19,7 @@ Every launch but the master session's gets the checkout unwritable to shell comm
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`). A runtime's own limit notice (never agent text): worker changes committed as unpushed `WIP:`, `capacity.exhausted` (not `lease-loss`), relaunch on the next account or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`). A runtime's own limit notice: worker changes committed as unpushed `WIP:`, `capacity.exhausted` (not `lease-loss`), relaunch on the next account or after reset.
 
 ## The loop's own master session
 

@@ -13,13 +13,13 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Review gate: verdicts, not threads
 
-Gate: reviewer approval of the exact head plus required CI; threads are inputs. Approvals mark each listed thread resolved, follow-up (backlog) or overridden by thread ID or a comment ID the prompt shows (prose counts for nothing), else are withdrawn and the relaunch names missed threads; the loop resolves them by thread ID. After two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
+Gate: reviewer approval of the exact head plus required CI; threads are inputs. Approvals mark each listed thread resolved, follow-up (backlog) or overridden by thread ID or a comment ID the prompt shows, else are withdrawn and the relaunch names missed threads; the loop resolves them by thread ID. After two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
 `plannedFiles` also bounds changes: at `complete`, each new head and landing, other non-new files must match the bound base byte-for-byte, else refused naming files, shipping items. Carried files (another item's unlanded commits) never eject; only scope requests or audited revisions widen `plannedFiles`.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates are its refusals; the queue ejects only for its reasons. Computed live, never stored.
+`evaluateLandability` (`src/model/landability.ts`), computed live, is the single authority on landing: build/acceptance gates and queue ejections are its refusals.
 
 Out-of-scope files are judged by three-way merging the head onto the landing commit (live or predicted base): changes it extended or only the base made pass; restoring merge-base versions, deleting, rewriting refuse.
 
@@ -27,7 +27,7 @@ Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, c
 
 ### Submit when your own criteria pass
 
-The full suite is CI's gate, not the worker's (GY-853): a worker runs the build and `graphyard verify GY-N` (its own criteria's proofs only), submits when they pass, and names in the PR, without a blocker, any sandbox-only full-suite failure outside `plannedFiles`. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all its cases executed and passed but the run ended abnormally (hook, crash, signal from other suites); a failed, skipped or unexecuted case always blocks.
+The full suite is CI's gate (GY-853): workers run the build and `graphyard verify GY-N` (own criteria's proofs), submit on pass, and name in the PR any sandbox-only full-suite failure outside `plannedFiles`, without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all its cases executed and passed but the run ended abnormally (hook, crash, signal from other suites); a failed, skipped or unexecuted case always blocks.
 
 ### Generated files never conflict
 

@@ -1,8 +1,7 @@
 <!-- page: Operate Graphyard | 4 | recorded, retrieved, promoted. -->
 # Review follow-ups
 
-An approval's FOLLOW-UP findings (beyond the criteria) are never filed as work (per review or per
-item); an operator promotes one on demand.
+An approval's FOLLOW-UP findings (beyond the criteria) are never filed as work; an operator promotes one on demand.
 
 ## Recorded on the item and the pull request
 
@@ -16,7 +15,7 @@ The loop records them on the item (`POST /api/work/GY-N/followups`; `followups.r
     graphyard followups GY-N      # GET /api/work/GY-N/followups
     graphyard followups --pr N    # every batch for PR N: GET /api/followups?pr=N
 
-Findings are numbered from 1.
+Numbered from 1.
 
 ## Promoting a finding
 
