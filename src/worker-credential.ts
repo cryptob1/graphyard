@@ -45,9 +45,11 @@ export function grantedPushPermissions(granted: Record<string, unknown> | null |
   return { permissions, missing };
 }
 
+/** The words every push shortfall line carries, by which a mint replaces the lines an earlier one raised. */
+export const pushShortfallMarker = 'which worker push credentials request';
 /** One attention line per shortfall: the permission, what minting without it costs, and the installation-accept step that restores it. */
 export function describePushShortfall(shortfall: PushPermissionShortfall, app: string, installationUrl: string) {
-  return `App ${app} installation lacks ${describePermission(shortfall.permission, shortfall.wanted as PermissionLevel)}${shortfall.granted ? ` (installed with ${shortfall.granted})` : ''}, which worker push credentials request; they are minted without it until it is granted, so a worker push that needs it is refused. Run graphyard master browser app-permissions, then graphyard master browser installation-accept, or accept the pending permission request at ${installationUrl}`;
+  return `App ${app} installation lacks ${describePermission(shortfall.permission, shortfall.wanted as PermissionLevel)}${shortfall.granted ? ` (installed with ${shortfall.granted})` : ''}, ${pushShortfallMarker}; they are minted without it until it is granted, so a worker push that needs it is refused. Run graphyard master browser app-permissions, then graphyard master browser installation-accept, or accept the pending permission request at ${installationUrl}`;
 }
 
 /** What the control plane answers a lease holder's mint with; the token is the only secret in it. */

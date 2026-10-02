@@ -23,7 +23,7 @@ import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, ty
 import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
-import { describePushShortfall, grantedPushPermissions } from './worker-credential.js';
+import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -682,6 +682,8 @@ export class GitHub {
     clearTimeout(timer);
   }
   private preflightState: AppPermissionReport | null = null;
+  /** The wanted worker push permissions the last mint found ungranted (GY-1100); null until a mint. */
+  private pushShortfalls: PushPermissionShortfall[] | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
   // A rejected App credential is retried once a minute, not once per queued job: every request
@@ -909,8 +911,10 @@ export class GitHub {
       const app = typeof installation.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(this.config.appId);
       const installationUrl = typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId);
       const suspended = !!installation.suspended_at;
+      // A push shortfall a mint met is kept current here, so accepting the permission clears it.
+      if (this.pushShortfalls) this.pushShortfalls = grantedPushPermissions(granted).missing;
       const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl)),
-        ...grantedPushPermissions(granted).missing.map(shortfall => describePushShortfall(shortfall, app, installationUrl))];
+        ...(this.pushShortfalls ?? []).map(shortfall => describePushShortfall(shortfall, app, installationUrl))];
       this.preflightState = { ...base, app, account: typeof installation.account?.login === 'string' ? installation.account.login : null, installationUrl, verifiedAt: base.observedAt, error: null, suspended, granted, missing, blockedFeatures: blockedFeatures(missing), attention };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'GitHub App permissions could not be read';
@@ -1013,9 +1017,11 @@ export class GitHub {
   private async requestPushToken(granted: Record<string, string>) {
     const { permissions, missing } = grantedPushPermissions(granted);
     demand(permissions.contents === 'write', `The App installation grants no Contents: write, so no worker push credential can be minted; accept it at ${this.preflightState?.installationUrl ?? installationSettingsUrl(this.config.installationId)}`, 502);
-    if (missing.length && this.preflightState) {
-      const lines = missing.map(shortfall => describePushShortfall(shortfall, this.preflightState!.app, this.preflightState!.installationUrl));
-      this.preflightState.attention = [...this.preflightState.attention.filter(line => !lines.includes(line)), ...lines];
+    this.pushShortfalls = missing;
+    const report = this.preflightState;
+    if (report) {
+      report.attention = [...report.attention.filter(line => !line.includes(pushShortfallMarker)),
+        ...missing.map(shortfall => describePushShortfall(shortfall, report.app, report.installationUrl))];
     }
     const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
       method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
