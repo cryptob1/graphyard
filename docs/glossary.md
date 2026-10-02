@@ -63,17 +63,8 @@ Launches sessions and reports liveness.
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Two-party decisions (`master decide GY-N ACTION REASON`, applied by a separate approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. The server refuses an approver who is the requester, an assignee, the evidence producer or the grantee. Reviewers, producers and the merge gate decide the rest; a human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until answered.
+The master applies non-weakening intent (create, release, unblock, add requirements) directly. Two-party decisions (`master decide GY-N ACTION REASON`, applied by a separate approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. An approver may not be the requester, an assignee, the evidence producer or the grantee. Reviewers, producers and the merge gate decide the rest; a human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until answered.
 
 ## Diagram legend
 
-| Shape and colour | Term |
-| --- | --- |
-| Amber rounded box | Human operator |
-| Green rounded box | Agent session (one role, one credential) |
-| Blue square box | Graphyard control plane |
-| Violet box | Herdr runtime |
-| Grey square box | GitHub and external facts |
-| Dashed chip | Credential, lease epoch or worktree |
-| Solid arrow | Authenticated command |
-| Dashed arrow | Observation, never authority |
+Amber rounded box: human operator; green rounded box: agent session (one role, one credential); blue square box: Graphyard control plane; violet box: Herdr runtime; grey square box: GitHub and external facts; dashed chip: credential, lease epoch or worktree; solid arrow: authenticated command; dashed arrow: observation, never authority.

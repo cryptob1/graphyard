@@ -32,7 +32,7 @@ Text equivalent: in bootstrap the operator supervises one worker while gates act
 
 ![Authority held by the operator, Graphyard, Herdr sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the operator sends human-only decisions; Herdr hosts master, slice lead and worker; reviewer (a GitHub identity) and producer (a grant holder) each hold their own credential; merges take only the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions; Herdr hosts master, slice lead and worker; reviewer and producer hold their own credentials; merges take only the guarded path. Colours follow the [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 

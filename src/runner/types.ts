@@ -25,9 +25,11 @@ export type RunEvent =
  * Why a run produced no payload. `timeout`: no terminal event within the bound; `exit`: the
  * process exited non-zero (or by a signal); `invalid-payload`: the agent's submission failed the
  * payload schema; `no-payload`: it ended cleanly without submitting; `cancelled`: `cancel()` was
- * called; `spawn`: the process could not be started.
+ * called; `spawn`: the process could not be started; `lost`: the run's process is gone and left
+ * no result on disk (GY-453) — killed from outside, or its host rebooted — so it judged nothing and
+ * its caller retries it without spending an attempt.
  */
-export const runFailureReasons = ['timeout', 'exit', 'invalid-payload', 'no-payload', 'cancelled', 'spawn'] as const;
+export const runFailureReasons = ['timeout', 'exit', 'invalid-payload', 'no-payload', 'cancelled', 'spawn', 'lost'] as const;
 export type RunFailureReason = typeof runFailureReasons[number];
 export interface RunFailure { reason: RunFailureReason; detail: string; code?: number | null }
 
@@ -47,22 +49,37 @@ export interface RunOptions<T> {
   validate: (payload: unknown) => T;
   /** The bound on the run: no terminal event within it is a `timeout` failure. */
   timeoutMs: number;
+  /**
+   * The run registry on disk (GY-453, registry.ts runsDirectory): the run's own directory is made
+   * under it and holds its output and result, so a restarted loop can adopt it. Absent, the run
+   * gets a scratch directory that is removed when it ends.
+   */
+  runs?: string;
 }
 
 export interface Run<T> {
   readonly id: string;
+  /** The run's directory on disk, when it has one: its output, its exit and its registry entry. */
+  readonly directory?: string;
   /** Every event so far, oldest first. */
   readonly events: readonly RunEvent[];
   /** Streams every event: the ones already seen, then each as it arrives. Returns the unsubscribe. */
   onEvent(listener: (event: RunEvent) => void): () => void;
   /** Stops the run; its result resolves as a `cancelled` failure unless it had already settled. */
   cancel(reason?: string): void;
+  /**
+   * Stops watching the run without signalling it (GY-453): what this process's exit does. The run
+   * keeps going, detached, and its result stays pending here; a restarted loop adopts it.
+   */
+  detach?(): void;
   result(): Promise<RunResult<T>>;
 }
 
 export interface Runner {
   readonly name: string;
   start<T>(prompt: string, options: RunOptions<T>): Run<T>;
+  /** Watches a run another process started, from its directory: its output so far, then until it ends (GY-453). */
+  adopt?<T>(directory: string, options: Omit<RunOptions<T>, 'cwd' | 'env' | 'runs'>): Run<T>;
 }
 
 /**

@@ -15,7 +15,7 @@ Per attested new head: `graphyard validation reuse decision.json`:
 {"workId":"9a7d6b2f-4e1c-4c5a-9f3e-2b8d1c0a7e51","expectedWorkRevision":12,"proof":"e2e:confirmed-booking-sends-sms","policy":{"id":"preview-reuse","revision":1},"buildAttestationId":"5c2e9a1b-7d3f-4a8e-b6c4-0f1d2e3a4b5c"}
 ```
 
-Refused (with reasons) unless the newest attempt is a fresh settled pass on the same pinned revisions and base, with no relevant or unknown change. A grant's `reuse` block expires at `freshnessSeconds`.
+Refused, with reasons, unless the newest attempt is a fresh settled pass on the same pinned revisions and base. A grant's `reuse` block expires at `freshnessSeconds`.
 
 ## Replay
 
