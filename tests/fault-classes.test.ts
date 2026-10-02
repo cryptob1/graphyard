@@ -167,8 +167,9 @@ test('unit:fault-classes — master status and the dashboard group open problems
   // The dashboard's Work page: the same grouping over each open item's own record.
   const work = boardWork() as unknown as Work[];
   const open = work.filter(entry => entry.stage !== 'done');
-  open[0].scopeRequest = { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'graphyard-claude-1', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
-  open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
+  // Requests open past the loop's bound (GY-1085): one still being decided within it is no fault.
+  open[0].scopeRequest = { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'graphyard-claude-1', at: new Date(NOW - hour).toISOString() } as Work['scopeRequest'];
+  open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW - hour).toISOString() } as Work['scopeRequest'];
   open[0].lease = { owner: 'graphyard-claude-1', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
   open[1].lease = { owner: 'graphyard-claude-2', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
   const expected = groupFaults(open.flatMap(entry => workFaults(entry, NOW)));
