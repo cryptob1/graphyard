@@ -183,7 +183,7 @@ test('the recorded baseline holds twenty consecutive passing runs of the require
   }
 });
 
-test('unit:timing-slack-tolerates-loaded-runners — GRAPHYARD_TIMING_SLACK lets an upper-bound timing pass up to budget × slack, defaults to exact, and never loosens other comparisons', () => {
+test('unit:timing-slack-tolerates-loaded-runners — GRAPHYARD_TIMING_SLACK lets an upper-bound timing pass up to budget × slack, defaults to exact, and never loosens other comparisons', async () => {
   assert.equal(timingSlack({}), 1, 'no variable keeps the exact budget');
   assert.equal(timingSlack({ GRAPHYARD_TIMING_SLACK: '1.5' }), 1.5);
   assert.equal(timingSlack({ GRAPHYARD_TIMING_SLACK: '0.5' }), 1, 'slack never tightens below the budget');
@@ -193,4 +193,27 @@ test('unit:timing-slack-tolerates-loaded-runners — GRAPHYARD_TIMING_SLACK lets
   assert.equal(withinSlack({ measuredMs: 30_001, budgetMs: 20_000, comparison: '<=' }, 1.5), false, 'past budget × slack still fails');
   assert.equal(withinSlack({ measuredMs: 20_072, budgetMs: 20_000, comparison: '<=' }, 1), false, 'exact by default');
   assert.equal(withinSlack({ measuredMs: 20_072, budgetMs: 20_000, comparison: '<' }, 1.5), false, 'a strict comparison is never loosened');
+
+  // GY-1040: a measurement the slack lets through passed its assertion, so the record says so and
+  // the timing report neither annotates it nor calls it over budget.
+  const directory = await temporaryDirectory('timing-slack'), previous = process.env.GRAPHYARD_TIMING_SLACK;
+  try {
+    const file = join(directory, 'timing.jsonl');
+    process.env.GRAPHYARD_TIMING_SLACK = '1.5';
+    const cycle = { name: 'cycle-within-interval.duration', test: 'integration:cycle-within-interval', statistic: 'duration', comparison: '<=' as const, budgetMs: 20_000 };
+    assertTiming({ ...cycle, samples: [20_072] }, file);
+    assert.throws(() => assertTiming({ ...cycle, samples: [30_001] }, file), TimingAssertionError);
+    const record = parseTimingRecord(await readFile(file, 'utf8'));
+    assert.deepEqual(record.map(entry => [entry.measuredMs, entry.passed, entry.toleratedBySlack]), [[20_072, false, 1.5], [30_001, false, undefined]]);
+    const failures = timingFailures(record, 1);
+    assert.deepEqual(failures.map(failure => failure.measuredMs), [30_001], 'only the measurement past budget × slack is a timing failure');
+    assert.deepEqual(timingFailures(record.slice(0, 1), 0), [], 'a run whose only overrun was tolerated has no timing failure');
+    const summary = timingSummary(record, failures, null);
+    assert.match(summary, /duration 20072ms \| <= 20000ms \|.*\| over budget, within its 1\.5× slack \|/);
+    assert.match(summary, /duration 30001ms \| <= 20000ms \|.*\| \*\*over budget\*\* \|/);
+    assert.deepEqual(timingSpread([record.slice(0, 1)]).map(entry => entry.failures), [0], 'a tolerated run is not counted as a failure in the spread');
+  } finally {
+    if (previous === undefined) delete process.env.GRAPHYARD_TIMING_SLACK; else process.env.GRAPHYARD_TIMING_SLACK = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
