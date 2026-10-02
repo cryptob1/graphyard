@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { automaticScopeGrounds, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../src/model/criterion-scope.js';
-import type { ScopeCriterion, ScopeRequestState } from '../src/model/scope.js';
+import { decideScopeRequest, type ScopeCriterion, type ScopeRequestState } from '../src/model/scope.js';
+import { importingTestGround } from '../src/model/scope-companions.js';
 import type { Work } from '../src/model.js';
 
 // GY-438: on 2026-09-25 the master granted six scope requests by hand — GY-259, GY-402, GY-406,
@@ -338,4 +339,91 @@ test('unit:scope-rule-criteria-implied — (e) a partly widened request with no 
   const escalated = Object.entries(state.actions).find(([key]) => key.startsWith('escalation:scope:'))?.[1];
   assert.match(escalated?.detail ?? '', /asked for 1 file \(src\/ci-guard\.ts\) because/, escalated?.detail);
   assert.doesNotMatch(escalated?.detail ?? '', /master-status/, 'the path just granted is not escalated');
+});
+
+// GY-955: the companions a change inevitably carries. On 2026-09-29 the widening rule refused
+// GY-945's five paths and GY-883's three fixtures wholesale, and the approver granted each minutes
+// later as "the feature implementation, not optional add-ons". The items' own criteria, verbatim.
+const gy945 = (extra: Partial<Work> = {}) => ({ ...item('GY-406', [], extra), key: 'GY-945', criteria: [
+  { id: 'AC-1', text: "A fleet panel in the web UI lists every registry account: runtime, quota state, per-window usage percentages with reset times, eligibility (with the ineligible reason when false), role preferences, and live session count - reading the same registry data the CLI's master registry reports.", proofs: ['unit:fleet-panel-renders-registry'] },
+  { id: 'AC-2', text: 'Each account shows when its quota was last observed, and stale or probe-failed accounts are visually distinguished from healthy ones, so an operator can tell a real wall from an old probe.', proofs: ['unit:fleet-panel-marks-stale-probe'] },
+] }) as Work;
+const gy945Ask = ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts', 'tests/docs-budget.test.ts'];
+const gy883 = (extra: Partial<Work> = {}) => ({ ...item('GY-406', ['src/model/policy.ts', 'src/model/gates.ts', 'tests/risk-lanes.test.ts'], extra), key: 'GY-883', criteria: [
+  { id: 'AC-1', text: 'src/model/policy.ts assigns every item a lane (low, medium or high) from a shipped path policy. A new test file tests/risk-lanes.test.ts that this item creates asserts the classification.', proofs: ['unit:risk-lane-assigned'] },
+  { id: 'AC-2', text: "In src/model/gates.ts a low-lane item is landable with its required CI checks green and one approving review. Tests assert each lane's required set.", proofs: ['unit:lane-sets-required-gates'] },
+] }) as Work;
+const gy883Ask = ['tests/auto-rebase.test.ts', 'tests/bootstrap-policy.test.ts', 'tests/queue-carry.test.ts'];
+/** The base as GY-883 found it: three fixtures over the src/model.ts barrel, which re-exports the planned gates module. */
+const fixtureBase: Record<string, string> = {
+  'src/model.ts': "// The domain model, split by concern under src/model/.\nexport * from './model/policy.js';\nexport * from './model/work.js';\nexport * from './model/gates.js';\n",
+  'src/model/gates.ts': 'export function evaluate() {}', 'src/model/policy.ts': 'export const lanes = [];', 'src/engine.ts': 'export class Engine {}', 'src/github.ts': 'export class GitHub {}',
+  'tests/auto-rebase.test.ts': "import { Engine } from '../src/engine.js';\nimport { Refusal, type Work } from '../src/model.js';\n",
+  'tests/bootstrap-policy.test.ts': "import { Engine } from '../src/engine.js';\nimport { evaluate, requiredProofs } from '../src/model.js';\n",
+  'tests/queue-carry.test.ts': "import { Engine } from '../src/engine.js';\nimport { carriedApproval, evaluate } from '../src/model.js';\n",
+  'tests/github-only.test.ts': "import { GitHub } from '../src/github.js';\n",
+  'tests/gates-direct.test.ts': "import { evaluate } from '../src/model/gates.js';\n",
+  'tests/docs-budget.test.ts': "import { budgetedPage } from '../src/model/documentation.js';\n",
+};
+const fixtureRead = async (path: string) => fixtureBase[path] ?? null;
+const fixtureExists = (path: string) => path in fixtureBase;
+const lease = { epoch: 1, owner: 'graphyard-worker', expiresAt: new Date(clock + 600_000).toISOString() };
+const refusedAsk = (paths: string[]) => ({ ...ask(paths), decision: { state: 'refused', reason: 'outside what the criteria imply', at: '2026-09-26T01:00:01.000Z', decidedBy: 'graphyard', waitedMs: 1000, paths, requestedBy: 'graphyard-worker', requestedAt: '2026-09-26T01:00:00.000Z', epoch: 1 } });
+
+test('unit:scope-grounds-inevitable-companions — GY-945\'s five paths are grounded per path and approved with no approver; a partly grounded ask widens by what is grounded and routes only the rest', async () => {
+  // The control plane's own rule now implies every one of them: documentation, the web UI the
+  // criteria describe, the test file both criteria's proofs are named for, and the docs-budget gate.
+  const verdict = decideScopeRequest(gy945(), { paths: gy945Ask });
+  assert.equal(verdict.state, 'approved', verdict.reason);
+  for (const expected of [/docs\/dashboard\.md \(docs\/ is documentation/, /web\/pages\/fleet\.tsx \(web\/pages\/fleet\.tsx is the web UI AC-1 describes\)/,
+    /tests\/fleet-panel\.test\.ts \(tests\/fleet-panel\.test\.ts is the test file AC-1, AC-2's proofs \(unit:fleet-panel-renders-registry, unit:fleet-panel-marks-stale-probe\) live in\)/,
+    /tests\/docs-budget\.test\.ts \(tests\/docs-budget\.test\.ts is the documentation-budget gate a change to docs\/dashboard\.md must keep passing\)/]) assert.match(verdict.reason, expected);
+  // (c) the docs-budget gate only beside documentation; and a file under web/ only where a criterion describes the web UI.
+  assert.equal(decideScopeRequest(gy945(), { paths: ['tests/docs-budget.test.ts'] }).state, 'refused', 'no documentation in the ask or the plan');
+  assert.equal(decideScopeRequest(gy945({ plannedFiles: ['docs/dashboard.md'] }), { paths: ['tests/docs-budget.test.ts'] }).state, 'approved', 'documentation already planned');
+  assert.equal(decideScopeRequest(gy883(), { paths: ['web/pages/fleet.tsx'] }).state, 'refused', 'no criterion describes the web UI');
+  assert.equal(decideScopeRequest(gy945(), { paths: ['web/pages/'] }).state, 'refused', 'never the web tree');
+
+  // A partly grounded ask: the engine's verdict stays whole, but the loop grants every grounded
+  // path and only the ungrounded rest is refused — never the whole ask.
+  const partial = [...gy945Ask, 'src/ci-guard.ts'];
+  assert.equal(decideScopeRequest(gy945(), { paths: partial }).state, 'refused');
+  const scoped = await automaticScopeGrounds(gy945(), ask(partial), partial, [], fixtureExists, fixtureRead, async () => [], async () => Infinity);
+  assert.deepEqual(scoped.grounds?.map(entry => entry.path), gy945Ask);
+  assert.ok('refusal' in scoped && /src\/ci-guard\.ts/.test(scoped.refusal) && !/fleet|docs-budget|dashboard|style/.test(scoped.refusal), 'refusal' in scoped ? scoped.refusal : '');
+
+  // (b) a new test file the criteria's proofs need, whatever it is called, when no base file holds those proofs.
+  const named = async (held: number) => automaticScopeGrounds(gy945(), ask(['tests/fleet.test.ts']), ['tests/fleet.test.ts'], [], fixtureExists, fixtureRead, async () => [], async () => Infinity, async () => held);
+  const fresh = await named(0);
+  assert.match(fresh.grounds?.[0]?.ground ?? '', /new test file AC-1's proofs \(unit:fleet-panel-renders-registry\) live in; no file on the base holds them/);
+  assert.ok('refusal' in await named(1), 'a base file already holds the proofs: they are not new');
+  const existing = await automaticScopeGrounds(gy945(), ask(['tests/github-only.test.ts']), ['tests/github-only.test.ts'], [], fixtureExists, fixtureRead, async () => [], async () => Infinity, async () => 0);
+  assert.ok('refusal' in existing, 'an existing unrelated test is not the new file the proofs live in');
+
+  // The loop widens by the grounded paths with no approver, audited, and leaves only the rest refused.
+  const widened: { paths: string[]; reason: string }[] = [];
+  const state = emptyDaemonState(loopConfig());
+  await runCycle(loopConfig(), state, loopEffects(() => [gy945({ lease, scopeRequest: refusedAsk(partial) } as Partial<Work>)], {
+    basePaths: async paths => new Set(paths.filter(fixtureExists)), baseText: fixtureRead, baseMentions: async () => Infinity,
+    widenScope: async (work, _request, paths, reason) => { widened.push({ paths, reason }); return { ...work, plannedFiles: [...(work.plannedFiles ?? []), ...paths], policyRevision: work.policyRevision + 1 }; },
+  }), () => clock);
+  assert.deepEqual(widened.map(entry => entry.paths), [gy945Ask]);
+  assert.match(widened[0].reason, /a companion the change inevitably carries/);
+  const partly = Object.values(state.actions).find(action => action.work === 'GY-945' && /^Partly widened /.test(action.detail));
+  assert.match(partly?.detail ?? '', /on the companions the change inevitably carries.*The rest goes to the approver: .*src\/ci-guard\.ts/, partly?.detail);
+  assert.ok(!Object.values(state.actions).some(action => action.kind === 'scope' && action.state === 'failed'), JSON.stringify(Object.values(state.actions).filter(action => action.state === 'failed')));
+});
+
+test('unit:scope-rule-grounds-pinning-fixture — GY-883\'s three fixtures, importing the barrel over a planned module, are granted with no approver; a test importing nothing planned is not', async () => {
+  const scoped = await automaticScopeGrounds(gy883(), ask(gy883Ask), gy883Ask, [], fixtureExists, fixtureRead, async () => [], async () => Infinity);
+  assert.ok(!('refusal' in scoped), 'refusal' in scoped ? scoped.refusal : '');
+  for (const path of gy883Ask) assert.match(scoped.grounds.find(entry => entry.path === path)?.ground ?? '', new RegExp(`^${path.replace(/\./g, '\\.')} imports src/model\\.ts, which re-exports planned file src/model/(gates|policy)\\.ts$`));
+  const direct = await importingTestGround('tests/gates-direct.test.ts', fixtureBase['tests/gates-direct.test.ts'], gy883().plannedFiles, fixtureRead);
+  assert.equal(direct, 'tests/gates-direct.test.ts imports src/model/gates.ts, a planned file whose behaviour the item changes');
+  const barrelPlanned = await importingTestGround('tests/gates-direct.test.ts', fixtureBase['tests/gates-direct.test.ts'], ['src/model.ts'], fixtureRead);
+  assert.equal(barrelPlanned, 'tests/gates-direct.test.ts imports src/model/gates, which planned file src/model.ts re-exports');
+  assert.equal(await importingTestGround('tests/github-only.test.ts', fixtureBase['tests/github-only.test.ts'], gy883().plannedFiles, fixtureRead), null, 'imports nothing the item plans');
+  assert.equal(await importingTestGround('src/engine.ts', fixtureBase['src/engine.ts'], gy883().plannedFiles, fixtureRead), null, 'only a test file');
+  const unrelated = await automaticScopeGrounds(gy883(), ask(['tests/github-only.test.ts']), ['tests/github-only.test.ts'], [], fixtureExists, fixtureRead, async () => [], async () => Infinity);
+  assert.ok('refusal' in unrelated && !unrelated.grounds?.length, 'still the approver\'s');
 });

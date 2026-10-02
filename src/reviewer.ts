@@ -7,7 +7,7 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped } from './retry-stop.js';
-import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
+import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
 import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
@@ -81,6 +81,14 @@ export const reviewRecordSchema = z.object({
   /** The thread IDs the launch prompt listed; an approval without a `Resolved threads:` line vouches for exactly these. */
   threadsListed: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
   /**
+   * The comment IDs of each listed thread, keyed by thread ID (GY-959): the other IDs GitHub shows
+   * the reviewer for that thread, so a closing line quoting one names the thread, read from the
+   * launch's own thread read with no further GitHub call.
+   */
+  threadAliases: z.record(z.string().min(1).max(200), z.array(z.string().min(1).max(200)).max(threadAliasLimit * 2)).optional(),
+  /** The listed threads this session's approval left unaccounted, when Graphyard withdrew it for that: the next attempt's prompt names them (GY-959). */
+  unaccounted: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
+  /**
    * The threads this session's approval named on its `Resolved threads:` and `Overridden threads:`
    * lines (`overridden` the ones it passed over rather than found fixed), the outdated threads its
    * approval settled, and what the loop resolved (review-threads.ts).
@@ -108,7 +116,9 @@ export const reviewRecordSchema = z.object({
   /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
   /** The review history the launch prompt was built from (GY-167, reviewHistory): the head last reviewed, and the changes-requested rounds before this one. */
-  reviewRound: z.object({ previousHead: sha40.optional(), changesRequested: z.number().int().nonnegative() }).strict().optional(),
+  reviewRound: z.object({ previousHead: sha40.optional(), changesRequested: z.number().int().nonnegative(),
+    /** The approval of this head that Graphyard last withdrew for leaving listed threads unaccounted, and those threads (GY-959). */
+    withdrawn: z.object({ reviewId: z.number().int().positive(), threads: z.array(z.string().min(1).max(200)).min(1).max(listedThreadLimit) }).strict().optional() }).strict().optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -481,7 +491,11 @@ export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBindi
   const recorded = new Set(round.filter(requested).map(record => record.verdict!.reviewId)).size;
   const carried = Math.max(0, ...round.filter(record => record.reviewRound).map(record => record.reviewRound!.changesRequested + (requested(record) ? 1 : 0)));
   const previousHead = reviewed.at(-1)?.sha;
-  return { ...(previousHead ? { previousHead } : {}), changesRequested: Math.max(recorded, carried) };
+  // The latest approval of this very head that Graphyard withdrew as incomplete: the relaunch is told why (GY-959).
+  const incomplete = records.filter(record => record.key === binding.key && record.pr === binding.pr && record.sha === binding.sha && record.verdict?.state === 'DISMISSED' && record.unaccounted?.length)
+    .sort((a, b) => (Date.parse(a.verdict!.submittedAt) || 0) - (Date.parse(b.verdict!.submittedAt) || 0)).at(-1);
+  return { ...(previousHead ? { previousHead } : {}), changesRequested: Math.max(recorded, carried),
+    ...(incomplete ? { withdrawn: { reviewId: incomplete.verdict!.reviewId, threads: incomplete.unaccounted! } } : {}) };
 }
 
 /** The prompt's review-round section: the delta since the head last reviewed, and the cap once three rounds requested changes (GY-167). */
@@ -489,7 +503,9 @@ export function reviewRoundSection(sha: string, history?: ReviewHistory) {
   if (!history) return '';
   return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
       + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '')
-    + (history.changesRequested >= reviewRoundCap ? `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. ` : '');
+    + (history.changesRequested >= reviewRoundCap ? `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. ` : '')
+    + (history.withdrawn ? `A previous approval of this head, review ${history.withdrawn.reviewId}, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread${history.withdrawn.threads.length === 1 ? '' : 's'} ${history.withdrawn.threads.join(' ')}: a thread described only in prose, or named by an ID that is neither its thread ID nor one of its listed comment IDs, is not accounted for. `
+      + `Name each of ${history.withdrawn.threads.length === 1 ? 'that thread' : 'those threads'} by its thread ID on exactly one of those closing lines. ` : '');
 }
 
 /**
@@ -739,7 +755,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id) }) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
@@ -1007,6 +1023,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
           .then(() => null, error => `it could not be withdrawn (${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)})`);
         if (withdrawn === null) {
           record.verdict = { ...verdict, state: 'DISMISSED' };
+          // Kept for the relaunch: its prompt names the threads this approval left unaccounted (GY-959).
+          record.unaccounted = (gaps as string[]).slice(0, listedThreadLimit);
           await closeReviewSession(root, record, { run: dependencies.run, now: () => now }, { state: 'failed', force: true,
             resolution: `the approval ${verdict.reviewId} of ${record.sha.slice(0, 12)} left listed threads unaccounted (${unaccounted}), so it was withdrawn and the request is relaunched`.slice(0, 900) });
         } else record.resolution = `the approval ${verdict.reviewId} of ${record.sha.slice(0, 12)} is not yet a complete verdict: ${withdrawn}; judged again next pass`.slice(0, 900);
@@ -1065,7 +1083,7 @@ async function approvalGaps(repository: string, record: ReviewRecord, reviewId: 
   if (!record.threadsListed?.length || record.threadReadFailure) return [];
   try {
     const review = JSON.parse(String(await run('gh', ['api', `repos/${repository}/pulls/${record.pr}/reviews/${reviewId}`])));
-    return unaccountedThreads(review?.body, record.threadsListed, !!record.criteriaOnly);
+    return unaccountedThreads(review?.body, record.threadsListed, !!record.criteriaOnly, record.threadAliases);
   } catch (error) { return `the approval could not be read to check which listed threads it accounts for (${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)})`; }
 }
 /** Withdraw an approval as the reviewer App that gave it: GitHub's review dismissal, with a short-lived reviewer token. */
@@ -1146,7 +1164,7 @@ const ledgerPath = (path: string) => path.length <= 1000 ? path : plannedScope(p
  * would lose the retry record of actions already taken.
  */
 function ledgerThread(thread: LaunchThread): LaunchThread {
-  const { url, createdAt, ...rest } = thread;
+  const { url, createdAt, aliases: _aliases, ...rest } = thread;
   return { ...rest, author: thread.author.slice(0, 200), path: ledgerPath(thread.path), excerpt: thread.excerpt.slice(0, 300),
     ...(createdAt && createdAt.length <= 40 ? { createdAt } : {}), ...(url && url.length <= 1000 ? { url } : {}) };
 }
@@ -1291,7 +1309,7 @@ async function fileApprovedFollowUp(record: ReviewRecord, verdict: NonNullable<R
     : filed.get(record.key) ?? openFollowUpItem(work, record.key)?.key;
   const filedNow = await fileFollowUpThreads({ repository, key: record.key, workId: item.id, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, store,
     ...(existing && append ? { existing, append } : {}),
-    ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, resolving, now);
+    ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed, ...(record.threadAliases ? { aliases: record.threadAliases } : {}) } : {}) }, run, resolving, now);
   if (filedNow.item) filed.set(record.key, filedNow.item);
   const outcome = { ...filedNow, ...(keyReuse && filedNow.item ? { keyReuse } : {}) };
   const failure = outcome.failure?.slice(0, 500), clientError = nextClientErrorRun(previous?.clientError, failure);
@@ -1397,7 +1415,7 @@ async function resolveApprovedThreads(records: ReviewRecord[], reviewer: string,
     if (previous && !predatesImplicit && (!previous.failure || previous.attempts >= threadResolutionAttempts)) continue;
     if (!approvesCurrentHead(record, work)) continue;
     const outcome = await resolveNamedThreads({ repository, pr: record.pr, sha: record.sha, reviewId: verdict.reviewId, reviewer, previous, ...(record.criteriaOnly ? { classified: true } : {}),
-      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed } : {}) }, run, now);
+      ...(record.threadReadFailure ? {} : record.threadsListed ? { listed: record.threadsListed, ...(record.threadAliases ? { aliases: record.threadAliases } : {}) } : {}) }, run, now);
     record.threadResolution = { ...outcome, refused: outcome.refused.slice(0, 100), ...(outcome.failure ? { failure: outcome.failure.slice(0, 500) } : {}) };
     changed++;
     const fresh = outcome.resolved.filter(id => !previous?.resolved.includes(id));
