@@ -13,7 +13,7 @@ const levels: PermissionLevel[] = ['read', 'write', 'admin'];
 export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration', workflows: 'Workflows' };
 export const featureLabels: Record<PermissionFeature, string> = {
   repository: 'repository access', observation: 'pull request observation', check: 'the required check',
-  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue', 'workflow-sync': 'base syncs carrying workflow changes',
+  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue', 'workflow-sync': 'workflow sync',
 };
 
 /** The control-plane App: it observes, publishes the gate check, dispatches reviews, and lands the queue. */
@@ -28,7 +28,7 @@ export const controlPlanePermissions: readonly PermissionRequirement[] = [
   { permission: 'checks', level: 'read', feature: 'observation', reason: 'read CI check runs' },
   { permission: 'checks', level: 'write', feature: 'check', reason: 'publish `Graphyard / merge` on the exact candidate commit' },
   { permission: 'administration', level: 'read', feature: 'observation', reason: 'inspect branch protection' },
-  { permission: 'workflows', level: 'write', feature: 'workflow-sync', reason: 'push a worker\'s base-sync merge commit that carries the base branch\'s own `.github/workflows` changes, which a worker push credential (Contents and Pull requests only) is refused' },
+  { permission: 'workflows', level: 'write', feature: 'workflow-sync', reason: 'push base syncs carrying the base\'s workflow changes' },
 ];
 /**
  * A reviewer App reads code and writes pull request comments. It deliberately never gains

@@ -14,7 +14,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
-| Workflows | Read and write | push a worker's base-sync merge commit that carries the base branch's own `.github/workflows` changes, which a worker push credential (Contents and Pull requests only) is refused (base syncs carrying workflow changes) |
+| Workflows | Read and write | push base syncs carrying the base's workflow changes (workflow sync) |
 
 A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
@@ -29,7 +29,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Base syncs carrying workflow changes
 
-Worker push credentials are minted with Contents and Pull requests only, never Workflows, so no worker can change CI configuration. GitHub then refuses a worker's push of a merge of `origin/BASE` that brings in the base's own workflow changes. The worker asks instead: `graphyard sync GY-N --push-via-control-plane COMMIT`. The control plane pushes COMMIT to the worker's assigned branch with its App's Workflows: write only when COMMIT fast-forwards that branch on GitHub, its second parent is in `origin/BASE`, and every `.github/workflows` path matches that parent except paths in plannedFiles. It rebuilds COMMIT through the Git Data API and pushes only an exact match. Anything else is refused naming the differing paths. Each outcome is recorded in the item's history under the worker and epoch (`sync.workflow-push`, `sync.workflow-push.refused`).
+Worker push tokens never carry Workflows, so no worker changes CI; GitHub refuses their merge of a base that changed `.github/workflows`. `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT if it fast-forwards the worker's branch, merges `origin/BASE` and keeps its workflow files (plannedFiles aside), else names the differing paths; history records `sync.workflow-push`.
 
 ## Require the check
 
@@ -39,7 +39,7 @@ The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-he
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed rerun lapses after 15 runless minutes; an accepted one is then read from its workflow run: queued or in progress is a runner-queue wait (no new head owed), one not found is requested once more; lacking Actions: write, preflight diagnoses it and rerun requests hold.
+A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed rerun lapses after 15 runless minutes; an accepted one is read from its run: queued or in progress is a runner-queue wait, one not found is requested once more; lacking Actions: write, preflight diagnoses it and rerun requests hold.
 
 Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
@@ -47,11 +47,11 @@ Once gated, the candidate's speculative tip, pushed onto the candidate branch an
 
 Reviews and proofs bind one head, base and policy revision. On moved bases all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip over the same author head and patch, the App's own dismissal restoring when observed; never a person's, a moved head or a changed patch.
 
-Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review at once, and the entry yields the head to the next until a fresh approval re-enters. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) and which is applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
+Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), a fresh review is requested at once, and the entry yields the head until re-approved. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip: one CI duration covers four default positions, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the entry whose docs change crossed the budget — the first at which the running total exceeds it — and the refusal names the words over and the pages that grew; the entries ahead of it fit and still merge. The word budget itself is never a merge gate (see [development](development.md#documentation)): a total over it warns.
+`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes. Each entry validates on its own tip, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the first entry whose docs change crossed the budget, naming the words over and the pages that grew; entries ahead still merge. The word budget itself is never a merge gate (see [development](development.md#documentation)): a total over it warns.
 
 ### Optimistic merges
 
@@ -59,7 +59,7 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 ### Pre-merge gate and release-candidate validation
 
-The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): the build, the docs check and the Node and browser suites, every job bounded so the set finishes in under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA, dispatched with its `sha` input or on a pushed `rc-*` tag.
+The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): the build, the docs check and the Node and browser suites, bounded under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA, dispatched with its `sha` input or on a pushed `rc-*` tag.
 
 ### Proofs in CI
 
