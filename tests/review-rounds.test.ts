@@ -13,6 +13,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
 import { cappedReview, neededDecision } from '../src/daemon/decisions.js';
 import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
+import { routedScopeStatus } from '../src/cli/owed-report.js';
 
 // GY-167, 2026-09-24: every review round re-read the whole change and found new edge cases, and
 // nothing bounded the rounds. From the second review of a pull request the reviewer judges only
@@ -168,6 +169,8 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
 
   assert.equal(defaultReviewRoundCap, 3);
   assert.deepEqual([0, 1, 2, 3].map(rounds => reviewRoundStatus({ pipeline: pipeline(rounds) }, 3)), [{ round: 1, cap: 3, capped: false }, { round: 2, cap: 3, capped: false }, { round: 3, cap: 3, capped: false }, { round: 4, cap: 3, capped: true }]);
+  const row = { key: 'GY-64', attention: null, attentionOwner: null };
+  assert.deepEqual(routedScopeStatus({ work: [row], attentionItems: [] }, [{ ...work(), pipeline: pipeline(3) }], [], { reviewRoundCap: 5 }).work, [{ ...row, reviewRound: { round: 4, cap: 5, capped: false } }], 'master status rows carry the round against the configured cap');
   assert.deepEqual(withReviewRounds([{ key: 'GY-64' }, { key: 'GY-65' }], [{ key: 'GY-64', pipeline: pipeline(3) }], 3), [{ key: 'GY-64', reviewRound: { round: 4, cap: 3, capped: true } }, { key: 'GY-65', reviewRound: null }], 'master status shows each item\'s round');
 
   const config = { autoMerge: true, reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' } };
