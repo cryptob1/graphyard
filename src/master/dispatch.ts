@@ -54,6 +54,8 @@ export interface DispatchOptions {
    * preparer supplies gets one only when a minter is given.
    */
   credential?: CredentialMinter;
+  /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
+  coordinatorRoot?: string;
 }
 /** Mints the push credential of `key` epoch `epoch` for `profile` into `directory`. */
 export type CredentialMinter = (root: string, input: { key: string; epoch: number; profile: WorkerProfile; directory: string }) => Promise<unknown>;
@@ -117,7 +119,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         try {
           assertClaimDeadline(work.key, options.claimBy);
           let epoch: number;
-          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null)));
+          ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null), options.coordinatorRoot));
           // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
           const at = new Date().toISOString();
           await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -148,7 +150,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string) {
   const prepared = await prepare(root, work.key, profile.name, undefined, claimBy);
   // The session pushes with its own short-lived credential, never the host's login (GY-999).
   const credential = credentialMint && profile.credentialFile ? workerCredentialDirectory(profile.credentialFile, work.key, prepared.epoch) : null;
@@ -177,8 +179,10 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // The instruction is the session's own first request, on the runtime's command line under
     // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
     // that contract is prompted after.
+    // A worker never reaches the operator's keyring, minted credential or not (GY-999, GY-1039): one
+    // launched without a minter has no GitHub credential at all, never the host's login.
     const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ownGitHubCredential: !!credential, onRun: () => { ran = true; } });
+      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ownGitHubCredential: true, ...(coordinatorRoot ? { coordinatorRoot } : {}), onRun: () => { ran = true; } });
     // A worker stopped on a prompt the launcher does not answer is held for a human rather than
     // closed: its record beside the launch files is what master status raises and what the watch
     // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.

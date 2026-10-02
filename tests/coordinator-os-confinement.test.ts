@@ -244,14 +244,50 @@ test('unit:keyring-endpoint-unheld-reported — a launch that binds an endpoint 
     assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), plain), null, 'a path that is no socket is not an endpoint');
     assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), join(base, 'missing')), null, 'no endpoint, nothing to migrate');
     assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), null), null);
-    // The launcher logs it for every session whose wrapper binds the endpoint, and for no other.
+    // The launcher logs it for a session whose wrapper binds the endpoint, and for no other.
     const bound = { mechanism: 'read-only-mount' as const, wrapper: ['bwrap', '--ro-bind', realpathSync(endpoint), '/run/user/1/bus', '--'], detail: '' };
-    const warning = await keyringEndpointWarning('gy-approver', bound, show('ActiveState=inactive\n'), endpoint);
+    const warning = await keyringEndpointWarning('gy-approver', bound, show('ActiveState=inactive\n'), endpoint, new Map());
     assert.ok(warning && warning.startsWith('graphyard: gy-approver: ') && warning.endsWith(`migrate: ${secretsBusMigration}`), 'a session given the unheld endpoint is logged with the migration');
-    assert.equal(await keyringEndpointWarning('gy-approver', bound, show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint), null, 'a held endpoint logs nothing');
-    assert.equal(await keyringEndpointWarning('gy-worker', { ...bound, wrapper: ['bwrap', '--ro-bind', '/dev/null', '/run/user/1/bus', '--'] }, show('ActiveState=inactive\n'), endpoint), null, 'a session with its own credential is never given the endpoint');
-    assert.equal(await keyringEndpointWarning('gy-codex', { mechanism: 'runtime-sandbox', wrapper: [], detail: '' }, show('ActiveState=inactive\n'), endpoint), null, 'a runtime sandbox binds no endpoint');
-    assert.equal(await keyringEndpointWarning('gy-master', null, show('ActiveState=inactive\n'), endpoint), null, 'an unconfined session binds no endpoint');
+    assert.equal(await keyringEndpointWarning('gy-approver', bound, show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint, new Map()), null, 'a held endpoint logs nothing');
+    assert.equal(await keyringEndpointWarning('gy-worker', { ...bound, wrapper: ['bwrap', '--ro-bind', '/dev/null', '/run/user/1/bus', '--'] }, show('ActiveState=inactive\n'), endpoint, new Map()), null, 'a session with its own credential is never given the endpoint');
+    assert.equal(await keyringEndpointWarning('gy-codex', { mechanism: 'runtime-sandbox', wrapper: [], detail: '' }, show('ActiveState=inactive\n'), endpoint, new Map()), null, 'a runtime sandbox binds no endpoint');
+    assert.equal(await keyringEndpointWarning('gy-master', null, show('ActiveState=inactive\n'), endpoint, new Map()), null, 'an unconfined session binds no endpoint');
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is probed and reported once per launcher process, and a socket replaced at the path is judged afresh (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-endpoint-once');
+  let server = createServer();
+  try {
+    const endpoint = join(base, 'graphyard-secrets-bus');
+    await new Promise<void>(done => server.listen(endpoint, done));
+    let probes = 0;
+    const unheld = () => { probes++; return 'ActiveState=inactive\n'; };
+    const bound = () => ({ mechanism: 'read-only-mount' as const, wrapper: ['bwrap', '--ro-bind', realpathSync(endpoint), '/run/user/1/bus', '--'], detail: '' });
+    const verdicts = new Map<string, Promise<string | null>>();
+    // Launches racing on the same socket share one probe, and only the first logs.
+    const first = await Promise.all([keyringEndpointWarning('gy-a', bound(), unheld, endpoint, verdicts), keyringEndpointWarning('gy-b', bound(), unheld, endpoint, verdicts)]);
+    assert.equal(first.filter(Boolean).length, 1, 'concurrent launches on one socket log the line once');
+    assert.equal(probes, 1, 'and ask the user manager once');
+    assert.equal(await keyringEndpointWarning('gy-c', bound(), unheld, endpoint, verdicts), null, 'a later launch on the same socket repeats nothing');
+    assert.equal(probes, 1, 'and probes nothing');
+    // The socket at the path is replaced — a restarted proxy, or the socket unit after a migration.
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const fresh = await keyringEndpointWarning('gy-d', bound(), unheld, endpoint, verdicts);
+    assert.ok(fresh && fresh.startsWith('graphyard: gy-d: '), 'a new socket at the path is judged and reported again');
+    assert.equal(probes, 2);
+    let held = 0;
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    assert.equal(await keyringEndpointWarning('gy-e', bound(), () => { held++; return `ActiveState=active\nListen=${endpoint} (Stream)\n`; }, endpoint, verdicts), null, 'a socket the unit holds logs nothing');
+    assert.equal(await keyringEndpointWarning('gy-f', bound(), () => { held++; return ''; }, endpoint, verdicts), null);
+    assert.equal(held, 1, 'and its verdict is kept too');
   } finally {
     await new Promise<void>(done => server.close(() => done()));
     rmSync(base, { recursive: true, force: true });

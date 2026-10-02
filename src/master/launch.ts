@@ -1,6 +1,6 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
@@ -393,7 +393,7 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   confinement?: false;
   /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
   coordinatorRoot?: string;
-  /** The session carries a GitHub credential of its own (a worker's, a reviewer's), so the confinement gives it no route to the operator's keyring (GY-1039). */
+  /** The session carries a GitHub credential of its own (a reviewer's) or must never read the operator's (every worker, minted credential or not), so the confinement gives it no route to the operator's keyring (GY-1039). */
   ownGitHubCredential?: boolean;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
@@ -453,19 +453,29 @@ export async function startAgentSession(name: string, kind: string, pane: string
  * The line a launch logs when the session it confines reaches the keyring through an endpoint
  * graphyard-secrets-bus.socket does not hold (GY-1039): an install that enabled the earlier
  * graphyard-secrets-bus.service has its proxy listen at the path itself, so a restart of that proxy
- * strands the session on a dead listener. The line names the endpoint and the migration, on every
- * such launch, until the host is migrated. Null when the confinement binds no endpoint (an
- * unconfined session, a runtime's own sandbox, a session with a credential of its own) or the
- * endpoint is held or cannot be judged.
+ * strands the session on a dead listener. The line names the endpoint and the migration. Each
+ * endpoint socket is judged once per launcher process, keyed by its device, inode and change time in
+ * `verdicts` (an unlinked socket's inode number may be reused at once):
+ * later launches binding the same socket neither probe the user manager again nor repeat the line,
+ * and a socket replaced at the path — the socket unit binding it after a migration, or a restarted
+ * proxy — is judged afresh. Null when the confinement binds no endpoint (an unconfined session, a
+ * runtime's own sandbox, a session with a credential of its own), the endpoint is held or cannot be
+ * judged, or this socket was already judged.
  */
-export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath()): Promise<string | null> {
+export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, Promise<string | null>> = keyringEndpointVerdicts): Promise<string | null> {
   if (!confinement || !path) return null;
-  let endpoint: string;
-  try { endpoint = realpathSync(path); } catch { return null; }
+  let endpoint: string, socket: string;
+  try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
   if (!confinement.wrapper.includes(endpoint)) return null;
-  const problem = await secretsBusEndpointProblem(run, path);
-  return problem ? `graphyard: ${name}: ${problem.text}; migrate: ${problem.next}` : null;
+  const judged = verdicts.get(socket);
+  if (judged) { await judged; return null; }
+  const verdict = secretsBusEndpointProblem(run, path).then(problem => problem ? `${problem.text}; migrate: ${problem.next}` : null, () => null);
+  verdicts.set(socket, verdict);
+  const problem = await verdict;
+  return problem ? `graphyard: ${name}: ${problem}` : null;
 }
+/** Each keyring endpoint socket's verdict in this process, by `dev:inode:ctime` (keyringEndpointWarning). */
+const keyringEndpointVerdicts = new Map<string, Promise<string | null>>();
 
 /**
  * A launch that failed before its runtime started closes what it created (GY-413): its pane

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
@@ -11,7 +12,7 @@ import { GitHub } from '../src/github.js';
 import { issuePushCredential } from '../src/server/push-credential.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { dispatchWork, loadMasterConfig, masterConfigSchema, setupMaster, type CredentialMinter, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { hostProcessLaunchTargets, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/profiles.js';
+import { bwrapOnPath, hostProcessLaunchTargets, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { roleSessionMaximumMs } from '../src/model/sessions.js';
 import { credentialBlockedReason, credentialFailure, refreshWorkerCredential, superviseSessionCredential, sweepExpiredWorkerCredentials, workerCredentialDirectory, workerCredentialRoot, workerCredentialEnvironment, workerPushPermissions, writeWorkerCredential, type MintedPushCredential } from '../src/worker-credential.js';
 import { environmentBlocker } from '../src/worker-sandbox.js';
@@ -234,6 +235,40 @@ test('unit:sandboxed-worker-push-without-keyring — under the containment sandb
     assert.match(await readFile(join(directory, 'hosts.yml'), 'utf8'), new RegExp(`^    oauth_token: ${token('sandboxed')}$`, 'm'));
   } finally {
     await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+test('unit:worker-without-credential-no-keyring — a worker launched without a minted credential still gets no route to the operator\'s keyring: it has no GitHub credential at all, never the host\'s login (GY-1039)', async () => {
+  const { root, profile, cleanup } = await installed();
+  const runtime = await temporaryDirectory('kr');
+  const server = createServer();
+  const saved = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, GRAPHYARD_SECRETS_BUS: process.env.GRAPHYARD_SECRETS_BUS };
+  try {
+    // A live keyring-only proxy beside the session bus: a coordination session would be given it.
+    const bus = join(runtime, 'bus'), proxy = join(runtime, 'graphyard-secrets-bus'), assigned = join(root, 'assigned');
+    await writeFile(bus, ''); await mkdir(assigned, { recursive: true });
+    await new Promise<void>(done => server.listen(proxy, done));
+    process.env.XDG_RUNTIME_DIR = runtime; delete process.env.GRAPHYARD_SECRETS_BUS;
+    const replacement = (words: readonly string[]) => words[words.indexOf(realpathSync(bus)) - 1];
+    assert.equal(replacement(readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: assigned })), realpathSync(proxy), 'the proxy is live and bound for a session that may read the keyring');
+    // No minter: an injected preparer and no `credential` option, so nothing is minted for the attempt.
+    // The stub's runtime is opencode whatever leads the typed line: here the supervisor's prefix, then the confinement.
+    const stub = herdr(), started = stub.run;
+    stub.run = (command: string, args: string[]) => args[0] === 'pane' && args[1] === 'run' ? (started(command, args), startedAtOnce(['pane', 'run', '', 'opencode']) ?? '') : started(command, args);
+    const bwrap = bwrapOnPath();
+    const confined = process.platform === 'linux' && !!bwrap && await sessionMountNamespaceWorks(bwrap);
+    const launch = dispatchWork(root, item(), profile, [], stub.run, [item()], async () => ({ epoch: 4, path: assigned, base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { coordinatorRoot: root });
+    if (!confined) { await assert.rejects(launch, /never starts a session unconfined/, 'a host that cannot confine refuses the worker'); return; }
+    await launch;
+    assert.equal(tabEnvironment(stub.tabs[0]).GH_CONFIG_DIR, undefined, 'no credential was minted for this worker');
+    const words = stub.typed[0].words, wrapper = words.findIndex(word => /(^|\/)bwrap$/.test(word));
+    assert.ok(wrapper > words.indexOf('watch') && words[words.indexOf('--', wrapper) + 1] === 'opencode', 'the worker runs confined under its supervisor, its runtime inside the wrapper');
+    assert.equal(replacement(words), '/dev/null', 'its session bus stays unconnectable');
+    assert.ok(!words.includes(realpathSync(proxy)), 'the keyring proxy is bound nowhere in its namespace');
+  } finally {
+    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    await new Promise<void>(done => server.close(() => done()));
+    await cleanup();
   }
 });
 
