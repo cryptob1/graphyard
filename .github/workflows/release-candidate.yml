@@ -1,79 +1,232 @@
 name: Release candidate
 # One moving main, a frozen candidate, UAT, then that exact SHA in production (docs/delivery.md).
-# A cut tags main's tip and nothing else, so merges keep flowing while the candidate is under test.
-# Railway's uat and production environments track release/uat and release/production, never main;
-# `graphyard release` moves those branches to the candidate's exact SHA.
+# A cut tags main's tip (rc/ID) and nothing else, so merges keep flowing while the candidate is under
+# test. The long suites the pre-merge gate never runs (GY-1093) — the soak, the timing-budget suites,
+# container acceptance, container recovery and the chart — run against the candidate's exact SHA,
+# never on a pull request and never as a required check; then Railway's uat environment serves that
+# SHA and the suites that drive the deployment run against it. Railway's uat and production track
+# release/uat and release/production, never main; `graphyard release` moves them to the exact SHA.
+# A dispatched `sha`, or a pushed rc tag (rc-*), validates that one commit with the long suites alone:
+# it is not a recorded candidate, so it is never deployed or promoted.
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
+      sha:
+        description: Full 40-character commit SHA to validate alone; leave empty to cut main's tip as a candidate
+        required: false
+        default: ''
       promote:
-        description: Promote the candidate to production when its UAT validation passes
+        description: Promote the cut candidate to production when its UAT validation passes
         type: boolean
         default: true
+  push:
+    tags: ['rc-*']
 permissions:
-  contents: write
+  contents: read
 concurrency:
-  # One candidate at a time; a cut that finds the previous one still under test waits its turn.
-  group: release-candidate
+  # One cut candidate at a time, and one validation per pinned SHA; a second request waits rather than cancels.
+  group: ${{ github.workflow }}-${{ inputs.sha || (github.event_name == 'push' && github.sha) || 'cut' }}
   cancel-in-progress: false
 jobs:
-  cut:
-    if: github.ref == 'refs/heads/main'
+  candidate:
+    name: cut or pin the candidate
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     outputs:
-      id: ${{ steps.cut.outputs.id }}
-      sha: ${{ steps.cut.outputs.sha }}
+      id: ${{ steps.pin.outputs.id }}
+      sha: ${{ steps.pin.outputs.sha }}
+    env:
+      PINNED: ${{ inputs.sha || (github.event_name == 'push' && github.sha) || '' }}
     steps:
       - uses: actions/checkout@v4
         with: { ref: main, fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: '24', cache: npm }
       - run: npm ci
-      - name: Cut a release candidate from main's tip
-        id: cut
+      - name: Cut a release candidate from main's tip, or pin the dispatched SHA or tagged commit
+        id: pin
+        shell: bash
         run: |
           set -euo pipefail
+          if [[ -n "$PINNED" ]]; then
+            [[ "$PINNED" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full 40-character commit SHA: $PINNED" >&2; exit 1; }
+            echo "sha=$PINNED" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "candidates are cut only by the workflow on main, not $GITHUB_REF" >&2; exit 1; }
           node bin/graphyard.mjs release cut --trigger "${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}" | tee cut.json
           echo "id=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.id : ''")" >> "$GITHUB_OUTPUT"
           echo "sha=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.sha : ''")" >> "$GITHUB_OUTPUT"
+  long-suites:
+    name: soak and timing-budget suites
+    needs: candidate
+    if: needs.candidate.outputs.sha != ''
+    env:
+      CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+    runs-on: ubuntu-latest
+    # The soak runs the launcher's real mount namespace on every simulated launch (GY-888) and
+    # takes about twenty minutes on a runner by itself.
+    timeout-minutes: 45
+    steps:
+      - name: Refuse anything but a full commit SHA
+        run: '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be a full 40-character commit SHA: $CANDIDATE_SHA" >&2; exit 1; }'
+        shell: bash
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Install bubblewrap (the soak confines every simulated launch in real namespaces)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      - name: Run the release-candidate test files
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/ci-tests.mjs release-candidate --out "$RUNNER_TEMP/release-candidate-tests.txt"
+          mkdir -p "$RUNNER_TEMP/timing"
+          GRAPHYARD_TIMING_SLACK=1.5 GRAPHYARD_TIMING_RECORD="$RUNNER_TEMP/timing/release-candidate.jsonl" npm test -- --files-from "$RUNNER_TEMP/release-candidate-tests.txt" --durations "$RUNNER_TEMP/timing/durations-release-candidate.jsonl" 2>&1 | tee "$RUNNER_TEMP/timing/test-release-candidate.log"
+      - name: Summarise the timing-dependent assertions
+        if: always()
+        run: npx tsx tests/helpers/timing-report.ts "$RUNNER_TEMP/timing/release-candidate.jsonl" "$RUNNER_TEMP/timing/test-release-candidate.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: graphyard-release-candidate-timing
+          path: ${{ runner.temp }}/timing/
+          if-no-files-found: ignore
+  container-acceptance:
+    needs: candidate
+    if: needs.candidate.outputs.sha != ''
+    env:
+      CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Build candidate image as the release process would
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag graphyard-ci .
+      - name: Exercise container over HTTP with an isolated database
+        # Validation only: this job has no evidence-producer credential.
+        run: |
+          echo '{}' > "$RUNNER_TEMP/candidate.json"
+          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/acceptance.json"
+      - name: Exercise the merge-authorization contract against the container
+        # Validation only: this job has no evidence-producer credential.
+        run: node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/merge-authorization.json" integration:merge-authorization
+      - name: Verify the release contract, backup and restore with the shipped image
+        run: node scripts/verify-image-release.mjs graphyard-ci "$(node -p "require('./package.json').version")" "$CANDIDATE_SHA"
+  container-recovery:
+    needs: candidate
+    if: needs.candidate.outputs.sha != ''
+    env:
+      CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+    runs-on: ubuntu-latest
+    # The recovery contract waits out the shipped two-minute lease and launch fences.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Build candidate image
+        run: docker build --tag graphyard-ci .
+      - name: Recover an expired lease on a second machine identity
+        # Validation only: this job has no evidence-producer credential.
+        run: |
+          echo '{}' > "$RUNNER_TEMP/candidate.json"
+          node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/recovery.json" integration:herdr-recovery
+  chart:
+    needs: candidate
+    if: needs.candidate.outputs.sha != ''
+    env:
+      CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - name: Lint and render the chart
+        run: |
+          set -euo pipefail
+          helm lint deploy/helm/graphyard --strict --set secrets.existingSecret=graphyard-credentials
+          helm template graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials > /dev/null
+          # An installation with nowhere to hold credentials must not render.
+          if helm template graphyard deploy/helm/graphyard > /dev/null 2>&1; then echo 'chart rendered without credentials' >&2; exit 1; fi
+      - name: Build the candidate image
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag "graphyard:$version" .
+          docker tag "graphyard:$version" "graphyard:$version-next"
+      - uses: helm/kind-action@v1
+        with: { cluster_name: graphyard }
+      - name: Install, exercise, upgrade and restore on a real cluster
+        run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
   uat:
-    needs: cut
-    if: needs.cut.outputs.id != ''
+    needs: [candidate, long-suites, container-acceptance, container-recovery, chart]
+    # Runs once the long suites finish, passed or not, so their verdicts join the candidate's UAT record.
+    if: ${{ !cancelled() && needs.candidate.outputs.id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
     # The uat environment holds the UAT URL, the token of a principal in UAT's own control plane that
     # the api suite drives it with, and the credential that files a failed candidate's follow-up item;
     # it holds nothing that can write to the production repository.
     environment: uat
+    env:
+      CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
     steps:
-      # The suites run the candidate's own code, checked out at its exact SHA.
+      # The CLI runs the candidate's own code, checked out at its exact SHA.
       - uses: actions/checkout@v4
-        with: { ref: '${{ needs.cut.outputs.sha }}', fetch-depth: 0 }
+        with: { ref: '${{ env.CANDIDATE_SHA }}', fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: '24', cache: npm }
       - run: npm ci
       - name: Deploy the candidate's exact SHA to UAT
-        run: node bin/graphyard.mjs release uat "${{ needs.cut.outputs.id }}"
-      - name: Run the long suites against the UAT deployment and record the verdict
-        # Both suites drive the deployment itself, while UAT must keep serving the candidate SHA, which
-        # is checked again after the last one: `endpoints` probes /healthz?strict and /, and `api`
-        # creates, replays and lists a work item and reads the board and status through UAT's own API.
-        # A failure files one follow-up item naming the failing suite and the candidate SHA; only that
-        # filing uses GRAPHYARD_TOKEN, which no --suite command is given.
-        run: node bin/graphyard.mjs release validate "${{ needs.cut.outputs.id }}" --url "$UAT_URL" --wait 1200 --api
+        run: node bin/graphyard.mjs release uat "${{ needs.candidate.outputs.id }}"
+      - name: Run the suites against the UAT deployment and record the verdict
+        # UAT must keep serving the candidate SHA, which is checked again after the last suite:
+        # `endpoints` probes /healthz?strict and /, and `api` creates, replays and lists a work item and
+        # reads the board and status through UAT's own API. Each long-suite job's result above joins
+        # the record as a suite of its own. A failure files one follow-up item naming the failing
+        # suite and the candidate SHA; only that filing uses GRAPHYARD_TOKEN, which no --suite
+        # command is given.
+        run: >-
+          node bin/graphyard.mjs release validate "${{ needs.candidate.outputs.id }}" --url "$UAT_URL" --wait 1200 --api
+          --suite 'long-suites=test "$LONG_SUITES" = success'
+          --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success'
+          --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success'
+          --suite 'chart=test "$CHART" = success'
         env:
+          LONG_SUITES: ${{ needs.long-suites.result }}
+          CONTAINER_ACCEPTANCE: ${{ needs.container-acceptance.result }}
+          CONTAINER_RECOVERY: ${{ needs.container-recovery.result }}
+          CHART: ${{ needs.chart.result }}
           UAT_URL: ${{ vars.UAT_URL }}
           GRAPHYARD_UAT_TOKEN: ${{ secrets.GRAPHYARD_UAT_TOKEN }}
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
   promote:
-    needs: [cut, uat]
+    needs: [candidate, uat]
     if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
     environment: production
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +235,7 @@ jobs:
         with: { node-version: '24', cache: npm }
       - run: npm ci
       - name: Promote the UAT-passed candidate to production by its exact SHA
-        run: node bin/graphyard.mjs release promote "${{ needs.cut.outputs.id }}"
+        run: node bin/graphyard.mjs release promote "${{ needs.candidate.outputs.id }}"
       - name: Confirm production serves the promoted SHA
         run: node bin/graphyard.mjs release verify --url "$PRODUCTION_URL" --wait 1200
         env:
