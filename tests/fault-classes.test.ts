@@ -611,6 +611,16 @@ for (const instance of decisionFaults.filter(entry => entry.kind === 'owed-decis
   });
 }
 
+test('manual:fault-class-decision — GY-971: the out-of-scope round waits while a scope request for the files is judged, and is asked once it is refused', () => {
+  const instance = decisionFaults.find(entry => entry.id === 'owed-decision|GY-971|2026-10-01T13:51:55.105Z')!, work = instance.work!;
+  const { scopeRegressionRework } = decisionRules as Partial<typeof decisionRules>;
+  assert.equal(scopeRegressionRework?.(work)?.binding, `${work.candidate!.sha}:outside-scope`, 'with no scope request the loop asks the round, bound to the head');
+  const request = { epoch: work.epoch, paths: ['src/model/policy.ts'], reason: 'the change needs it', requestedBy: 'graphyard-claude-1', at: instance.at };
+  assert.equal(scopeRegressionRework?.({ ...work, scopeRequest: request } as Work), null, 'no "restore them" round while the widening is being judged');
+  const refused = { ...request, decision: { state: 'refused', reason: 'not grounded', decidedBy: 'graphyard-approver', at: instance.at } };
+  assert.equal(scopeRegressionRework?.({ ...work, scopeRequest: refused } as unknown as Work)?.binding, `${work.candidate!.sha}:outside-scope`, 'a refused widening leaves the round to restore the files');
+});
+
 /** The loop's effects over one item's snapshot, its control-plane calls answered as the test says. */
 function replayEffects(work: Work, now: string, decide: DaemonEffects['decide'], decisions: () => Promise<{ decisions: any[] }>): DaemonEffects {
   return { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [work], now, jobs: [] }),

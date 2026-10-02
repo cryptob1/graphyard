@@ -84,7 +84,7 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## Guarded merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`… deploy main first`). The loop asks rework for out-of-`plannedFiles` changes, never for a merge refused for want of authorization.
+`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`… deploy main first`). The loop asks rework for out-of-`plannedFiles` changes once no scope request is pending, never for unauthorized-merge refusals.
 
 ### Repair lane
 

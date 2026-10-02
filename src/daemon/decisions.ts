@@ -280,11 +280,13 @@ const scopeRegression = /^Candidate changes \d+ files? outside its planned files
  * next action is already `request-rework`, and the refusal says what the worker does (sync, restore
  * each file from the base, push), but nothing asked for the round: on 2026-10-01 GY-971 was owed it
  * as a judgment for a master session, a decision fault every cycle. A worker who needs the files asks
- * for them with scope-request in that round. The binding names the head.
+ * for them with scope-request in that round. The binding names the head. While a scope request is
+ * still being judged the round waits: an approved widening clears the refusal, a refused one asks it.
  */
 export function scopeRegressionRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
+  if (work.scopeRequest && work.scopeRequest.decision?.state !== 'refused') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const reasons = work.gates.find(gate => gate.name === 'build')?.reasons ?? [];
   const refused = reasons.filter(reason => scopeRegression.test(reason));
