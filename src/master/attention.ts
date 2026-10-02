@@ -7,6 +7,7 @@ import { currentRestore, refusedReconciliation } from '../merge-queue.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
+import { roleAtCapacity } from '../fleet.js';
 import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
 
@@ -156,13 +157,19 @@ export function starvedJobText(job: NonNullable<ControlPlaneStatus['starvedJobs'
  * on. Everything that stops a role from launching is attention the master resolves itself, in
  * the registry: no file on this host decides it.
  */
+const masterRoleUnnamed = (text: string) => /^role master is not configured\b/.test(text);
 export function fleetStatus(fleet: FleetView | null | undefined) {
   if (!fleet) return { fleet: null, attentionItems: [] as AttentionItem[] };
   const accounts = fleet.accounts.map(account => ({ account: account.name, runtime: account.runtime, model: account.model, modelId: account.modelId, cost: account.cost, capability: account.capability?.tier ?? null, host: account.host,
     roles: account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`), liveSessions: account.liveSessions.map(session => ({ role: session.role, work: session.work, since: session.since })),
     loggedIn: account.loggedIn, quota: account.quota, usage: account.usage, resetsAt: account.resetsAt, observedAt: account.observedAt, eligible: account.eligible, ineligible: account.ineligible,
     smoke: account.smoke ? { result: account.smoke.result, at: account.smoke.at, reason: account.smoke.reason } : null, heldFrom: account.held ?? [] }));
-  const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.map(text => ({ subject: 'fleet', text,
+  // Two lines the registry view lists are no configuration the installation lacks (GY-1086): a role
+  // at its concurrency limit is the fleet working at the limit the registry sets, a wait for a slot
+  // (GY-190) that the concurrency attention names when it starves work; and the master role is
+  // opt-in (GY-898), never proposed, so the loop itself records its absence as a wait, not a fault.
+  // Both stay on the fleet view and its roles.
+  const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.filter(text => !roleAtCapacity(text) && !masterRoleUnnamed(text)).map(text => ({ subject: 'fleet', text,
     ...agentOwner('master', /is not configured/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON' : /serves no role/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --reason REASON, or graphyard master registry account remove NAME --reason REASON'
       : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)'), ...classified('fleet') })) : [];
   return { attentionItems, fleet: { configured: fleet.configured, revision: fleet.revision, updatedAt: fleet.updatedAt, host: fleet.host, runtimes: fleet.runtimes.map(runtime => runtime.name), accounts, roles: fleet.roles,

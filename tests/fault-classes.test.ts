@@ -517,12 +517,21 @@ test('unit:recurring-class-item — a failing run ends when its action is retire
   fail('refresh:running', -hour, 'failed'); fail('refresh:retrying', -2 * hour, 'started');
   endFailingRuns(state, policy, clock);
   assert.deepEqual(Object.keys(state.faults.failing).sort(), ['refresh:retrying', 'refresh:running']);
-  // Pruning a retired row drops its run with it.
+  // The cursor bound never retires a row whose run still stands (GY-1086): that row is the fault's
+  // only record, and retiring it reopened a standing refusal as a new instance every hour. Once the
+  // window has ended the run, pruning retires the row, and a run whose row is gone ends with it.
   for (let index = 0; index <= retainedActions; index += 1) state.actions[`old:${index}`] = { kind: 'refresh', work: null, principal: null, state: 'done', detail: 'x', attempts: 1, cycle: 1, epoch: null, at: iso(-48 * hour + index) } as any;
   state.actions['refresh:running'].at = iso(-72 * hour);
   pruneDaemonState(state);
+  assert.equal(state.actions['refresh:running']?.state, 'failed', 'the oldest row stays while its run stands');
+  assert.deepEqual(Object.keys(state.faults.failing).sort(), ['refresh:retrying', 'refresh:running']);
+  endFailingRuns(state, policy, clock);
+  pruneDaemonState(state);
   assert.equal(state.actions['refresh:running'], undefined);
   assert.deepEqual(Object.keys(state.faults.failing), ['refresh:retrying']);
+  delete state.actions['refresh:retrying'];
+  pruneDaemonState(state);
+  assert.deepEqual(Object.keys(state.faults.failing), [], 'a run whose row is retired has ended');
 });
 
 test('unit:recurring-class-item — the loop reads status-level faults with coordinator visibility, so held jobs and production recur', async () => {
