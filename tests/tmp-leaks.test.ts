@@ -120,7 +120,8 @@ test('unit:loop-sweeps-stale-test-temp — the loop removes this user\'s test te
   // The volume is stubbed: a test tmpdir may sit on a filesystem without fixed inodes (btrfs reports none).
   const inodes = await readTmpInodes(root, tmp, async () => ({ files: 1_048_576, ffree: 354_178 }));
   assert.ok(inodes, 'the temporary directory\'s inodes are read');
-  assert.deepEqual({ ...inodes, removedAt: typeof inodes.removedAt }, { path: tmp, totalInodes: 1_048_576, freeInodes: 354_178, removed: stale.length, removedAt: 'string' });
+  assert.deepEqual({ ...inodes, removedAt: typeof inodes.removedAt, latest: inodes.latest && { ...inodes.latest, at: inodes.latest.at === inodes.removedAt } },
+    { path: tmp, totalInodes: 1_048_576, freeInodes: 354_178, removed: stale.length, removedAt: 'string', latest: { removed: stale.length, at: true }, own: { entries: kept.length, testTemp: 3, capped: false } });
   assert.equal(await readTmpInodes(root, tmp, async () => ({ files: 0, ffree: 0 })), null, 'a filesystem without fixed inodes reads as unknown');
   const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
   const reading = readResources(input).find(entry => entry.id === 'tmp-inodes');
@@ -130,4 +131,38 @@ test('unit:loop-sweeps-stale-test-temp — the loop removes this user\'s test te
   // The warning line is a quarter of the inodes free: below it the reading raises attention.
   const low = readResources({ ...input, tmp: { ...inodes, totalInodes: 1000, freeInodes: 200 } }).find(entry => entry.id === 'tmp-inodes');
   assert.equal(low?.state, 'low');
+  // GY-1081: the latest pass's own count is reported, so an empty pass after the removal shows 0
+  // as current while the last count that was not 0 stays named.
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const later = await readTmpInodes(root, tmp, async () => ({ files: 1_048_576, ffree: 354_178 }));
+  assert.equal(later?.latest?.removed, 0, 'the latest pass removed nothing');
+  assert.equal(later?.removed, stale.length, 'the last pass to remove anything is still named');
+  assert.notEqual(later?.latest?.at, later?.removedAt);
+  // This user's own entries in the directory: every kept entry, three of them with test temp names.
+  assert.deepEqual(later?.own, { entries: kept.length, testTemp: 3, capped: false });
+  const laterDetail = readResources({ ...input, tmp: later }).find(entry => entry.id === 'tmp-inodes')?.detail ?? '';
+  assert.match(laterDetail, new RegExp(`${kept.length} entries at its top level are this user's \\(3 with test temp names\\); the per-user quota itself is not readable`));
+  assert.match(laterDetail, /the loop's latest \/tmp pass removed 0 entries at .*; the last pass to remove anything removed 7 entries at /);
+  assert.deepEqual((await readTmpInodes(root, tmp, async () => ({ files: 10, ffree: 5 }), (process.getuid?.() ?? 0) + 1))?.own, { entries: 0, testTemp: 0, capped: false }, 'another user\'s entries are not counted as this user\'s');
+});
+
+test('unit:loop-sweeps-stale-test-temp — the pass considers only this user\'s entries: another uid\'s stale test temp entries are never scanned or removed', async () => {
+  const tmp = await temporaryDirectory('loop-test-temp-uid');
+  const stale = [join(tmp, 'graphyard-other-user'), join(tmp, 'pg-password-other-user')];
+  await mkdir(stale[0]); await writeFile(stale[1], 'x');
+  for (const path of stale) await backdate(path, testTempMinAgeMs + 30 * 60_000);
+  // The same entries as another uid would own them: the pass reads its uid from the process, so for
+  // one pass the process reports another, and the filter alone keeps the entries out.
+  const getuid = process.getuid!, realUid = getuid();
+  let other;
+  process.getuid = () => realUid + 1;
+  try { other = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set() }); } finally { process.getuid = getuid; }
+  assert.deepEqual({ scanned: other.scanned, removed: other.removed.length, errors: other.errors }, { scanned: 0, removed: 0, errors: [] });
+  for (const path of stale) assert.equal(existsSync(path), true, `${path} is not this pass's to remove`);
+  // As this user's entries, the same pass removes them.
+  const own = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set() });
+  assert.equal(own.removed.length, stale.length);
 });
