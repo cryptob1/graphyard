@@ -603,9 +603,20 @@ export class ReviewSessionPending extends Error {
  * whose verdict was then withheld together with the first. The request is answered: the verdict
  * settles it as soon as the control plane reads it, so no second session is launched for it.
  */
-export function answeringRecord(records: readonly ReviewRecord[], requestId: string, sha: string): ReviewRecord | null {
+export function answeringRecord(records: readonly ReviewRecord[], requestId: string, sha: string, observation?: Work['observation']): ReviewRecord | null {
   return records.filter(record => record.requestId === requestId && record.sha === sha && record.state === 'completed'
-    && !!record.verdict && conflictingVerdictStates.includes(record.verdict.state)).at(-1) ?? null;
+    && !!record.verdict && conflictingVerdictStates.includes(record.verdict.state) && !withdrawnSinceSettled(record, observation)).at(-1) ?? null;
+}
+/**
+ * A settled verdict the control plane has since seen withdrawn: its observation, read after the loop
+ * settled the record, lists that review in another state (dismissed) or no longer lists it at all.
+ * Such a verdict answers nothing, so the request is reviewed again (stale-dismissal).
+ */
+function withdrawnSinceSettled(record: ReviewRecord, observation: Work['observation'] | undefined) {
+  const listed = observation?.reviews.find(review => review.id === record.verdict!.reviewId);
+  if (listed) return !conflictingVerdictStates.includes(listed.state);
+  const settledAt = Date.parse(record.closedAt ?? record.verdict!.submittedAt), observedAt = Date.parse(observation?.at ?? '');
+  return Number.isFinite(settledAt) && Number.isFinite(observedAt) && observedAt > settledAt;
 }
 /** The reviewer session a launch was refused for, when it already answers the requested head. */
 export const answeredByPendingReview = (error: unknown, request: { sha: string }) =>
@@ -652,7 +663,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       work.key, { sha: current.sha, agentName: current.agentName, ...(current.requestId ? { requestId: current.requestId } : {}) }) };
     // A request a settled session already answered is answered (GY-1083): its verdict awaits only the
     // control plane's observation, and a second session's verdict would conflict with it.
-    const answered = dependencies.requestId ? answeringRecord(ledger.reviews, dependencies.requestId, binding.sha) : null;
+    const answered = dependencies.requestId ? answeringRecord(ledger.reviews, dependencies.requestId, binding.sha, work.observation) : null;
     if (answered) return { refusal: new ReviewSessionPending(`Reviewer session ${answered.agentName} already answered ${work.key} review request ${dependencies.requestId} on ${binding.sha.slice(0, 7)} with ${answered.verdict!.state} (review ${answered.verdict!.reviewId}); one request yields one verdict, so no second session is launched and the control plane settles the request once it observes that verdict`,
       work.key, { sha: binding.sha, agentName: answered.agentName, requestId: dependencies.requestId!, answered: { state: answered.verdict!.state, reviewId: answered.verdict!.reviewId } }) };
     for (const pending of pendings) await closeReviewSession(root, pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: staleReviewReason(pending, [work])!, force: true });

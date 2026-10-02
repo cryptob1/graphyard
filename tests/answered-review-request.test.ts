@@ -47,9 +47,10 @@ const instances = [
 type Instance = typeof instances[number];
 
 /** The item as the launchers' snapshot read it: submitted, proven, and its review request still open. */
-function item(instance: Instance): Work {
+function item(instance: Instance, observedAt = new Date(Date.now() - verdictIngestGraceMs - 120_000).toISOString()): Work {
+  // Read before the loop settled the first session: the window the instances fell in.
   const candidate = { sha: instance.sha, baseSha: base, pr: instance.pr, branch: `graphyard/${instance.key.toLowerCase()}-1`, author: 'implementer' };
-  const observation: Observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(),
+  const observation: Observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: observedAt,
     prState: 'open', draft: false, baseTip: base, baseTree: '7b'.padEnd(40, '0'), baseTipContained: true };
   const work = { id: `work-${instance.key}`, key: instance.key, title: 'Instance', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: instance.policyRevision,
@@ -171,5 +172,14 @@ test('manual:fault-class-review-convergence — GY-1083: a request whose answer 
     work.autoDispatch!.review = { ...work.autoDispatch!.review!, id: fresh };
     await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: fresh });
     assert.equal(master.tabs.length, 2, 'the fresh request is launched');
+    // A verdict the control plane observed withdrawn after the loop settled it answers nothing either:
+    // GitHub listed it dismissed, or no longer listed it, so the request is reviewed again.
+    const withdrawn = item(instance, new Date().toISOString());
+    for (const reviews of [[{ id: instance.verdicts[0][0], reviewer, sha: instance.sha, state: 'DISMISSED', submittedAt: instance.verdicts[0][2] }], []]) {
+      await updateReviewLedger(master.root, ledger => { ledger.reviews = [answered(instance, 60_000)]; });
+      withdrawn.observation = { ...withdrawn.observation!, reviews };
+      await launchReview(master.root, withdrawn, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: instance.requestId });
+    }
+    assert.equal(master.tabs.length, 4, 'each withdrawn answer is reviewed again');
   } finally { await master.cleanup(); }
 });
