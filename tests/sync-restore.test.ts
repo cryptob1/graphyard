@@ -5,7 +5,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
-import { restoreAndReport, restoreOutOfScope } from '../src/cli/sync-restore.js';
+import { missingSubmoduleCommits, restoreAndReport, restoreOutOfScope } from '../src/cli/sync-restore.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { localScopeFindings } from '../src/sync.js';
 import { managedInstructions } from '../src/repository-setup.js';
@@ -186,6 +186,53 @@ test('unit:sync-restores-out-of-scope — a refused submodule is restored to the
   assert.equal(git('rev-parse', 'HEAD^'), pushed);
   assert.equal(git('rev-parse', 'HEAD:vendor/library'), first);
   assert.equal(at(join(worker, 'vendor/library'))('rev-parse', 'HEAD'), first);
+});
+
+test('unit:sync-restores-out-of-scope — a submodule clone missing the base commit is named with its fetch, not a raw git error', async () => {
+  const directory = await temporaryDirectory('sync-restore');
+  const library = join(directory, 'library'), worker = join(directory, 'worker');
+  const at = (cwd: string) => (...args: string[]) => execFileSync('git', ['-c', 'protocol.file.allow=always', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const lib = at(library), git = at(worker);
+  for (const [cwd, run] of [[library, lib], [worker, git]] as const) {
+    execFileSync('git', ['init', '--quiet', '--initial-branch=main', cwd]);
+    run('config', 'user.email', 'test@example.com'); run('config', 'user.name', 'Test');
+  }
+  await writeFile(join(library, 'lib.txt'), 'one\n'); lib('add', '.'); lib('commit', '--quiet', '-m', 'One');
+  const first = lib('rev-parse', 'HEAD');
+  await writeFile(join(worker, 'in-scope.txt'), 'base\n');
+  git('submodule', 'add', '--quiet', library, 'vendor/library');
+  git('commit', '--quiet', '-m', 'Add the library');
+  // The base moves the gitlink to a commit the worker's clone never fetched.
+  await writeFile(join(library, 'lib.txt'), 'two\n'); lib('commit', '--quiet', '-am', 'Two');
+  const second = lib('rev-parse', 'HEAD');
+  git('update-index', '--cacheinfo', `160000,${second},vendor/library`); git('commit', '--quiet', '-m', 'Base bumps the library');
+  const baseTip = git('rev-parse', 'HEAD');
+  git('update-index', '--cacheinfo', `160000,${first},vendor/library`); git('commit', '--quiet', '-m', 'Worker pins the old library');
+  const pushed = git('rev-parse', 'HEAD');
+  const refused = localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD')).filter(finding => finding.refused).map(finding => finding.path);
+  assert.deepEqual(refused, ['vendor/library']);
+
+  const reports: any[] = [];
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  let exitCode: typeof process.exitCode;
+  try { restoreAndReport(git, report => reports.push(report), { work: { key: 'GY-7', plannedFiles: planned }, baseBranch: 'main', baseTip, regenerated: [], generated: [], refused }); }
+  finally { exitCode = process.exitCode; process.exitCode = previousExitCode; }
+  assert.equal(exitCode, 1);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].ok, false);
+  assert.deepEqual(reports[0].restored, []);
+  const fetch = `git -C vendor/library fetch origin ${second}`;
+  assert.deepEqual(reports[0].missingSubmoduleCommits, [{ path: 'vendor/library', commit: second, fetch }]);
+  assert.ok(reports[0].next.includes('submodule vendor/library') && reports[0].next.includes(fetch));
+  assert.equal(git('rev-parse', 'HEAD'), pushed);
+
+  // The named fetch is the whole remedy: the restore then succeeds.
+  at(join(worker, 'vendor/library'))('fetch', '--quiet', 'origin', second);
+  assert.deepEqual(missingSubmoduleCommits(git, baseTip, refused), []);
+  assert.deepEqual(restoreOutOfScope(git, baseTip, refused), ['vendor/library']);
+  assert.equal(git('rev-parse', 'HEAD:vendor/library'), second);
+  assert.equal(at(join(worker, 'vendor/library'))('rev-parse', 'HEAD'), second);
 });
 
 test('unit:worker-prompt-names-sync-restore — the worker instructions name sync --restore and rule out a force push', () => {
