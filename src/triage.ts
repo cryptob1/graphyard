@@ -84,6 +84,9 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
     if (live.size >= (input.settings.triageConcurrency ?? triageConcurrency)) break;
     const failed = failedAt.get(work.id);
     if (failed !== undefined && input.clock - failed < triageRetryMs) continue;
+    // Started outside the run registry, as a scratch run (runner/pi.ts): nothing adopts it after a
+    // restart, so it bounds itself, ends with this process, and a run left by a loop killed outright
+    // is ended and removed by the next scratch run before it starts, never judged twice at once.
     const run = input.runner.start(triagePrompt(input.config, work, input.work), {
       cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: triageRole }, tool: triageTool, timeoutMs: triageTimeoutMs(input.settings), validate: payload => triageJudgementSchema.parse(payload) });
     const settled = run.result().then(result => settleTriage(input, work, result)).catch(() => { failedAt.set(work.id, Date.now()); }).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });
