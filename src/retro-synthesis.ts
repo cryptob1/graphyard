@@ -46,7 +46,9 @@ export async function readRetroArtefacts(db: Db): Promise<RetroArtefact[]> {
 /**
  * Only the applied mechanical checks, for the submit transaction: their approvals and the drafts
  * they applied, never the whole retro ledger, so a submission's cost is bounded by the checks in
- * force rather than by every draft ever recorded.
+ * force rather than by every draft ever recorded. Its kind filters are answered by the
+ * `events_kind_created` index, so it reads retro rows only; an expression index on the payload id
+ * is an events schema change outside this module (GY-1048 follow-ups 18, 19, 22, declined here).
  */
 export async function readAppliedRetroChecks(db: Db): Promise<RetroArtefact[]> {
   const result = await db.query(`SELECT seq, actor, kind, created_at, payload FROM events

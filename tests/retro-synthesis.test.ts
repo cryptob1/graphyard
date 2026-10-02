@@ -230,13 +230,6 @@ test('unit:retro-artefact-governed-application — an applied check runs on ever
   // The submit transaction reads only the checks in force, never the whole retro ledger.
   assert.deepEqual((await readAppliedRetroChecks(store.pool)).map(artefact => artefact.id), artefacts.filter(artefact => artefact.state === 'applied' && artefact.kind === 'mechanical-check').map(artefact => artefact.id));
   assert.equal(retroCheckRefusals({ plannedFiles: ['docs/'] }, observe(['docs/a.md']), [check]).length, 0);
-  // Both retro reads probe a judgement by its draft id through the partial expression index, not a scan of the retro kinds.
-  const client = await store.pool.connect();
-  try {
-    await client.query('BEGIN'); await client.query('SET LOCAL enable_seqscan = off');
-    const plan = await client.query(`EXPLAIN SELECT 1 FROM events judged WHERE judged.kind IN ('retro.applied', 'retro.refused') AND judged.payload->>'id' = $1`, [check.id]);
-    assert.match(plan.rows.map(row => row['QUERY PLAN']).join('\n'), /events_retro_judged/);
-  } finally { await client.query('ROLLBACK'); client.release(); }
 
   // Catalogue update: the intervention report files every instance of the catalogued cause under its entry and fault class.
   const report = await call(operator, 'GET', 'interventions?window=7');
