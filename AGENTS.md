@@ -139,7 +139,10 @@ acceptance, a sudo prompt — run `graphyard master browser app-permissions`,
 Each drives the operator's own authenticated browser profile headless, records every
 step and screenshot under `.graphyard/master-actions/`, verifies the result through
 the API, and appends an attributable audit entry. On a Confirm-access page the flow
-triggers GitHub Mobile and reports the two-digit code in `master status`; approving
+triggers GitHub Mobile (on a passkey-first page, through the "Use GitHub Mobile" link
+under "Having problems?", following its href if the click fails; a failed click is
+recorded with agent-browser's own error) and reports the two-digit code in
+`master status`; approving
 that prompt on their device, and the three human-only decisions above, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
