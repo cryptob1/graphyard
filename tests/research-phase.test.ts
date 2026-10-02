@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { createSchema } from '../src/model/work.js';
-import { applyResearchAnswer, applyResearchEvent, clearResearchRuns, currentResearch, requirementsRevision, researchBriefSchema, researchHold, researchHoldGraceMs, researchRework,
+import { applyResearchAnswer, applyResearchEvent, clearResearchRuns, currentResearch, requirementsRevision, researchBriefSchema, researchHold, researchHoldGraceMs, researchLostRestarts, researchRework,
   researchSettings, researchSettled, researchStep, researchTool, type ResearchBrief, type ResearchEvent, type ResearchSettings } from '../src/research.js';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { neededDecision } from '../src/daemon/decisions.js';
@@ -295,4 +295,42 @@ test('unit:research-never-blocks — a timed-out, failed, over-budget or unrecor
   assert.match(result.actions[0].detail, /was not started, so it is built without a brief/);
   // Disabled research holds nothing either.
   assert.equal((await step([item({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', key: 'GY-10' })], refused.runner, async () => undefined, NOW, settings({ enabled: false }))).held.size, 0);
+});
+
+test('unit:research-never-blocks — a research run lost to its host is started again at the same requirements, a bounded number of times, before the item is built without a brief', async t => {
+  t.after(clearResearchRuns);
+  const work = item({ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', key: 'GY-11' });
+  const lostResult = (): RunResult<unknown> => ({ ok: false, failure: { reason: 'lost', detail: 'the run\'s process is gone and recorded no exit' }, payloads: [] });
+  const killed = fakeRunner(lostResult);
+  const ledger = plane([work]);
+  for (let run = 0; run <= researchLostRestarts; run++) {
+    const cycle = await step([work], killed.runner, ledger.record);
+    assert.ok(cycle.held.has(work.id), `run ${run + 1} holds dispatch for its brief`);
+    if (run) assert.match(cycle.actions[0].detail, /again after .*lost run/);
+    await researchSettled();
+    assert.equal(currentResearch(work)!.failure!.reason, 'lost');
+  }
+  assert.equal(killed.starts.length, researchLostRestarts + 1, 'each lost run was started again, up to the bound');
+  assert.equal(currentResearch(work)!.restarts, researchLostRestarts);
+  const spent = await step([work], killed.runner, ledger.record);
+  assert.equal(spent.held.size, 0, 'past the bound the item is built without a brief');
+  assert.equal(killed.starts.length, researchLostRestarts + 1);
+  assert.throws(() => applyResearchEvent(work, { event: 'started', revision: requirementsRevision(work), runtime: 'pi', model: 'm', timeoutMs: 1000, tokenBudget: 1000 }, 'x', new Date(NOW)), /restarted at most/);
+
+  // A lost run that is then started again and succeeds records its brief.
+  const second = item({ id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', key: 'GY-12' });
+  let runs = 0;
+  const flaky = fakeRunner(() => ++runs === 1 ? lostResult() : submitted(brief));
+  const plane2 = plane([second]);
+  await step([second], flaky.runner, plane2.record); await researchSettled();
+  await step([second], flaky.runner, plane2.record); await researchSettled();
+  assert.equal(currentResearch(second)!.state, 'recorded');
+  assert.equal(currentResearch(second)!.restarts, 1);
+  // A failure that is not a loss is never restarted.
+  const failed = item({ id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', key: 'GY-13' });
+  const exits = fakeRunner(() => ({ ok: false, failure: { reason: 'exit', code: 1, detail: 'pi exited with code 1' }, payloads: [] }));
+  const plane3 = plane([failed]);
+  await step([failed], exits.runner, plane3.record); await researchSettled();
+  await step([failed], exits.runner, plane3.record);
+  assert.equal(exits.starts.length, 1);
 });
