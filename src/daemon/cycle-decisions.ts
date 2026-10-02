@@ -568,8 +568,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const aRank = waitingRank(a), bRank = waitingRank(b);
     return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
   }) : snapshot.work;
-  // A producer request whose attempts are used up calls for a rework once its escalation has stood
-  // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
+  // Spent producer attempts call for a rework once the proof step's escalation has stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   const wake = effects.observe && observationWaker(effects.observe);
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
@@ -592,24 +591,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     let key = decisionKey(item, decision);
     needed.add(key);
-    // Rework waits for an observation that still describes the item (GY-144). A request already
-    // standing is left as it is — neither supervised into a second request nor withdrawn — until
-    // GitHub is observed again and the item says whether it still needs the round.
+    // Rework waits for an observation that still describes the item (GY-144); a standing request is left until GitHub is observed again.
+    // The step wakes it itself unless paused (GY-793) and re-decides at once: a new head, passing rerun or refreshed base breakage needs none.
     let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
-    // The step asks for that observation itself (GY-793) and re-decides from the reading as soon as it
-    // lands, rather than finding every later reading past the bound. A paused client observes nothing.
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
-    if (fresh) {
-      const again = routineDecision(fresh, config, now(), assessment);
-      // The fresh reading may need no rework: a new head, a rerun that passed, or a base breakage the observation job refreshes.
-      if (!again || again.action !== 'rework') {
-        const waitKey = `wait:rework:${item.id}`, detail = `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`;
-        if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail);
-        return;
-      }
-      item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key);
-      wait = reworkObservationWait(item, now(), pause);
+    const again = fresh && routineDecision(fresh, config, now(), assessment);
+    if (fresh && again?.action !== 'rework') {
+      const waitKey = `wait:rework:${item.id}`, detail = `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`;
+      if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail);
+      return;
     }
+    if (fresh && again) { item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key); wait = reworkObservationWait(item, now(), pause); }
     const watch = state.approvals[key];
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;

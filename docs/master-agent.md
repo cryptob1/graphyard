@@ -27,9 +27,7 @@ The loop launches, wakes and rotates the [master session](master-agent-sessions.
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
-### Base-branch breakages
-
-A failed `test` run names failed tests (`graphyard-failed-tests:`); failing on the head's base, passing on the tip, the tip merges in (`baseBreak`) without rework; `master status` names test, breaking and fixing commits. Awaiting decisions wake observation.
+`baseBreak`: tests (`graphyard-failed-tests:`) failing on the head's base, passing on the tip merge the tip, not rework; `master status` names test and commits.
 
 ### Session liveness is reconciled, not trusted
 
