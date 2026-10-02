@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, withReviewerDefaults, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped } from './retry-stop.js';
 import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
@@ -379,7 +379,7 @@ export async function mintReviewerToken(credential: ReviewerCredential, reposito
 
 export async function bindReviewer(root: string, input: { appId: number; installationId: number; slug: string; privateKey: string; credentialDirectory?: string },
   verify: (credential: ReviewerCredential) => Promise<{ repository: string; permissions: Record<string, string> }>) {
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   if (input.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App; an identity cannot independently review the work it gates');
   assertReviewerKey(input.privateKey);
   const candidate = reviewerCredentialSchema.parse({ appId: input.appId, installationId: input.installationId, slug: input.slug, repository: config.repository, privateKey: input.privateKey });
@@ -401,7 +401,7 @@ export async function bindReviewer(root: string, input: { appId: number; install
 
 export async function saveReviewerProfile(root: string, profileInput: unknown) {
   const profile = reviewerProfileSchema.parse(profileInput);
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   if (config.reviewers.some(item => item.name === profile.name || item.agentName === profile.agentName)) throw new Error('Reviewer profile name and agent name must be unique');
   if (config.workers.some(item => item.agentName === profile.agentName)) throw new Error('A worker profile already uses that Herdr agent name');
   await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), { ...config, reviewers: [...config.reviewers, profile] });
@@ -411,7 +411,7 @@ export async function saveReviewerProfile(root: string, profileInput: unknown) {
 
 /** Remove a reviewer profile; an automatic-dispatch setting that named it is cleared with it. */
 export async function removeReviewerProfile(root: string, name: string) {
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   const removed = config.reviewers.find(item => item.name === name);
   if (!removed) throw new Error(`Unknown reviewer profile ${name}`);
   const reviewers = config.reviewers.filter(item => item.name !== name);
@@ -627,7 +627,7 @@ export async function launchReview(root: string, work: Work, profileName: string
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
-  const config = withReviewerDefaults(await loadMasterConfig(root));
+  const config = await loadMasterConfig(root);
   if (!config.reviewer) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
   const reviewerApp = config.reviewer;
@@ -898,6 +898,15 @@ export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'ba
   return null;
 }
 
+const paneKey = (pane: string | null | undefined, agentName: string | null | undefined) => `${pane ?? ''}\0${agentName ?? ''}`;
+/** Remove a settled record's reviewer credential directory: null once it is gone, else the failure to keep on the record. */
+async function withdrawCredential(record: Pick<ReviewRecord, 'sessionDirectory'>): Promise<string | null> {
+  try { await rm(record.sessionDirectory, { recursive: true, force: true }); return null; }
+  catch (error) { return `the reviewer credential directory ${record.sessionDirectory} could not be removed: ${error instanceof Error ? error.message : 'unknown reason'}`.slice(0, 500); }
+}
+/** Whether a settled record's close failure is Herdr refusing to close its pane, rather than only a credential directory left behind. */
+const paneCloseRefused = (record: Pick<ReviewRecord, 'closeFailure'>) => !!record.closeFailure?.startsWith('Herdr could not close pane ');
+
 /**
  * Settle one record: close its pane, withdraw the session credential, and record the outcome.
  * A record whose pane Herdr could not close stays pending, so the close is retried, unless
@@ -914,8 +923,8 @@ async function closeReviewSession(root: string, record: ReviewRecord, dependenci
   try { if (record.pane) await closeHerdrPane(record.pane, dependencies.run); }
   catch (error) { if (paneAlreadyGone(error)) paneGone = true; else closeFailure = `Herdr could not close pane ${record.pane}: ${error instanceof Error ? error.message : 'unknown reason'}`; }
   if (!closeFailure || options.force) {
-    try { await rm(record.sessionDirectory, { recursive: true, force: true }); }
-    catch (error) { closeFailure = `${closeFailure ? `${closeFailure}; ` : ''}the reviewer credential directory ${record.sessionDirectory} could not be removed: ${error instanceof Error ? error.message : 'unknown reason'}`; }
+    const credential = await withdrawCredential(record);
+    if (credential) closeFailure = closeFailure ? `${closeFailure}; ${credential}`.slice(0, 500) : credential;
   }
   record.closeFailure = closeFailure;
   if (!closeFailure || options.force) {
@@ -1077,21 +1086,35 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // and, if that close failed, is retried on the next. A close Herdr keeps refusing is tried at most
   // `settledCloseAttempts` times, one ledger write each, and is then reported (heldNameAttention)
   // rather than retried on every tick; once the pane is gone its failure is cleared.
+  // The sweep reads two indexes built once per pass (GY-1075), so it stays linear in the ledger
+  // however long retention grows: the panes Herdr lists, by (pane, name), and the names a pending
+  // record holds. A settled record's credential directory is withdrawn again whenever its close
+  // failure is rewritten or cleared, so a removal a forced settlement could not make is retried
+  // and kept on the record rather than dropped with the pane failure beside it.
   const released: { pane: string; agentName: string }[] = [];
+  const listed = new Set((dependencies.agents ?? []).map(agent => paneKey(agent.pane_id, agent.name)));
+  const pendingNames = new Set(ledger.reviews.filter(record => record.state === 'pending').map(record => record.agentName));
   for (const record of dependencies.agents ? ledger.reviews : []) {
     if (record.state === 'pending' || !record.pane || pendingBefore.has(record.id)) continue;
-    if (!dependencies.agents!.some(agent => agent.pane_id === record.pane && agent.name === record.agentName)) {
-      if (record.closeAttempts && record.closeFailure) { delete record.closeFailure; changed++; }
+    if (!listed.has(paneKey(record.pane, record.agentName))) {
+      if (record.closeAttempts && record.closeFailure) {
+        const credential = await withdrawCredential(record);
+        if (credential !== record.closeFailure) { if (credential) record.closeFailure = credential; else delete record.closeFailure; changed++; }
+      }
       continue;
     }
-    if (ledger.reviews.some(other => other.state === 'pending' && other.agentName === record.agentName)) continue;
+    if (pendingNames.has(record.agentName)) continue;
     if ((record.closeAttempts ?? 0) >= settledCloseAttempts) continue;
     record.closeAttempts = (record.closeAttempts ?? 0) + 1;
-    try { await closeHerdrPane(record.pane, dependencies.run); delete record.closeFailure; released.push({ pane: record.pane, agentName: record.agentName }); }
+    let paneFailure: string | null = null;
+    try { await closeHerdrPane(record.pane, dependencies.run); released.push({ pane: record.pane, agentName: record.agentName }); }
     catch (error) {
-      if (paneAlreadyGone(error)) { delete record.closeFailure; released.push({ pane: record.pane, agentName: record.agentName }); }
-      else record.closeFailure = `Herdr could not close pane ${record.pane} of the settled session holding ${record.agentName}: ${error instanceof Error ? error.message : 'unknown reason'}`.slice(0, 500);
+      if (paneAlreadyGone(error)) released.push({ pane: record.pane, agentName: record.agentName });
+      else paneFailure = `Herdr could not close pane ${record.pane} of the settled session holding ${record.agentName}: ${error instanceof Error ? error.message : 'unknown reason'}`;
     }
+    const credential = await withdrawCredential(record);
+    const failure = [paneFailure, credential].filter(Boolean).join('; ').slice(0, 500);
+    if (failure) record.closeFailure = failure; else delete record.closeFailure;
     changed++;
   }
   // An approval recorded as a session's verdict can be withdrawn after that session closed: a push
@@ -1599,7 +1622,7 @@ export function stoppedFollowUpAttention(records: ReviewRecord[]) {
  * fault named with its pane, never a silent bound; it clears once the pane is gone.
  */
 export function heldNameAttention(records: ReviewRecord[]) {
-  return records.filter(record => record.state !== 'pending' && !!record.pane && !!record.closeFailure && (record.closeAttempts ?? 0) >= settledCloseAttempts)
+  return records.filter(record => record.state !== 'pending' && !!record.pane && paneCloseRefused(record) && (record.closeAttempts ?? 0) >= settledCloseAttempts)
     .map(record => ({ subject: record.key,
       text: `Settled reviewer session ${record.agentName} on ${record.key} (${record.state}, request ${record.requestId ?? record.id}) still holds its agent name in pane ${record.pane}: ${settledCloseAttempts} closes failed, the last with ${record.closeFailure}`.slice(0, 1000),
       next: `herdr pane close ${record.pane} (a pane that is already gone counts as closed); the next dispatch tick clears the failure` }));
