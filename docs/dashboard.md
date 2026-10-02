@@ -40,4 +40,4 @@ Below the summary: **What is left**, **Requirements** (✓ or ○ per criterion)
 
 ## Insights
 
-Headline numbers, **Flow** (Now columns show 12 dots, **+N more**), landed per day, merges/hour, queue wait, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse, PR-to-production (`POST /api/production-observations`, `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation**, **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` file repeats as `bug` items; missing values read `Unavailable`.
+Headline numbers, **Flow** (Now columns show 12 dots, **+N more**; medians survive failed replay reads), landed per day, merges/hour, queue wait, time spent, [optimistic merges](github.md#optimistic-merges); **Show details** holds shipping pulse, PR-to-production (`POST /api/production-observations`, `master verify-deployment`) and flow analytics. **Shipped** holds **Interventions**, **Validation**, **Releases**; `GRAPHYARD_INTERVENTION_PATTERNS=1` file repeats as `bug` items; missing values read `Unavailable`.
