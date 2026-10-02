@@ -212,7 +212,7 @@ function rowToRecord(row: any): AttributionRecord {
 }
 /** One work item's attribution history, newest last, bounded. */
 export async function attributionHistory(store: Store, workId: string, limit = 200): Promise<AttributionRecord[]> {
-  return (await store.pool.query('SELECT * FROM attribution_records WHERE work_id=$1 ORDER BY seq DESC LIMIT $2', [workId, limit])).rows.map(rowToRecord).reverse();
+  return (await store.reportPool.query('SELECT * FROM attribution_records WHERE work_id=$1 ORDER BY seq DESC LIMIT $2', [workId, limit])).rows.map(rowToRecord).reverse();
 }
 
 // ---- Analytics ------------------------------------------------------------------------------

@@ -32,7 +32,7 @@ export const attributionRoutes = defineRoutes('attribution', [
     method: 'GET', path: /^\/api\/attribution\/manifest\/([^/]+)\/(\d+)$/,
     async handle({ services: { engine } }, [id, revision]) {
       name.parse(id);
-      const release = (await engine.store.pool.query('SELECT document FROM releases WHERE id=$1 AND revision=$2', [id, Number(revision)])).rows[0]?.document as Release | undefined;
+      const release = (await engine.store.reportPool.query('SELECT document FROM releases WHERE id=$1 AND revision=$2', [id, Number(revision)])).rows[0]?.document as Release | undefined;
       demand(release, 'Release revision not found', 404);
       return releaseManifest(release!);
     },
@@ -42,7 +42,7 @@ export const attributionRoutes = defineRoutes('attribution', [
     method: 'GET', path: /^\/api\/attribution\/work\/([^/]+)$/,
     async handle({ actor, services: { engine } }, [id]) {
       z.uuid().parse(id);
-      const work = (await engine.store.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document as Work | undefined;
+      const work = (await engine.store.reportPool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document as Work | undefined;
       demand(work, 'Work item not found', 404);
       demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
       demand(actor.role !== 'worker' || work!.lastAssignment?.owner === actor.id || work!.workspaces.some(w => w.owner === actor.id), 'Workers read the attribution history of their assigned work only', 403);
