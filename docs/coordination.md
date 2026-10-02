@@ -25,6 +25,10 @@ Out-of-scope files are judged by three-way merging the head onto the landing com
 
 Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits, prints the classification; `graphyard sync GY-N --restore` also restores out-of-scope files to the base tip in one commit naming them (plain push, never force).
 
+### Submit when your own criteria pass
+
+The full suite is CI's gate, not the worker's (GY-853): a worker runs the build and `graphyard verify GY-N` (its own criteria's proofs only), submits when they pass, and names in the PR, without a blocker, any sandbox-only full-suite failure outside `plannedFiles`. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all its cases executed and passed but the run ended abnormally (hook, crash, signal from other suites); a failed, skipped or unexecuted case always blocks.
+
 ### Generated files never conflict
 
 `docs/README.md`, `docs/protocol.md` are generated in full ([development](development.md)); `sync` regenerates them post-merge. `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses.
