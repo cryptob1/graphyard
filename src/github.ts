@@ -2771,6 +2771,18 @@ async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Pro
  * other item is woken at once by a webhook naming it, so its timer is only a backstop.
  */
 export const headObservationSeconds = 20;
+/**
+ * The merge band: the items observed every `headObservationSeconds`, an authorized merge-stage item
+ * or the merge-queue head. One definition serves the release's cadence and the poll skip
+ * (GY-1052), so a skip never defers an item the release would observe at the merge cadence. It is
+ * narrower than the claim band (`max(mergeBatchSize, parallelTips)`), which orders claims only:
+ * entries behind the head poll at the active cadence, and a skip defers them no longer than that.
+ */
+async function inMergeBand(work: Work | undefined, queue: () => Promise<Work[]>) {
+  if (!work || work.stage !== 'merge') return false;
+  if (mergeAuthorized(work)) return true;
+  return !!work.queue && queuePlacement(work, await queue(), Date.now())?.position === 0;
+}
 export const idleObservationSeconds = 300;
 /**
  * How old an observation may be and still serve the merge gate: the freshness the publication
@@ -2939,11 +2951,6 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // A skip re-reads the claimed item after the claim, so an item that entered the band between
   // the pre-claim snapshot and `takeJob` is not deferred for one more interval. The re-read is
   // targeted: the item by its id, and the live queue entries only when its queue position decides.
-  const inMergeBand = async (claimed: Work | undefined, queue: () => Promise<Work[]>) => {
-    if (!claimed || claimed.stage !== 'merge') return false;
-    if (mergeAuthorized(claimed)) return true;
-    return !!claimed.queue && queuePlacement(claimed, await queue(), Date.now())?.position === 0;
-  };
   const skippable = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until
     && !await inMergeBand(all.find(entry => entry.id === job.work_id), async () => all);
   const refreshedUntil = skippable && !await inMergeBand(await engine.store.workItem(job.work_id), () => engine.store.queuedWork())
@@ -3128,7 +3135,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     // unchanged candidate, never shortens it.
     // An authorized head GitHub may merge at any moment is observed at the same cadence, so the
     // record before its merge always carries a fresh observation to attribute the delivery from.
-    const head = !settled && !held && work?.stage === 'merge' && (mergeAuthorized(work) || queuePlacement(work, await engine.store.list(), Date.now())?.position === 0);
+    const head = !settled && !held && await inMergeBand(work, () => engine.store.queuedWork());
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });

@@ -110,12 +110,14 @@ export class Store {
     return (await this.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document;
   }
   /**
-   * The live merge-queue entries, which is all a queue position is computed from (`queueOrder`):
-   * selected through the work index, so no settled or unqueued item's document is read (GY-1052).
+   * The live merge-queue entries, which is all a queue position is computed from (GY-1052): the
+   * filter is `queueOrder`'s own, a queue entry on an item not done, so `queuePlacement` over this
+   * equals it over the whole fleet. Selected through the work index, so no unqueued item's
+   * document is read; a settled item has no queue (`settledSql`), so none is read either.
    */
   async queuedWork(): Promise<Work[]> {
     return (await this.pool.query(`SELECT w.document FROM work_index i JOIN work_items w ON w.id=i.id
-      WHERE NOT i.settled AND i.stage IS DISTINCT FROM 'done' AND jsonb_typeof(w.document->'queue')='object' ORDER BY i.number`)).rows.map(row => row.document);
+      WHERE i.stage IS DISTINCT FROM 'done' AND jsonb_typeof(w.document->'queue')='object' ORDER BY i.number`)).rows.map(row => row.document);
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];

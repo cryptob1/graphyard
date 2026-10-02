@@ -9,6 +9,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, baseRefCycleMs, billableBudgetShare, observationThroughputStatus, processJob, protectionShareMs } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
+import { queueOrder, queuePlacement } from '../src/merge-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-806: GitHub API use fits the rate limit. Each test is named for the proof it produces:
@@ -378,6 +379,22 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   // A worker's push to the pull-request branch names the item by its branch before its candidate names the new head.
   await deliver('push', { ref: `refs/heads/${polled.candidate!.branch}`, after: sha('pushed-head'), repository: { full_name: REPOSITORY } });
   assert.deepEqual(await replica.store.webhookDue(), [polled.id]);
+
+  // The live queue places an entry exactly as the whole fleet does (GY-1052): `queuedWork` filters as
+  // `queueOrder` does, so a done item still holding a queue entry, and an unqueued item, change nothing.
+  const placed = async () => {
+    const fleet = await store!.list(), live = await store!.queuedWork();
+    const queued = new Set(queueOrder(fleet).map(entry => entry.id));
+    assert.deepEqual(live.map(entry => entry.id), fleet.filter(entry => queued.has(entry.id)).map(entry => entry.id), 'the live queue is exactly the fleet\'s queue entries');
+    for (const entry of queueOrder(fleet)) assert.deepEqual(queuePlacement(entry, live, 0), queuePlacement(entry, fleet, 0), `${entry.key} is placed alike`);
+    return queueOrder(live).map(entry => entry.key);
+  };
+  const enqueue = (id: string, sequence: number, stage?: string) => store!.pool.query(`UPDATE work_items SET document=jsonb_set(document, '{queue}', $2::jsonb)${stage ? " || jsonb_build_object('stage', $3::text)" : ''} WHERE id=$1`,
+    [id, JSON.stringify({ sequence, enqueuedAt: new Date().toISOString() }), ...(stage ? [stage] : [])]);
+  await enqueue(woken.id, 2); await enqueue(polled.id, 1);
+  assert.deepEqual(await placed(), [polled.key, woken.key]);
+  await enqueue(polled.id, 1, 'done');
+  assert.deepEqual(await placed(), [woken.key], 'a done item holding a queue entry is out of the queue either way');
 });
 
 /**
