@@ -355,6 +355,7 @@
     "tests/landing-merge-result.test.ts": 2362,
     "tests/landing-three-way.test.ts": 1990,
     "tests/launch-delivery.test.ts": 1671,
+    "tests/launch-freshness.test.ts": 1000,
     "tests/launch-prompt-delivery.test.ts": 1889,
     "tests/launch-settings-warning.test.ts": 1021,
     "tests/launches-off-cycle.test.ts": 20753,
