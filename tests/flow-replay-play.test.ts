@@ -1,10 +1,39 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
-import { createElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
 import { replayFrames, replaySeconds } from '../web/flow-replay.js';
-import { ReplaySection, replayLoop, type FrameClock } from '../web/pages/insights-flow.js';
+import type { FrameClock } from '../web/pages/insights-flow.js';
+
+// GY-451: the scrub test drags the slider through the component's own change handler, not through a
+// regex of its source. The page compiles its JSX through React's runtime, so while this suite's
+// copy of the page module is first loaded the runtime is wrapped to record each rendered element's
+// props, and `useState` to lend the component the player's own state and wiring: a render then
+// yields the real handler, and firing it moves the player as the page would move. The wraps
+// delegate everything they do not take over, and this suite's file runs in its own process.
+const require_ = createRequire(import.meta.url);
+type Rendered = { type: unknown; props: Record<string, unknown> };
+const rendered: Rendered[] = [];
+const jsxRuntime = require_('react/jsx-runtime') as Record<'jsx' | 'jsxs', (type: unknown, props: unknown, key: unknown) => unknown>;
+for (const jsx of ['jsx', 'jsxs'] as const) {
+  const original = jsxRuntime[jsx];
+  jsxRuntime[jsx] = (type, props, key) => { rendered.push({ type, props: props as Record<string, unknown> }); return original(type, props, key); };
+}
+type UseState = (initial: unknown) => [unknown, (value: unknown) => void];
+const react = require_('react') as { useState: UseState };
+const realUseState = react.useState;
+// While `wired` stands, the component's two `useState` calls — position, then playing — return the
+// player's state with the player's own setters, exactly as the page's effect wires them to the loop.
+let wired: { calls: number; t: number; playing: boolean; setT: (t: number) => void; setPlaying: (playing: boolean) => void } | null = null;
+const wiredUseState: UseState = initial => {
+  if (!wired) return realUseState(initial);
+  return (wired.calls++ === 0 ? [wired.t, wired.setT] : [wired.playing, wired.setPlaying]) as [unknown, (value: unknown) => void];
+};
+react.useState = wiredUseState;
+
+const { createElement } = await import('react');
+const { renderToStaticMarkup } = await import('react-dom/server');
+const { ReplaySection, replayLoop } = await import('../web/pages/insights-flow.js');
 
 // GY-204: the Flow page's "Last 24 hours, replayed" behaves like a video — still at its first
 // frame under a large play button until the viewer presses it, then played once.
@@ -36,12 +65,25 @@ function player() {
   const { clock, advance, pending } = handClock();
   const state = { t: 0, playing: false };
   let stop: (() => void) | undefined;
-  const run = () => { stop?.(); stop = replayLoop(state.playing, state.t, clock, t => { state.t = t; }, playing => { state.playing = playing; run(); }); };
+  // The state setters, as the page's effect wires them to the loop.
+  const setT = (t: number) => { state.t = t; };
+  const setPlaying = (playing: boolean) => { state.playing = playing; run(); };
+  const run = () => { stop?.(); stop = replayLoop(state.playing, state.t, clock, setT, setPlaying); };
   const render = () => renderToStaticMarkup(createElement(ReplaySection, { frames, truncated: false, initial: { ...state }, clock }));
   // The overlay button's onClick and the pause control's, as the page wires them.
   const press = () => { if (state.t >= 1) state.t = 0; state.playing = true; run(); };
   const pause = () => { state.playing = false; run(); };
-  return { state, advance, pending, render, press, pause };
+  // A drag of the slider to `value`/1000, fired through the component's own change handler.
+  const scrub = (value: string) => {
+    rendered.length = 0;
+    wired = { calls: 0, t: state.t, playing: state.playing, setT, setPlaying };
+    try { renderToStaticMarkup(createElement(ReplaySection, { frames, truncated: false, initial: { ...state }, clock })); }
+    finally { wired = null; }
+    const input = rendered.find(element => element.type === 'input');
+    assert.ok(input && input.props['aria-label'] === 'Replay position', 'the slider rendered, carrying its change handler');
+    (input!.props.onChange as (event: { target: { value: string } }) => void)({ target: { value } });
+  };
+  return { state, advance, pending, render, press, pause, scrub };
 }
 
 const overlay = (html: string) => /<button type="button" class="replay-overlay"([^>]*)>/.exec(html);
@@ -150,7 +192,7 @@ test('unit:replay-overlay-screenshot — the overlay spans the replay under a tr
   assert.match(spec, /page\.screenshot\(\{ path: `\$\{out\}\/insights-replay-overlay-\$\{viewport\.width\}\.png`/);
 });
 
-test('unit:replay-scrub — outside reduced motion the replay position is a draggable slider that follows playback, and dragging it pauses the replay at the chosen point (GY-288)', async () => {
+test('unit:replay-scrub — outside reduced motion the replay position is a draggable slider that follows playback, and dragging it pauses the replay at the chosen point (GY-288)', () => {
   const p = player();
   p.press();
   p.advance(replaySeconds * 1000 / 4);
@@ -159,10 +201,8 @@ test('unit:replay-scrub — outside reduced motion the replay position is a drag
   assert.ok(slider, 'a range input, not a read-only progress bar');
   assert.ok(Math.abs(Number(slider![1]) - 250) <= 10, `it follows playback, at ${slider![1]}`);
   assert.doesNotMatch(html, /role="progressbar"/);
-  // The slider's change handler, as the page wires it: it pauses, then moves to the dragged point.
-  const source = await read('web/pages/insights-flow.tsx');
-  assert.match(source, /aria-label="Replay position" onChange=\{e => \{ setPlaying\(false\); setT\(Number\(e\.target\.value\) \/ 1000\); \}\}/);
-  p.state.playing = false; p.state.t = 0.7; p.pause();
+  // Dragging to 0.7 fires the handler the component rendered with: it pauses, then moves to the dragged point.
+  p.scrub('700');
   p.advance(replaySeconds * 1000);
   assert.deepEqual(p.state, { t: 0.7, playing: false }, 'the scrubbed point holds');
   assert.match(overlay(p.render())![1], /aria-label="Play the last 24 hours"/);

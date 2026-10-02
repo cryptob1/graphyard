@@ -13,7 +13,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { dispatchWork, loadMasterConfig, masterConfigSchema, setupMaster, type CredentialMinter, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { hostProcessLaunchTargets, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { roleSessionMaximumMs } from '../src/model/sessions.js';
-import { credentialBlockedReason, credentialFailure, grantedPushPermissions, refreshWorkerCredential, superviseSessionCredential, sweepExpiredWorkerCredentials, workerCredentialDirectory, workerCredentialRoot, workerCredentialEnvironment, workerPushPermissions, writeWorkerCredential, type MintedPushCredential } from '../src/worker-credential.js';
+import { credentialBlockedReason, credentialFailure, grantedPushPermissions, refreshWorkerCredential, revokeInstallationToken, withdrawWorkerCredential, superviseSessionCredential, sweepExpiredWorkerCredentials, workerCredentialDirectory, workerCredentialRoot, workerCredentialEnvironment, workerPushPermissions, writeWorkerCredential, type MintedPushCredential } from '../src/worker-credential.js';
 import { installationOwner } from '../src/master/attention.js';
 import { environmentBlocker } from '../src/worker-sandbox.js';
 import { attemptRetryHold, maxFailedAttempts, retryBackoffMs } from '../src/daemon/reblocked-attempts.js';
@@ -77,7 +77,9 @@ test('unit:worker-session-scoped-push-credential — a worker launched under its
     let minted = 0;
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       if (String(url).endsWith('/app/installations/5678')) return new Response(JSON.stringify({ permissions: { contents: 'write', pull_requests: 'write', workflows: 'write', metadata: 'read' } }), { status: 200 });
+      if (String(url).includes('/rules/branches/')) return new Response('[]', { status: 200 });
       if (!String(url).endsWith('/access_tokens')) return realFetch(url, init);
+      if (!init?.body) return new Response(JSON.stringify({ token: token('client'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: {} }), { status: 201 });
       requests.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
       minted++;
       return new Response(JSON.stringify({ token: token(`session${minted}`), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: { contents: 'write', pull_requests: 'write', metadata: 'read' } }), { status: 201 });
@@ -253,11 +255,12 @@ test('unit:credential-block-releases-slot — an attempt blocked only by a GitHu
   // write refusals and item decisions are not credential failures.
   for (const blocker of ["git push failed: fatal: could not read Username for 'https://github.com': No such device or address", 'gh pr create: The token in default is invalid.', "remote: Invalid username or token. fatal: Authentication failed for 'https://github.com/owner/project.git/'"])
     assert.ok(credentialFailure(blocker), blocker);
-  for (const blocker of ['gh pr edit 530: HTTP 401: Bad credentials (https://api.github.com/graphql)', 'To get started with GitHub CLI, please run:  gh auth login'])
+  for (const blocker of ['gh pr edit 530: HTTP 401: Bad credentials (https://api.github.com/graphql)', 'To get started with GitHub CLI, please run:  gh auth login', 'git push: git@github.com: Permission denied (publickey).'])
     assert.ok(credentialFailure(blocker), blocker);
   // A generic authentication refusal that names neither GitHub, git nor gh is the item's own.
   for (const blocker of ['needs a product decision on the retry bound', environmentBlocker('sync GY-963', 'claude', { path: '/srv/x/.git/FETCH_HEAD', detail: 'Permission denied' }),
-    'the integration test gets HTTP 401 from the billing API: Requires authentication', 'staging answers Bad credentials for the seeded user'])
+    'the integration test gets HTTP 401 from the billing API: Requires authentication', 'staging answers Bad credentials for the seeded user',
+    'ssh deploy@staging.example.net failed: Permission denied (publickey).'])
     assert.equal(credentialFailure(blocker), false, blocker);
 
   // The ending counts on the retry ladder (GY-885), so a failure no fresh mint cures is bounded:
@@ -368,6 +371,8 @@ test('unit:mint-requests-granted-subset — when the installation lacks a wanted
   const installationReads: string[] = [], mints: Record<string, string>[] = [];
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     const path = String(url);
+    if (path.includes('/rules/branches/')) return new Response('[]', { status: 200 });
+    if (path.endsWith('/access_tokens') && !init?.body) return new Response(JSON.stringify({ token: token('client'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: {} }), { status: 201 });
     if (path.endsWith('/app/installations/5678')) { installationReads.push(path); return new Response(JSON.stringify({ app_slug: 'graphyard-test', html_url: 'https://github.com/settings/installations/5678', permissions: granted }), { status: 200 }); }
     if (path.endsWith('/access_tokens') && init?.body) {
       const asked: Record<string, string> = JSON.parse(String(init.body)).permissions;
@@ -423,6 +428,110 @@ test('unit:mint-requests-granted-subset — when the installation lacks a wanted
     granted = { pull_requests: 'write', metadata: 'read' };
     await github.preflight();
     await assert.rejects(github.mintPushToken(), /grants no Contents: write/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// ---- GY-1066: the review follow-ups of GY-999 ----------------------------------------------------
+
+test('GY-1066 — no worker token from a merge-queue bypass App, the lease checked again after the mint, and a token kept until GitHub confirms its revocation', async () => {
+  const realFetch = globalThis.fetch;
+  const directory = await temporaryDirectory('push-credential-followups');
+  try {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+    let rules: unknown = [], ruleset: unknown = null, rulesetStatus = 404, mints = 0, revokeStatus = 204;
+    const revocations: string[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      const target = String(url);
+      if (target.includes('/rules/branches/')) return new Response(JSON.stringify(rules), { status: 200 });
+      if (/\/rulesets\/\d+$/.test(target)) return ruleset ? new Response(JSON.stringify(ruleset), { status: 200 }) : new Response('{"message":"unavailable"}', { status: rulesetStatus });
+      if (target.endsWith('/app/installations/5678')) return new Response(JSON.stringify({ permissions: { ...workerPushPermissions, metadata: 'read' } }), { status: 200 });
+      if (target.endsWith('/installation/token')) { revocations.push(String((init?.headers as Record<string, string>).Authorization)); return new Response(null, { status: revokeStatus }); }
+      if (!target.endsWith('/access_tokens')) throw new Error(`unexpected request ${target}`);
+      if (!init?.body) return new Response(JSON.stringify({ token: token('client'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: {} }), { status: 201 });
+      mints++;
+      return new Response(JSON.stringify({ token: token(`mint${mints}`), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions: workerPushPermissions }), { status: 201 });
+    }) as typeof fetch;
+
+    // 1. A merge queue that lets this App bypass it — or whose bypass cannot be read — mints nothing.
+    const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 5678, privateKey });
+    rules = [{ type: 'merge_queue', ruleset_id: 77, parameters: {} }];
+    ruleset = { id: 77, bypass_actors: [{ actor_id: 1234, actor_type: 'Integration', bypass_mode: 'pull_request' }] };
+    await assert.rejects(github.mintPushToken(), /App 1234 is a bypass actor of the merge queue on main \(ruleset 77\)/);
+    ruleset = { id: 77, current_user_can_bypass: 'pull_requests_only' };
+    await assert.rejects(github.mintPushToken(), /may bypass the merge queue on main \(ruleset 77: pull_requests_only\)/);
+    ruleset = null;
+    await assert.rejects(github.mintPushToken(), (error: any) => error.status === 409 && /bypass actors of the merge queue on main \(ruleset 77\) cannot be read/.test(error.message)
+      && /no worker can launch on this repository until workers push as an App the queue does not exempt/.test(error.message));
+    // A ruleset GitHub fails to answer transiently is retryable (502), never the standing policy refusal.
+    for (const status of [500, 503]) {
+      rulesetStatus = status;
+      await assert.rejects(github.mintPushToken(), (error: any) => error.status === 502 && /ruleset 77\) could not be read now .*ask again/.test(error.message), `HTTP ${status}`);
+    }
+    rulesetStatus = 404;
+    assert.equal(mints, 0, 'nothing is minted from a bypass App');
+    ruleset = { id: 77, current_user_can_bypass: 'never', bypass_actors: [{ actor_id: 9, actor_type: 'Integration', bypass_mode: 'always' }] };
+    assert.equal((await github.mintPushToken()).token, token('mint1'), 'a queue this App cannot bypass leaves the worker its credential');
+    rules = [];
+    assert.equal((await github.mintPushToken()).token, token('mint2'), 'a base with no merge queue (a user-owned repository) is unaffected');
+
+    // 2. The lease moves while GitHub mints: nothing is answered, and the fresh token is revoked.
+    const now = new Date();
+    const leased = item({ stage: 'build', epoch: 4, lease: { owner: 'worker-a', epoch: 4, expiresAt: new Date(now.getTime() + 120_000).toISOString() }, lastAssignment: { owner: 'worker-a', epoch: 4, claimedAt: now.toISOString() } });
+    const moves: Record<string, Work> = {
+      submitted: { ...leased, submission: { epoch: 4, pr: 9 } } as Work,
+      superseded: { ...leased, epoch: 5, lease: { owner: 'worker-b', epoch: 5, expiresAt: leased.lease!.expiresAt } } as Work,
+      released: { ...leased, lease: null } as Work,
+    };
+    for (const [name, moved] of Object.entries(moves)) {
+      let reads = 0;
+      const services = { engine: { store: { list: async () => [reads++ === 0 ? leased : moved] } }, github, repository: 'owner/project' } as unknown as Parameters<typeof issuePushCredential>[0];
+      const revoked: string[] = [];
+      await assert.rejects(issuePushCredential(services, worker, 'GY-999', { epoch: 4 }, now, async value => { revoked.push(value); }), /was submitted|Lease missing, expired, or superseded/, name);
+      assert.deepEqual(revoked, [token(`mint${mints}`)], `the token minted for a ${name} lease is revoked`);
+    }
+    const kept = { engine: { store: { list: async () => [leased] } }, github, repository: 'owner/project' } as unknown as Parameters<typeof issuePushCredential>[0];
+    assert.equal((await issuePushCredential(kept, worker, 'GY-999', { epoch: 4 }, now, async () => { throw new Error('a held lease revokes nothing'); })).token, token(`mint${mints}`));
+
+    // 3. Revocation is confirmed only by GitHub's 204 (or a 401: the token no longer authenticates).
+    revokeStatus = 204; await revokeInstallationToken(token('a'));
+    revokeStatus = 401; await revokeInstallationToken(token('b'));
+    for (const status of [500, 429, 403]) { revokeStatus = status; await assert.rejects(revokeInstallationToken(token('c')), new RegExp(`HTTP ${status}`)); }
+    assert.equal(revocations.length, 5);
+
+    // A withdrawal GitHub does not confirm keeps the token to retry; the session's own files go.
+    const session = join(directory, 'GY-999-4');
+    const minted: MintedPushCredential = { key: 'GY-999', epoch: 4, repository: 'owner/project', token: token('session'), tokenExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(), leaseBound: new Date(Date.now() - 60_000).toISOString(), permissions: workerPushPermissions };
+    await writeWorkerCredential(session, minted);
+    const failing = async () => { throw new Error('HTTP 502'); };
+    assert.equal(await withdrawWorkerCredential(session, failing), 'retained');
+    assert.equal(existsSync(join(session, 'token')), false, 'the session can no longer read the token');
+    assert.equal(existsSync(join(session, 'credential.json')), false);
+    assert.equal(mode(join(session, 'revoke.json')), 0o600, 'the token still to revoke is kept 0600');
+    // The sweep retries it: still refused, it stays; confirmed, the directory goes.
+    assert.deepEqual(await sweepExpiredWorkerCredentials(directory, new Date(), failing), []);
+    assert.equal(existsSync(session), true);
+    const swept: string[] = [];
+    assert.deepEqual(await sweepExpiredWorkerCredentials(directory, new Date(), async value => { swept.push(value); }), [session]);
+    assert.deepEqual(swept, [token('session')]);
+    assert.equal(existsSync(session), false);
+    // Once GitHub's own expiry of the token has passed, nothing is left to revoke.
+    await writeWorkerCredential(session, minted);
+    assert.equal(await withdrawWorkerCredential(session, failing), 'retained');
+    assert.equal(await withdrawWorkerCredential(session, failing, new Date(Date.parse(minted.tokenExpiresAt) + 1)), 'withdrawn');
+    assert.equal(existsSync(session), false);
+
+    // A refresh whose old token GitHub does not confirm revoking keeps it and retries at the next refresh.
+    const live = { ...minted, expiresAt: new Date(Date.now() + 60_000).toISOString(), leaseBound: new Date(Date.now() + 3_600_000).toISOString() };
+    await writeWorkerCredential(session, live);
+    assert.equal(await refreshWorkerCredential(session, async () => ({ ...live, token: token('second') }), { revoke: failing }), 'refreshed');
+    assert.equal(JSON.parse(await readFile(join(session, 'revoke.json'), 'utf8'))[0].token, token('session'));
+    const retried: string[] = [];
+    assert.equal(await refreshWorkerCredential(session, async () => ({ ...live, token: token('third') }), { revoke: async value => { retried.push(value); } }), 'refreshed');
+    assert.deepEqual(retried, [token('session'), token('second')]);
+    assert.equal(existsSync(join(session, 'revoke.json')), false);
   } finally {
     globalThis.fetch = realFetch;
   }
