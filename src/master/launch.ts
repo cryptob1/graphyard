@@ -401,8 +401,8 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   coordinatorRoot?: string;
   /** The session carries a GitHub credential of its own (a reviewer's) or must never read the operator's (every worker, minted credential or not), so the confinement gives it no route to the operator's keyring (GY-1039). */
   ownGitHubCredential?: boolean;
-  /** Judges the keyring endpoint the confinement binds (keyringEndpointWarning unless a caller supplies its own). */
-  keyringWarning?: (name: string, confinement: CoordinatorConfinement | null) => Promise<string | null>;
+  /** Judges the keyring endpoint the confinement binds (keyringEndpointWarning unless a caller supplies its own); `started` settles true once the launch succeeds, false when it fails. */
+  keyringWarning?: (name: string, confinement: CoordinatorConfinement | null, started: Promise<boolean>) => Promise<string | null>;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
@@ -430,32 +430,39 @@ export async function startAgentSession(name: string, kind: string, pane: string
   options.onRun?.();
   const log = options.log ?? (line => process.stderr.write(`${line}\n`));
   // The keyring probe asks the user manager (up to 10 s) while the runtime starts, never in front
-  // of it (GY-1039): its line is logged whenever it answers, and no launch waits on it.
-  void (options.keyringWarning ?? keyringEndpointWarning)(name, confinement).then(line => { if (line) log(line); }, () => undefined);
-  let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
-  try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
-  catch (error) {
-    if (error instanceof SessionStartError) log(`graphyard: ${name} (${kind}) in pane ${pane}: start failed after ${(error.waitedMs / 1000).toFixed(1)} s (${error.startCase}; bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
-    throw error;
-  }
-  log(`graphyard: ${name} (${kind}) in pane ${pane}: runtime ${started.awaiting ? 'awaiting consent' : 'started'} after ${(started.waitedMs / 1000).toFixed(1)} s (bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
-  let named = true;
-  try { await herdrJson(['agent', 'rename', pane, name], run); }
-  catch (error) {
-    // A runtime whose own naming rules are narrower than the ones checked above says so in its
-    // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
-    if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
-    // A held session is still named so a human can find it, but a runtime that will not take the
-    // name before its dialog is answered does not turn the hold into a failed start.
-    // The hold records it unnamed, so the watch supervisor retries the name before it clears.
-    if (!started.awaiting) throw error;
-    named = false;
-  }
-  // The request is already the runtime's own first argument, so nothing waits to be pasted: a
-  // session held on a consent dialog reads it once the dialog is answered.
-  return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
-    confinement,
-    started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+  // of it (GY-1039): no launch waits on it. Its line belongs to the launch, so it is logged only
+  // once the launch has succeeded; a failed launch logs nothing under its session's name, and its
+  // verdict is not kept, so the next launch on that endpoint reports it instead.
+  let launched = false, settle!: (ok: boolean) => void;
+  const outcome = new Promise<boolean>(done => { settle = done; });
+  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
+  try {
+    let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
+    try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
+    catch (error) {
+      if (error instanceof SessionStartError) log(`graphyard: ${name} (${kind}) in pane ${pane}: start failed after ${(error.waitedMs / 1000).toFixed(1)} s (${error.startCase}; bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
+      throw error;
+    }
+    log(`graphyard: ${name} (${kind}) in pane ${pane}: runtime ${started.awaiting ? 'awaiting consent' : 'started'} after ${(started.waitedMs / 1000).toFixed(1)} s (bound ${Math.round((options.timeoutMs ?? agentStartTimeoutMs) / 1000)} s)`);
+    let named = true;
+    try { await herdrJson(['agent', 'rename', pane, name], run); }
+    catch (error) {
+      // A runtime whose own naming rules are narrower than the ones checked above says so in its
+      // refusal; that is a refused name too, and it is reported as one rather than as a failed start.
+      if (nameRefusedByRuntime(error)) throw new SessionNameRefusedError(name, `the runtime refused it: ${herdrErrorText(error).split('\n')[0].slice(0, 200)}`, options.retry ?? null);
+      // A held session is still named so a human can find it, but a runtime that will not take the
+      // name before its dialog is answered does not turn the hold into a failed start.
+      // The hold records it unnamed, so the watch supervisor retries the name before it clears.
+      if (!started.awaiting) throw error;
+      named = false;
+    }
+    launched = true;
+    // The request is already the runtime's own first argument, so nothing waits to be pasted: a
+    // session held on a consent dialog reads it once the dialog is answered.
+    return { delivery, command, files, trust: trust ?? null, consent: started.consent, awaiting: started.awaiting ? { ...started.awaiting, request: null as string | null, named } : undefined,
+      confinement,
+      started: { state: started.awaiting ? 'awaiting consent' as const : 'started' as const, detail: started.detail, waitedMs: started.waitedMs, extended: started.extended } };
+  } finally { settle(launched); }
 }
 
 /** secretsBusEndpointProblem's answer when the user manager could not judge the endpoint. */
@@ -490,35 +497,44 @@ export async function secretsBusEndpointProblem(run: ChildRun | undefined, path:
  * graphyard-secrets-bus.socket does not hold (GY-1039): an install that enabled the earlier
  * graphyard-secrets-bus.service has its proxy listen at the path itself, so a restart of that proxy
  * strands the session on a dead listener. The line names the endpoint and the migration. Each
- * endpoint socket is judged once per launcher process, keyed by its device, inode and change time in
- * `verdicts` (an unlinked socket's inode number may be reused at once):
- * later launches binding the same socket neither probe the user manager again nor repeat the line,
- * and a socket replaced at the path — the socket unit binding it after a migration, or a restarted
- * proxy — is judged afresh. Null when the confinement binds no endpoint (an unconfined session, a
- * runtime's own sandbox, a session with a credential of its own), the endpoint is held or cannot be
- * judged, or this socket was already judged. A probe that cannot judge the socket — no user manager
- * answers, or its answer is unreadable — is not remembered, so a later launch, and any launch that
- * was awaiting that probe, asks again and still reports an unmigrated endpoint once the user manager
- * answers.
+ * endpoint socket is judged once per launcher process, keyed by its device, inode and change time
+ * (an unlinked socket's inode number may be reused at once): later launches binding the same socket
+ * neither probe the user manager again nor repeat the line, and a socket replaced at the path — the
+ * socket unit binding it after a migration, or a restarted proxy — is judged afresh. `verdicts`
+ * keeps only the latest socket's verdict per endpoint path, so replaced incarnations leave nothing
+ * behind. Null when the confinement binds no endpoint (an unconfined session, a runtime's own
+ * sandbox, a session with a credential of its own), the endpoint is held or cannot be judged, or
+ * this socket was already judged. A probe that cannot judge the socket — no user manager answers,
+ * or its answer is unreadable — is not remembered, so a later launch, and any launch that was
+ * awaiting that probe, asks again and still reports an unmigrated endpoint once the user manager
+ * answers. The line is the launch's own: when `started` settles false (the launch failed and its
+ * pane was closed) nothing is returned and the verdict is forgotten, so the next launch reports it.
  */
-export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, Promise<string | null | undefined>> = keyringEndpointVerdicts): Promise<string | null> {
+export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true)): Promise<string | null> {
   if (!confinement || !path) return null;
   let endpoint: string, socket: string;
   try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
   if (!confinement.wrapper.includes(endpoint)) return null;
+  const judging = () => { const held = verdicts.get(endpoint); return held?.socket === socket ? held.verdict : undefined; };
   // A launch that finds a probe in flight shares it and logs nothing of its own, unless that probe
   // could not judge the socket: its entry is gone by then, so this launch asks again itself.
-  for (let judged = verdicts.get(socket); judged; judged = verdicts.get(socket)) if (await judged !== undefined) return null;
+  for (let judged = judging(); judged; judged = judging()) if (await judged !== undefined) return null;
   // A probe that could not judge the socket is not its verdict: its entry is dropped before any
   // launch awaiting it resumes, so the next launch, or one racing this one, asks again.
-  const forget = () => { if (verdicts.get(socket) === verdict) verdicts.delete(socket); return undefined; };
+  const forget = () => { if (verdicts.get(endpoint)?.verdict === verdict) verdicts.delete(endpoint); return undefined; };
   const verdict: Promise<string | null | undefined> = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? forget() : problem ? `${problem.text}; migrate: ${problem.next}` : null, forget);
-  verdicts.set(socket, verdict);
+  // The endpoint's earlier socket, if any, is replaced: only the latest incarnation is kept.
+  verdicts.set(endpoint, { socket, verdict });
   const problem = await verdict;
-  return problem ? `graphyard: ${name}: ${problem}` : null;
+  if (!problem) return null;
+  if (await started) return `graphyard: ${name}: ${problem}`;
+  forget();
+  return null;
 }
-/** Each keyring endpoint socket's verdict in this process, by `dev:inode:ctime` (keyringEndpointWarning). */
-const keyringEndpointVerdicts = new Map<string, Promise<string | null | undefined>>();
+/** One keyring endpoint path's latest socket (`dev:inode:ctime`) and its verdict (keyringEndpointWarning). */
+export interface KeyringEndpointVerdict { socket: string; verdict: Promise<string | null | undefined> }
+/** The latest socket's verdict per keyring endpoint path in this process (keyringEndpointWarning). */
+const keyringEndpointVerdicts = new Map<string, KeyringEndpointVerdict>();
 
 /**
  * A launch that failed before its runtime started closes what it created (GY-413): its pane

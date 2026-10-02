@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
 import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusPath, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { createServer } from 'node:net';
-import { headlessConfinementWrapper, keyringEndpointWarning, secretsBusEndpointProblem, secretsBusMigration, secretsBusUnjudged, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
+import { headlessConfinementWrapper, keyringEndpointWarning, type KeyringEndpointVerdict, secretsBusEndpointProblem, secretsBusMigration, secretsBusUnjudged, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -429,7 +429,7 @@ test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is pro
     let probes = 0;
     const unheld = () => { probes++; return 'ActiveState=inactive\n'; };
     const bound = () => ({ mechanism: 'read-only-mount' as const, wrapper: ['bwrap', '--ro-bind', realpathSync(endpoint), '/run/user/1/bus', '--'], detail: '' });
-    const verdicts = new Map<string, Promise<string | null | undefined>>();
+    const verdicts = new Map<string, KeyringEndpointVerdict>();
     // Launches racing on the same socket share one probe, and only the first logs.
     const first = await Promise.all([keyringEndpointWarning('gy-a', bound(), unheld, endpoint, verdicts), keyringEndpointWarning('gy-b', bound(), unheld, endpoint, verdicts)]);
     assert.equal(first.filter(Boolean).length, 1, 'concurrent launches on one socket log the line once');
@@ -475,13 +475,25 @@ test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is pro
     assert.equal(raced[0], null, 'the unjudged probe logs nothing');
     assert.ok(raced[1] && raced[1].startsWith('graphyard: gy-l: '), 'the launch that awaited it probes again and reports the unmigrated endpoint');
     assert.equal(probes, 4);
+    // Every replaced incarnation leaves nothing behind: one entry per endpoint path (follow-up 13).
+    assert.equal(verdicts.size, 1, 'only the latest socket\'s verdict is kept for the endpoint');
+    // A launch that fails logs nothing under its name, and its verdict is not kept, so the next
+    // launch on that socket reports the endpoint (follow-up 12).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    assert.equal(await keyringEndpointWarning('gy-m', bound(), unheld, endpoint, verdicts, Promise.resolve(false)), null, 'a failed launch logs nothing');
+    const next = await keyringEndpointWarning('gy-n', bound(), unheld, endpoint, verdicts);
+    assert.ok(next && next.startsWith('graphyard: gy-n: '), 'the next launch reports the endpoint instead');
+    assert.equal(probes, 6);
+    assert.equal(verdicts.size, 1);
   } finally {
     await new Promise<void>(done => server.close(() => done()));
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-test('unit:keyring-probe-off-launch-path — a launch never waits on the keyring endpoint probe: the runtime start is observed while the probe runs, and its line is logged when it answers (GY-1039)', async () => {
+test('unit:keyring-probe-off-launch-path — a launch never waits on the keyring endpoint probe: the runtime start is observed while the probe runs, its line is logged when it answers, and a failed launch logs none (GY-1039)', async () => {
   const base = await temporaryDirectory('confinement-endpoint-path');
   try {
     let answer!: (line: string | null) => void;
@@ -497,6 +509,16 @@ test('unit:keyring-probe-off-launch-path — a launch never waits on the keyring
     answer('graphyard: gy-approver: The keyring endpoint /run/user/1/graphyard-secrets-bus is a socket graphyard-secrets-bus.socket does not hold');
     await new Promise(done => setImmediate(done));
     assert.ok(logged.some(line => line.startsWith('graphyard: gy-approver: The keyring endpoint')), 'the probe\'s line is logged once it answers');
+    // A launch whose runtime never starts tells the probe so, and nothing is logged under the failed
+    // session's name (follow-up 12).
+    const outcomes: Promise<boolean>[] = [];
+    const failing = (session: string, _bound: unknown, started: Promise<boolean>) => { outcomes.push(started); return started.then(ok => ok ? `graphyard: ${session}: The keyring endpoint` : null); };
+    const dead = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') return ''; throw new Error('herdr: pane gone'); };
+    await assert.rejects(startAgentSession('gy-failed', 'pi', 'pane-2', [], 'Judge the candidate', dead, { directory: base, confinement: false, keyringWarning: failing, timeoutMs: 50, log: line => logged.push(line) }));
+    assert.equal(outcomes.length, 1);
+    assert.equal(await outcomes[0], false, 'the probe learns the launch failed');
+    await new Promise(done => setImmediate(done));
+    assert.ok(!logged.some(line => line.startsWith('graphyard: gy-failed: The keyring endpoint')), 'and logs nothing under the failed session\'s name');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
