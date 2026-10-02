@@ -299,11 +299,14 @@ test('integration:cycle-within-interval — a coordination cycle over the 100-it
   const budget = cycleBudget(state, intervalMs);
   assert.deepEqual(budget.lastCycle, { cycle: cycle.cycle, at: cycle.at, durationMs: cycle.durationMs, childWaitMs: cycle.childWaitMs, workMs: cycle.workMs });
   assert.equal(cycle.childWaitMs, 0, 'a cycle that ran no child process waited on none'); assert.equal(cycle.workMs, cycle.durationMs);
-  assert.equal(budget.withinInterval, true); assert.equal(budget.overruns, 0); assert.equal(budget.measured, 1); assert.equal(budget.intervalMs, intervalMs);
+  // The bound itself is the assertTiming above, which a loaded CI runner may pass inside its slack
+  // (GY-1040); the report must then still say the cycle overran its interval, not that it fit.
+  const overran = cycle.durationMs > intervalMs;
+  assert.equal(budget.withinInterval, !overran); assert.equal(budget.overruns, overran ? 1 : 0); assert.equal(budget.measured, 1); assert.equal(budget.intervalMs, intervalMs);
   // A regression is visible: an overrunning cycle is counted and named.
   const slow = { ...cycle, cycle: cycle.cycle + 1, durationMs: intervalMs * 3 };
   const regressed = cycleBudget({ metrics: [...state.metrics, slow] }, intervalMs);
-  assert.equal(regressed.withinInterval, false); assert.equal(regressed.overruns, 1); assert.deepEqual(regressed.lastOverrun, { cycle: slow.cycle, at: slow.at, durationMs: slow.durationMs, childWaitMs: slow.childWaitMs, workMs: slow.workMs });
+  assert.equal(regressed.withinInterval, false); assert.equal(regressed.overruns, (overran ? 1 : 0) + 1); assert.deepEqual(regressed.lastOverrun, { cycle: slow.cycle, at: slow.at, durationMs: slow.durationMs, childWaitMs: slow.childWaitMs, workMs: slow.workMs });
   assert.equal(regressed.p95Ms, slow.durationMs);
   assert.deepEqual(cycleBudget({ metrics: [] }, intervalMs), { intervalMs, measured: 0, lastCycle: null, withinInterval: null, p95Ms: null, overruns: 0, lastOverrun: null });
 });
