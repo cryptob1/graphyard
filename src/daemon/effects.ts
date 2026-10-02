@@ -36,7 +36,7 @@ import { readCredentialFile } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
-import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
+import { alignRunningLoopUnit, detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
@@ -47,7 +47,6 @@ import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
-import { alignLoopUnit, loopUnitName } from '../supervisor.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -787,18 +786,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       restartSelf: async () => {
         const unit = detectLoopSupervisorUnit();
         if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
-        // --no-block queues the restart and returns: the hand-off is systemd's stop signal, which
-        // the loop takes during its wait, not a call this process must survive.
+        // --no-block queues the restart; systemd's stop then ends this wait (upgrade.ts restartEndedBySupervisorStop).
         await run('systemctl', ['--user', '--no-block', 'restart', unit]);
       },
-      // GY-916: the unit the restart above starts from is first brought back to the running
-      // configuration (its watchdog window follows run.intervalSeconds); only the packaged unit
-      // name is rewritten, and only when the loop runs under it.
-      alignUnit: async () => {
-        const config = current();
-        if (detectLoopSupervisorUnit() !== loopUnitName) return { wrote: 'none', reason: `this loop does not run under ${loopUnitName}` };
-        return alignLoopUnit({ root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds });
-      },
+      alignUnit: () => alignRunningLoopUnit(root, current()),
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },

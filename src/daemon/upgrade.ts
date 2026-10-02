@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
+import { alignLoopUnit, loopUnitName } from '../supervisor.js';
 import { storeAction, message, type DaemonState } from './state.js';
 import { detailChanged } from './decisions.js';
 
@@ -84,6 +85,16 @@ export function restartEndedBySupervisorStop(error: unknown): boolean {
   const ended = error as { signal?: unknown; status?: unknown; timedOut?: unknown } | null;
   return !!ended && typeof ended === 'object' && typeof ended.signal === 'string' && ['SIGTERM', 'SIGKILL', 'SIGHUP', 'SIGINT'].includes(ended.signal)
     && (ended.status === null || ended.status === undefined) && ended.timedOut !== true;
+}
+
+/**
+ * The running loop's unit brought back to its configuration before it re-executes through it
+ * (GY-916): its watchdog window follows run.intervalSeconds. Only the packaged unit name is
+ * rewritten, and only when the loop runs under it.
+ */
+export async function alignRunningLoopUnit(root: string, config: MasterConfig, unit = detectLoopSupervisorUnit()) {
+  if (unit !== loopUnitName) return { wrote: 'none', reason: `this loop does not run under ${loopUnitName}` };
+  return alignLoopUnit({ root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds });
 }
 
 export interface SelfUpgradeDeps {
