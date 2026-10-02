@@ -342,9 +342,18 @@ export interface QueueEjection {
   family?: 'landability' | null;
   /** GY-878: the verdict version and inputs behind a landability ejection, for the audit trail. */
   verdict?: LandabilityAudit;
+  /**
+   * GY-1095. For an ejection because a required CI check failed: the check, the failed run, the tip
+   * it failed on, and the queue entry's speculation as it stood, so a passing rerun of that check on
+   * the same tip lifts the ejection and the entry re-enters at its place (`ejectedCheckLift`). Null
+   * or absent on any other ejection.
+   */
+  check?: { name: string; runId: number | null; tip: string; speculation: QueueSpeculation | null } | null;
 }
 export interface QueueHistoryEntry {
-  at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved'; sequence: number; reason?: string; tip?: string;
+  at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved' | 'lifted'; sequence: number; reason?: string; tip?: string;
+  /** For a lifted ejection (GY-1095): the check whose rerun passed on the same tip, and that run. */
+  check?: string; runId?: number | null;
   /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
   predecessors?: string[]; from?: string;
   /** For a landability ejection (GY-878): the verdict version and inputs it was refused by. */
@@ -1069,6 +1078,55 @@ export function standingMergeRefusal(work: Work): string | null {
   return `${mergeRefusalEjectionPrefix}${candidate.sha.slice(0, 12)} since ${refusal.since}: ${refusal.reason.slice(0, 600)}; ${refusal.action === 'rereview' ? 'a fresh review of it is requested' : 'it awaits a rework decision'}, and the entry leaves the queue so the next one heads it`;
 }
 /**
+ * The first required check whose newest counted run failed on the observed current candidate and
+ * is not held by its one rerun (GY-516), with that run: the check a CI ejection is made for. The
+ * policy's and the base branch's other required checks alike, so ejection, the batch verdict and
+ * the parallel-tip window read one answer (GY-1060).
+ */
+export function ejectingCheck(work: Work, ciAppIds: readonly number[] | null): { name: string; run: Observation['checks'][number] } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!candidate || !observation || observation.candidate.sha !== candidate.sha) return null;
+  for (const required of requiredChecksOf(work)) {
+    const run = requiredCheckRun(required, observation.checks, ciAppIds);
+    if (requiredRunFailed(required, run) && !holdingCheckRerun(work, candidate.sha, required.name, run)) return { name: required.name, run: run! };
+  }
+  return null;
+}
+/** The reason prefix of an ejection for `check` failing, as `ejectionReason` words it. */
+export const failedCheckEjectionPrefix = (check: string) => `Required CI check ${check} did not pass on speculative tip `;
+/**
+ * GY-1095. The passing rerun that lifts a standing CI ejection: the ejection was made for required
+ * check C failing on tip T, T is still the observed candidate, the newest counted run of C on T is a
+ * rerun after the failed one and passes, and no other required check's newest run on T failed. The entry then re-enters at its
+ * place, with the speculation it held, and no new candidate is needed. Null when the ejection
+ * stands: another kind of ejection, a changed tip or policy, a rerun that failed again or has not
+ * concluded, another failing required check, or a tip built behind an entry that left the queue
+ * without landing (that tip carries its unlanded commits and is restored first).
+ */
+export function ejectedCheckLift(work: Work, all: Work[], ciAppIds: readonly number[]): { check: string; run: Observation['checks'][number]; tip: string; reason: string } | null {
+  const ejection = work.queueEjection, candidate = work.candidate, observation = work.observation;
+  const failed = ejection?.check;
+  if (work.queue || !ejection || !failed || !candidate || !observation || work.stage === 'done' || observation.merged || observation.prState === 'closed') return null;
+  if (ejection.sha !== candidate.sha || failed.tip !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
+  if (observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
+  const required = requiredChecksOf(work);
+  const check = required.find(entry => entry.name === failed.name);
+  if (!check) return null;
+  const run = requiredCheckRun(check, observation.checks, ciAppIds);
+  if (!requiredCheckPassed(check, run)) return null;
+  // Only a rerun lifts: a run GitHub created after the failed one (check-run ids increase), or for a
+  // run recorded without an id, one observed after a failed run of the check that is still retained.
+  const rerun = failed.runId !== null ? run!.id !== undefined && run!.id > failed.runId
+    : observation.checks.slice(0, observation.checks.indexOf(run!)).some(entry => entry.name === check.name && failedCheckResults.includes(entry.result));
+  if (!rerun) return null;
+  if (required.some(entry => requiredRunFailed(entry, requiredCheckRun(entry, observation.checks, ciAppIds)))) return null;
+  const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
+  const departed = (predicted?.predecessors ?? []).some(key => { const item = all.find(entry => entry.key === key); return !item || (item.stage !== 'done' && !item.queue); });
+  if (departed) return null;
+  const tip = candidate.sha.slice(0, 12);
+  return { check: check.name, run: run!, tip: candidate.sha, reason: `ejection lifted: check ${check.name} passed on rerun${run!.id !== undefined ? ` (run ${run!.id})` : ''} on speculative tip ${tip}${failed.runId !== null ? `, replacing failed run ${failed.runId}` : ''}` };
+}
+/**
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
  * inputs keep an entry queued; only a reported adverse result removes it.
  */
@@ -1105,7 +1163,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // for a required check decides, exactly as the test gate does, so a successful retry
   // never leaves an entry ejected by the failure it replaced — nor one its rerun (GY-516)
   // holds. GY-430: this includes both policy checks and branch-protection required checks.
-  const check = failedRequiredCheck(work, observation, ciAppIds);
+  const check = ejectingCheck(work, ciAppIds)?.name;
   // Under a parallel-tip window (GY-498) the prefix tips isolate the culprit in one round instead
   // of a bisection. Outside the window nothing is required of the entry yet, and a failure on a
   // tip it still holds is inherited from the entries ahead (the waiting batch's rule); a head that
@@ -1636,7 +1694,7 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   // The policy's checks and the base branch's other required checks alike (GY-1060), as ejection reads them.
   const runs = judgedRequiredChecks(work, observation, ciAppIds);
   // A failure awaiting its one rerun (GY-516) is not yet a verdict: the batch waits, as for a pending run.
-  const failed = failedRequiredCheck(work, observation, ciAppIds);
+  const failed = ejectingCheck(work, ciAppIds)?.name;
   // A tip whose only failure is the docs word budget is judged as that proof (GY-574), so the plan
   // attributes it: the counts, not the check's name, say the lone failure was the budget's.
   const docs = observation.docsBudget;
@@ -1699,7 +1757,7 @@ function tipCi(work: Work, ciAppIds: readonly number[] | null): { ci: TipView['c
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha) return { ci: 'none' };
   // Every required check, protection-only ones included (GY-1060): the window view and attribution agree with ejection.
   const runs = judgedRequiredChecks(work, observation, ciAppIds);
-  const failed = failedRequiredCheck(work, observation, ciAppIds);
+  const failed = ejectingCheck(work, ciAppIds)?.name;
   if (failed) return { ci: 'fail', failedCheck: failed };
   if (runs.length > 0 && runs.every(entry => requiredCheckPassed(entry.check, entry.run))) return { ci: 'pass' };
   return { ci: runs.some(entry => !!entry.run) ? 'running' : 'none' };
@@ -1945,15 +2003,6 @@ export function checkRerunHeld(work: Pick<Work, 'checkReruns' | 'candidate' | 'o
 /** Every required check (GY-430) with the run that counts for it on the observation. */
 function judgedRequiredChecks(work: Work, observation: Observation, ciAppIds: readonly number[] | null) {
   return requiredChecksOf(work).map(check => ({ check, run: requiredCheckRun(check, observation.checks ?? [], ciAppIds) }));
-}
-/**
- * The required check whose newest counting run failed on the observed candidate and is not held by
- * a rerun: the policy's and the base branch's other required checks alike, so ejection, the batch
- * verdict and the parallel-tip window read one answer (GY-1060).
- */
-function failedRequiredCheck(work: Work, observation: Observation, ciAppIds: readonly number[] | null): string | undefined {
-  return judgedRequiredChecks(work, observation, ciAppIds)
-    .find(({ check, run }) => requiredRunFailed(check, run) && !holdingCheckRerun(work, observation.candidate.sha, check.name, run))?.check.name;
 }
 /** A transition of a rerun record, as the engine writes it to the item's ledger. */
 export interface CheckRerunTransition { kind: 'check.rerun.owed' | 'check.rerun.passed' | 'check.rerun.failed' | 'check.rerun.expired' | 'check.rerun.requested'; rerun: CheckRerun }
