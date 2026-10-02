@@ -15,7 +15,7 @@ import { type FleetLaunchAccount, type FleetProbe, selectFleetSession } from '..
 import { capacityRetryAt } from '../model/capacity.js';
 import { type EscalationContext, contextFingerprint, escalationAction, handleEscalation, followPrecedent } from '../model/escalation-context.js';
 import { type AgentEnvironment, agentKindSchema, type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, type WorkerProfile } from './profiles.js';
-import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, privateFile, readCredentialFile } from './config.js';
+import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, loadStoredMasterConfig, privateFile, readCredentialFile } from './config.js';
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
@@ -47,7 +47,7 @@ async function identityHolds(config: MasterConfig, file: string, id: string, fet
  * once from stdin and never stored. Without `apply` it reports the plan and changes nothing.
  */
 export async function setupAutonomy(root: string, input: { adminToken?: string; apply: boolean; harness?: string }, fetcher: AutonomyFetch = fetch) {
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   const plan = autonomyPlan(config);
   const identities = [plan.operatorAgent, plan.approver];
   const describe = identities.map(({ id, capabilities, credentialFile, role }) => ({ id, capabilities, credentialFile, role }));
