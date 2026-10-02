@@ -19,6 +19,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
+import { currentRestore } from '../merge-queue.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -70,8 +71,10 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
+    const byKey = new Map(work.map(item => [item.key, item]));
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))) derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind)) && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now)))
+        derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
@@ -89,6 +92,24 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
   const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
+}
+/** How long an ejected tip's restore may stay owed before its contaminated head counts as a merge fault (GY-1087). */
+export const restoreWaitBoundMs = 30 * 60_000;
+/**
+ * GY-1087. Whether the branch restore an ejection owes is still in motion: the candidate is the
+ * ejected tip, or a restore is requested for it, the restore has not run yet, and the ejection or
+ * request is inside `restoreWaitBoundMs`. The reconciliation job runs it on its own (GY-127), so the
+ * contaminated head it clears is a handoff the control plane already made, not a merge fault
+ * (GY-417, GY-971 on 1 October 2026: each counted seconds after its ejection). A restore that ran
+ * and failed, a head found contaminated with no ejection, and a restore owed past the bound count.
+ */
+export function restoreInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.candidate) return false;
+  const restore = currentRestore(work)?.restore ?? null;
+  if (restore?.performedAt) return false;
+  const ejected = work.queueEjection?.sha === work.candidate.sha ? work.queueEjection : null;
+  const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
+  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
 /**
  * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
