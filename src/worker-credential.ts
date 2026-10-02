@@ -2,6 +2,7 @@
 import { chmod, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import type { Work } from './model.js';
+import { describePermission, type PermissionLevel } from './github-permissions.js';
 import { roleSessionMaximumMs } from './model/sessions.js';
 
 /**
@@ -17,6 +18,39 @@ import { roleSessionMaximumMs } from './model/sessions.js';
  * before GitHub's one-hour expiry while the attempt runs and withdraws it when the session ends.
  */
 export const workerPushPermissions = { contents: 'write', pull_requests: 'write', workflows: 'write' } as const;
+
+/** A permission a worker push credential wants that the installation does not grant at that level. */
+export interface PushPermissionShortfall { permission: string; wanted: string; granted: string | null }
+const pushLevels = ['read', 'write', 'admin'];
+const pushRank = (level: unknown) => typeof level === 'string' ? pushLevels.indexOf(level) : -1;
+
+/**
+ * The permissions a worker push credential is minted with: each wanted permission at the level the
+ * installation grants, never above what is wanted (GY-1100). GitHub refuses a whole mint (422) that
+ * asks for one permission the installation lacks, so on 2026-10-02 adding `workflows` to the wanted
+ * set stopped every worker launch until the installation accepted it. A missing permission is left
+ * out instead and answered as a shortfall the operator's attention names; a token without
+ * `workflows` still pushes everything that does not touch a workflow.
+ */
+export function grantedPushPermissions(granted: Record<string, unknown> | null | undefined, wanted: Record<string, string> = workerPushPermissions): { permissions: Record<string, string>; missing: PushPermissionShortfall[] } {
+  const permissions: Record<string, string> = {}, missing: PushPermissionShortfall[] = [];
+  for (const [permission, level] of Object.entries(wanted)) {
+    const held = granted?.[permission], heldRank = pushRank(held);
+    if (heldRank >= pushRank(level)) permissions[permission] = level;
+    else {
+      if (heldRank >= 0) permissions[permission] = held as string;
+      missing.push({ permission, wanted: level, granted: heldRank >= 0 ? held as string : null });
+    }
+  }
+  return { permissions, missing };
+}
+
+/** The words every push shortfall line carries, by which a mint replaces the lines an earlier one raised. */
+export const pushShortfallMarker = 'which worker push credentials request';
+/** One attention line per shortfall: the permission, what minting without it costs, and the installation-accept step that restores it. */
+export function describePushShortfall(shortfall: PushPermissionShortfall, app: string, installationUrl: string) {
+  return `App ${app} installation lacks ${describePermission(shortfall.permission, shortfall.wanted as PermissionLevel)}${shortfall.granted ? ` (installed with ${shortfall.granted})` : ''}, ${pushShortfallMarker}; they are minted without it until it is granted, so a worker push that needs it is refused. Run graphyard master browser app-permissions, then graphyard master browser installation-accept, or accept the pending permission request at ${installationUrl}`;
+}
 
 /** What the control plane answers a lease holder's mint with; the token is the only secret in it. */
 export interface MintedPushCredential {

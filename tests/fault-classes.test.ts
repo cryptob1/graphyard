@@ -118,18 +118,19 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   assert.equal(dispatched.faultClass, 'session-liveness');
   assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.kind, entry.faultClass]), [['GY-8', 'action:dispatch', 'session-liveness']]);
   // Failures written outside the cycle's own steps carry their class too: an action a restart
-  // interrupted, a refused configuration reload and a refused watchdog window.
+  // interrupted, a refused configuration reload and a refused watchdog window. A merge a restart
+  // interrupted is the exception (GY-1087): asking GitHub again for the same head is a retry.
   const restarted = emptyDaemonState(config());
   storeAction(restarted, 'session:work-9:1', { kind: 'session', work: 'GY-9', principal: 'worker', state: 'started', detail: 'Launching', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
   storeAction(restarted, 'merge:work-9:1', { kind: 'merge', work: 'GY-9', principal: null, state: 'started', detail: 'Merging', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
   const resumed = reconcilePendingActions(restarted, [item('GY-9')], clock);
-  assert.deepEqual(resumed.map(entry => [entry.kind, entry.state, entry.faultClass]), [['session', 'indeterminate', 'session-liveness'], ['merge', 'failed', 'merge']]);
+  assert.deepEqual(resumed.map(entry => [entry.kind, entry.state, entry.faultClass]), [['session', 'indeterminate', 'session-liveness'], ['merge', 'failed', undefined]]);
   const [refused] = await noteConfigReload(restarted, { at: iso(1000), changed: [], refused: 'workers[0].agentName is stale' } as any, async () => {});
   assert.equal(refused.faultClass, 'configuration', 'a refused reload is a configuration fault');
   const [watchdog] = await noteWatchdog(restarted, { windowMs: 1000, refusal: 'The watchdog window is shorter than the interval' } as any, iso(2000), async () => {});
   assert.equal(watchdog.faultClass, 'configuration');
-  assert.deepEqual(restarted.faults.instances.map(entry => entry.faultClass), ['session-liveness', 'merge', 'configuration', 'configuration'], 'each is a recorded instance');
-  assert.ok(Object.values(restarted.actions).every(action => (action.state === 'failed' || action.state === 'indeterminate') === !!action.faultClass), 'every failed action, and only a failed one, carries a class');
+  assert.deepEqual(restarted.faults.instances.map(entry => entry.faultClass), ['session-liveness', 'configuration', 'configuration'], 'each is a recorded instance');
+  assert.ok(Object.values(restarted.actions).every(action => (action.kind !== 'merge' && (action.state === 'failed' || action.state === 'indeterminate')) === !!action.faultClass), 'every failed action but the retried merge, and only a failed one, carries a class');
   let persisted = 0;
   const failing = { snapshot: async () => ({ work: [], now: iso(0) }), persist: async () => { persisted++; } } as unknown as DaemonEffects;
   await runCycle(config(), state, { ...failing, agents: () => [], credentials: async () => ({}), observeDeployment: async () => { throw new Error('the deployment endpoint timed out'); } } as unknown as DaemonEffects, () => clock);
