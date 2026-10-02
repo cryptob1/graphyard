@@ -27,7 +27,7 @@ The gate is the reviewer's approval of the exact head plus required CI; threads 
 
 The landing check three-way merges the head onto its landing commit: out-of-scope changes that commit extended, or only the base made, pass; restoring the merge-base version, deleting or rewriting is refused. Observations recompute it; stale refusals clear without a push.
 
-Before any push, `graphyard sync GY-N` merges `origin/BASE` (never rebases), regenerates and commits. Restore an out-of-scope file: `git checkout BASE_TIP -- PATH`.
+Before any push, `graphyard sync GY-N` merges `origin/BASE` (never rebases), regenerates, commits and prints the classification. `--restore` also restores every out-of-scope file to the base tip in one new commit naming them, so a plain push updates the PR; no history rewrite or force push.
 
 ### Generated files never conflict
 

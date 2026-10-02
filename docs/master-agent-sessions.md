@@ -49,7 +49,9 @@ A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher 
 
 A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless, it is **`never started`**, relaunched free a minute later, up to three (`retry.neverStarted`).
 
-A resolved blocker or scope request re-prompts the attempt's inactive session once (`complete GY-N EPOCH PR`); blocking again hands the epoch to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, handed on after 30 more. Pastes target the attempt's own pane, never a shared agent name; a gone pane hands it on.
+A resolved blocker or scope request re-prompts the attempt's inactive session once (`complete GY-N EPOCH PR`); blocking again hands the epoch to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, handed on after 30 more. Pastes target the pane on the attempt's own session handle, never a profile's reusable agent name (GY-852); a gone pane hands it on.
+
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
 
 ### Panes are closed and reclaimed
 
