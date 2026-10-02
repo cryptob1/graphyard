@@ -21,7 +21,7 @@ import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
 import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson } from '../master.js';
-import { readControlPlaneClock, type ContainmentEffects } from '../master/containment.js';
+import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
@@ -68,8 +68,7 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-/** The containment effects (verify, clock, settle) live with the containment clock in src/master/containment.ts. */
-export interface DaemonEffects extends ContainmentEffects {
+export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -210,6 +209,12 @@ export interface DaemonEffects extends ContainmentEffects {
    * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
+  /** Verifies on this host which quarantined supervisors are demonstrably gone. */
+  containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
+  /** Bounds this host's clock against the control plane with a light timed read just before containment is assessed (GY-811). */
+  controlPlaneClock?: () => Promise<ControlPlaneClock>;
+  /** Settles one quarantine this host verified dead, so the item can be claimed again. */
+  settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
   /**
@@ -398,20 +403,7 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
   }
 }
 
-/** The pause before the one retry of a failed snapshot read: a second or so, jittered so loops never retry in step. */
-export const snapshotRetryDelayMs = (random: () => number = Math.random) => Math.round(500 + random() * 1000);
-/**
- * The coordination snapshot read, retried once. The read is an idempotent GET, and one timed-out or
- * refused read is usually the network or a busy server, not a fault worth a failed cycle and its
- * backoff: it is tried again after a jittered pause, and only a second failure fails the cycle
- * (GY-187). `master run` wraps its snapshot effect in this.
- */
-export function retriedSnapshot<T>(read: () => Promise<T>, pause: () => number = snapshotRetryDelayMs): () => Promise<T> {
-  return async () => {
-    try { return await read(); }
-    catch { await delay(pause()); return read(); }
-  };
-}
+export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {

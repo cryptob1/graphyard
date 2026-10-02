@@ -15,9 +15,7 @@ A lease expires 120 s after the last heartbeat (one more lease period after a re
 
 ## Supervisor died leaving a containment quarantine
 
-The loop settles a lapsed, verified-dead quarantine itself, bounding its clock by one timed HEAD / per cycle while one awaits, not the slow snapshot. A proxy's dated error page is refused; a slow read refuses, naming its round trip.
-
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, then `rework`, or `recover-containment` once delivered ([recipes](operations.md#recovery-recipes)).
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, then `rework` (`recover-containment` once delivered; [recipes](operations.md#recovery-recipes)). Autosettle bounds clock skew via `HEAD`.
 
 ## Submitted implementation needs rework
 
@@ -25,7 +23,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's scan groups refusal and rework interventions by cause: a refusal shape (`build/out-of-scope-count`), loop trigger, or normalised rework reason. A cause reaching the threshold gets drafted artefacts (`retro.drafted`), never applied or filed as work: a criteria wording update, mechanical check, producer-method correction or fault-catalogue entry. An AI admin or operator agent holding `decision:approve` (not a human, the drafter or a recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`), or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) refuses `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue`, `retroCatalogued`) and counts recurrences. Drafted instances never count again; a recurrence is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's pattern scan groups refusal and rework interventions by cause: a declared refusal shape (`build/out-of-scope-count`), a loop refusal trigger, or a normalised rework reason. A cause reaching the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed as work: a standards or criteria wording update, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent holding `decision:approve` (not a human session, the drafter, or an instance's recorder) approves one, applying it at its registry's next revision (`requirements`, `checks`, `catalogue`) and recording the cause, fingerprint and instances it closes, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on every submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) and counts recurrences against itself. Instances in any draft never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 

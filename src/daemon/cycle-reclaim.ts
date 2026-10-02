@@ -1,17 +1,17 @@
 // Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
 import { describeReclaim, paneReclaimStatus, agentlessPaneAttentionBound } from '../master-resources.js';
 import { diskThresholdBytes, containmentPhase } from '../master.js';
-import { containmentClock, withoutMeasuredRoundTrip } from '../master/containment.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { gigabytes, message, reclaimIntervalMs, reclaimSummarySchema } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { boundDetail, detailChanged } from './decisions.js';
+import { detailChanged } from './decisions.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
-import type { ContainmentObservation } from '../master/containment.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { SessionHandle } from '../model/sessions.js';
 import type { ContainmentAssessment } from '../master.js';
+import { containmentQuarantines } from '../master.js';
+import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
 import { closablePane, endedScopeStates } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import type { DaemonAction, DaemonState } from './state.js';
@@ -212,14 +212,15 @@ export async function reclaimStep(cycle: Cycle) {
   //     supervisor is gone, so it does: the probe is the same one `master settle-containment`
   //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
   //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
-  //     The timed read runs only in a cycle with a quarantine to assess — one whose owner's lease is
-  //     not live — at most once, and a read that fails or stalls past its timeout leaves the snapshot's bounds.
-  const assessing = effects.containment && snapshot.work.some(item => item.containmentQuarantine && containmentPhase(item, clock)?.state !== 'live');
-  const measured = assessing && effects.controlPlaneClock ? await effects.controlPlaneClock().catch(() => null) : null;
-  const clockBounds = await containmentClock(clockOffset, measured ? () => Promise.resolve(measured) : undefined);
-  // Every containment assessment this cycle is judged with the timed read's bounds, the fresh probe
-  // after a pane close included (GY-795): the snapshot's bound is as wide as its slow read.
-  const observed: ContainmentObservation = { now: snapshot.now, clockOffset: clockBounds.clockOffset, clockRoundTripMs: clockBounds.roundTripMs, clockSource: clockBounds.source };
+  //     The clock is bounded by a light timed read taken just before the probe, not by the
+  //     snapshot's read: that read takes seconds on a loaded plane, and a bound that wide refused
+  //     every automatic settlement as unmeasurable (GY-811). Should the timed read fail, the
+  //     snapshot's bounds stand and the refusal names their round trip. The read is taken only
+  //     when a quarantine here is assessable — registered on this host and no longer live — so a
+  //     cycle with nothing to settle never pays for it.
+  const assessable = effects.containment && containmentQuarantines(snapshot.work, config.hostId).some(item => containmentPhase(item, clock)?.state !== 'live');
+  const measured = assessable ? await containmentClock(clockOffset, effects.controlPlaneClock) : null;
+  const observed: ContainmentObservation = measured ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source } : { now: snapshot.now, clockOffset };
   const assessments = await effects.containment?.(snapshot.work, observed) ?? {};
   await closeEndedWorkerPanes(state, effects, open, assessments, observed, now, performed);
   // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
@@ -232,10 +233,10 @@ export async function reclaimStep(cycle: Cycle) {
     if (!assessment.settleable) {
       const escalationKey = `escalation:containment:${item.id}:${epoch}`;
       const detail = `${item.key}: containment quarantine from epoch ${epoch} cannot be settled automatically: ${assessment.refusals.join('; ')}`;
-      // The refusal names the measured round trip, which differs every cycle: a refusal of the same
-      // class is recorded once, and master status shows the live measurement (GY-795).
+      // The refusal names each cycle's measured round trip, which differs every read: the
+      // escalation is recorded again only when what blocks the settlement changes, not the number.
       const previous = state.actions[escalationKey];
-      if (!previous || withoutMeasuredRoundTrip(previous.detail) !== withoutMeasuredRoundTrip(boundDetail(detail))) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
+      if (detailChanged(previous && { detail: unmeasured(previous.detail) }, unmeasured(detail))) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
       return;
     }
     if (!effects.settleContainment) return;
