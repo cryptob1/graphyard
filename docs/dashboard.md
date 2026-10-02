@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## Work
 
-One group per open item (a tile counts and filters it): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` serves groups, not the page; items carry `group`, `stage`, `owner`, `actor` (`worker`, `reviewer`, `producer`, `approver`, `master`, `executor`, `human-only`, `held`), `command` (or null), `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, default 30 minutes). `master status`: the master's as `board.owed`.
+One group per open item (a tile counts and filters it): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` serves groups, not the page; items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, default 30 minutes). `master status`: the master's as `board.owed`.
 
 ## Workers
 
@@ -15,7 +15,7 @@ Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Co
 
 ## Settings › Agents
 
-**Can launch now?**: per role, yes, or why not and until when. **Accounts**: first applicable chip (Disabled, No role, Spent, Launch failing: failed smoke test, role hold or start failure within the hour; Unavailable, Working, Idle); local times, countdowns (`web/agent-status.ts`). **Account details**: **old probe** past an hour (`quotaStaleThresholdMs`, `web/pages/fleet.tsx`); **probe failed** after a failed smoke test. Settings pages share `web/components/page-layout.tsx`; operator identity ids behind **Identifiers**.
+**Can launch now?**: per role, yes, or why not and until when. **Accounts**: first applicable chip (Disabled, No role, Spent, Launch failing: failed smoke test, role hold or start failure within the hour; Unavailable, Working, Idle). **Account details**: **old probe** past an hour; **probe failed** after a failed smoke test. Operator identity ids sit behind **Identifiers**.
 
 ## The status sentence
 
@@ -23,8 +23,8 @@ Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *L
 
 ## An item page
 
-Below the summary: **What is left**; **Requirements** (✓/○ per criterion); **Pull request** with **Merge danger** (low/medium/high; one- or two-way door: what it touches, what a revert restores, what the merge guard still checks; schema, deployment, workflow files one-way); **Test cases**; **Activity**; **Technical details** (gates, sessions, evidence, overlaps: `Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left**; **Requirements** (✓/○ per criterion); **Pull request** with **Merge danger** (low/medium/high; schema, deployment, workflow files are one-way doors); **Test cases**; **Activity**; **Technical details** (gates, sessions, evidence, overlaps: `Shares files with GY-166, GY-167 (tests/)`).
 
 ## Insights
 
-Headline numbers, **Flow** (12 dots per column, then **+N more**; medians survive a failed replay read), landed/day, merges/hour, median queue wait, time spent, [optimistic merges](github.md#optimistic-merges). **Show details**: shipping pulse (PR-to-production via `POST /api/production-observations` or `master verify-deployment`), flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**. Missing values: `Unavailable`.
+**Flow**, landed/day, merges/hour, median queue wait, time spent, [optimistic merges](github.md#optimistic-merges). **Show details**: shipping pulse (PR-to-production via `POST /api/production-observations` or `master verify-deployment`), flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**. Missing values: `Unavailable`.

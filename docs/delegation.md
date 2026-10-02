@@ -16,11 +16,11 @@ Producers ever assigned the item or in its slice: `evidence.producer.refused`. L
 | `security-concern` | A lead's `escalate` ruling |
 | `requirement-weakening` | A revision retires a criterion or narrows proofs |
 
-Unresolved triggers drop merge authorization; raising one dequeues the head. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). Meanwhile a replacement may claim; delivery waits.
+Unresolved triggers drop merge authorization. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). Meanwhile a replacement may claim; delivery waits.
 
 ### Who may settle what
 
-Resolutions record `escalation.resolved` (resolver, session kind, reason, attestation).
+Resolutions record `escalation.resolved`.
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
 - `lease-loss` of a superseded/stopped epoch: loop's two-party decision (stale if the superseding lease lapses).

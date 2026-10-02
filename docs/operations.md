@@ -14,7 +14,7 @@
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair; never bypass. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong accepted evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused or webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check. A migration touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock), locks each before rebuilding its trigger, and retries a deadlock or expired lock wait with backoff in one 30-second lock budget (failed locks release at once); each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer. Migrations and backups lock separately; the first `work_index` rebuild briefly locks `work_items`.
+- **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check. A migration touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock), locks each before rebuilding its trigger, and retries a deadlock or expired lock wait with backoff in one 30-second lock budget (failed locks release at once); each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer.
 - **Loop down**: [loop](operations-reference.md#master-coordination-loop). **A change must prove itself**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
@@ -34,7 +34,7 @@ Never attest a stop you have not confirmed; merged work changes only via follow-
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
 - Only guarded/audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
-- History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited; never other kinds, rows a delta extends, an item's newest save, delivery events, cited revisions, merged-not-done items' rows or rows the flow projection hasn't read.
+- History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited.
 
 ## Deeper references
 

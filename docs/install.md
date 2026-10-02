@@ -3,7 +3,7 @@
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-Ask only: **Which provider** (`--workspace` for multi-workspace Railway); **Provider login**; **the GitHub App confirmation click**, once; **Approval of the printed plan**. Never invent a fifth.
+Ask only: **Which provider**; **Provider login**; **the GitHub App confirmation click**, once; **Approval of the printed plan**. Never invent a fifth.
 
 ## Hard rules
 
@@ -15,7 +15,7 @@ Ask only: **Which provider** (`--workspace` for multi-workspace Railway); **Prov
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts pass Graphyard's probe `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true` (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts pass Graphyard's probe `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true`.
 
 ### Providers
 
@@ -30,7 +30,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift) proposes names). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`); human approves plan and `drift`.
+Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`); human approves plan and `drift`.
 
 ## Step 2: apply
 
@@ -50,11 +50,11 @@ Human installs the App at the printed `http://127.0.0.1:4311`; **Verify** *App r
 
 ## Step 5: first pull request
 
-Dispatch a [small item](onboarding.md#4-prove-the-first-pr); after `Graphyard / merge` appears, rerun `--apply`; **Verify** the base branch requires it. `--plan`/`--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
+Dispatch a [small item](onboarding.md#4-prove-the-first-pr); after `Graphyard / merge` appears, rerun `--apply`; **Verify** the base branch requires it. `--plan`/`--apply` are idempotent; tokens never rotate.
 
 ## Upgrading an existing installation
 
-A new App permission holds jobs needing it. [Back up, deploy](deployment.md#backup-upgrade-rollback); beside `.graphyard/github-app.json` run `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `doctor` shows `appPermissions.missing` empty. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`) and declares undeclared operators `sessionKind human`, agents `ai` (tokens kept).
+[Back up, deploy](deployment.md#backup-upgrade-rollback); beside `.graphyard/github-app.json` run `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `doctor` shows `appPermissions.missing` empty. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`) and declares undeclared principals' `sessionKind`.
 
 ## Failure handling
 
@@ -72,7 +72,7 @@ A new App permission holds jobs needing it. [Back up, deploy](deployment.md#back
 
 ## Agent execution contract
 
-Run steps 1–5, report verifications and `nextSteps`; never weaken a gate.
+Run steps 1–5, report verifications; never weaken a gate.
 
 ## Manual fallback for unsupported platforms
 

@@ -24,7 +24,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`graphyard master reviewer setup` creates it (Pull requests write, reads otherwise); review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Grants recheck every five minutes and on 403s; shortfalls (`appPermissions`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
+`graphyard master reviewer setup` creates it (Pull requests write, reads otherwise); review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Shortfalls (`appPermissions`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
 
 ## Require the check
 
@@ -32,17 +32,17 @@ Require `Graphyard / merge` from the control-plane App on base: `strict` **off**
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (newest configured-CI-App run) before rework or ejection; lapses after 15 runless minutes; without Actions: write, preflight diagnoses and reruns hold. A rerun queued/in progress is a runner wait (no new head owed); one not found is re-requested.
+A failed required check reruns once on the unchanged head (newest configured-CI-App run) before rework or ejection.
 
-Once gated, a speculative tip pushed onto the candidate branch and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once that check's newest run on the tip passes and no other required check fails (`queue.ejection-lifted`). Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Withdrawal dequeues. Queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+Once gated, a speculative tip pushed onto the candidate branch and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Withdrawal dequeues. Queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
-`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (one CI duration, four positions; costs concurrent CI, a discarded suffix on failure; `parallelTips: 1` batches). Entries merge in order once all tips through theirs pass; publications wake successors to re-read in-flight verdicts; a failing tip ejects its entry once those ahead pass; later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order once all tips through theirs pass; a failing tip ejects its entry once those ahead pass; later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
 
 ### Bindings and carry
 
-Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. Republication reads PR reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch (App's own dismissal restored when observed); never a person's, a moved head or changed patch.
+Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. Republication reads PR reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch; never a person's, a moved head or changed patch.
 
-Before merging, the reviewer App re-posts a carried approval missing from the PR (bound reviewer's latest of the reviewed head; a newer one observed re-binds: `review.carry-refreshed`). None usable: `mergerefused`; carried approval cleared (`mergeRefusal.action: rereview`), fresh review requested at once, entry yields the head until one re-enters. Same refusal on consecutive cycles past 10 minutes raises attention (reason, next step); the loop clears a carried approval or requests a rework decision (`mergeRefusal.action: rework`; approver-judged in the high [risk lane](how-graphyard-works.md#risk-lanes), applied as requested in low/medium), each once per recovery phase (a re-bound carry starts one).
+Before merging, the reviewer App re-posts a carried approval missing from the PR. None usable: `mergerefused`; the carried approval is cleared and a fresh review requested at once. A refusal repeating past 10 minutes raises attention; the loop clears a carried approval or requests a rework decision, each once per recovery phase.
 
 ### Optimistic merges
 
@@ -50,7 +50,7 @@ Before merging, the reviewer App re-posts a carried approval missing from the PR
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`.github/workflows/ci.yml`: build, docs check, Node and browser suites), under ten minutes. Soak/timing-budget files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance/recovery and the Helm chart run only in `.github/workflows/release-candidate.yml`, on one pinned SHA (`sha` input or pushed `rc-*` tag).
+Required: `typecheck`, `test` (`.github/workflows/ci.yml`: build, docs check, Node and browser suites), under ten minutes. Soak/timing-budget files, container acceptance/recovery and the Helm chart run only in `.github/workflows/release-candidate.yml`, on one pinned SHA (`sha` input or pushed `rc-*` tag).
 
 ### Proofs in CI
 

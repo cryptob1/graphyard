@@ -12,17 +12,17 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 5. **Acceptance**: granted producers report proofs its [lane](#risk-lanes) requires.
 6. **Done**: Graphyard rechecks gates, merges, observes.
 
-Cards stop at the first refusing gate, naming what's missing; nothing sets stages.
+Cards stop at the first refusing gate, naming what's missing.
 
 ## Risk lanes
 
-`src/model/policy.ts` assigns a **risk lane** (`low`, `medium`, `high`) by changed paths (renames: both ends); `master status` shows it, p50 target; the landability verdict (`src/model/gates.ts`) requires facts by lane.
+`src/model/policy.ts` assigns a **risk lane** (`low`, `medium`, `high`) by changed paths; `master status` shows it, p50 target; the landability verdict requires facts by lane.
 
 - **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential-loading bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework decisions.
 - **Medium** (60 min): the rest; adds producer-run `unit:`/`integration:`.
 - **Low** (30 min): test-only, docs-only, single-module (shared leading segments). Required CI, one approval; no producer proofs or `manual:` attestations.
 
-All lanes require `e2e:` proofs, inherited bootstrap obligations; low/medium reworks need no approver (ledger: `graphyard-risk-lane`).
+All lanes require `e2e:` proofs; low/medium reworks need no approver.
 
 ## Who holds which authority
 
@@ -43,5 +43,5 @@ Text equivalent: callers use the API; the engine applies each mutation, with an 
 - Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; pushes, base changes invalidate evidence.
 - Claims bump the epoch; old-epoch or expired-lease commands refuse.
 - Evidence is its authenticated producer's; latest trusted record per proof and candidate wins, even failing.
-- Append-only history (routine rows compacted after retention); retries within a day replay.
+- Append-only history; retries within a day replay.
 - Graphyard merges only the exact authorized candidate, once (else a permanent violation); merge isn't [delivery](delivery.md).

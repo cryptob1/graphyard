@@ -9,7 +9,7 @@ graphyard runner snapshot selected-files.json > oracle-source.json
 graphyard runner bundle-digest ./oracle
 ```
 
-Bundle (reviewed specs, helpers, lockfiles): attestor-owned, not group- or world-writable; `validation define` pins `digest`, `runnerImageDigest` (from `docker/runner/Dockerfile`). Specs read target `GRAPHYARD_TARGET_URL`.
+Bundle: attestor-owned, not group- or world-writable; `validation define` pins `digest`, `runnerImageDigest` (from `docker/runner/Dockerfile`). Specs read target `GRAPHYARD_TARGET_URL`.
 
 ## Run an attempt
 
@@ -78,4 +78,4 @@ Proof-scoped `producer` credential, own boundary-group OS account: `graphyard ru
 }
 ```
 
-`grant`: from runner output. Collector (`collection-authority`) verifies attestor signature, inventory, both containers gone; uploads artifacts privately seven days. `observations` bracket the run, gaps under `maxGapMs`; difference, gap or `unknown` measurement refuses; infrastructure faults publish `blocked`.
+`grant`: from runner output. Collector (`collection-authority`) verifies attestor signature, inventory, both containers gone; uploads artifacts privately. `observations` bracket the run, gaps under `maxGapMs`; difference, gap or `unknown` measurement refuses; infrastructure faults publish `blocked`.

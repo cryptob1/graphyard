@@ -15,7 +15,7 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` while every grant on the checkout or its `.git` stays within its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, fresh `/proc`, systemd and `/run/dbus` hidden, session bus a keyring-only proxy), re-exposing only the session's directory (worktree, or a reviewer's or producer's checkout beside its root), worktree-admin directories, shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. Refused, with the reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout. Loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names paths and leases.
+Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` while every grant on the checkout or its `.git` stays within its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, fresh `/proc`, session bus a keyring-only proxy), re-exposing only the session's directory, worktree-admin directories and shared Git areas (objects, remote refs, `FETCH_HEAD`). Refused, with the reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout. Loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names paths and leases.
 
 ## Accounts and failover
 
@@ -23,7 +23,7 @@ A profile's `accounts` lists [agent environments](onboarding.md#agent-environmen
 
 ## The loop's own master session
 
-Fleet role `master registry role set master ACCOUNTS …` (unconfigured, nothing launches), one session holding its registry slot until the loop ends it (retried each cycle); loop and `master start` adopt a live `masterAgentName`. Starts on the master prompt plus a durable handover of standing judgement work; relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240; an open item's merge defers it ≤30 minutes). Changed subjects wake it; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`master status` `daemon.master`).
+Fleet role `master registry role set master ACCOUNTS …` (unconfigured, nothing launches), one session holding its registry slot until the loop ends it; loop and `master start` adopt a live `masterAgentName`. Starts on the master prompt plus a durable handover of standing judgement work; relaunches on exit (an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240; an open item's merge defers it ≤30 minutes). Changed subjects wake it; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`master status` `daemon.master`).
 
 ### The request is the session's first message
 
@@ -49,9 +49,9 @@ On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three per request (`retry.neverStarted`).
 
-A resolved blocker or scope request re-prompts the inactive session once (item, epoch, change, `complete GY-N EPOCH PR`); re-blocking that epoch ends attempt and blocker for a fresh session (preferably another runtime). **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch. Pastes go to the attempt's own session-handle pane, never a profile's reusable agent name; a gone pane hands the attempt on.
+A resolved blocker or scope request re-prompts the inactive session once (item, epoch, change, `complete GY-N EPOCH PR`); re-blocking that epoch ends attempt and blocker for a fresh session. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
 
-Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts, re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts, re-adopted; lost ones retry free.
 
 ### Panes are closed and reclaimed
 
@@ -60,7 +60,6 @@ Ending a session closes its pane; each cycle closes ≤**6** more launched **on 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A schema-failing cursor is repaired, not fatal**, logged once with the
-  path that failed.
+- **A schema-failing cursor is repaired, not fatal**, logged once with the path that failed.
 - **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 - **A session that exits at launch is classified from its pane.** One that exits **at launch** leaves `herdr agent get` only `agent_not_found`, so `herdr pane read` decides: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.

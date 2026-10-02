@@ -3,11 +3,11 @@
 
 ## The one command
 
-One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; `/healthz` reports version and `commit`; alert on `/healthz?strict` (503 if unhealthy).
+One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --apply` ([install](install.md)). Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`; alert on `/healthz?strict` (503 if unhealthy).
 
 ## Variables
 
-`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); App `GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY` (or `_FILE`)/`GITHUB_WEBHOOK_SECRET`; trusted `GITHUB_CI_APP_IDS`; [reviewer](github.md#identity-bound-agent-review) `GRAPHYARD_REVIEWER_APPS`; `GRAPHYARD_GENERATED_FILES` (`node scripts/check-docs.mjs --list`); `GRAPHYARD_BUILD_SHA` (image commit, else `RAILWAY_GIT_COMMIT_SHA`); `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); optional `RAILWAY_API_TOKEN` (deployment incidents); and:
+`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); App `GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY` (or `_FILE`)/`GITHUB_WEBHOOK_SECRET`; trusted `GITHUB_CI_APP_IDS`; [reviewer](github.md#identity-bound-agent-review) `GRAPHYARD_REVIEWER_APPS`; `GRAPHYARD_GENERATED_FILES` (`node scripts/check-docs.mjs --list`); `GRAPHYARD_BUILD_SHA` (image commit); optional `RAILWAY_API_TOKEN` (deployment incidents); `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); and:
 
 | Variable | Purpose
 | --- | ---
@@ -17,7 +17,7 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (default 1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (default 2)
 
-Installers derive the four limits from deployed principals; unset ones derive at start-up (`delegationLimits` drift).
+Installers derive the four limits from deployed principals.
 
 ### CI producer
 
@@ -31,7 +31,7 @@ Installers derive the four limits from deployed principals; unset ones derive at
 
 ### Production deployment observation
 
-A new `GRAPHYARD_BUILD_SHA` checks undeployed merges once (`delivery.deployment-contained`, `production.deployment-pending`; same-commit restart: nothing); one unserved after five minutes is a `delivery.deployment-incident` (`master status`: `main is N commits ahead of production`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+A new `GRAPHYARD_BUILD_SHA` checks undeployed merges once; one unserved after five minutes is a `delivery.deployment-incident` (shown in `master status`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 
