@@ -11,23 +11,34 @@ import type { WorkerProfile } from '../master/profiles.js';
 import { accountLaunch, readEnvironmentLog, selectionKey, sharedGitDirectory, type LaunchAccount } from '../master/environments.js';
 import { readFleet, type FleetLaunchAccount, type FleetProbe } from '../fleet.js';
 import { rolePolicy } from '../model/registry.js';
+import { sessionConfinement } from '../master/launch.js';
 
 /** What the loop writes on the item for one probe (POST work/ID/blocker-probe). */
 export interface BlockerProbeRecord { blocker: string; class: BlockerClass; probe: string; result: 'pass' | 'fail'; detail: string; nextAt: string | null }
-/** The launch a worker gets: its runtime kind, the arguments that carry its sandbox, and its environment. */
-export interface WorkerLaunch { kind?: string | null; args: string[]; environment?: Record<string, string> }
+/** The launch a worker gets: its runtime kind, the arguments that carry its sandbox, its environment, and the coordinator confinement words placed before its runtime (GY-888). */
+export interface WorkerLaunch { kind?: string | null; args: string[]; environment?: Record<string, string>; confinement?: readonly string[] }
 /** What one probe found: what it ran, whether the cause no longer stands, and what it saw. */
 export interface BlockerProbeResult { probe: string; passed: boolean; detail: string; /** outside-scope-test-failure: the base tip the probe read. */ baseTip?: string }
 
 /**
  * The command that runs `script` inside the confinement the worker's own launch describes: the
  * runtime's sandbox where its arguments select one (the same wrapper `verifyWorkerSandbox` probes
- * a launch through), and otherwise the script as the worker's shell would run it. A probe run any
- * other way would pass on the loop's own credentials and paths while the next attempt still fails.
+ * a launch through), and otherwise the script as the worker's shell would run it — in both cases
+ * behind the coordinator confinement words the launch carries (the GY-888 read-only mount every
+ * non-sandboxed runtime starts inside). A probe run any other way would pass on the loop's own
+ * credentials and paths while the next attempt still fails.
  */
 export function confinedCommand(launch: WorkerLaunch | null, cwd: string, script: string[]): { command: string; args: string[] } {
   const sandbox = launch?.kind ? runtimeSandboxes[launch.kind] : undefined;
-  return sandbox && sandbox.mode(launch!.args) !== null ? sandbox.probe(launch!.args, cwd, script) : { command: script[0], args: script.slice(1) };
+  const inner = sandbox && sandbox.mode(launch!.args) !== null ? sandbox.probe(launch!.args, cwd, script) : { command: script[0], args: script.slice(1) };
+  const wrapper = launch?.confinement ?? [];
+  return wrapper.length ? { command: wrapper[0], args: [...wrapper.slice(1), inner.command, ...inner.args] } : inner;
+}
+/** Where `confinedCommand` runs a probe, in words. */
+export function confinementName(launch: WorkerLaunch | null): string {
+  const sandbox = launch?.kind ? runtimeSandboxes[launch.kind] : undefined;
+  if (sandbox && sandbox.mode(launch!.args) !== null) return `the ${launch!.kind} sandbox`;
+  return launch?.confinement?.length ? `the ${launch.kind} worker's read-only coordinator mount` : 'the worker shell';
 }
 
 /**
@@ -63,7 +74,7 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
   const env = { ...process.env, ...(deps.launch?.environment ?? {}), GIT_TERMINAL_PROMPT: '0' };
   const confined = async (probe: string, script: string[]) => {
     const { command, args } = confinedCommand(deps.launch, deps.cwd, script);
-    const where = command === script[0] ? 'the worker shell' : `the ${deps.launch?.kind} sandbox`;
+    const where = confinementName(deps.launch);
     try { await deps.run(command, args, { cwd: deps.cwd, env }); return { probe: `${probe} inside ${where}`, passed: true, detail: `passed in ${deps.cwd}` }; }
     catch (error) { return { probe: `${probe} inside ${where}`, passed: false, detail: bound(firstLine(error)) }; }
   };
@@ -137,13 +148,18 @@ export async function blockedAttemptAccount(config: MasterConfig, work: Work, pr
 /**
  * The launch a worker on `profile` gets for `work`, built as dispatch builds it: its account's
  * `accountLaunch`, then every path the worker writes in `cwd` — the worktree, its own Git admin
- * directory and the shared one — granted to the runtime's sandbox (`grantWorkerPaths`).
+ * directory and the shared one — granted to the runtime's sandbox (`grantWorkerPaths`), then the
+ * coordinator confinement `startAgentSession` wraps every worker in (`sessionConfinement`, GY-888).
+ * `coordinatorRoot` defaults to the launcher's own checkout, as a worker launch's does; a launch
+ * that could carry no confinement throws its refusal, so the probe fails rather than running bare.
  */
-export async function blockedAttemptLaunch(config: MasterConfig, root: string, work: Work, profile: WorkerProfile, cwd: string, probe: FleetProbe = {}): Promise<WorkerLaunch> {
+export async function blockedAttemptLaunch(config: MasterConfig, root: string, work: Work, profile: WorkerProfile, cwd: string, probe: FleetProbe = {}, coordinatorRoot?: string | null): Promise<WorkerLaunch> {
   const launch = accountLaunch(profile, await blockedAttemptAccount(config, work, profile, probe));
   const paths = workerPaths(cwd);
   const writable = writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) });
-  return { kind: launch.kind, args: grantWorkerPaths(launch.kind, launch.args, writable, cwd), environment: launch.environment };
+  const args = grantWorkerPaths(launch.kind, launch.args, writable, cwd);
+  const confinement = await sessionConfinement(launch.kind!, args, { directory: cwd }, coordinatorRoot);
+  return { kind: launch.kind, args, environment: launch.environment, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) };
 }
 
 /** The classes whose probe runs inside the worker's confinement, and so needs its launch. */
@@ -156,7 +172,7 @@ const confinedClasses: readonly BlockerClass[] = ['github-credential', 'sandbox-
  * checkout otherwise, with the base tip read from `origin`. A launch that cannot be built is a
  * failing probe naming why, never a pass.
  */
-export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildRun, planeHealth: () => Promise<string | null>, probe: FleetProbe = {}) {
+export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildRun, planeHealth: () => Promise<string | null>, probe: FleetProbe = {}, coordinatorRoot?: string | null) {
   return async (work: Work, classification: BlockerClassification): Promise<BlockerProbeResult | null> => {
     const holder = work.lease?.owner ?? work.lastAssignment?.owner;
     const launched = config.workers.filter(worker => worker.mode === 'launch');
@@ -165,7 +181,7 @@ export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildR
     const cwd = workspace && existsSync(workspace.path) ? workspace.path : root;
     let launch: WorkerLaunch | null = null;
     if (profile && confinedClasses.includes(classification.class)) {
-      try { launch = await blockedAttemptLaunch(config, root, work, profile, cwd, probe); }
+      try { launch = await blockedAttemptLaunch(config, root, work, profile, cwd, probe, coordinatorRoot); }
       catch (error) { return { probe: `the worker launch for ${work.key}`, passed: false, detail: bound(`the launch the next attempt would get cannot be built: ${firstLine(error)}`) }; }
     }
     return probeBlocker(work, classification, { run: (command, args, options) => run(command, args, { ...options, timeoutMs: 30_000 }), planeHealth,

@@ -280,7 +280,9 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   const sandbox = await probeBlocker(work, classifyBlocker(incidents[2][0]), { run: () => '', launch: { kind: 'codex', args: ['--sandbox', 'workspace-write'] }, cwd: '/srv/wt', clock: Date.now() });
   assert.equal(sandbox?.passed, true);
   assert.match(sandbox!.probe, /write \/srv\/wt\/\.git\/logs\/refs\/remotes\/origin\/graphyard\/gy-941-1 inside the codex sandbox/);
-  assert.deepEqual(confinedCommand({ kind: 'claude', args: [] }, '/srv/wt', ['/bin/sh', '-c', 'true']), { command: '/bin/sh', args: ['-c', 'true'] }, 'a runtime without a sandbox runs the probe as its shell would');
+  assert.deepEqual(confinedCommand({ kind: 'claude', args: [] }, '/srv/wt', ['/bin/sh', '-c', 'true']), { command: '/bin/sh', args: ['-c', 'true'] }, 'an unconfined launch with no sandbox runs the probe as its shell would');
+  assert.deepEqual(confinedCommand({ kind: 'claude', args: [], confinement: ['bwrap', '--ro-bind', '/coord', '/coord', '--'] }, '/srv/wt', ['/bin/sh', '-c', 'true']),
+    { command: 'bwrap', args: ['--ro-bind', '/coord', '/coord', '--', '/bin/sh', '-c', 'true'] }, 'a launch carrying the coordinator mount runs the probe inside it, as the worker runs');
 
   // A managed worktree is a linked one: `.git` is a file and the ref logs live in the shared Git
   // directory. The blocker's `.git/logs/...` path is probed where Git writes it, so while the
@@ -331,6 +333,29 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   assert.equal(ran.at(-1)!.command, '/bin/sh', 'the session\'s claude runtime has no sandbox to wrap the probe in');
   assert.equal(ran.at(-1)!.env.CLAUDE_CONFIG_DIR, '/homes/reg-claude');
   assert.equal(ran.at(-1)!.env.CODEX_HOME, process.env.CODEX_HOME, 'the profile\'s own account is not used');
+
+  // Run from a coordinator checkout, a claude worker starts inside the GY-888 read-only mount
+  // (startAgentSession → sessionConfinement), so its probe does too: never a bare host shell. Where
+  // the mount cannot be built the probe fails naming why, as the worker launch would be refused.
+  ran.length = 0;
+  const confined = await loopBlockerProbe(accountConfig('codex'), repo, record, async () => null, { registry: { ...local, document: async () => registry } }, repo)(linkedWork, classifyBlocker(incidents[2][0]));
+  if (confined?.passed) {
+    const wrapped = ran.at(-1)!;
+    assert.match(wrapped.command, /bwrap$/, 'the probe runs inside the worker\'s bubblewrap mount');
+    assert.ok(wrapped.args.join(' ').includes(`--ro-bind ${repo} ${repo}`), 'with the coordinator checkout read-only');
+    assert.match(confined.probe, /inside the claude worker's read-only coordinator mount/);
+  } else {
+    assert.equal(ran.some(entry => entry.command === '/bin/sh'), false, 'never run bare when the mount cannot be built');
+    assert.match(confined!.detail, /unwritable at the OS level/);
+  }
+  // Really run, the confined write probe fails on the read-only coordinator checkout and passes in the worktree.
+  if (confined?.passed) {
+    const { command, args } = ran.at(-1)!;
+    const launch = { kind: 'claude', args: [], confinement: [command, ...args.slice(0, args.indexOf('--') + 1)] };
+    const write = (path: string) => probeBlocker(work, { ...classifyBlocker(incidents[2][0]), path } as any, { run: host, launch, cwd: linked, clock: Date.now() });
+    if (process.getuid?.() !== 0) assert.equal((await write(join(repo, 'probe-target')))?.passed, false, 'the coordinator checkout is read-only inside the mount');
+    assert.equal((await write(join(linked, 'probe-target')))?.passed, true, 'the worktree stays writable inside the mount');
+  }
 });
 
 test('unit:scope-blocker-becomes-decision — a planned-file-scope blocker becomes an additive widening decision for the independent approver, and a needs-decision blocker gets its approver launched, without a master', async () => {

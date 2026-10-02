@@ -28,7 +28,7 @@ An attempt blocked by a GitHub credential failure (git's or `gh`'s own refusal, 
 
 ## Blocked work unblocks itself
 
-`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`) and, in the blocker's transaction, releases the lease; the capacity record carries `blocked on epoch N: REASON` (`credential-blocked attempt on epoch N` for a GitHub credential failure) for the next attempt. Each cycle (`blockers` step) the loop classes every standing blocker (`src/model/blocker-class.ts`):
+`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`) and, in the blocker's transaction, releases the lease; the capacity record carries `blocked on epoch N: REASON` (`credential-blocked attempt on epoch N` for a GitHub credential failure) for the next attempt. Each cycle (`blockers` step) the loop classes every standing blocker (`src/model/blocker-class.ts`). Credential and path probes run in the confinement the next worker gets: its runtime sandbox, inside the read-only coordinator mount every non-sandboxed runtime starts in; a probe that cannot be confined fails.
 
 | Class | Probe, every cycle | Cleared when |
 | --- | --- | --- |
