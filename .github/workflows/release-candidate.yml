@@ -205,12 +205,14 @@ jobs:
         # the record as a suite of its own. A failure files one follow-up item naming the failing
         # suite and the candidate SHA; only that filing uses GRAPHYARD_TOKEN, which no --suite
         # command is given.
-        run: >-
-          node bin/graphyard.mjs release validate "${{ needs.candidate.outputs.id }}" --url "$UAT_URL" --wait 1200 --api
-          --suite 'long-suites=test "$LONG_SUITES" = success'
-          --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success'
-          --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success'
-          --suite 'chart=test "$CHART" = success'
+        run: |
+          # The suite commands expand their variables when the suite runs, not here.
+          # shellcheck disable=SC2016
+          node bin/graphyard.mjs release validate "${{ needs.candidate.outputs.id }}" --url "$UAT_URL" --wait 1200 --api \
+            --suite 'long-suites=test "$LONG_SUITES" = success' \
+            --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success' \
+            --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success' \
+            --suite 'chart=test "$CHART" = success'
         env:
           LONG_SUITES: ${{ needs.long-suites.result }}
           CONTAINER_ACCEPTANCE: ${{ needs.container-acceptance.result }}

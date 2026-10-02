@@ -1,10 +1,12 @@
 import { defineCommands } from './registry.js';
+import { releaseLeaseCommand } from './lease.js';
 import {
   apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
   ledgerStatus, promote, readLedger, readServed, syncLedger, validateAndRecord, type CutTrigger, type Suite,
 } from '../release-candidate.js';
 
 const switches = new Set(['no-push', 'api']);
+const subcommands = new Set(['cut', 'status', 'uat', 'validate', 'follow-up', 'promote', 'verify']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -26,6 +28,7 @@ export const releaseCommands = defineCommands([
   {
     name: 'release',
     help: [
+      ...releaseLeaseCommand.help,
       '  release cut [--trigger schedule|manual] [--base main] [--no-push]',
       "                                Record main's tip as a release candidate (tag rc/ID) with the",
       '                                deliveries it carries; merges to main never pause',
@@ -40,7 +43,14 @@ export const releaseCommands = defineCommands([
       '  release verify --url URL [--wait SECONDS]',
       '                                Check production serves a promoted candidate and name it',
     ],
-    async run({ id, args, api, print, repositoryRoot }) {
+    async run(context) {
+      const { id, args, api, print, repositoryRoot } = context;
+      // `release GY-N EPOCH` is the worker's lease release; every other word is a candidate step.
+      if (id && !subcommands.has(id)) {
+        const work = (await api('work')).find((item: any) => item.id === id || item.key === id);
+        if (!work) throw new Error(`Unknown work item ${id}`);
+        return releaseLeaseCommand.run(context, work);
+      }
       const git = gitIn(repositoryRoot());
       const options = flags(args);
       const base = options.one('base') ?? 'main', push = options.one('no-push') === undefined;
