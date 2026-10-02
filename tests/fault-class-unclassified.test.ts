@@ -43,12 +43,12 @@ test('manual:fault-class-unclassified — GY-727, GY-859, GY-1069: a non-exercis
   assert.equal(lines.length, 3);
   const record: FaultRecord = { instances: [], open: {}, failing: {} };
   const opened = trackFaults(record, classifyAttention(lines), '2026-10-01T17:01:27.555Z');
-  assert.deepEqual(opened.map(entry => [entry.subject, entry.kind, entry.faultClass]), nonExercising.map(([key]) => [key, 'non-exercising-proof', 'proof']));
+  assert.deepEqual(opened.map(entry => [entry.subject, entry.kind, entry.faultClass]), nonExercising.map(([key]) => [key, 'nonexercising-proof', 'proof']));
   // A line recorded before its builder set the kind — the instances' own text — is recognised by its wording.
   for (const line of lines) {
     assert.match(line.text, /^GY-\d+ is awaiting rework for a non-exercising proof: /);
     const [worded] = classifyAttention([{ subject: line.subject, text: line.text }]);
-    assert.deepEqual([worded.kind, worded.faultClass], ['non-exercising-proof', 'proof'], line.text);
+    assert.deepEqual([worded.kind, worded.faultClass], ['nonexercising-proof', 'proof'], line.text);
   }
 });
 
