@@ -14,7 +14,7 @@ import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
-import { dispatchReserved, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
+import { dispatchReserved, profileConcurrency, type HerdrAgent, type MasterConfig, type MergeExecutor, type ProducerProfile, type WorkerProfile } from './master.js';
 import { agentNameReadings, assertNameAvailable, attributeRefusal } from './master-resources.js';
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { processConnectAccounts } from './master/environments.js';
@@ -254,7 +254,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       // A name every session of the profile could take is held: the namespace is at its bound,
       // and the refusal names it rather than reading as a busy reviewer (GY-132).
       assertNameAvailable('reviewer', profile, agents);
-      if (agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
+      // The fixed name is busy only for a profile that runs one session; one that runs several names each session for its request (GY-1072).
+      if (profileConcurrency(profile) === 1 && agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
       // A launch refused by a resource at its bound — the review ledger's cap — records that resource.
       try {
         await registeredLaunch(record(work), launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace),
