@@ -337,13 +337,43 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
   const preClaim = await store!.list();
   const merging = preClaim.map(entry => asMerging.find(other => other.id === entry.id && entry.id === woken.id) ?? entry);
-  let reads = 0;
-  t.mock.method(engine.store, 'list', async () => reads++ === 0 ? preClaim : merging, { times: 2 });
+  let reads = 0, itemReads = 0, queueReads = 0;
+  t.mock.method(engine.store, 'list', async () => { reads++; return preClaim; }, { times: 1 });
+  t.mock.method(engine.store, 'workItem', async (id: string) => { itemReads++; return merging.find(entry => entry.id === id); }, { times: 1 });
+  const queued = t.mock.method(engine.store, 'queuedWork', async () => { queueReads++; return []; });
   const beforeRace = api.requests.length;
   assert.equal(await processJob(engine, github), true, 'the item was claimed');
-  assert.equal(reads, 2, 'the fleet was read again after the claim');
+  assert.deepEqual({ reads, itemReads }, { reads: 1, itemReads: 1 }, 'the claimed item, not the fleet, was read again after the claim');
+  assert.equal(queueReads, 0, 'a merge-authorized item needs no queue read');
   assert.ok(api.requests.length > beforeRace, 'and observed, not skipped');
   assert.doesNotMatch((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
+  queued.mock.restore();
+
+  // A skip outside the merge band costs one read of the claimed item by its id (GY-1052): neither the
+  // fleet nor the queue is read again, so an early-due poll never pays a second full fleet read.
+  await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
+  const fleetReads = t.mock.method(engine.store, 'list'), itemRead = t.mock.method(engine.store, 'workItem'), queueRead = t.mock.method(engine.store, 'queuedWork');
+  const beforeSkip = api.requests.length;
+  assert.equal(await processJob(engine, github), true, 'the poll was claimed');
+  assert.equal(api.requests.length, beforeSkip, 'and skipped');
+  assert.match((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
+  assert.deepEqual({ fleet: fleetReads.mock.callCount(), item: itemRead.mock.callCount(), queue: queueRead.mock.callCount() }, { fleet: 1, item: 1, queue: 0 }, 'one fleet read before the claim, one item read after it');
+  fleetReads.mock.restore(); itemRead.mock.restore(); queueRead.mock.restore();
+
+  // A queued, unauthorized merge-stage item is placed from the live queue alone: the queue head is in the band.
+  await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
+  const plain = (await store!.list()).find(entry => entry.id === woken.id)!;
+  const queuedHead = { ...plain, stage: 'merge' as const, queue: { sequence: 1, enqueuedAt: new Date().toISOString() } } as Work;
+  t.mock.method(engine.store, 'workItem', async () => queuedHead, { times: 1 });
+  const headQueue = t.mock.method(engine.store, 'queuedWork', async () => [queuedHead]);
+  const beforeHead = api.requests.length;
+  assert.equal(await processJob(engine, github), true, 'the queue head was claimed');
+  assert.equal(headQueue.mock.callCount(), 1, 'its position was read from the live queue');
+  assert.ok(api.requests.length > beforeHead, 'and observed, not skipped');
+  headQueue.mock.restore();
+  // The targeted reads against the real store: the item by its id, and no live queue entries in this fleet.
+  assert.equal((await store!.workItem(woken.id))?.key, woken.key);
+  assert.deepEqual(await store!.queuedWork(), []);
 
   // A worker's push to the pull-request branch names the item by its branch before its candidate names the new head.
   await deliver('push', { ref: `refs/heads/${polled.candidate!.branch}`, after: sha('pushed-head'), repository: { full_name: REPOSITORY } });

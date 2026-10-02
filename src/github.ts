@@ -2936,14 +2936,18 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // replica that claims the poll need not be the one that made the refresh.
   // The band is read again at skip time (GY-1052): an item that entered the merge band since the
   // refresh is observed at the merge cadence, not left until the longer interval the refresh used.
-  // A skip re-reads the fleet after the claim, so an item that entered the band between the
-  // pre-claim snapshot and `takeJob` is not deferred for one more interval.
-  const inMergeBand = (fleet: Work[]) => {
-    const claimed = fleet.find(entry => entry.id === job.work_id);
-    return !!claimed && claimed.stage === 'merge' && (mergeAuthorized(claimed) || queuePlacement(claimed, fleet, Date.now())?.position === 0);
+  // A skip re-reads the claimed item after the claim, so an item that entered the band between
+  // the pre-claim snapshot and `takeJob` is not deferred for one more interval. The re-read is
+  // targeted: the item by its id, and the live queue entries only when its queue position decides.
+  const inMergeBand = async (claimed: Work | undefined, queue: () => Promise<Work[]>) => {
+    if (!claimed || claimed.stage !== 'merge') return false;
+    if (mergeAuthorized(claimed)) return true;
+    return !!claimed.queue && queuePlacement(claimed, await queue(), Date.now())?.position === 0;
   };
-  const skippable = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until && !inMergeBand(all);
-  const refreshedUntil = skippable && !inMergeBand(await engine.store.list()) ? new Date(job.refreshed_until!).getTime() : null;
+  const skippable = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until
+    && !await inMergeBand(all.find(entry => entry.id === job.work_id), async () => all);
+  const refreshedUntil = skippable && !await inMergeBand(await engine.store.workItem(job.work_id), () => engine.store.queuedWork())
+    ? new Date(job.refreshed_until!).getTime() : null;
   if (refreshedUntil !== null) {
     await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
     return true;
