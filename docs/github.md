@@ -34,7 +34,7 @@ The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-he
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed or accepted rerun lapses after 15 runless minutes; lacking Actions: write, preflight diagnoses it and rerun requests hold.
+A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed rerun lapses after 15 runless minutes; an accepted one is then read from its workflow run: queued or in progress is a runner-queue wait (no new head owed), one not found is requested once more; lacking Actions: write, preflight diagnoses it and rerun requests hold.
 
 Once gated, the candidate's speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
