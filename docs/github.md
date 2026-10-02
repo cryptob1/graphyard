@@ -32,27 +32,27 @@ Require `Graphyard / merge` from the control-plane App on the base branch: `stri
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (newest configured-CI-App run; without Actions: write preflight diagnoses it and requests hold), lapsing after 15 runless minutes. Its workflow run queued or in progress is a runner wait (no new head owed); one not found is requested again.
+A failed required check reruns once on the unchanged head (newest configured-CI-App run; lacking Actions: write, preflight diagnoses and holds requests), lapsing after 15 runless minutes. A queued or in-progress run is a runner wait; one not found is re-requested.
 
-The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects the entry; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+The speculative tip, pushed onto the candidate branch and `refs/graphyard/queue/KEY`, binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects. An entry conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once its rerun passes and no other required check fails (`queue.ejection-lifted`). Withdrawal dequeues; queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` with GitHub's blocker.
 
 ### Bindings and carry
 
-Reviews and proofs bind a head, base and policy revision; on a moved base all carry if the patch-id held; else the approval carries if no reviewed file changed, as do proofs with disjoint `scopeFiles`. A republished tip of the same head and patch keeps it; a person's approval never carries.
+Reviews and proofs bind head, base and policy revision. On a moved base all carry if the patch-id held; else the approval carries if no reviewed file changed, as do proofs with disjoint `scopeFiles`. Republishing the same head and patch keeps them; a person's approval never carries.
 
-Before merging, the reviewer App re-posts the bound reviewer's latest approval of the tip's reviewed head when the carried review is missing from the PR; a newer approval of that head re-binds the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the carried approval is cleared (`mergeRefusal.action: rereview`), a fresh review is requested at once, and the entry yields the head until a fresh approval re-enters. The same refusal on consecutive cycles past 10 minutes raises an attention naming reason and next step; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), judged by an approver in the high [risk lane](how-graphyard-works.md#risk-lanes), applied as requested in low or medium. Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
+The reviewer App re-posts a carried approval missing from the PR; a newer observed approval re-binds the carry (`review.carry-refreshed`). With none, `mergerefused` clears the carried approval (`mergeRefusal.action: rereview`), requests a fresh review and yields the head until re-approved. The same refusal past 10 minutes raises an attention naming reason and next step; the loop then clears the carried approval or requests rework (`mergeRefusal.action: rework`), approver-judged in the high [risk lane](how-graphyard-works.md#risk-lanes), direct otherwise. Each action fires once per recovery phase (a re-bound carry opens one).
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass (`1` batches); a failing tip ejects its entry once those ahead pass, rebuilding later ones. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget; those ahead still merge ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass (`1` batches); a failing tip ejects its entry once those ahead pass, rebuilding later ones. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget ([development](development.md#documentation)).
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on, `false` disables): a green entry disjoint from base changes lands unqueued unless it, or its base since its run, touched a `mergeQueue.optimisticExclude` (shared-infrastructure) glob; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
+`mergeQueue.optimistic` (default on): a green entry disjoint from base changes lands unqueued unless it, or its base since its run, touched a `mergeQueue.optimisticExclude` (shared-infrastructure) glob; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
 
 ### Pre-merge gate and release-candidate validation
 
-The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): build, docs check, Node and browser suites, bounded to finish in under ten minutes. Soak and timing-budget files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance and recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them on one pinned SHA (its `sha` input or a pushed `rc-*` tag).
+Required pre-merge: `typecheck` and `test` (`.github/workflows/ci.yml`): build, docs check, Node and browser suites, under ten minutes. Soak and timing-budget files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance and recovery and the Helm chart skip pull requests: `.github/workflows/release-candidate.yml` runs them on one pinned SHA (`sha` input or pushed `rc-*` tag).
 
 ### Proofs in CI
 

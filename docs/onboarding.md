@@ -13,15 +13,15 @@ Per concurrent session: a worker identity and host ID (`install --workers`), or:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`. Masterless: [`graphyard watch`](protocol/leases.md#watch).
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Masterless: [`graphyard watch`](protocol/leases.md#watch).
 
 ### Documentation policy
 
-`init --scan --apply` writes documentation paths to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`); deploy the printed `GRAPHYARD_DOCUMENTATION` (else `documentation.drift`). Features and bugs owe *Documentation reflects this change*: a docs diff or `complete --no-docs "WHY"`. `"wordBudget":{"total":N,"perPage":N}`: at 97% `master status` raises `docs` and files a trim item; a queue overflow ejects the crossing entry.
+`init --scan --apply` writes documentation paths to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`); deploy the printed `GRAPHYARD_DOCUMENTATION` (else `documentation.drift`). Features and bugs owe *Documentation reflects this change*: a docs diff or `complete --no-docs "WHY"`. `"wordBudget":{"total":N,"perPage":N}`: at 97% `master status` raises `docs` and files a trim item; overflowing the queue ejects the crossing entry.
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md` says **every session Graphyard launches receives its instruction as the session's own first request** on its command line (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation, and any other bracketed paste is untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; any other bracketed paste is untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -29,7 +29,7 @@ Login homes (`~/.coding_agents`): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_H
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply
-CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude            # /login once
+CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude            # /login
 node "$GRAPHYARD_CLI" master environments --apply
 ```
 
@@ -37,7 +37,7 @@ Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-mo
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (needs the host's executor) seals a key or login into a 0600 auth file and smoke-tests it; admins **Retry** a failed one.
+Settings › **Agents** › **Connect an account** (needs the host's executor) seals a key or login into a smoke-tested 0600 auth file; admins **Retry** failures.
 
 ### Configure the fleet
 
@@ -64,7 +64,7 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
   --input-cost 15 --output-cost 75 --reason "Pricing"
 node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
-  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second plan"
+  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second"
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
@@ -81,7 +81,7 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-A candidate needs one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions without a restart. Adding workers? A worker count `W` and `G` proof groups need `⌈W/2⌉` review and `G×⌈W/2⌉` producer slots over ≥2 producer principals; watch `longestWaitMs`.
+Candidates need one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions without a restart. Adding workers? A worker count `W` and `G` proof groups need `⌈W/2⌉` review and `G×⌈W/2⌉` producer slots over ≥2 producer principals; watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -96,7 +96,7 @@ Use an OS user whose GitHub credentials workers can't read; `--browser-profile` 
 
 ### The loop must be supervised
 
-`master init` in the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`, never a side effect: worker checkouts and temp directories are refused. Move it: `master init --token-stdin --replace-supervisor` in the new checkout. `master status` reports `setup.supervisor`.
+`master init` in the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`, never a side effect; worker checkouts and temp directories are refused. Move it: `master init --token-stdin --replace-supervisor` in the new checkout. `master status` reports `setup.supervisor`.
 
 ## 4. Prove the first PR
 

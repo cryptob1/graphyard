@@ -15,4 +15,4 @@ The [CI producer](../deployment.md#ci-producer) (`runtime: github-actions`, gran
 
 ## Revocation
 
-`POST /api/work/:id/revoke` (`admin`, granted producer) with `proof`, `sha`, `baseSha`, `policyRevision`, `reason` withdraws the tuple's trusted records and reuses (annotated, not deleted); delivered work refuses it. Post-delivery `e2e:deploy-smoke` carries `sha` = deployed commit, `baseSha` = merge commit (`delivery.smoke`).
+`POST /api/work/:id/revoke` (`admin`, granted producer) with `proof`, `sha`, `baseSha`, `policyRevision`, `reason` annotates the tuple's trusted records and reuses as withdrawn; delivered work refuses it. Post-delivery `e2e:deploy-smoke` carries `sha` = deployed commit, `baseSha` = merge commit (`delivery.smoke`).

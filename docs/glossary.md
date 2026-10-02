@@ -3,7 +3,7 @@
 
 ### 1. Human operator (human authority)
 
-The `admin` holder declaring `sessionKind: "human"`; alone decides goals, priorities, spending, accounts and people's credentials.
+The `admin` holder (`sessionKind: "human"`); alone decides goals, priorities, spending, accounts and people's credentials.
 
 **Canonical usage:** *human operator*; bare *operator* means them.
 
@@ -17,7 +17,7 @@ A model acting through a runtime with its credential's authority only.
 
 One agent instance running in a runtime.
 
-**Canonical usage:** *session*; *runtime*: the hosting software.
+**Canonical usage:** *session*; *runtime* hosts it.
 
 ### 4. Principal, role, and credential
 
@@ -27,7 +27,7 @@ One agent instance running in a runtime.
 
 ### 5. Worker lease and worktree
 
-*Lease*: a worker's timed hold on one item at one *epoch*; *assigned worktree*: its registered `(host, path)` checkout and branch.
+*Lease*: a worker's timed hold on one item at one *epoch*; *assigned worktree*: its registered `(host, path)` checkout.
 
 **Canonical usage:** *lease*, *epoch*, *assigned worktree*.
 
@@ -63,8 +63,8 @@ Launches sessions, reports liveness.
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) itself. Two-party decisions (`master decide GY-N ACTION REASON`, applied by another approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. The approver is never the requester, an assignee, the evidence producer or grantee. Reviewers, producers and the merge gate decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) the item.
+The master applies non-weakening intent (create, release, unblock, add requirements). Two-party decisions (`master decide GY-N ACTION REASON`, applied by another approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. The approver is never the requester, assignee, producer or grantee. Reviewers, producers and the merge gate decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) the item.
 
 ## Diagram legend
 
-Amber rounded: human operator; green rounded: agent session (one role, one credential); blue square: Graphyard control plane; violet: Herdr runtime; grey square: GitHub and external facts; dashed chip: credential, lease epoch or worktree; solid arrow: authenticated command; dashed arrow: observation, never authority.
+Amber: human operator; green: agent session (one role, one credential); blue: control plane; violet: Herdr; grey: GitHub and external facts; dashed chip: credential, epoch or worktree; solid arrow: authenticated command; dashed arrow: observation, never authority.

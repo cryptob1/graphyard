@@ -16,7 +16,7 @@ A card stops at its first refusing gate, naming what is missing.
 
 ## Risk lanes
 
-`src/model/policy.ts` puts each item in a **risk lane** by changed paths (renames by both endpoints), setting what landing requires; `master status` shows its p50 target.
+`src/model/policy.ts` puts each item in a **risk lane** by changed paths (renames by both endpoints); `master status` shows its p50 target.
 
 - **High** (4 h): schema, persistence, auth, credentials, principals, public API, operator agent, proof grants, install, deploy, unobserved changes. Adds `manual:` attestations and a two-party decision per rework.
 - **Medium** (60 min): the rest; adds producer-run `unit:`/`integration:` proofs.
@@ -28,11 +28,11 @@ Every lane requires `e2e:` proofs and inherited bootstrap obligations; low and m
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the operator supervises one worker while gates activate; then the master dispatches many, each credentialed, in its own worktree.
+Text equivalent: in bootstrap the operator supervises one worker while gates activate; then the master dispatches many, each in its own worktree.
 
 ![Authority held by the operator, Graphyard, Herdr sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the operator sends human-only decisions; Herdr hosts master, slice lead and worker; reviewer and producer hold own credentials; merges are guarded. Colours follow the [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions; Herdr hosts master, slice lead and worker; reviewer and producer hold their own credentials. Colours: [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
@@ -43,5 +43,5 @@ Text equivalent: callers use the API; the engine applies each mutation in one lo
 - Gates deterministically check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change voids evidence.
 - Each claim bumps the epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; the latest trusted record per proof and candidate wins, even a failure.
-- History is append-only (routine rows compacted after retention); a retry within a day replays.
+- History is append-only (routine rows compacted after retention); a same-day retry replays.
 - Graphyard merges only the exact authorized candidate, once; any other merge is a permanent violation. Merge is not [delivery](delivery.md).

@@ -21,6 +21,8 @@ npm ci && npm run build && npm test
 
 `npm test` hides `GRAPHYARD_*`/`HERDR_*`, reserving free Postgres ports. Worktree installs need [bubblewrap](install.md#preconditions).
 
+Attestor tests expect an ownership refusal where a sandbox stats `/tmp` and `/home` as uid 65534 (`tests/helpers/unprivileged-stat.mjs`).
+
 ## CI
 
 `test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips every pre-merge file (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).

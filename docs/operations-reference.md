@@ -23,11 +23,11 @@ Stop the worker, then [`rework`](operations.md#recovery-recipes). `scripts/rewor
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, recurring refusal and rework causes become drafts (`retro.drafted`), never self-applied or filed. Once [approved](protocol/work-commands.md), requirements join [`retroStanding`](protocol/read-endpoints.md), checks refuse a failing `complete` (`409`), catalogue entries classify recurrences; one recurring after application is redrafted (`recurredAfter`).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, recurring refusal and rework causes become drafts (`retro.drafted`), never self-applied or filed. [Approved](protocol/work-commands.md) requirements join [`retroStanding`](protocol/read-endpoints.md), checks refuse a failing `complete` (`409`), catalogue entries classify recurrences; one recurring after application is redrafted (`recurredAfter`).
 
 ## Flaky CI check
 
-A failing required check [reruns once](github.md#merge-queue) per sha, keeping position, approval and proofs with no rework however long it waits for a runner (`check.rerun.waiting`, *waiting for a runner*); one GitHub accepted but never created is requested again (`check.rerun.rerequested`); a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
+A failing required check [reruns once](github.md#merge-queue) per sha, keeping position, approval and proofs (`check.rerun.waiting`, `check.rerun.rerequested`); a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
 
 ## Accepted evidence turns out to be wrong
 
@@ -60,7 +60,7 @@ About ten requests; unchanged, none. Immutable, per-cycle and webhook-driven rea
 
 ### What a pause means for gates
 
-A `403`/`429` pauses requests; gates read stale until it lifts, and nothing merges on an observation over two minutes old.
+A `403`/`429` pauses requests; gates read stale until it lifts; nothing merges on an observation over two minutes old.
 
 ### Reading the budget
 
@@ -72,15 +72,15 @@ After an hour without deliveries, check `https://github.com/settings/apps/APP-SL
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default: volume size, else advisory 10 GiB).
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default: volume size, else advisory 10 GiB); `tmp-inodes`, free `/tmp` inodes (filesystem-wide; warns under 25%); the loop clears 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`.
 
 ## Storage retention
 
-Receipts answer retries for a day. Routine ledger rows (`github.observed`, `heartbeat`, `action.*` and the like) store only the change; compaction (`ledger.compacted`) deletes those past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) unless delivery or flow needs them. Only `VACUUM FULL` frees disk.
+Receipts answer retries for a day. Routine ledger rows (`github.observed`, `heartbeat`, `action.*`) store only the change; `ledger.compacted` deletes those past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) unless delivery or flow needs them. Only `VACUUM FULL` frees disk.
 
 ## Bootstrap mode for a self-proving change
 
-A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to the criterion. Other gates apply; `e2e:` proofs cannot be deferred; the next item touching those paths owes it (`graphyard obligations`).
+A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to the criterion. Other gates apply; `e2e:` proofs never defer; the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -113,7 +113,9 @@ Only an `admin` grants or revokes, to `producer` principals: exact name, `kind:*
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, at most half the pool) pace each token's above-reserve budget to the reset, head first; when tight, idle items await webhooks. `observationThroughput`: pace, head lag (`github` past two minutes). `leaseHealth`: lease pool (heartbeat, claim, `complete`, `blocked`) heartbeat p50/p95, raised past 5 s.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, at most half the pool) pace each token's above-reserve budget to the reset, head first; when tight, idle items await webhooks. `observationThroughput`: pace, head lag (`github` past two minutes). `leaseHealth`: lease pool (heartbeat, claim, `complete`, `blocked`) p50/p95, raised past 5 s.
+
+Reconcile reads each live item once per pass, locking only its batch rows; contended batches back off, then defer a tick; deferrals and ticks over 5 s warn.
 
 ### Concurrent reconciliation
 

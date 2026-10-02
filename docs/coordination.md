@@ -29,6 +29,10 @@ The landing check three-way merges the head onto its landing commit: out-of-scop
 
 Before any push, `graphyard sync GY-N` merges `origin/BASE` (never rebases), regenerates and commits. `graphyard sync GY-N --restore` also restores every out-of-scope file to the base tip in one new commit naming them, so a plain push updates the PR; it never rewrites history and never needs a force push.
 
+### Submit when your own criteria pass
+
+The full suite is CI's gate, not the worker's (GY-853): a worker builds, runs `graphyard verify GY-N` (its own criteria's proofs only) and submits when they pass, naming in the PR, not as a blocker, any sandbox-only full-suite failure outside `plannedFiles`. A proof whose own cases all passed in a run that still ended abnormally is `leftToCi`: `verify` exits 0 and `complete` reports `passing`, naming it. A failed, skipped or unexecuted case always blocks.
+
 ### Generated files never conflict
 
 `sync` regenerates `docs/README.md`, `docs/protocol.md` ([development](development.md)) and the managed `AGENTS.md` blocks. The regression guard treats paths in `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` as `generated`, refusing only a deletion.
