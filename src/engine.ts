@@ -14,7 +14,7 @@ import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { branchContamination, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
-import { queueEjectionRecord } from './model/queue.js';
+import { liftedEjection, queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { retroCheckRefusals } from './model/retro-synthesis.js';
@@ -582,6 +582,8 @@ export class Engine {
   }
   /** A queue entry the evaluation just derived out is recorded as an ejection, and the entries behind it are woken. */
   private async recordEjection(db: PoolClient, work: Work, all: Work[], queuedBefore: number | null, now: Date, extra: Record<string, unknown> = {}) {
+    const lifted = liftedEjection(work, queuedBefore, now);
+    if (lifted) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejection-lifted', JSON.stringify({ details: { ...lifted, at: now.toISOString() } })]);
     if (queuedBefore === null || work.queue || work.queueEjection?.sequence !== queuedBefore) return;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
       JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, conflict: work.queueEjection.conflict ?? null, ...extra, at: now.toISOString() } })]);
@@ -2197,6 +2199,9 @@ export class Engine {
     // behind it are woken to predict against the real base.
     const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
     if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason, conflict: work.queueEjection!.conflict ?? null } });
+    // A CI ejection a passing rerun on the same tip lifted (GY-1095) is recorded naming the check and run.
+    const lifted = liftedEjection(work, queuedBefore, now);
+    if (lifted) ledger.push({ kind: 'queue.ejection-lifted', details: { ...lifted } });
     // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
     const dissolved = work.queue?.batchDissolved ?? null;
     if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) ledger.push({ kind: 'queue.batch-dissolved', details: { ...dissolved } });
