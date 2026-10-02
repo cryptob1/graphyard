@@ -24,12 +24,13 @@ export function restoreOutOfScope(git: Git, baseTip: string, refused: readonly s
  * rewritten. The scope is classified again after the commit, and the report says whether any file
  * still differs; one that does fails the command.
  */
-export function restoreAndReport(git: Git, print: (value: unknown) => void, sync: {
+export async function restoreAndReport(git: Git, print: (value: unknown) => void, sync: {
   work: { key: string; plannedFiles?: string[] }; baseBranch: string; baseTip: string; regenerated: string[]; generated: string[]; refused: readonly string[];
-}): void {
+  read?: (sha: string) => Promise<string | null>;
+}): Promise<void> {
   const { work, baseBranch, baseTip, regenerated, generated } = sync;
   const restored = restoreOutOfScope(git, baseTip, sync.refused);
-  const after = localScopeFindings(work.plannedFiles ?? [], git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'), generated);
+  const after = await localScopeFindings(work.plannedFiles ?? [], git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'), generated, sync.read);
   const still = after.filter(finding => finding.refused);
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated, plannedFiles: work.plannedFiles, ok: !still.length,
     restored, files: after, refused: still.map(finding => `${finding.path}: ${finding.detail}`),
