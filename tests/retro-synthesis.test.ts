@@ -7,8 +7,8 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { Intervention, InterventionPolicy } from '../src/model/interventions.js';
-import { cataloguedCause, classifyGateRefusals, detectRecurringCauses, draftPrevention, retroCause, retroCheckRefusals, retroStanding, type RetroArtefact } from '../src/model/retro-synthesis.js';
-import { judgeRetroArtefact, readRetroArtefacts, synthesizeRetro } from '../src/retro-synthesis.js';
+import { cataloguedCause, classifyGateRefusals, detectRecurringCauses, draftPrevention, retroApprovalConflict, retroCause, retroCheckRefusals, retroStanding, runRetroCheck, type RetroArtefact } from '../src/model/retro-synthesis.js';
+import { judgeRetroArtefact, readAppliedRetroChecks, readRetroArtefacts, retroLedgerLimit, synthesizeRetro } from '../src/retro-synthesis.js';
 import { withRetroStanding } from '../src/cli/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -104,6 +104,43 @@ test('unit:retro-synthesis-drafts-prevention — a cause past the threshold draf
   assert.match(standard.proposal, /the new route skips the operator-agent guard/);
 });
 
+test('unit:retro-artefact-governed-application — retro checks judge the item\'s own candidate with the scope and documentation matchers the gates use, and only agent sessions judge drafts', async () => {
+  const work = { plannedFiles: ['src/area/**', 'src/one.ts'], documentation: { paths: ['packages/*/README.md'] }, policy: { checks: ['test', 'typecheck'] } };
+  const file = (path: string, fields: Record<string, unknown> = {}) => ({ path, status: 'modified' as const, sha: 'c'.repeat(40), baseSha: 'd'.repeat(40), additions: 1, deletions: 1, binary: false, ...fields });
+  const observed = (scopeFiles: ReturnType<typeof file>[], extra: Partial<Observation> = {}) => ({ files: scopeFiles.map(entry => entry.path), checks: [], conflicting: false, scopeFiles, ...extra });
+  // A planned directory scope, a documentation glob and a new file sync accepts all pass; a rewrite outside them is named.
+  assert.equal(runRetroCheck('planned-files', work, observed([file('src/area/deep/a.ts'), file('src/one.ts'), file('packages/web/README.md'), file('src/new.ts', { status: 'added', baseSha: null })])), null);
+  assert.match(String(runRetroCheck('planned-files', work, observed([file('src/area/a.ts'), file('src/other.ts')]))), /1 file\(s\) outside plannedFiles: src\/other\.ts$/);
+  // Without scopeFiles, the changed paths are judged with the same matchers.
+  assert.equal(runRetroCheck('planned-files', work, { files: ['src/area/x/y.ts', 'packages/api/README.md'], checks: [], conflicting: false }), null);
+  assert.match(String(runRetroCheck('planned-files', work, { files: ['packages/api/src/index.ts'], checks: [], conflicting: false })), /packages\/api\/src\/index\.ts/);
+  // Only a check the item's policy requires that failed on its head refuses; one still running or not required does not.
+  assert.equal(runRetroCheck('checks-passed', work, observed([], { checks: [{ name: 'lint', result: 'failure', appId: 1 }, { name: 'test', result: 'pending', appId: 1 }] })), null);
+  assert.match(String(runRetroCheck('checks-passed', work, observed([], { checks: [{ name: 'typecheck', result: 'failure', appId: 1 }] }))), /failed required checks on its head: typecheck/);
+  // An item requiring no checks — an empty list or none at all — is never refused by a failed check it does not require.
+  const failedLint = observed([], { checks: [{ name: 'lint', result: 'failure', appId: 1 }] });
+  assert.equal(runRetroCheck('checks-passed', { ...work, policy: { checks: [] } }, failedLint), null);
+  assert.equal(runRetroCheck('checks-passed', { ...work, policy: null }, failedLint), null);
+  assert.equal(runRetroCheck('checks-passed', { plannedFiles: work.plannedFiles }, failedLint), null);
+
+  // A principal declaring no session kind fails closed; an operator agent is an agent identity.
+  const draft = { id: 'draft-1', draftedBy: 'drafter' };
+  assert.match(String(retroApprovalConflict(draft, { id: 'legacy', role: 'admin' })), /declares no AI session/);
+  assert.match(String(retroApprovalConflict(draft, { id: 'person', role: 'admin', sessionKind: 'human' })), /human session/);
+  assert.equal(retroApprovalConflict(draft, { id: 'agent', role: 'admin', sessionKind: 'ai' }), null);
+  assert.equal(retroApprovalConflict(draft, { id: 'operator-agent', role: 'operator-agent' }), null);
+
+  // A declared cause outside the specialised branches still drafts its prevention once catalogued, so its recurrence is recorded.
+  const ready = detectRecurringCauses([1, 2, 3].map(n => signal(`d${n}`, { kind: 'escalation', resolution: `Dependency GY-${n} is unfinished` })), [], policy, now)[0];
+  assert.equal(ready.cause, 'ready/dependency');
+  assert.deepEqual(draftPrevention(ready).map(entry => [entry.kind, entry.target]), [['standards-update', 'criteria-wording'], ['fault-catalogue-entry', 'fault-catalogue']]);
+  const catalogued = { ...ready, catalogued: { cause: ready.cause, entry: 'retro-ready-dependency', artefact: 'a', faultClass: 'decision' as const, meaning: 'm' } };
+  assert.deepEqual(draftPrevention(catalogued).map(entry => entry.kind), ['standards-update']);
+
+  // Only a server without the route reads as no registries: a message that merely mentions 404 is an error.
+  await assert.rejects(withRetroStanding({ key: 'GY-1' }, async () => { throw Object.assign(new Error('{"error":"GY-404 is locked"}'), { status: 500 }); }), /GY-404 is locked/);
+});
+
 test('unit:retro-synthesis-drafts-prevention — synthesis records its drafts in the ledger for independent approval, applies nothing and files no work item', async () => {
   for (const n of [1, 2, 3]) await reworked(outOfScope(n));
   const before = await workCount();
@@ -189,7 +226,9 @@ test('unit:retro-artefact-governed-application — an applied check runs on ever
   const ruled = (rule: 'merges-onto-base' | 'checks-passed') => [{ ...check, check: { ...check.check!, rule } }];
   assert.equal(retroCheckRefusals({ plannedFiles: [] }, observe([], { conflicting: true }), ruled('merges-onto-base')).length, 1);
   assert.equal(retroCheckRefusals({ plannedFiles: [] }, observe([]), ruled('merges-onto-base')).length, 0);
-  assert.equal(retroCheckRefusals({ plannedFiles: [] }, observe([], { checks: [{ name: 'test', result: 'failure', appId: 1 }] }), ruled('checks-passed')).length, 1);
+  assert.equal(retroCheckRefusals({ plannedFiles: [], policy: { checks: ['test'] } }, observe([], { checks: [{ name: 'test', result: 'failure', appId: 1 }] }), ruled('checks-passed')).length, 1);
+  // The submit transaction reads only the checks in force, never the whole retro ledger.
+  assert.deepEqual((await readAppliedRetroChecks(store.pool)).map(artefact => artefact.id), artefacts.filter(artefact => artefact.state === 'applied' && artefact.kind === 'mechanical-check').map(artefact => artefact.id));
   assert.equal(retroCheckRefusals({ plannedFiles: ['docs/'] }, observe(['docs/a.md']), [check]).length, 0);
 
   // Catalogue update: the intervention report files every instance of the catalogued cause under its entry and fault class.
@@ -234,4 +273,40 @@ test('unit:retro-artefact-governed-application — a closed pattern is never del
   assert.match(again[0].proposal, /recurred after .* was applied, so the earlier prevention did not hold/);
   const approved = await judgeRetroArtefact(store, approver, repository, again[0].id, 'approve', 'Tighten the wording');
   assert.equal(approved.application?.revision, 2);
+});
+
+test('unit:retro-artefact-governed-application — judgement revalidates an operator agent under its own lock, concurrent approvals apply at distinct revisions, and unjudged drafts survive a burst of judged ones', async () => {
+  // Two review causes, each drafting a requirements update for the same registry.
+  for (const n of [1, 2, 3]) await reworked(`Reviewer on GY-${n}: the handler leaks the connection on timeout`);
+  for (const n of [1, 2, 3]) await reworked(`Reviewer on GY-${n}: the migration lacks a down step`);
+  const drafted = (await synthesizeRetro(store, policy)).drafted;
+  const updates = drafted.filter(artefact => artefact.registry === 'requirements');
+  assert.equal(updates.length, 2);
+
+  // An operator agent is read again inside the transaction: revoked, or stripped of decision:approve, it judges nothing.
+  const agent: Principal = { id: 'retro-operator-agent', role: 'operator-agent', capabilities: ['decision:approve'], scope: { repositories: [repository], workItems: [] } } as Principal;
+  const revoked = async () => { throw Object.assign(new Error('Operator-agent credential is revoked or expired'), { status: 401 }); };
+  await assert.rejects(judgeRetroArtefact(store, agent, repository, updates[0].id, 'approve', 'fine', revoked), /revoked or expired/);
+  await assert.rejects(judgeRetroArtefact(store, agent, repository, updates[0].id, 'approve', 'fine', async () => ({ ...agent, capabilities: [] } as Principal)), /Capability decision:approve is required/);
+  await assert.rejects(judgeRetroArtefact(store, agent, repository, updates[0].id, 'approve', 'fine'), /authorization is unavailable/);
+  assert.equal((await readRetroArtefacts(store.pool)).find(artefact => artefact.id === updates[0].id)?.state, 'drafted');
+
+  // Concurrent approvals in one registry are serialised by the coordination lock: each takes its own revision.
+  const before = retroStanding(await readRetroArtefacts(store.pool)).find(registry => registry.registry === 'requirements')!.revision;
+  const approved = await Promise.all(updates.map(update => judgeRetroArtefact(store, approver, repository, update.id, 'approve', 'closes it', async () => agent)));
+  assert.deepEqual(approved.map(entry => entry.application!.revision).sort(), [before + 1, before + 2]);
+
+  // A burst of judged drafts newer than an unjudged one never pushes it out of the reading.
+  const waiting = randomUUID();
+  const pattern = { ...updates[0].pattern, cause: 'reason/waiting-for-judgement' };
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [coordinator.id, 'retro.drafted', JSON.stringify({ id: waiting, at: now, draft: { kind: 'standards-update', registry: 'requirements', target: 'coding-standards', title: 'Waiting', proposal: 'Waiting' }, pattern })]);
+  const burst = Array.from({ length: retroLedgerLimit + 1 }, () => randomUUID());
+  await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL, $2, 'retro.drafted', jsonb_build_object('id', id, 'at', $3::text, 'draft', $4::jsonb, 'pattern', $5::jsonb) FROM unnest($1::text[]) AS id`,
+    [burst, coordinator.id, now, JSON.stringify({ kind: 'standards-update', registry: 'requirements', target: 'coding-standards', title: 'Burst', proposal: 'Burst' }), JSON.stringify(pattern)]);
+  await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT NULL, $2, 'retro.refused', jsonb_build_object('id', id, 'refusal', jsonb_build_object('by', $2::text, 'at', $3::text, 'reason', 'burst')) FROM unnest($1::text[]) AS id`, [burst, approver.id, now]);
+  // A judgement row without an id never turns the unjudged predicate NULL for every draft.
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [approver.id, 'retro.refused', JSON.stringify({ refusal: { by: approver.id, at: now, reason: 'no id' } })]);
+  const read = await readRetroArtefacts(store.pool);
+  assert.equal(read.find(artefact => artefact.id === waiting)?.state, 'drafted');
+  assert.equal(read.filter(artefact => artefact.refusal?.reason === 'burst').length, retroLedgerLimit + 1);
 });
