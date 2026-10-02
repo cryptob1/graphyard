@@ -481,6 +481,27 @@ test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is pro
   }
 });
 
+test('unit:keyring-probe-off-launch-path — a launch never waits on the keyring endpoint probe: the runtime start is observed while the probe runs, and its line is logged when it answers (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-endpoint-path');
+  try {
+    let answer!: (line: string | null) => void;
+    const probing: string[] = [];
+    const logged: string[] = [];
+    const keyringWarning = (name: string) => { probing.push(name); return new Promise<string | null>(done => { answer = done; }); };
+    const run = (_command: string, args: string[]) => startedAtOnce(args) ?? '';
+    // A hung user manager: the probe never answers before the launch returns.
+    const launched = await startAgentSession('gy-approver', 'pi', 'pane-1', [], 'Judge the candidate', run, { directory: base, confinement: false, keyringWarning, log: line => logged.push(line) });
+    assert.equal(launched.started.state, 'started', 'the runtime start is observed while the probe is still asking');
+    assert.deepEqual(probing, ['gy-approver'], 'the probe was started for the launch');
+    assert.ok(!logged.some(line => line.includes('keyring endpoint')), 'nothing about the endpoint is logged before the probe answers');
+    answer('graphyard: gy-approver: The keyring endpoint /run/user/1/graphyard-secrets-bus is a socket graphyard-secrets-bus.socket does not hold');
+    await new Promise(done => setImmediate(done));
+    assert.ok(logged.some(line => line.startsWith('graphyard: gy-approver: The keyring endpoint')), 'the probe\'s line is logged once it answers');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
   const base = await temporaryDirectory('confinement-session');
   try {

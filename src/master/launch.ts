@@ -401,6 +401,8 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   coordinatorRoot?: string;
   /** The session carries a GitHub credential of its own (a reviewer's) or must never read the operator's (every worker, minted credential or not), so the confinement gives it no route to the operator's keyring (GY-1039). */
   ownGitHubCredential?: boolean;
+  /** Judges the keyring endpoint the confinement binds (keyringEndpointWarning unless a caller supplies its own). */
+  keyringWarning?: (name: string, confinement: CoordinatorConfinement | null) => Promise<string | null>;
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
@@ -427,8 +429,9 @@ export async function startAgentSession(name: string, kind: string, pane: string
   await herdrRun(['pane', 'run', pane, command], run);
   options.onRun?.();
   const log = options.log ?? (line => process.stderr.write(`${line}\n`));
-  const keyring = await keyringEndpointWarning(name, confinement);
-  if (keyring) log(keyring);
+  // The keyring probe asks the user manager (up to 10 s) while the runtime starts, never in front
+  // of it (GY-1039): its line is logged whenever it answers, and no launch waits on it.
+  void (options.keyringWarning ?? keyringEndpointWarning)(name, confinement).then(line => { if (line) log(line); }, () => undefined);
   let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
   try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
   catch (error) {
