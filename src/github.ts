@@ -984,11 +984,20 @@ export class GitHub {
    */
   async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
-    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+    const mint = (permissions: Record<string, string>) => fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
       method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions: workerPushPermissions }),
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
     });
+    let response = await mint(workerPushPermissions);
     this.record('/app/installations/access_tokens', response, false);
+    // An installation that has not accepted `workflows` refuses the whole request (422); the worker
+    // still gets the push credential it had before, and only a base sync carrying a workflow change
+    // is refused, never every launch (2026-10-02).
+    if (response.status === 422 && 'workflows' in workerPushPermissions) {
+      const { workflows: _omitted, ...withoutWorkflows } = workerPushPermissions as Record<string, string>;
+      response = await mint(withoutWorkflows);
+      this.record('/app/installations/access_tokens', response, false);
+    }
     const refused = await this.refusal(response, 'worker push credential');
     if (refused) throw refused;
     const result: any = await response.json();

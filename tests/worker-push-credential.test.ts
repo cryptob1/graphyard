@@ -356,3 +356,22 @@ test('unit:credential-block-releases-slot — an attempt blocked only by a GitHu
     await cleanup();
   }
 });
+
+test('unit:push-mint-falls-back-without-workflows — an installation that has not accepted workflows still mints the contents and pull_requests credential instead of refusing every launch', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+    const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 5678, privateKey });
+    const asked: Record<string, string>[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith('/access_tokens')) return realFetch(url, init);
+      const { permissions } = JSON.parse(String(init!.body));
+      asked.push(permissions);
+      if (permissions.workflows) return new Response(JSON.stringify({ message: 'The permissions requested are not granted to this installation.' }), { status: 422 });
+      return new Response(JSON.stringify({ token: token('fallback'), expires_at: new Date(Date.now() + 3_600_000).toISOString(), permissions }), { status: 201 });
+    }) as typeof fetch;
+    const minted = await github.mintPushToken();
+    assert.deepEqual(asked, [workerPushPermissions, { contents: 'write', pull_requests: 'write' }], 'workflows is asked first, then the credential without it');
+    assert.deepEqual(minted.permissions, { contents: 'write', pull_requests: 'write' });
+  } finally { globalThis.fetch = realFetch; }
+});
