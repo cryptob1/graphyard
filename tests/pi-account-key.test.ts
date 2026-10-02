@@ -197,8 +197,14 @@ test('unit:pi-account-key-by-reference — a registry write that carries a key-l
   refuses({ ...account({ key: zaiKey }), reason: 'rotated to Zq8vK2mN4pR7tX1wB5yC9dF3gH6jL0sA' }, /input\.reason looks like a credential/);
   refuses({ ...account({ key: zaiKey }), reason: 'see https://example.invalid/?token=Zq8vK2mN4pR7tX1wB5yC9dF3gH6jL0sA&x=1' }, /input\.reason looks like a credential/);
   refuses({ ...account({ key: zaiKey }), reason: 'https://example.invalid/keys/Zq8vK2mN4pR7tX1wB5yC9dF3gH6jL0sA#v2' }, /input\.reason looks like a credential/);
-  for (const plain of ['1d8fe666b4dade5e263cddb19c70e7e95b772a68', '7f9551b6-3f4f-48d2-a30d-74aa1e423752', 'claude-haiku-4-5-20251001', '/home/vish/.graphyard/agents/pi-a', 'coordinator-token-'.padEnd(40, 'x'), 'ClaudeQuaternaryReviewerAccountNumber2', 'ZAI_API_KEY', 'https://github.com/cryptob1/graphyard/pull/385#discussion_r4113452046'])
+  // A random key split by key-alphabet punctuation still mixes letters and digits in long parts.
+  refuses({ ...account({ key: zaiKey }), reason: 'rotated to Zq8vK2mN4pR7-tX1wB5yC9dF3gH6jL0sA_k9' }, /input\.reason looks like a credential/);
+  for (const plain of ['1d8fe666b4dade5e263cddb19c70e7e95b772a68', '7f9551b6-3f4f-48d2-a30d-74aa1e423752', 'claude-haiku-4-5-20251001', '/home/vish/.graphyard/agents/pi-a', 'coordinator-token-'.padEnd(40, 'x'), 'ClaudeQuaternaryReviewerAccountNumber2', 'ZAI_API_KEY', 'https://github.com/cryptob1/graphyard/pull/385#discussion_r4113452046',
+    // Provider model ids are words, numbers and short version parts, never keys (GY-463).
+    'anthropic.claude-3-5-sonnet-20241022-v2:0', 'us.anthropic.claude-3-7-sonnet-20250219-v1:0', 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Free', 'Qwen/Qwen2.5-Coder-32B-Instruct-AWQ', 'mistralai/Mixtral-8x22B-Instruct-v0.1'])
     assert.equal(looksLikeSecret(plain), false, plain);
+  // A model id is stored as written: the registry refuses no legitimate provider id.
+  registry = applyRegistryMutation(registry, 'model.set', { model: { name: 'sonnet-bedrock', id: 'anthropic.claude-3-5-sonnet-20241022-v2:0' }, reason: 'Bedrock model' }, { actor: 'operator', at: new Date().toISOString() }).registry;
   // A reference outside the login home, or on a variable the launcher owns, is not a reference.
   refuses(account({ key: { file: '/etc/zai.key', variable: 'ZAI_API_KEY' } }), /inside the account home/);
   refuses(account({ key: { file: '../zai.key', variable: 'ZAI_API_KEY' } }), /inside the account home/);

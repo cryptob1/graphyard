@@ -15,9 +15,14 @@ const zaiKey = /(^|[^A-Za-z0-9])[0-9a-f]{32}\.[A-Za-z0-9]{16}($|[^A-Za-z0-9])/;
  * A prefixless key of another provider: one token of at least 32 key characters mixing letters and
  * digits, random enough that it is no word, identifier or hash. Hex digests and UUIDs stay below the
  * bar (at most 17 distinct characters), and so do names made of words, which repeat their letters.
+ * A provider model id can pass that bar, so a token built only of words, numbers and short version
+ * parts — `anthropic.claude-3-5-sonnet-20241022-v2`, `Llama-3.3-70B-Instruct-Turbo-Free` — is no key
+ * (GY-463): a random key's parts mix letters and digits over far more than six characters.
  */
+const modelIdPart = (part: string) => /^[A-Za-z]*$/.test(part) || /^[0-9]*$/.test(part) || part.length <= 6;
 const randomToken = (token: string) => {
   if (token.length < 32 || !/^[A-Za-z0-9_\-+=.]+$/.test(token) || !/[0-9]/.test(token) || !/[A-Za-z]/.test(token)) return false;
+  if (token.split(/[-_.+=]/).every(modelIdPart)) return false;
   const counts = new Map<string, number>();
   for (const character of token) counts.set(character, (counts.get(character) ?? 0) + 1);
   const entropy = [...counts.values()].reduce((sum, count) => sum - (count / token.length) * Math.log2(count / token.length), 0);
