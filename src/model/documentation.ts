@@ -43,7 +43,6 @@ export const documentationPolicySchema = z.object({
   }).strict().optional(),
 }).strict();
 export type DocumentationPolicy = z.infer<typeof documentationPolicySchema>;
-/** `delivery` is the merge-gate and release-candidate policy `graphyard init` writes (GY-1102, model/delivery-policy.ts). */
 export const repositoryConfigSchema = z.object({ documentation: documentationPolicySchema, delivery: deliveryPolicySchema.optional() }).strict();
 export type RepositoryConfig = z.infer<typeof repositoryConfigSchema>;
 

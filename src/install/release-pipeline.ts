@@ -1,4 +1,6 @@
-import { packageVersion } from '../release.js';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { buildIdentity, cliCommit } from '../protocol-version.js';
 import { candidateWorkflowFile, promotionWorkflowFile, type DeliveryPolicy, type GateCheck } from '../model/delivery-policy.js';
 
 // ---------------------------------------------------------------------------
@@ -16,11 +18,25 @@ export const candidateWorkflowName = 'Graphyard release candidate';
 export const promotionWorkflowName = 'Graphyard promotion';
 
 /**
- * The Graphyard CLI the generated workflows run, pinned to the version that rendered them: a
+ * The Graphyard commit the generated workflows run the CLI from: the build's own commit when the
+ * deployment stamps one, else the newest commit of this checkout that origin/main already holds, so
+ * the pin names a ref GitHub can serve (package.json's version has no published tag or package).
+ */
+export function publishedCliCommit(env: Record<string, string | undefined> = process.env, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): string {
+  const root = fileURLToPath(new URL('../..', import.meta.url));
+  let published: string | null = null;
+  try { published = run('git', ['-C', root, 'merge-base', 'HEAD', 'origin/main']).trim(); } catch { /* no origin/main: fall back to HEAD */ }
+  const commit = buildIdentity(env).commit ?? (published && /^[0-9a-f]{40}$/i.test(published) ? published.toLowerCase() : cliCommit(root, run));
+  if (!commit) throw new Error('Cannot pin the Graphyard CLI the generated workflows run: this install is not a Git checkout and GRAPHYARD_BUILD_SHA is unset. Set GRAPHYARD_BUILD_SHA to the Graphyard commit this install was built from, then rerun graphyard init --scan --apply');
+  return commit;
+}
+
+/**
+ * The Graphyard CLI the generated workflows run, pinned to the exact commit that rendered them: a
  * floating CLI could change promotion semantics under a pinned candidate. A re-apply after an
  * upgrade re-renders the pin, so an upgrade is a reviewed diff to the workflow.
  */
-export const pinnedCli = (version = packageVersion) => `npx -y github:cryptob1/graphyard#v${version}`;
+export const pinnedCli = (commit = publishedCliCommit()) => `npx -y github:cryptob1/graphyard#${commit}`;
 
 export interface PipelineOptions {
   /** The branch candidates are cut from. */

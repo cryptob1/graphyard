@@ -151,7 +151,7 @@ export function wiringActions(ctx: DeploymentContext, observed: Awaited<ReturnTy
       command: `gh api --method POST repos/${ctx.repository}/git/refs -f ref=refs/heads/${releaseBranchNames.uat} -f sha=<${ctx.baseBranch} tip>` },
     { id: 'release.github-environments', target: 'github', state: environmentsThere ? 'satisfied' : 'create',
       title: 'Create the uat and production GitHub environments the generated workflows deploy through (UAT_URL and PRODUCTION_URL are stored on them)',
-      command: `gh api --method PUT repos/${ctx.repository}/environments/uat` },
+      command: `gh api --method PUT repos/${ctx.repository}/environments/uat (and environments/production)` },
   ];
 }
 

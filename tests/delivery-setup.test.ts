@@ -7,10 +7,10 @@ import { classifyChecks, describeMergeGate, detectStack } from '../src/onboardin
 import { applyDelivery, applyProposal, repositoryScanDifference, saveProposal, scanProposal } from '../src/repository-setup.js';
 import { candidateWorkflowFile, deliveryPolicySchema, promotionWorkflowFile, requiredPullRequestChecks, type DeliveryPolicy } from '../src/model/delivery-policy.js';
 import { parseRepositoryConfig } from '../src/model/documentation.js';
-import { candidateWorkflowName, pinnedCli, renderCandidateWorkflow, renderPromotionWorkflow, suiteJobId } from '../src/install/release-pipeline.js';
+import { candidateWorkflowName, pinnedCli, publishedCliCommit, renderCandidateWorkflow, renderPromotionWorkflow, suiteJobId } from '../src/install/release-pipeline.js';
 import { assessPromotion, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
-import { packageVersion } from '../src/release.js';
+import { fileURLToPath } from 'node:url';
 import { harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -151,7 +151,15 @@ const triggersOf = (text: string) => text.slice(text.indexOf('\non:\n'), text.in
 
 test('unit:setup-generates-candidate-and-promotion-workflows — the generated workflows cut a pinned SHA, deploy it to UAT through the configured adapter, and promote only a UAT-passed candidate by its exact SHA', async () => {
   const cli = pinnedCli();
-  assert.equal(cli, `npx -y github:cryptob1/graphyard#v${packageVersion}`, 'the workflows run the CLI version that rendered them, never a floating one');
+  // The pin is the exact Graphyard commit that rendered the workflows, and one that exists: a
+  // version tag the repository never published would fail the very first step in every managed repo.
+  const pinned = cli.match(/^npx -y github:cryptob1\/graphyard#([0-9a-f]{40})$/)?.[1];
+  assert.ok(pinned, `the workflows run the CLI commit that rendered them, never a floating or version ref: ${cli}`);
+  assert.doesNotThrow(() => execFileSync('git', ['cat-file', '-e', `${pinned}^{commit}`], { cwd: fileURLToPath(new URL('..', import.meta.url)), stdio: 'ignore' }), 'the pinned commit exists');
+  const stamped = 'a'.repeat(40);
+  assert.equal(publishedCliCommit({ GRAPHYARD_BUILD_SHA: stamped }), stamped, 'a build that stamps its commit pins that commit');
+  assert.equal(publishedCliCommit({}, (_command, args) => args.includes('merge-base') ? `${'b'.repeat(40)}\n` : 'c'.repeat(40)), 'b'.repeat(40), 'a checkout pins its newest commit origin/main already holds');
+  assert.throws(() => publishedCliCommit({}, () => { throw new Error('not a git checkout'); }), /GRAPHYARD_BUILD_SHA/, 'no resolvable commit refuses rather than rendering an unresolvable pin');
   for (const policy of [railwayPolicy(), railwayPolicy({ adapter: 'command', project: null, uat: './deploy.sh uat', production: './deploy.sh production' })]) {
     const adapter = policy.deploy.adapter;
     const candidate = renderCandidateWorkflow(policy, { stack: 'node' });
