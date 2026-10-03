@@ -10,7 +10,7 @@ import { fileFollowUpThreads, followUpItem, type AppendFollowUpFindings, type Cr
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
 import { repeatedClientErrorLimit } from '../src/retry-stop.js';
 import { followUpEntries, followUpParent, openFollowUpItem, overdueTriage, type TriageJudgement } from '../src/model/machine-backlog.js';
-import { foldUnshippedFollowUps, followUpShipKey, pendingFollowUpsReport } from '../src/model/followups-held.js';
+import { foldUnshippedFollowUps, followUpShipReceiptKey, pendingFollowUpsReport } from '../src/model/followups-held.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { clearTriageRuns, triageSettled, triageStep, triageTool } from '../src/triage.js';
 import { researchSettings } from '../src/research.js';
@@ -145,6 +145,18 @@ test('unit:followups-wait-on-parent — an approval of an unshipped parent files
   assert.deepEqual(await shipHeldFollowUps(await store.list(), ship), []);
   assert.equal((await ship(parent.key, `followups-after-ship:${parent.key}`)).key, item!.key);
   assert.equal((await followUpsOf(parent.key)).length, 1);
+
+  // GY-1136 (findings 1, 5): findings held again once that item is closed start a new hold, answered
+  // under its own receipt, so the dispatcher's fixed key files them as a new item rather than replaying the first.
+  await ok(operator, `work/${item!.key}/close`, { kind: 'obsolete', reason: 'Handled elsewhere' });
+  await approve(await reload(parent.key), 103, ['src/c.ts — held after the first filing closed']);
+  assert.deepEqual((await reload(parent.key)).pendingFollowUps?.findings.map(finding => finding.text), ['src/c.ts — held after the first filing closed']);
+  const reshipped = await shipHeldFollowUps(await store.list(), ship);
+  const second = (await followUpsOf(parent.key)).filter(entry => !isClosed(entry));
+  assert.equal(second.length, 1, reshipped.join('\n'));
+  assert.notEqual(second[0]!.key, item!.key);
+  assert.match(reshipped.join('\n'), new RegExp(`as ${second[0]!.key}$`));
+  assert.deepEqual(followUpEntries(second[0]!).map(finding => finding.text), ['src/c.ts — held after the first filing closed']);
 });
 
 test('unit:followups-migrate-to-parent — the one-time migration folds each open follow-up item of an unshipped parent back onto it, closed as superseded by the parent, deleting nothing; a parent closed without shipping drops what it holds with a recorded reason', async () => {
@@ -154,14 +166,33 @@ test('unit:followups-migrate-to-parent — the one-time migration folds each ope
   const folded = await legacy(unshipped, 201, ['src/u.ts — unshipped finding']);
   const kept = await legacy(shipped, 202, ['src/s.ts — shipped finding']);
   const orphan = await legacy(closed, 203, ['src/c.ts — closed finding']);
+  // GY-1136 (findings 2, 3, 7): an item under a live lease defers the fold and leaves the migration unfinished.
+  const leasedParent = await parentItem('Unshipped parent of a leased follow-up');
+  const leased = await legacy(leasedParent, 206, ['src/l.ts — leased finding']);
+  const setLease = async (expiresAt: string) => {
+    const current = await reload(leased.key);
+    await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [leased.id, JSON.stringify({ ...current, lease: { owner: 'ship-worker', epoch: 1, expiresAt } })]);
+  };
+  await setLease(new Date(Date.now() + 3_600_000).toISOString());
   await deliver(shipped);
   await ok(operator, `work/${closed.key}/close`, { kind: 'obsolete', reason: 'Nobody wants it' });
   const before = (await store.list()).length;
   // The loop asks once per process under one key; GY-402's merge runs first, the fold on the next ask.
   const first = await ok(operator, 'followups/migrate', {}, 'graphyard-followups-migration');
   assert.equal(first.parents ?? null, null);
+  const deferring = await ok(operator, 'followups/migrate', {}, 'graphyard-followups-migration');
+  assert.ok(deferring.parents.folded >= 2, JSON.stringify(deferring.parents));
+  assert.deepEqual(deferring.parents.deferred, [leased.key]);
+  assert.equal((await reload(leased.key)).stage, 'backlog', 'the leased item is left alone');
+  assert.equal((await store.pool.query("SELECT 1 FROM events WHERE kind='followups.parent-migrated'")).rowCount, 0, 'no one-time record while an item is deferred');
+  // Once its lease has lapsed, the next ask folds it and records the migration.
+  await setLease(new Date(Date.now() - 1_000).toISOString());
   const second = await ok(operator, 'followups/migrate', {}, 'graphyard-followups-migration');
-  assert.ok(second.parents.folded >= 2, JSON.stringify(second.parents));
+  assert.equal(second.parents.deferred, undefined, JSON.stringify(second.parents));
+  assert.equal(second.parents.folded, 1);
+  const lapsed = await reload(leased.key);
+  assert.deepEqual({ kind: lapsed.closure?.kind, ref: lapsed.closure?.ref, lease: lapsed.lease }, { kind: 'superseded', ref: leasedParent.key, lease: null });
+  assert.deepEqual((await reload(leasedParent.key)).pendingFollowUps?.findings.map(finding => finding.text), ['src/l.ts — leased finding']);
 
   const closedItem = await reload(folded.key);
   assert.ok(isClosed(closedItem));
@@ -176,7 +207,7 @@ test('unit:followups-migrate-to-parent — the one-time migration folds each ope
   assert.ok(isClosed(await reload(orphan.key)));
   const dropped = (await reload(closed.key)).pendingFollowUps?.dropped;
   assert.match(dropped?.reason ?? '', /closed as obsolete without shipping .*1 pending follow-up finding\(s\) are dropped/);
-  assert.equal(second.parents.dropped.find((entry: any) => entry.key === closed.key)?.findings, 1);
+  assert.equal(deferring.parents.dropped.find((entry: any) => entry.key === closed.key)?.findings, 1);
   assert.equal((await store.list()).length, before, 'nothing was deleted');
   // One-time: a later ask changes nothing and returns the record.
   const third = await ok(operator, 'followups/migrate', {}, 'graphyard-followups-migration');
@@ -314,6 +345,23 @@ test('manual:review-followups-triaged GY-1047.1: foldUnshippedFollowUps skips it
   assert.equal(result.deferred[0]!.key, 'GY-101');
 });
 
+test('manual:review-followups-triaged GY-1136.1: foldUnshippedFollowUps folds an item whose lease has lapsed and ignores leases on closed items (findings 4, 6)', () => {
+  const at = '2026-10-02T12:00:00.000Z', now = new Date(at);
+  const base = { type: 'chore', priority: 2, criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
+    observation: null, blocker: null, gates: [], violations: [], description: '' };
+  const parent = { ...base, id: 'parent-1', key: 'GY-300', title: 'Parent', stage: 'build', dependencies: [], ready: true, epoch: 1, lease: null } as unknown as Work;
+  const followUp = (key: string, stage: string, expiresAt: string) => ({ ...base, id: key, key, title: key, stage, dependencies: ['parent-1'], ready: true, epoch: 1,
+    lease: { owner: 'worker-1', epoch: 1, expiresAt }, origin: { reviewFollowUps: { parent: 'GY-300', findings: [{ path: 'src/a.ts', text: `${key} finding` }] } } }) as unknown as Work;
+  const lapsed = followUp('GY-301', 'build', '2026-10-02T11:59:59.000Z'), live = followUp('GY-302', 'build', '2026-10-02T12:00:01.000Z');
+  const done = { ...followUp('GY-303', 'done', '2026-10-02T13:00:00.000Z'), closure: { kind: 'obsolete', ref: null, by: 'x', at, from: 'build', reason: 'closed' } } as unknown as Work;
+  const result = foldUnshippedFollowUps([parent, lapsed, live, done], 'actor', now);
+  assert.deepEqual(result.folded.map(entry => entry.work.key), ['GY-301']);
+  assert.equal(lapsed.closure?.kind, 'superseded');
+  assert.deepEqual(result.deferred.map(item => item.key), ['GY-302'], 'only the open item under a live lease defers; a closed one is neither folded nor deferred');
+  assert.equal(live.closure, undefined);
+});
+
 test('manual:review-followups-triaged GY-1047.2: foldUnshippedFollowUps resolves parents via key map in O(n) time (finding 22)', () => {
   const at = '2026-10-02T12:00:00.000Z', now = new Date(at);
   const parents = Array.from({ length: 10 }, (_, i) => ({
@@ -342,20 +390,15 @@ test('manual:review-followups-triaged GY-1047.2: foldUnshippedFollowUps resolves
   }
 });
 
-test('manual:review-followups-triaged GY-1047.3: followUpShipKey incorporates the hold timestamp to prevent receipt replay on re-held findings after ship (findings 1, 9, 16, 18, 23, 25)', () => {
-  const parentWithoutHold = { key: 'GY-500', pendingFollowUps: null };
-  assert.equal(followUpShipKey(parentWithoutHold), 'followups-after-ship:GY-500');
-
-  const t1 = '2026-10-02T10:00:00.000Z';
-  const parentWithFirstHold = { key: 'GY-500', pendingFollowUps: { at: t1, findings: [{ path: 'src/a.ts', text: 'finding 1' }] } };
-  assert.equal(followUpShipKey(parentWithFirstHold as any), `followups-after-ship:GY-500:${t1}`);
-
-  const t2 = '2026-10-02T14:30:00.000Z';
-  const parentWithSecondHold = { key: 'GY-500', pendingFollowUps: { at: t2, findings: [{ path: 'src/b.ts', text: 'finding 2' }] } };
-  assert.equal(followUpShipKey(parentWithSecondHold as any), `followups-after-ship:GY-500:${t2}`);
-
-  // The keys for the first and second holds differ, ensuring the second ship does not replay the first receipt
-  assert.notEqual(followUpShipKey(parentWithFirstHold as any), followUpShipKey(parentWithSecondHold as any));
+test('manual:review-followups-triaged GY-1047.3: the ship receipt is scoped to the hold timestamp so re-held findings after ship are not answered with the earlier receipt (GY-1047 findings 1, 9, 16, 18, 23, 25; GY-1136 findings 1, 5)', () => {
+  const key = 'followups-after-ship:GY-500';
+  assert.equal(followUpShipReceiptKey(key, { pendingFollowUps: null }), key);
+  const t1 = '2026-10-02T10:00:00.000Z', t2 = '2026-10-02T14:30:00.000Z';
+  const first = { pendingFollowUps: { at: t1, findings: [{ path: 'src/a.ts', text: 'finding 1' }] } } as any;
+  const second = { pendingFollowUps: { at: t2, findings: [{ path: 'src/b.ts', text: 'finding 2' }] } } as any;
+  assert.equal(followUpShipReceiptKey(key, first), `${key}@${t1}`);
+  assert.equal(followUpShipReceiptKey(key, first), followUpShipReceiptKey(key, { ...first }), 'a retry within one hold replays');
+  assert.notEqual(followUpShipReceiptKey(key, first), followUpShipReceiptKey(key, second));
 });
 
 test('manual:review-followups-triaged GY-1047.4: foldUnshippedFollowUps reports deferred leased items so callers can defer finalizing migration', () => {
