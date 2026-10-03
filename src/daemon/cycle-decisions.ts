@@ -1,7 +1,6 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
-import { detectRuntimeExhaustion } from '../master/environments.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
@@ -15,6 +14,7 @@ import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
 import { wakeObservationJob } from './cycle-delivery.js';
+import { sessionExhaustion } from './cycle-sessions.js';
 
 /** The launcher key of the approver launch for a decision (GY-616). */
 const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
@@ -220,10 +220,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
     if (!effects.sessionOutput || !effects.reportCapacity || !watch.agentName) return false;
     const agent = (await sessions()).agents.find(candidate => candidate.name === watch.agentName);
-    if (!agent || !stoppedStates.includes(agent.agent_status ?? '')) return false;
+    if (!agent) return false;
     // Judged against the approver's own runtime's provider messages: free prose about a quota is
-    // not a provider limit notice, whatever it mentions (GY-421).
-    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectRuntimeExhaustion(output, watch.runtime ?? approverRuntime(config), clock) : null, () => null);
+    // not a provider limit notice, whatever it mentions (GY-421). A working approver counts only
+    // when its runtime is retrying on the notice (GY-973).
+    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null);
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
     const key = failoverKey('approver', item, session), previous = state.actions[key];
