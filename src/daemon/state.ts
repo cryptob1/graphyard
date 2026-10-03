@@ -10,6 +10,7 @@ import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
+import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -422,6 +423,8 @@ export const daemonStateSchema = z.object({
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
+  /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */
+  projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
@@ -556,6 +559,11 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   const failures = state.failures;
   if (failures.last) Object.assign(failures.last, { call: cut(failures.last.call, 100), reason: cut(failures.last.reason, 1000) });
   if (failures.lastUnhandled) failures.lastUnhandled.reason = cut(failures.lastUnhandled.reason, 1000);
+  if (state.projectMemory) {
+    state.projectMemory.decisions = (state.projectMemory.decisions ?? []).slice(0, 50);
+    state.projectMemory.pitfalls = (state.projectMemory.pitfalls ?? []).slice(0, 50);
+    state.projectMemory.changes = (state.projectMemory.changes ?? []).slice(0, 50);
+  }
   return state;
 }
 /** A deployment observation within its schema: 200 deliveries a side (the newest kept) and a 500-character reason. */

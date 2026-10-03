@@ -27,6 +27,7 @@ import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
+import { writeProjectMemory } from '../project-memory.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
@@ -531,7 +532,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     };
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
-  const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
+  // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
+  let writtenMemory: string | null = null;
+  const persistLoop = async (state: DaemonState) => {
+    const memory = state.projectMemory ? JSON.stringify(state.projectMemory) : null;
+    if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
+    return writeDaemonState(current(), state);
+  };
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
