@@ -3232,8 +3232,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
               work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
                 const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
                 if (!jobRow) return itemToUpdate;
-                const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-                const cur = all.find(w => w.id === itemToUpdate.id);
+                // Only this item is read under the coordination lock (GY-1027).
+                const cur: Work | undefined = (await db.query('SELECT document FROM work_items WHERE id=$1', [itemToUpdate.id])).rows[0]?.document;
                 if (!cur) return itemToUpdate;
                 const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
                 if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
