@@ -322,9 +322,13 @@ export interface QueueEjection {
   /**
    * For a speculative-merge conflict (GY-321): the keys of the entries the prediction held, the
    * predecessors the conflicting tip was built behind, or [] when the merge was onto the base
-   * branch tip itself. Absent on other ejections and on records that predate the rule.
+   * branch tip itself. For a CI failure on a speculative tip attributed to predecessors (GY-471):
+   * those predecessors, which the entry waits for exactly as it waits for a conflicting one.
+   * Absent on other ejections and on records that predate the rule.
    */
   predecessors?: string[];
+  /** For a CI failure on a speculative tip (GY-471): whose change the failure was attributed to, and on what evidence; see `attributeTipFailure`. */
+  attribution?: FailureAttribution;
   /**
    * GY-252. Whether the ejection was a speculative-merge conflict (github.ts SpeculativeConflict),
    * recorded as a typed fact rather than read back from `reason`: `{ base }` names the tip the
@@ -1322,6 +1326,165 @@ export function ejectedTipRestore(work: Work, all: Work[]): { contaminated: stri
   return { contaminated: contamination.head, foreign: contamination.foreign, own: contamination.own, reason: `ejected from the merge queue: ${ejection.reason}`, previous: current?.restore ?? null };
 }
 
+// ---- Failure attribution on speculative tips (GY-471) --------------------------------------------
+/*
+ * A speculative tip holds the entry under test and every unlanded predecessor it was built behind,
+ * so a required check failing there is not by that fact the entry's own. 2026-09-25: GY-392's tip
+ * bbc1c212, built behind GY-235 and GY-422, failed `test` because GY-422 pushed
+ * src/cli/master-status.ts over its module budget (GY-422's own tip failed the same way); the loop
+ * asked GY-392's worker to fix a file its diff never touched, the approver refused the rework as
+ * misattributed, and the culprit stayed queued ahead of everything. The failure is now attributed
+ * before any rework is asked: to a predecessor whose own head fails the same check, or whose diff
+ * holds a file the failing output names while the entry's does not; otherwise to the entry.
+ */
+
+/** What a failed required check run's output named, as the observation read it from the run's output and annotations. */
+export interface CheckFailure {
+  name: string; id?: number;
+  /** Repository paths the output names, as written there (absolute runner paths included). */
+  named: string[];
+  /** The failing tests the output names: `path: test name` where an annotation anchors one. */
+  subjects: string[];
+}
+declare module './model/work.js' { interface Observation { checkFailures?: CheckFailure[] } }
+export const checkFailureNamedMax = 60, checkFailureSubjectsMax = 20;
+/** The annotation title the CI test job gives each failing test (tests/helpers/timing-report.ts). */
+export const failingTestTitle = 'Failing test';
+const namedPath = /\/?(?:[A-Za-z0-9_@.-]+\/)*[A-Za-z0-9_@-][A-Za-z0-9_@.-]*\.(?:[cm]?[jt]sx?|json|ya?ml|md|sql|css|html|sh|mjs|cjs)(?![A-Za-z0-9_])/g;
+/**
+ * The files and failing tests a failed check run names: every annotation's path (the runner's own
+ * `.github` placeholder excluded), and every path in the annotations' titles and messages and the
+ * run's output title, summary and text. Bounded; order of first mention.
+ */
+export function checkFailureOf(run: { name: string; id?: number; output?: { title?: string | null; summary?: string | null; text?: string | null } | null }, annotations: { path?: string | null; title?: string | null; message?: string | null }[]): CheckFailure {
+  const named = new Set<string>(), subjects: string[] = [];
+  const add = (path: string) => { const clean = path.replace(/^file:\/\//, ''); if (clean && !clean.startsWith('.github') && named.size < checkFailureNamedMax) named.add(clean); };
+  const scan = (text: string | null | undefined) => { for (const match of (text ?? '').slice(0, 65_536).matchAll(namedPath)) add(match[0]); };
+  for (const annotation of annotations) {
+    if (annotation.path) add(annotation.path);
+    if (annotation.title === failingTestTitle && annotation.path && subjects.length < checkFailureSubjectsMax) subjects.push(`${annotation.path}: ${(annotation.message ?? '').split('\n')[0].slice(0, 200)}`);
+    scan(annotation.title); scan(annotation.message);
+  }
+  scan(run.output?.title); scan(run.output?.summary); scan(run.output?.text);
+  return { name: run.name, ...(run.id !== undefined ? { id: run.id } : {}), named: [...named], subjects };
+}
+/** Whether a path the output names is `path`: the same repository path, or an absolute one ending in it. */
+export const namesPath = (named: string, path: string) => named === path || named.endsWith(`/${path}`);
+
+export interface FailureAttribution {
+  /** The required check that failed, the speculative tip it failed on, and the entry that tip was published for. */
+  check: string; tip: string; entry: string;
+  /** The entries the tip was built behind, in queue order; [] for a tip on the base branch alone. */
+  predecessors: string[];
+  /** What the failing output named (see `CheckFailure`). */
+  named: string[]; subjects: string[];
+  /** The predecessors the failure is attributed to, each at the head it was judged on, with why. */
+  culprits: { key: string; sha: string; evidence: string }[];
+  /** `predecessor`: culprits explain it; `entry`: the entry's own diff holds a named file; `unexplained`: nothing the record holds explains it, so it stays the entry's. */
+  verdict: 'predecessor' | 'entry' | 'unexplained';
+  evidence: string;
+}
+/**
+ * Whether an item's own observed head failed `check`: the newest run of it read through the same
+ * trust boundary as the queue's own ejection (`requiredCheckRun`), so an App outside the CI set
+ * never makes a predecessor a culprit, nor a run the head's one rerun (GY-516) still holds.
+ */
+function headFails(work: Work, check: string, ciAppIds: readonly number[]): boolean {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha) return false;
+  const required = requiredChecksOf(work).find(entry => entry.name === check);
+  const run = required ? requiredCheckRun(required, observation.checks, ciAppIds) : undefined;
+  return !!run && (required!.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result)) && !holdingCheckRerun(work, candidate.sha, check, run);
+}
+/**
+ * The paths an item's current head changes relative to the base it is bound to, or null when the
+ * record cannot say. On a speculative tip the bound base is the predicted one, which already holds
+ * every predecessor, so a predecessor's file compares equal there and is not the item's own. A file
+ * the observation did not compare (planned scope, or past the lookup budget) counts as its own.
+ */
+export function ownDiff(work: Pick<Work, 'candidate' | 'observation'>): string[] | null {
+  const observation = work.observation, candidate = work.candidate;
+  if (!observation || !candidate || observation.candidate.sha !== candidate.sha) return null;
+  if (!observation.scopeFiles?.length) return observation.files.length ? observation.files : null;
+  return observation.scopeFiles.flatMap(file => file.baseSha !== undefined && file.baseSha === file.sha ? [] : [file.path, ...(file.previousPath ? [file.previousPath] : [])]);
+}
+/** The entries the current head was published behind as a speculative tip, or null when it is not a tip the record knows. */
+export function tipPredecessors(work: Pick<Work, 'candidate' | 'queue' | 'queueHistory'>): string[] | null {
+  const candidate = work.candidate, speculation = work.queue?.speculation;
+  if (!candidate) return null;
+  if (speculation?.tip === candidate.sha) return speculation.predecessors;
+  const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
+  return predicted ? predicted.predecessors ?? [] : null;
+}
+const listNamed = (paths: string[]) => paths.length > 4 ? `${paths.slice(0, 4).join(', ')} and ${paths.length - 4} more` : paths.join(', ');
+/**
+ * Whose change a required `check` that failed on the entry's current speculative tip is attributed
+ * to, or null when the head is not a tip. Each predecessor the tip was built behind is compared in
+ * queue order: one whose own current head fails the same check, or whose own diff holds a file the
+ * failing output names (or a failing test's own file) while the entry's diff holds none of those,
+ * is a culprit. Only a failure no predecessor explains stays the entry's.
+ */
+export function attributeTipFailure(work: Work, all: Work[], check: string, ciAppIds: number[]): FailureAttribution | null {
+  const candidate = work.candidate, predecessors = tipPredecessors(work);
+  if (!candidate || !predecessors) return null;
+  const failure = work.observation?.candidate.sha === candidate.sha ? work.observation.checkFailures?.find(entry => entry.name === check) : undefined;
+  const named = failure?.named ?? [], subjects = failure?.subjects ?? [];
+  const own = ownDiff(work);
+  const hits = (paths: string[] | null) => (paths ?? []).filter(path => named.some(name => namesPath(name, path)));
+  const entryHits = hits(own);
+  const culprits: FailureAttribution['culprits'] = [];
+  for (const key of predecessors) {
+    const item = all.find(entry => entry.key === key);
+    const head = item?.candidate, observation = item?.observation;
+    if (!item || !head || item.stage === 'done' || observation?.merged) continue;
+    if (headFails(item, check, ciAppIds)) {
+      culprits.push({ key, sha: head.sha, evidence: `${key}'s own head ${head.sha.slice(0, 12)} fails ${check} too` });
+      continue;
+    }
+    const theirs = hits(ownDiff(item));
+    if (theirs.length && own && !entryHits.length) culprits.push({ key, sha: head.sha, evidence: `${key}'s diff changes ${listNamed(theirs)}, which the failing ${check} output names, and ${work.key}'s diff does not` });
+  }
+  const tip = candidate.sha.slice(0, 12);
+  const behind = predecessors.length ? `behind ${predecessors.join(', ')}` : 'on the base branch alone';
+  const names = named.length ? `the failing output names ${listNamed(named)}` : 'the failing output names no file';
+  const evidence = culprits.length ? `${check} failed on speculative tip ${tip} built ${behind}; attributed to ${culprits.map(entry => entry.key).join(', ')}: ${culprits.map(entry => entry.evidence).join('; ')}`
+    : entryHits.length ? `${check} failed on speculative tip ${tip} built ${behind}; ${names}, and ${work.key}'s own diff changes ${listNamed(entryHits)}${predecessors.length ? `, while no predecessor's own head fails ${check}` : ''}`
+    : `${check} failed on speculative tip ${tip} built ${behind}; ${names}${predecessors.length ? `, no predecessor's own head fails ${check}, and no predecessor's diff alone holds a named file` : ''}, so nothing but ${work.key}'s change explains it`;
+  return { check, tip: candidate.sha, entry: work.key, predecessors, named, subjects, culprits, verdict: culprits.length ? 'predecessor' : entryHits.length ? 'entry' : 'unexplained', evidence };
+}
+/**
+ * A queued predecessor that a later entry's tip failure was attributed to, at exactly its current
+ * head: the ejection reason and the attribution it carries, or null. The later entry's ejection is
+ * the record; this entry leaves the queue on it, and re-enters only with a new head.
+ */
+export function blamedTipFailure(work: Work, all: Work[]): { reason: string; attribution: FailureAttribution } | null {
+  const candidate = work.candidate;
+  if (!work.queue || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  for (const other of all) {
+    const ejection = other.queueEjection, attribution = ejection?.attribution;
+    if (other.id === work.id || other.queue || !ejection || !attribution || attribution.verdict !== 'predecessor' || ejection.policyRevision !== other.policyRevision || ejection.sequence <= work.queue.sequence) continue;
+    const culprit = attribution.culprits.find(entry => entry.key === work.key && entry.sha === candidate.sha);
+    if (culprit) return { attribution, reason: `Required CI check ${attribution.check} failed on speculative tip ${attribution.tip.slice(0, 12)} of ${attribution.entry} and is attributed to this entry: ${culprit.evidence}` };
+  }
+  return null;
+}
+/** The reason `ejectionReason` gives a required CI check that failed on the tip, with the check named. */
+export const tipCheckFailureReason = /^Required CI check (\S+) did not pass on speculative tip [0-9a-f]+/;
+/**
+ * The required check an ejection reason says failed on the entry's tip, or null. A docs-budget
+ * overflow the per-entry word counts already attributed (GY-574) is not attributed again. A failure
+ * the tip window gave the entry because the tip ahead passed still is: the predecessors' change can
+ * pass alone and still be what breaks — the named file is theirs alone.
+ */
+export function unattributedTipFailure(reason: string): string | null {
+  const failed = tipCheckFailureReason.exec(reason);
+  if (!failed || reason.includes(`: ${docsBudgetProof} failed: `)) return null;
+  return failed[1];
+}
+/** The window's clause pinning a failure on the entry because the tip ahead passed, dropped once a predecessor is shown to explain it. */
+export const windowAttributionClause = /, attributed to this entry: speculative tip \S+ ahead of it passed \S+$/;
+
+/** The reason `advanceQueue` ejects an entry whose speculative merge conflicts (github.ts SpeculativeConflict). */
 /**
  * GY-568. The speculative tip the current candidate is, when it was built behind predecessors of
  * which one or more has since left the merge queue without landing: `departed` names them. Such a
@@ -1391,7 +1554,7 @@ export function speculativeConflict(ejection: Pick<QueueEjection, 'reason' | 'co
 export function predecessorConflict(work: Pick<Work, 'candidate' | 'queue' | 'queueEjection' | 'policyRevision'>): string[] | null {
   const ejection = work.queueEjection, candidate = work.candidate;
   if (work.queue || !ejection || !candidate || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
-  if (!speculativeConflict(ejection) || !ejection.predecessors?.length) return null;
+  if (!(speculativeConflict(ejection) || ejection.attribution?.verdict === 'predecessor') || !ejection.predecessors?.length) return null;
   return ejection.predecessors;
 }
 /**
@@ -1413,7 +1576,8 @@ export function predecessorWait(work: Work, all: Work[]): string[] | null {
 }
 /** The merge-gate reason for an entry that waits on its predecessors (see `predecessorWait`). */
 export function predecessorWaitText(work: Work, waiting: string[]) {
-  return `Waiting for ${waiting.join(', ')} to land or leave the merge queue: candidate ${work.candidate!.sha.slice(0, 12)} was ejected because its speculative merge behind ${waiting.length === 1 ? 'it' : 'them'} conflicts (${work.queueEjection!.reason}); no sync with the base resolves that, so the same head re-enters at the back of the queue once ${waiting.length === 1 ? 'it has' : 'any of them has'} landed or left`;
+  const attributed = work.queueEjection!.attribution?.verdict === 'predecessor';
+  return `Waiting for ${waiting.join(', ')} to land or leave the merge queue: candidate ${work.candidate!.sha.slice(0, 12)} was ejected because ${attributed ? `a required CI check failed on its speculative tip and the failure is attributed to ${waiting.length === 1 ? 'it' : 'them'}` : `its speculative merge behind ${waiting.length === 1 ? 'it' : 'them'} conflicts`} (${work.queueEjection!.reason}); ${attributed ? 'no rework of its own change fixes that' : 'no sync with the base resolves that'}, so ${attributed ? 'the item' : 'the same head'} re-enters at the back of the queue once ${waiting.length === 1 ? 'it has' : 'any of them has'} landed or left`;
 }
 /** The predecessors a merge-gate reason names as waited on, or null for any other reason. */
 export function predecessorWaitReason(reason: string): string[] | null {

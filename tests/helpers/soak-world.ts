@@ -7,7 +7,7 @@ import type { HerdrAgent } from '../../src/master.js';
 import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
-import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
+import { failingTestTitle, heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
 
@@ -165,6 +165,37 @@ export class SimulatedGitHub {
   refusedBranches = new Set<string>();
   /** GY-854. Items GitHub takes this long to compute mergeable once their check passed, so they stay queued, unlanded. */
   slowMergeable = new Map<string, number>();
+  /**
+   * GY-471. Items whose flaked first tip fails `test` in a file another item's change holds: the
+   * failing test's annotation, as the CI test job writes one per failing test, names that file, so
+   * the queue can attribute the tip's failure to the predecessor whose diff alone changes it.
+   */
+  failureNames = new Map<string, string>();
+  /** Every check-run annotations read the observer made, by run id, in order (GY-471): each failed run is read at most once. */
+  annotationReads: number[] = [];
+  private failureReader?: GitHub;
+  /**
+   * What each failed required check on a published tip names, computed by the real
+   * `GitHub.checkFailures` over this world: its annotation reads are answered from the simulated
+   * runs and counted, so the identical code the production observer runs reads the simulated tips.
+   */
+  async checkFailures(work: Work, pr: PullRequest, published: boolean) {
+    const reader = this.failureReader ??= Object.create(GitHub.prototype) as GitHub;
+    (reader as unknown as Record<string, unknown>).annotations ??= new Map();
+    (reader as unknown as { pages: (path: string) => Promise<unknown[]> }).pages = async (path: string) => {
+      const id = Number(/^\/check-runs\/(\d+)\/annotations$/.exec(path)?.[1]);
+      if (!Number.isSafeInteger(id)) throw new Error(`Unexpected ${path}`);
+      this.annotationReads.push(id);
+      const [head, runs] = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === id)) ?? [];
+      const run = runs?.find(entry => entry.id === id);
+      const owner = head ? [...this.prs.values()].find(entry => entry.head === head) : undefined;
+      const named = owner && this.failureNames.get(owner.key);
+      return run?.result === 'failure' && run.name === 'test' && named && this.flakeTips.get(owner!.key) === head
+        ? [{ path: 'tests/soak-suite.test.ts', title: failingTestTitle, message: `${owner!.key} suite\nAssertionError: ${named} no longer exports what the suite imports` }] : [];
+    };
+    const checks = this.checks(pr, clock.now()).map(run => ({ name: run.name, status: 'completed', conclusion: run.result, id: run.id, app: { id: this.options.ciAppId }, output: { annotations_count: 1 } }));
+    return await GitHub.prototype.checkFailures.call(reader, work, checks, published);
+  }
   /** Every write a branch restore made or was refused, per item, in order (GY-854). */
   restoreWrites: { key: string; write: 'reset' | 'merge'; refused: boolean; at: number }[] = [];
   /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
@@ -515,6 +546,8 @@ export class SimulatedGitHub {
         // them (GY-574): the real word counter over this world's trees and blobs.
         const speculation = work.queue?.speculation;
         const published = !!speculation && speculation.tip === pr.head && speculation.policyRevision === work.policyRevision;
+        // What a failing published tip's checks name (GY-471), read exactly as production reads it.
+        const checkFailures = await world.checkFailures(work, pr, published && pr.open && !pr.merged);
         const docsBudget = published && pr.open && !pr.merged
           ? await world.tipDocs(work, pr.head, speculation!.base, checks.filter(run => !run.source).map(run => ({ id: run.id, name: run.name, status: 'completed', conclusion: run.result })))
           : undefined;
@@ -532,7 +565,7 @@ export class SimulatedGitHub {
           // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
           ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
           // The failing published tip's docs counts (GY-574), from which its overflow is attributed.
-          ...(docsBudget ? { docsBudget } : {}),
+          ...(docsBudget ? { docsBudget } : {}), ...(checkFailures.length ? { checkFailures } : {}),
         };
       },
       // The main guard (GY-500): CI's verdict on base-branch commits, and the revert pull requests it opens and lands head-bound.

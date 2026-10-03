@@ -1,6 +1,7 @@
 import { baseRefreshConflict, defaultMergeBatchSize, describeTipWindow, ejectedCheckLift, ejectedTipRestore, ejectingCheck, ejectionReason, failedCheckEjectionPrefix, mergeRefusalEjectionPrefix, standingMergeRefusal, nextQueueSequence, pendingBaseRefresh, pendingRestore, predictQueue, predecessorWait, predecessorWaitText, queueHistoryLimit, queueBatch, queuePlacement, sameMergeBatch, sameTips, stuckBatchMs, windowBatchView } from '../merge-queue.js';
 import type { QueueEjection, QueueHistoryEntry, QueuePlacement } from '../merge-queue.js';
 import type { Work } from './work.js';
+import { attributeTipFailure, blamedTipFailure, unattributedTipFailure, windowAttributionClause, type FailureAttribution } from '../merge-queue.js';
 import { behindBaseHold } from './behind-base.js';
 import { carriedApproval, currentCarry, describeGround } from './carry.js';
 import { currentEvidence } from './evidence.js';
@@ -46,7 +47,17 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const peersOf = (subject: Work) => all.map(item => item.id === subject.id ? subject : item);
   const batchOf = (subject: Work) => queueBatch(subject, peersOf(subject), now.getTime(), batchSize, ciAppIds);
   const windowOf = (subject: Work) => parallelTips ? describeTipWindow(peersOf(subject), predictQueue(peersOf(subject), now.getTime()), parallelTips, ciAppIds).get(subject.key) ?? null : null;
-  const reason = queue ? ejectionReason(probe, ciAppIds, all, parallelTips ? null : batchOf(probe), windowOf(probe), now, verdict()) : null;
+  const ejected = queue ? ejectionReason(probe, ciAppIds, all, parallelTips ? null : batchOf(probe), windowOf(probe), now, verdict()) : null;
+  // A required check that failed on this entry's speculative tip is attributed before anything
+  // is asked of its worker (GY-471): a failure a predecessor explains ejects the entry to wait for
+  // that predecessor, never to rework, and the predecessor leaves the queue on the same record
+  // (`blamedTipFailure`). A bisection isolates an entry only once the tip before it passed, so
+  // there a predecessor is blamed only by the files the failing output names.
+  const failedCheck = ejected ? unattributedTipFailure(ejected) : null;
+  const attribution: FailureAttribution | null = failedCheck ? attributeTipFailure(probe, all, failedCheck, ciAppIds) : null;
+  const blamed = queue && !ejected ? blamedTipFailure(probe, all) : null;
+  const culprits = attribution?.verdict === 'predecessor' ? attribution.culprits.map(entry => entry.key) : null;
+  const reason = blamed ? blamed.reason : ejected && culprits ? `${ejected.replace(windowAttributionClause, '')}; attributed to predecessor${culprits.length === 1 ? '' : 's'} ${culprits.join(', ')} (${attribution!.culprits.map(entry => entry.evidence).join('; ')}), so ${work.key} waits for ${culprits.length === 1 ? 'it' : 'them'} and asks no rework` : ejected;
   const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
   if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
   const lift = !queue && eligible && ejection?.check ? ejectedCheckLift(work, all, ciAppIds) : null;
@@ -62,6 +73,8 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     ejection = { at: now.toISOString(), sequence: queue.sequence, reason, sha: candidate?.sha ?? null, policyRevision: work.policyRevision, conflict: null,
       family: audit ? 'landability' : null, ...(audit ? { verdict: audit } : {}), check };
     record('ejected', reason, queue.speculation?.tip ?? candidate?.sha, audit);
+    // A failure attributed on the tip records whom it blamed and the evidence (GY-471).
+    if (culprits || blamed || attribution) ejection = { ...ejection, ...(culprits ? { predecessors: culprits } : {}), ...(blamed ? { attribution: blamed.attribution } : attribution ? { attribution } : {}) };
     queue = null;
   } else if (lift && ejection?.check) {
     // A CI ejection whose check's newest run on the same tip now passes is lifted (GY-1095): the
@@ -145,6 +158,8 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
       }
     }
   }
+  // The reasons describe the ejection this evaluation made, which a predecessor wait reads (GY-471).
+  work = { ...work, queueEjection: ejection };
   const reasons = placement ? placement.reasons
     : work.observation?.merged || work.stage === 'done' ? []
     : waiting?.length ? [predecessorWaitText(work, waiting)]
