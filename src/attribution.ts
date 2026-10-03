@@ -244,7 +244,7 @@ export async function readAttribution(store: Store, query: AttributionQuery): Pr
   const environmentRows = environmentIds.length ? (await store.reportPool.query("SELECT DISTINCT ON (id) id,document FROM validation_definitions WHERE kind='environment' AND id=ANY($1::text[]) ORDER BY id,revision DESC", [environmentIds])).rows : [];
   const environments = Object.fromEntries(environmentRows.map(r => [r.id, { immutable: r.document.immutable !== false }]));
   const blockedRows = (await store.reportPool.query(`SELECT w.document->>'id' AS id, w.document->>'key' AS key, v.key AS proof, v.value->'reanchor' AS reanchor, v.value->>'environmentId' AS environment
-    FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v WHERE v.value->'reanchor'->>'state'='blocked' AND w.document->>'stage'<>'done' ORDER BY w.number LIMIT 500`)).rows;
+    FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v WHERE w.id IN (SELECT id FROM work_index WHERE stage <> 'done') AND v.value->'reanchor'->>'state'='blocked' ORDER BY w.number LIMIT 500`)).rows;
   const blockedNow = blockedRows.filter(r => r.reanchor.at <= to).map(r => ({ workKey: r.key, workId: r.id, proof: r.proof, environmentId: r.reanchor.environmentId ?? r.environment ?? '', reasons: r.reanchor.reasons ?? [], since: r.reanchor.at, supersededRequestId: r.reanchor.supersededRequestId }));
   return { observedAt, from, to, days: query.days, records: recordRows.slice(0, attributionLimits.records).map(rowToRecord), recordsTruncated: recordRows.length > attributionLimits.records,
     requests, requestsTruncated: requestRows.length > attributionLimits.requests, environments, blockedNow };
