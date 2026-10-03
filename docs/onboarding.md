@@ -17,7 +17,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Masterl
 
 ### Documentation policy
 
-`init --scan --apply` writes documentation paths to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`); deploy the printed `GRAPHYARD_DOCUMENTATION` (else `documentation.drift`). Features and bugs owe *Documentation reflects this change*: a docs diff or `complete --no-docs "WHY"`. `"wordBudget":{"total":N,"perPage":N}`: at 97% `master status` raises `docs` and files a trim item; overflowing the queue ejects the crossing entry.
+`init --scan --apply` writes docs paths to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`); deploy `GRAPHYARD_DOCUMENTATION` (else `documentation.drift`). Features/bugs owe *Documentation reflects this change*: docs diff or `complete --no-docs "WHY"`. `"wordBudget":{"total":N,"perPage":N}`: at 97% `master status` raises `docs` and files a trim item; queue overflow ejects.
 
 ### What the generated instructions authorize
 
@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY` exports a 0600 key per run. Two unjudged Pi runs bench an account from a role an hour. Registry writes refuse pasted-key-like fields (known prefix, PEM, JWT, z.ai key, long random token), except word-built model ids.
+`--key-file zai.key --key-variable ZAI_API_KEY` exports a 0600 key per run. Two unjudged Pi runs bench an account from a role an hour. Registry writes refuse pasted secrets (PEM, JWT, z.ai key, long tokens), except word-built model ids.
 
 ### Add a role
 
@@ -81,7 +81,7 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Candidates need one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions without a restart. Adding workers? A worker count `W` and `G` proof groups need `⌈W/2⌉` review and `G×⌈W/2⌉` producer slots over ≥2 producer principals; watch `longestWaitMs`.
+Candidates need one review and one producer session per proof group; `"concurrency"` caps sessions without restart. A worker count `W` and `G` proof groups need `⌈W/2⌉` review and `G×⌈W/2⌉` producer slots over ≥2 producer principals; watch `longestWaitMs`.
 
 ## 3. Start the master
 

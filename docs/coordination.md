@@ -15,13 +15,13 @@ A criterion is `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed thread resolved, follow-up (held until ship) or overridden by ID; prose counts for nothing; the loop resolves named threads by ID. Refused duplicate filings link the existing item or use an approval-and-body-hash key. Retries stop after 10 identical 4xx failures, raising one attention item. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, and it escalates rather than reworks ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.
+The gate is reviewer approval of the exact head plus required CI; threads are inputs: approval names each listed thread resolved, follow-up (held until ship) or overridden by ID; the loop resolves named threads by ID. Refused duplicate filings link the existing item or use an approval-and-body-hash key. Retries stop after 10 identical 4xx failures, raising one attention item. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
 `plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass, as do `tests/helpers/timing-baseline.json` lines of tests touched; every other file must match the bound base byte-for-byte. Deletions, reverts or rewrites are refused; carried files never eject. Workers cannot widen `plannedFiles`; scope requests or revisions can. Asks over 20 files in one directory become their deepest common directory (`tests/`); pending asks merge into one decision.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on whether a candidate can land: build and acceptance gates are its refusals, and the merge queue ejects an entry only for a reason it gives. Recomputed live, never stored; a newly landable head re-enters the queue. The control plane publishes the verdict as `graphyard/landable` on every candidate head (GY-887).
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on whether a candidate can land: build and acceptance gates are its refusals; the merge queue ejects an entry only for a reason it gives. Recomputed live; a newly landable head re-enters the queue. The control plane publishes the verdict as `graphyard/landable` on candidate heads (GY-887).
 
 ### Keep current with `graphyard sync`
 
