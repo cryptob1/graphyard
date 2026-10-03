@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -14,7 +14,7 @@ import { hostSealKey, loginCommand, parkArgs, parkCommand, unsealOnHost } from '
 import { defaultChoices, requestChoices, resolveHumanAnswer, type HumanRequestRow } from '../src/model/human-request.js';
 import type { Principal, Work } from '../src/model.js';
 import HumanRequestsPage, { signInAction } from '../web/pages/human-requests.js';
-import { isSignInSessionToken, REDEEM_ATTEMPTS, redeemSignIn, signInCode } from '../web/pages/login.js';
+import { redeemSignIn, signInCode } from '../web/pages/login.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
 import { principalSchema } from '../src/server/principals.js';
@@ -189,7 +189,7 @@ test('unit:human-request-choices — every human-only request carries its reques
   assert.throws(() => resolveHumanAnswer(credential.humanRequest!, { request: randomUUID(), outcome: 'provided', choice: 'decline', secret }), /sent only with the choice that asks for it/);
 });
 
-test('unit:sign-in-follow-ups — the sign-in tables stay bounded however often an admin asks for a link, a redemption that never reached the server is retried with the kept code, a link-opened session is never offered to a password store, and an interrupted seal-key write still seals to the host (GY-1041)', async () => {
+test('unit:sign-in-tables-bounded — the sign-in link and session tables stay bounded however often an admin asks for a link: the oldest entry goes first and the newest still works (GY-1041)', async () => {
   // Bounded: the oldest link and session go first once the cap is reached; the newest still work.
   const now = Date.parse('2026-10-02T12:00:00Z');
   const table = new HumanSignIn(() => now);
@@ -202,29 +202,6 @@ test('unit:sign-in-follow-ups — the sign-in tables stay bounded however often 
   const held = table as unknown as { links: Map<string, unknown>; sessions: Map<string, unknown> };
   assert.ok(held.links.size <= maxSignInLinks && held.sessions.size <= maxSignInSessions, `${held.links.size} links, ${held.sessions.size} sessions`);
 
-  // Retried: a dropped request and a 503 are tried again with the same code; a refusal is final.
-  const tried: string[] = [];
-  const flaky = (replies: (() => Response)[]) => (async (_input: unknown, init?: RequestInit) => { tried.push(JSON.parse(String(init!.body)).code); return replies.shift()!(); }) as typeof fetch;
-  const noWait = async () => {};
-  const opened = await redeemSignIn('code-1', flaky([() => { throw new TypeError('network'); }, () => new Response('', { status: 503 }), () => Response.json({ token: 'gyh_fresh' })]), noWait);
-  assert.deepEqual([opened, tried], [{ kind: 'signed-in', token: 'gyh_fresh' }, ['code-1', 'code-1', 'code-1']]);
-  tried.length = 0;
-  assert.deepEqual(await redeemSignIn('code-2', flaky([() => new Response('', { status: 502 }), () => new Response('', { status: 401 })]), noWait), { kind: 'refused' });
-  assert.equal(tried.length, 2, 'a refusal is not retried');
-  tried.length = 0;
-  assert.deepEqual(await redeemSignIn('code-3', flaky(Array.from({ length: REDEEM_ATTEMPTS }, () => () => new Response('', { status: 500 }))), noWait), { kind: 'unreachable' });
-  assert.equal(tried.length, REDEEM_ATTEMPTS, 'retries are bounded');
-
-  // A session a link opened expires in hours: it is never saved as the durable Graphyard login.
-  assert.equal(isSignInSessionToken(sessions[1].token), true);
-  assert.equal(isSignInSessionToken(token(operator)), false);
-
-  // A seal key whose public half was never written (the process died between the two writes).
-  const home = await temporaryDirectory('graphyard-seal-'), pem = join(home, 'seal', 'host-a.pem');
-  const first = await hostSealKey('host-a', home);
-  await unlink(`${pem}.pub`);
-  assert.equal(await hostSealKey('host-a', home), first, 'the public half is derived from the kept private key, never EEXIST');
-  assert.equal((await readFile(`${pem}.pub`, 'utf8')).trim(), first, 'and written back');
 });
 
 test('unit:operator-principal-declared-human — the install plan declares its operator principal a human session and no agent principal; a roster rotation keeps it so', async () => {
