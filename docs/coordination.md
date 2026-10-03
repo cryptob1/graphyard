@@ -15,7 +15,7 @@ A criterion is `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed thread resolved, follow-up or overridden by ID; prose counts for nothing; the loop resolves named threads by ID. Refused duplicate filings link the existing item or use an approval-and-body-hash key. Retries stop after 10 identical 4xx failures, raising one attention item. After two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed thread resolved, follow-up (held until ship) or overridden by ID; prose counts for nothing; the loop resolves named threads by ID. Refused duplicate filings link the existing item or use an approval-and-body-hash key. Retries stop after 10 identical 4xx failures, raising one attention item. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, and it escalates rather than reworks ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 

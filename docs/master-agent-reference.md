@@ -43,7 +43,7 @@ Permission flows read `GET /api/github/installation`, recording `record.json` un
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their credential; `master executors restart` moves them to the current release. A verified deployment moves a clean checkout to the base tip (else `upgrade` attention), restarting on runtime changes; `releaseLag` flags lag past 10 minutes.
+Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their credential; `master executors restart` moves them to the current release. A verified deployment moves a clean checkout to the base tip (else `upgrade` attention), restarting on runtime changes; `releaseLag` flags lag past 10 minutes. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, and `deactivating` units.
 
 A `resync` completes only on an observation newer than its claim: `POST /api/work/:id/resync` with `{ since }` wakes the observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, it fails (`no observation newer than the claim was saved`) and backs off, stalling after thirty minutes for a scheduled job, else three failures.
 
@@ -59,8 +59,10 @@ A dead supervisor fences its item; `containment` lists surviving processes' pid,
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-Faults carry `faultClass` (`faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes; sandbox or `workflows`-permission refusals are `configuration`; scope requests count past 15 minutes open or refused with no approver. Recurring-class and `invariant:` faults get a read-only diagnostician (`run.diagnostician`) whose fix approval releases or closes as duplicate. Restores owed under 30 minutes are not `merge` faults.
+## Fault classes
+
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
 
 ## Pipeline speed
 
-Over ten-plus deliveries, `speed.submitToMerge` must reach p50 ≤ 30 and p90 ≤ 60 minutes; rows also carry `executionMs`, `waitMs`, `reworkRounds`, `interventions`. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Rows' `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.

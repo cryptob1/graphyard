@@ -18,4 +18,11 @@ Findings are numbered from 1: file, text, thread, pull request, head, promoted i
 
     graphyard promote-followup GY-N INDEX
 
-An admin or `intent:create` operator agent (`POST /api/work/GY-N/promote`) makes a backlog item planning the file, depending on the approved item and requiring `manual:review-followup-addressed` (fixed, or declined with a reason). Repeats return it (`"duplicate": true`).
+An admin or `intent:create` operator agent (`POST /api/work/GY-N/promote`) makes a backlog item planning the file, depending on the approved item and requiring `manual:review-followup-addressed` (fixed, or declined with a reason). Repeats return it (`"duplicate": true`); a promoted finding leaves only unpromoted findings for ship.
+
+## Past the review-round cap
+
+An item's review round is one more than its rework rounds (`pipeline.reworkRounds`); `master status` shows `reviewRound` (`round`, `cap`, `capped`). The cap is `reviewRoundCap` in `.graphyard/master.json` (default 3). Past it, no review finding sends an item back to a worker: reviewers must name each blocking finding on a `BLOCKING:` line, and non-blocking ones on a `Follow-up finding:` line.
+
+- A change request without a `BLOCKING:` line records findings as follow-ups and withdraws the verdict; the head is reviewed again without rework (withdrawn once; a repeat escalates).
+- One naming a blocking finding, or one Graphyard cannot withdraw, raises an escalation for an independent approver (`graphyard master decide GY-N rework REASON`).

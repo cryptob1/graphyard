@@ -26,6 +26,7 @@ import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
+import { observedReviewBody } from './review-cap.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -636,6 +637,17 @@ export class GitHub {
   private histories = new Map<string, Set<string> | null>();
   /** Settled terminal commit statuses per head commit sha and context name (GY-1060). */
   private terminalStatuses = new Map<string, { name: string; result: string; appId: 0; source: 'status' }>();
+  /** Last published landability check run body per head commit sha (GY-1050). Bounded by landableBodiesEntries. */
+  private landableBodies = new Map<string, LandableCheckRun>();
+  /** Bound on how many published landability bodies the cache retains (GY-1050). */
+  landableBodiesEntries = ancestryEntries;
+  private cacheLandableBody(sha: string, body: LandableCheckRun) {
+    this.landableBodies.delete(sha);
+    this.landableBodies.set(sha, body);
+    if (this.landableBodies.size > this.landableBodiesEntries) {
+      this.landableBodies.delete(this.landableBodies.keys().next().value!);
+    }
+  }
   /**
    * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
    * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
@@ -1562,6 +1574,7 @@ export class GitHub {
       // `reviews`, and review-conflict.ts must still read it as withdrawn rather than standing.
       dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
+        ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}),
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
@@ -2427,22 +2440,42 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * left alone when the published run already says the same. Success is written only while the pull
    * request still has that head on that base, as `publish` writes its own.
    */
-  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}) {
+  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}, skipOnMoved = false): Promise<{ skipped: boolean } | void> {
     const body = landableCheckRun(work, all, new Date());
     if (!body) return;
     const success = body.conclusion === 'success';
+    // Check in-memory cache and standing run before making PR reads (GY-1050).
+    const cached = this.landableBodies.get(body.head_sha);
+    if (landableCheckCurrent(cached, body)) return;
+    const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
+    if (landableCheckCurrent(existing, body)) {
+      this.cacheLandableBody(body.head_sha, body);
+      return;
+    }
     if (success) {
       const pr = await this.request(`/pulls/${work.candidate!.pr}`);
-      requireCurrent(pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha, 'PR changed before the landability check was published; retry');
+      const current = pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha;
+      if (!current) {
+        if (skipOnMoved) return { skipped: true };
+        requireCurrent(false, 'PR changed before the landability check was published; retry');
+      }
     }
-    await this.upsertLandable(body, () => beforeWrite(success));
+    await beforeWrite(success);
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    this.cacheLandableBody(body.head_sha, body);
   }
   /** Creates or updates this App's `graphyard/landable` run on a head; an identical standing run is not rewritten. */
   async upsertLandable(body: LandableCheckRun, beforeWrite: () => Promise<void> = async () => {}) {
+    const cached = this.landableBodies.get(body.head_sha);
+    if (landableCheckCurrent(cached, body)) return;
     const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
-    if (landableCheckCurrent(existing, body)) return;
+    if (landableCheckCurrent(existing, body)) {
+      this.cacheLandableBody(body.head_sha, body);
+      return;
+    }
     await beforeWrite();
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    this.cacheLandableBody(body.head_sha, body);
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
@@ -3241,18 +3274,27 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       if (!observation.merged) {
         const unpublishable = hold('check');
         if (unpublishable) held ??= unpublishable;
-        else if (typeof github.mergeQueueState === 'function') {
-          // The check and GitHub's queue move together (GY-258): an authorized, requested head is
-          // published as passed and handed to GitHub to merge; anything else is failed and taken out.
-          const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
-          if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
-        }
-        else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
-        // The landability verdict is recomputed from this observation's facts and published as its
-        // one required check on the head (GY-887); an unchanged verdict writes nothing.
-        if (!unpublishable && typeof github.publishLandable === 'function') {
-          const observed = work;
-          await github.publishLandable(observed, all.map(item => item.id === observed.id ? observed : item), success => guard(observed, success)());
+        else {
+          // The landability verdict is recomputed from this observation's facts and published as its
+          // one required check on the head (GY-887); an unchanged verdict writes nothing.
+          // Publishing before gateMerge ensures GitHub sees the required check satisfied at enqueue time (GY-1050).
+          // Recomputing with the live store snapshot covers peer changes since job start (GY-1050).
+          if (typeof github.publishLandable === 'function') {
+            const peers = await engine.store.list();
+            const target = work;
+            const landable = await github.publishLandable(target, peers.map(item => item.id === target.id ? target : item), success => guard(target, success)(), true);
+            if (landable?.skipped) {
+              await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed);
+              return true;
+            }
+          }
+          if (typeof github.mergeQueueState === 'function') {
+            // The check and GitHub's queue move together (GY-258): an authorized, requested head is
+            // published as passed and handed to GitHub to merge; anything else is failed and taken out.
+            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
+          }
+          else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
         }
         // A merge-path repair whose normal merge is stalled may take the audited repair lane (GY-406).
         if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work, new Date(), guard(work, true));

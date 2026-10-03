@@ -66,4 +66,4 @@ The only admin-bypass merges (head-bound, App ruleset bypass):
 - A `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, on an approver's `master decide GY-N repair-merge REASON`; audited (`repair.merged`).
 - The main guard's [revert](github.md#optimistic-merges) of a confirmed required-suite failure's culprit (`optimistic.revert.*`), reopening it as rework.
 
-Unresolved review threads are reviewer inputs, not merge blockers (`reviewThreads`); approval lists each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
+Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approval lists each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

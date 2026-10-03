@@ -9,11 +9,9 @@ Claims last 120 s; renew every ≤30 s. Owner mutations carry the epoch; expired
 
 ### Push credential
 
-Workers never push with the host's `gh` login; their session bus is masked (GY-999). Before a worker starts, the launcher mints a credential into `worker-sessions/GY-N-EPOCH` beside the profile's credential file (0700, files 0600), sets `GH_CONFIG_DIR` there, empties `GH_TOKEN`/`GITHUB_TOKEN`, resets git credential helpers to that token and pushes ssh origins over https; a launch that cannot mint one is refused and its claim released. `POST /api/work/UUID/push-credential` `{"epoch": N}` (lease holder only; CLI `graphyard push-credential GY-N EPOCH DIR`) mints an unstored repository Graphyard App installation token (`contents`, `pull_requests`, `workflows` write, as a base sync may carry a workflow change; on a 422 for `workflows` it retries once without it) expiring by the **lease bound** (claim plus the 4-hour time box); none for a lapsed, submitted or overdue epoch, rechecked after minting. `watch` re-mints it within 15 minutes of expiry, revoking the old one, and revokes and removes it at session end (unconfirmed revocations wait in `revoke.json`); a killed supervisor's is revoked at the profile's next launch.
+Workers never push with the host's `gh` login; the session bus is masked. The launcher mints a credential in `worker-sessions/GY-N-EPOCH` (0700, files 0600), sets `GH_CONFIG_DIR`, empties `GH_TOKEN`/`GITHUB_TOKEN`, and sets git credentials to push https. `POST /api/work/UUID/push-credential` `{"epoch": N}` (lease holder only; `graphyard push-credential GY-N EPOCH DIR`) mints an unstored GitHub App token (`contents`, `pull_requests`, `workflows` write; retries without `workflows` on 422) expiring by the 4-hour lease bound; none for lapsed, submitted or overdue epochs. `watch` re-mints within 15 minutes of expiry and revokes on session end. A base merge queue allowing App bypass refuses token minting (409; transient ruleset read: 502).
 
-**Limitation (GY-1066):** no token is minted (409) while the base's merge queue lets the App bypass it or hides its bypass list, so such a repository launches no worker until workers push as a separate, non-exempt App (not yet provided). A transient ruleset read failure is a retryable 502.
-
-An attempt blocked by a GitHub credential failure (git or `gh` refusal, or a 401 naming GitHub) ends next cycle, keeping its branch, and relaunches with a fresh credential; like an overrun time box, relaunches wait 5, then 15 minutes, and a third in a row holds the item for an approver.
+GitHub credential failures end the attempt and relaunch with a fresh credential (backoff 5, then 15 minutes; three hold for an approver).
 
 ## How a lease ends
 

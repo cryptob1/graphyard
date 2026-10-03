@@ -16,19 +16,19 @@ A card stops at its first refusing gate, naming what is missing.
 
 ## Shared project memory
 
-Every worker, reviewer and producer starts with a role-filtered project-memory digest in its first request (≤500 words):
-- Approved decisions and reasons; operator answers.
-- Recurring fault classes and remedies.
-- Merges after the base with changed files (last 24 hours when unremembered).
+Workers, reviewers and producers receive a role-filtered project-memory digest in their first request (≤500 words):
+- Decisions and reasons; operator answers.
+- Recurring faults and remedies.
+- Merges after the base with changed files (last 24 hours).
 
-The loop updates memory from applied decisions, human answers, recurring faults and merges—never agent claims—persisting `.graphyard/project-memory.json`. `master status` reports `projectMemory`.
+The loop updates memory from applied decisions, operator answers, faults and merges, persisting `.graphyard/project-memory.json`. `master status` reports `projectMemory`.
 
 ## Risk lanes
 
 `src/model/policy.ts` assigns each item a **risk lane** by changed paths; `master status` shows its p50 target:
-- **High** (4 h): schema, persistence, auth, credentials, principals, public API, operator agent, proof grants, install, deploy, unobserved changes. Adds `manual:` attestations and two-party rework decisions.
-- **Medium** (60 min): default; adds producer `unit:`/`integration:` proofs.
-- **Low** (30 min): test-only, docs-only or single-module; required CI, one approval.
+- **High** (4 h): auth, credentials, principals, API, grants, install, deploy, schema. Adds `manual:` attestations and two-party rework decisions.
+- **Medium** (60 min): default; adds producer proofs.
+- **Low** (30 min): test/docs-only or single-module; required CI, one approval.
 
 Every lane requires `e2e:` proofs and bootstrap obligations; low and medium reworks need no approver.
 
@@ -48,8 +48,8 @@ Text equivalent: the operator sends human-only decisions; Herdr hosts master, sl
 
 Text equivalent: callers use the API; the engine applies each mutation in one locked Postgres transaction; the reconciliation worker syncs GitHub, publishes the check and merges; webhooks only wake jobs.
 
-- Gates are deterministic checks of `(PR, head SHA, base SHA)` under current policy; pushes or base changes void evidence.
+- Gates deterministically check `(PR, head SHA, base SHA)` under current policy; pushes or base changes void evidence.
 - Claims bump epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; latest trusted record per proof and candidate wins.
-- History is append-only; same-day retries replay.
-- Graphyard merges only the exact authorized candidate, once; any other merge is a permanent violation. Merge is not [delivery](delivery.md).
+- History is append-only; retries replay.
+- Graphyard merges only the exact authorized candidate, once. Merge is not [delivery](delivery.md).
