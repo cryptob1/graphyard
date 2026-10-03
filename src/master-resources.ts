@@ -957,6 +957,11 @@ export function hostMemoryAttention(state: HostMemoryState | null | undefined): 
     ...agentOwner('master', 'Let running verification finish or stop what holds the memory named here; master run resumes launches on its own once available memory is back above the floor, and GRAPHYARD_VERIFICATION_SLOTS on the host lowers how many full suites and type checks run at once') }];
 }
 
+/** Host memory rides the loop's cursor: `master status` judges it only while the loop runs. */
+export function loopMemoryAttention(cycling: { running: boolean; memory?: HostMemoryState | null } | null): AttentionItem[] {
+  return cycling?.running ? hostMemoryAttention(cycling.memory) : [];
+}
+
 /** Why no session may be launched on `host` now, or null: an executor's `launchHold` (GY-612). */
 export async function hostMemoryHold(host: string | null, read: () => Promise<HostMemoryReading | null> = readHostMemory, now: () => number = Date.now): Promise<string | null> {
   const reading = await read();
