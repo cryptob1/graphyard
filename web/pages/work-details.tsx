@@ -168,6 +168,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <details className="more-details" aria-label="Technical details"><summary>Technical details</summary>
       <h3>About this item</h3>
       <p>{item.description}</p>
+      {!!item.pendingFollowUps?.findings.length && <><h3>Pending follow-ups ({item.pendingFollowUps.findings.length})</h3><p className="muted">{item.pendingFollowUps.dropped ? item.pendingFollowUps.dropped.reason : item.pendingFollowUps.filed ? `Filed as ${item.pendingFollowUps.filed.item} once this item shipped.` : 'Review findings beyond the criteria, held here until this item ships; then they become its one follow-up item.'}</p><ul className="pending-follow-ups">{item.pendingFollowUps.findings.map((finding, index) => <li key={index}>{finding.text}</li>)}</ul></>}
       <dl className="facts">
         <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>
       </dl>

@@ -138,7 +138,8 @@ export function resourceReport(readings: ResourceReading[], lastReclaim: unknown
   const pressed = readings.filter(reading => reading.state === 'low' || reading.state === 'exhausted');
   return {
     summary: `${readings.length} resource reading(s): ${pressed.length ? pressed.map(reading => `${reading.id} ${reading.state}`).join(', ') : 'all within their warning lines'}${readings.some(reading => reading.state === 'unknown') ? `; unread: ${readings.filter(reading => reading.state === 'unknown').map(reading => reading.id).join(', ')}` : ''}`,
-    readings: readings.map(({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, waiting }) => ({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, ...(waiting === undefined ? {} : { waiting }) })),
+    readings: readings.map(({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, waiting, overdue, advisory }) => ({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable,
+      ...(waiting === undefined ? {} : { waiting }), ...(overdue === undefined ? {} : { overdue }), ...(advisory ? { advisory } : {}) })),
     lastReclaim,
   };
 }

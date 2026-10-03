@@ -60,6 +60,90 @@ test('GitHub adapter binds observations to repository, base, current reviews, an
   f.pr.base.ref = 'other'; await assert.rejects(f.github.observe(f.work), /unmanaged/);
   f.pr.base.ref = 'main'; f.pr.head.repo.full_name = 'attacker/fork'; await assert.rejects(f.github.observe(f.work), /same-repository/);
 });
+test('GY-1060: a required status context is read as a commit status, and protection and rulesets are read once across observations', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  f.github.request = async (path, method, body) => {
+    if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+    if (path.startsWith('/rules/branches/')) { f.calls.push({ path, method: method ?? 'GET', body }); return [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'secrets', integration_id: 77 }] } }]; }
+    if (path === `/commits/${head}/status?per_page=100&page=1`) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'error' }, { context: 'unrequired', state: 'failure' }] }; }
+    return request(path, method, body);
+  };
+  const obs = await f.github.observe(f.work);
+  assert.deepEqual(obs.requiredChecks, [{ name: 'ci/legacy', appId: null }, { name: 'secrets', appId: 77 }]);
+  assert.deepEqual(obs.checks, [{ name: 'test', result: 'success', appId: 15368, id: 9 }, { name: 'ci/legacy', result: 'failure', appId: 0, source: 'status' }],
+    'only the required context no check run reports is read from statuses, an error as a failure');
+  await f.github.observe(f.work);
+  const reads = (pattern: RegExp) => f.calls.filter(call => pattern.test(call.path)).length;
+  assert.equal(reads(/\/protection$/), 1, 'the second observation reuses the protection read');
+  assert.equal(reads(/^\/rules\/branches\//), 1, 'and the ruleset read');
+  assert.equal(reads(/\/status\?/), 1, 'a settled terminal status is cached per head and reused across observations');
+  await f.github.protection(); await f.github.protection();
+  assert.equal(reads(/\/protection$/), 3, 'a direct protection read is never shared');
+});
+test('GY-1060: every page of the combined status is read, and another app\'s run of a required context does not hide its status', async () => {
+  const f = fixture(), request = f.github.request.bind(f.github);
+  const filler = Array.from({ length: 100 }, (_, index) => ({ context: `other/${index}`, state: 'success' }));
+  f.github.request = async (path, method, body) => {
+    if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+    if (path.startsWith('/rules/branches/')) return [];
+    if (path.startsWith(`/commits/${head}/status?`)) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: path.endsWith('&page=1') ? filler : [{ context: 'ci/legacy', state: 'success' }] }; }
+    if (path.includes('/check-runs') && !path.includes('check_name=')) {
+      const runs = await request(path, method, body);
+      return { check_runs: [...runs.check_runs, { id: 30, name: 'ci/legacy', status: 'queued', conclusion: null, app: { id: 4242 } }] };
+    }
+    return request(path, method, body);
+  };
+  const obs = await f.github.observe(f.work);
+  assert.deepEqual(obs.checks.filter(check => check.name === 'ci/legacy').map(check => [check.appId, check.result, check.source]), [[4242, 'queued', undefined], [0, 'success', 'status']],
+    'the status on the second page is read beside the stray run');
+  assert.equal(f.calls.filter(call => call.path.startsWith(`/commits/${head}/status?`)).length, 2);
+});
+test('GY-1060: pending statuses re-read, finished PRs skip status reads, and status read errors fail observation', async () => {
+  // 1. Pending statuses are re-read across observations (not cached as terminal)
+  {
+    const f = fixture(), request = f.github.request.bind(f.github);
+    f.github.request = async (path, method, body) => {
+      if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+      if (path.startsWith('/rules/branches/')) return [];
+      if (path === `/commits/${head}/status?per_page=100&page=1`) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'pending' }] }; }
+      return request(path, method, body);
+    };
+    const obs1 = await f.github.observe(f.work);
+    assert.deepEqual(obs1.checks.filter(c => c.name === 'ci/legacy'), [{ name: 'ci/legacy', result: 'pending', appId: 0, source: 'status' }]);
+    await f.github.observe(f.work);
+    const reads = (pattern: RegExp) => f.calls.filter(call => pattern.test(call.path)).length;
+    assert.equal(reads(/\/status\?/), 2, 'a pending status is re-read on the next observation');
+  }
+  // 2. Gated on open and unmerged PRs (Finding 20)
+  {
+    const f = fixture(), request = f.github.request.bind(f.github);
+    f.github.request = async (path, method, body) => {
+      if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+      if (path.startsWith('/rules/branches/')) return [];
+      if (path.startsWith('/pulls/') && !path.includes('/reviews') && !path.includes('/files')) {
+        const pr = await request(path, method, body);
+        return { ...pr, state: 'closed', merged: true };
+      }
+      if (path.startsWith(`/commits/${head}/status?`)) { f.calls.push({ path, method: method ?? 'GET', body }); return { statuses: [{ context: 'ci/legacy', state: 'success' }] }; }
+      return request(path, method, body);
+    };
+    const obs = await f.github.observe(f.work);
+    const reads = (pattern: RegExp) => f.calls.filter(call => pattern.test(call.path)).length;
+    assert.equal(reads(/\/status\?/), 0, 'a closed or merged PR skips requiredStatuses reads');
+    assert.equal(obs.checks.some(c => c.name === 'ci/legacy'), false);
+  }
+  // 3. Status read errors are not swallowed (Finding 23)
+  {
+    const f = fixture(), request = f.github.request.bind(f.github);
+    f.github.request = async (path, method, body) => {
+      if (path.includes('/protection')) { const p = await request(path, method, body); return { ...p, required_status_checks: { ...p.required_status_checks, contexts: ['ci/legacy'] } }; }
+      if (path.startsWith('/rules/branches/')) return [];
+      if (path.startsWith(`/commits/${head}/status?`)) throw new Error('GitHub status endpoint 502 Bad Gateway');
+      return request(path, method, body);
+    };
+    await assert.rejects(f.github.observe(f.work), /GitHub status endpoint 502 Bad Gateway/, 'status read errors fail the observation rather than being swallowed');
+  }
+});
 test('GitHub adapter retains retry history in deterministic check-run identity order', async () => {
   const f = fixture(), request = f.github.request.bind(f.github);
   f.github.request = async (path, method, body) => path.includes('/check-runs')
@@ -221,7 +305,9 @@ test('the speculative tip is merged onto the candidate branch and published unde
   assert.equal(speculation.ref, 'refs/graphyard/queue/gy-41');
   assert.deepEqual(speculation.predecessors, ['GY-40']);
   const merge = f.calls.find(call => call.path === '/merges')!;
-  assert.deepEqual(merge.body, { base: 'graphyard/task', head: predictedBase, commit_message: 'Graphyard speculative tip for GY-41 behind GY-40' });
+  // Built on the scratch branch, then the candidate branch is moved to it in one push (GY-1087).
+  assert.deepEqual(merge.body, { base: 'graphyard-merge-check/gy-41', head: predictedBase, commit_message: 'Graphyard speculative tip for GY-41 behind GY-40' });
+  assert.deepEqual(f.calls.filter(call => call.path === '/git/refs/heads/graphyard/task').map(call => [call.method, call.body]), [['PATCH', { sha: speculativeTip, force: true }]]);
   const ref = f.calls.find(call => call.path === '/git/refs/graphyard/queue/gy-41')!;
   assert.equal(ref.method, 'PATCH'); assert.deepEqual(ref.body, { sha: speculativeTip, force: true });
 });
