@@ -111,6 +111,10 @@ const commands = {
   // verdict: the decision is recomputed here from the item's own criteria and the repository's
   // documentation rule, exactly as `autosettle` recomputes containment death.
   autoscope: z.object({ epoch }).strict(),
+  // The master loop recording that dispatching the item keeps failing for one unchanged cause
+  // (GY-1078): the cause becomes the item's blocker, so nothing dispatches it again until an
+  // operator clears it. It needs no lease — no attempt is running — and is refused while one is.
+  dispatchblock: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
   // scope syntax; the merge queue carries a proof across its own authored tip only inside it.
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
@@ -1163,6 +1167,11 @@ export class Engine {
           work.scopeRequest = mergedScopeRequest(work.scopeRequest, { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString(),
             ...(data.remove?.length ? { remove: data.remove } : {}), ...(data.criteria?.length ? { criteria: data.criteria } : {}) }, work.plannedFiles);
         }
+      }
+      if (command === 'dispatchblock') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; a dispatch failure is recorded only while no attempt holds the item`, 409);
+        work.blocker = data.reason; recordIntervention(work, 'blocked');
       }
       if (command === 'autoscope') {
         // The loop asks, the control plane decides. The verdict is recomputed here from the item's

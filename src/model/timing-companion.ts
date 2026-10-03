@@ -11,10 +11,13 @@ import type { ScopeFile } from './work.js';
  */
 export const timingBaselinePath = 'tests/helpers/timing-baseline.json';
 
+/** A test file whose execution duration is tracked in the baseline: top-level tests/*.test.ts. */
+export const timedTestFile = (path: string) => testFile(path) && /^tests\/[^/]+\.test\.ts$/.test(path);
+
 /** The test files a change adds, changes or removes: the files whose baseline lines it may write. */
 export const changedTestFiles = (files: readonly { path: string; previousPath?: string; status?: string }[]) =>
-  [...new Set(files.filter(file => file.status !== 'unchanged').flatMap(file => [file.path, ...(file.previousPath ? [file.previousPath] : [])]))]
-    .filter(path => path !== timingBaselinePath && testFile(path));
+  [...new Set(files.filter(file => file.status !== 'unchanged').flatMap(file => [file.path, ...(file.previousPath && file.status !== 'copied' ? [file.previousPath] : [])]))]
+    .filter(path => path !== timingBaselinePath && timedTestFile(path));
 
 export interface TimingCompanion { allowed: boolean; detail: string }
 const canonical = (value: unknown) => JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.keys(entry).sort().map(key => [key, entry[key]])) : entry);
@@ -42,7 +45,7 @@ export function timingBaselineCompanion(base: string, head: string, tests: reado
 
 /** True when the item's planned scope or observed diff holds a test file, so the baseline is implied by it. */
 export const addsTestFile = (item: { plannedFiles?: readonly string[]; observation?: { files?: readonly string[] } | null }) =>
-  (item.plannedFiles ?? []).some(planned => { const scope = pathScope(planned); return scope.path !== timingBaselinePath && (scope.prefix ? /(^|\/)(tests?|__tests__|browser-tests|spec)\//.test(scope.path) : testFile(scope.path)); })
+  (item.plannedFiles ?? []).some(planned => { const scope = pathScope(planned); return scope.path !== timingBaselinePath && (scope.prefix ? /^tests\//.test(scope.path) : timedTestFile(scope.path)); })
   || changedTestFiles((item.observation?.files ?? []).map(path => ({ path }))).length > 0;
 
 /**
@@ -53,6 +56,7 @@ export const addsTestFile = (item: { plannedFiles?: readonly string[]; observati
 export async function judgeTimingCompanion(files: ScopeFile[], read: (sha: string) => Promise<string | null>, planned: (path: string) => boolean = () => false) {
   const file = files.find(entry => entry.path === timingBaselinePath);
   if (!file || planned(file.path) || file.status === 'removed' || !file.sha || !file.baseSha || file.sha === file.baseSha) return;
+  const inScopeTests = files.filter(f => planned(f.path) || f.status === 'added' || f.baseSha === null);
   const [base, head] = await Promise.all([read(file.baseSha), read(file.sha)]);
-  if (base !== null && head !== null) file.companion = timingBaselineCompanion(base, head, changedTestFiles(files));
+  if (base !== null && head !== null) file.companion = timingBaselineCompanion(base, head, changedTestFiles(inScopeTests));
 }
