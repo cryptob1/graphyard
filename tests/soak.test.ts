@@ -21,6 +21,7 @@ import { readControlPlaneClock, unmeasured } from '../src/master/containment.js'
 import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { dispatchFailureBlockAfter } from '../src/daemon/dispatch-failures.js';
+import { capBindingPrefix } from '../src/daemon/reblocked-attempts.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -190,6 +191,8 @@ const basePlan = {
 };
 /** GY-430: the main day's item whose auto-merge GitHub holds BLOCKED past the bound: one with no other merge-path fault. */
 const blockedMergeItem = 6;
+/** GY-1057: the binding of the rework the cap day interrupts just before its cap request. */
+const interruptedBeforeCap = 'soak:interrupted-before-cap';
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
@@ -425,7 +428,9 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number; neverFrom?: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+  /** GY-1057: the lane item's first application is interrupted by a server fault, not refused; `atCap` interrupts a rework on other grounds just before the cap's first request. */
+  laneInterrupt?: { review: boolean; atCap: boolean };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -477,14 +482,19 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       : observation;
   };
   // Its first lane application is refused by the engine, as a rework the control plane cannot
-  // apply at the moment it is requested would be; every later one goes through.
-  const laneApplications: { key: string; refused: boolean; at: number }[] = [];
+  // apply at the moment it is requested would be; every later one goes through. Under
+  // `laneInterrupt` (GY-1057) a server fault interrupts it instead — no outcome is recorded, and the
+  // next request resumes it — and `interruptNext` arms that fault for one later application.
+  const laneApplications: { key: string; refused: boolean; interrupted: boolean; at: number }[] = [];
+  let interruptNext = false, capInterruptInjected = false;
   const executeAll = engine.execute.bind(engine);
   engine.execute = (async (actor, command, id, input, key, context) => {
     const laneWork = plan.lowLane ? items[plan.lowLane - 1] : undefined;
     if (command === 'rework' && laneWork && id === laneWork.id && /approved by graphyard-risk-lane/.test(actor.displayName ?? '')) {
-      const refused = !laneApplications.length;
-      laneApplications.push({ key: laneWork.key, refused, at: clock.now() });
+      const first = !laneApplications.length, interrupted = interruptNext || (first && !!options.laneInterrupt?.review), refused = first && !interrupted;
+      interruptNext = false;
+      laneApplications.push({ key: laneWork.key, refused, interrupted, at: clock.now() });
+      if (interrupted) throw new Error(`Simulated: a server fault interrupted the application of ${laneWork.key}'s rework`);
       if (refused) throw new Refusal(`Simulated: ${laneWork.key}'s rework could not be applied at the moment it was requested`, 409);
     }
     return executeAll(actor, command, id, input, key, context);
@@ -703,8 +713,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const idling = options.reassigned === n && attempt === 1;
     // GY-999: a session whose push is refused for want of a valid GitHub login blocks on it. The
     // recovering item's first two attempts do; the other item's every attempt does — a failure no
-    // freshly minted credential cures, which the retry ladder must bound.
-    const credentialBlocks = !!options.credentialBlocked && ((n === options.credentialBlocked.recovers && attempt <= 2) || n === options.credentialBlocked.never);
+    // freshly minted credential cures, which the retry ladder must bound — from its first attempt, or
+    // from `neverFrom`, after an earlier attempt submitted (GY-1057: so its change is observed).
+    const credentialBlocks = !!options.credentialBlocked && ((n === options.credentialBlocked.recovers && attempt <= 2) || (n === options.credentialBlocked.never && attempt >= (options.credentialBlocked.neverFrom ?? 1)));
     const pane = herdr.open(profile.agentName, idling ? 'done' : 'working', path);
     sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: idling ? Number.MAX_SAFE_INTEGER : clock.now() + plan.workMs,
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
@@ -1010,9 +1021,16 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge, refuseMerge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
-    decide: (work, action, reason, input = {}) => {
+    decide: async (work, action, reason, input = {}) => {
       const bound = decisionInput(action, work, input);
       decideCalls.push({ key: work.key, action, reason, input: bound });
+      // GY-1057: just before the cap's first request, a rework on other grounds is requested and its
+      // lane application interrupted, so the cap's request finds it outstanding and resumes it.
+      if (options.laneInterrupt?.atCap && !capInterruptInjected && action === 'rework' && String((bound as { binding?: unknown }).binding ?? '').startsWith(capBindingPrefix)) {
+        capInterruptInjected = true; interruptNext = true;
+        const injected = await api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, { binding: interruptedBeforeCap }), reason: 'Simulated: a rework on other grounds whose application a server fault interrupts' }).then(() => null, (error: Error) => error);
+        assert.match(String(injected?.message), /\(500\)/, 'the injected rework was interrupted, not applied');
+      }
       return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: bound, reason });
     },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
@@ -2814,6 +2832,44 @@ test('unit:soak-invariants-hold — sessions blocked on a GitHub credential fail
   assert.match(state.actions[`retry:held:${held.id}`]?.detail ?? '', /held: 3 attempts in a row ended without submitting.*credential-blocked attempt on epoch 1.*credential-blocked attempt on epoch 3/, 'the hold names every credential failure');
   assert.ok(state.actions[`retry:cap-request:${held.id}`], 'the loop asked for the decision that alone resumes the item, rather than relaunching it');
   assert.ok(theirs.every(session => session.state === 'reclaimed'), 'no blocked session was left holding its lease');
+});
+
+test('unit:soak-invariants-hold — a low-lane item held at the attempt cap has its cap rework applied by the control plane as it is requested, with no approver session, and an interrupted lane rework is resumed exactly once', { timeout: 300_000 }, async () => {
+  // GY-1057: the attempt-cap branch that records a lane-applied rework without launching an
+  // approver rides the soak too. The never-curing item of the credential day rides the low lane
+  // here: its first attempt submits a one-module change and is sent back by its review, and every
+  // attempt after it is credential-blocked, so it reaches the cap as an observed low item. Two
+  // server faults interrupt lane applications, leaving a rework approved with no outcome: the review
+  // rework's first application, which the loop's next request resumes; and a rework on other
+  // grounds just before the cap's first request, which that request resumes instead of recording
+  // the cap's own — the cap step settles on it, and requests its own round once more, not every cycle.
+  const recovers = 2, never = 3;
+  const { items, violations, failures, state, laneApplications, approverWorks, decideCalls } = await simulateDay({
+    hours: 8, credentialBlocked: { recovers, never, neverFrom: 2 }, laneInterrupt: { review: true, atCap: true },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([never]), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 }, lowLane: never },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds across the interrupted and the lane-applied cap reworks');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  const held = items[never - 1];
+  assert.match(state.actions[`retry:held:${held.id}`]?.detail ?? '', /held: 3 attempts in a row ended without submitting/, 'the item reached the attempt cap');
+  assert.deepEqual(approverWorks.filter(key => key === held.key), [], 'no approver session was launched for the low-lane reworks');
+  // The credential failure never cures, so the item reaches the cap again after each applied
+  // round; every later cap is requested once and applied as requested.
+  const outcomes = laneApplications.map(entry => entry.interrupted ? 'interrupted' : entry.refused ? 'refused' : 'applied');
+  assert.deepEqual(outcomes.slice(0, 5), ['interrupted', 'applied', 'interrupted', 'applied', 'applied'], 'each interrupted application was resumed exactly once, and the cap\'s own round was applied after');
+  assert.ok(outcomes.slice(5).every(outcome => outcome === 'applied'), `no later application was interrupted or refused: ${outcomes.join(', ')}`);
+  const reworks = ((await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(held.id)}/decisions`)).decisions as { action: string; state: string; input?: { binding?: string } }[]).filter(entry => entry.action === 'rework');
+  assert.equal(reworks.length, laneApplications.length - 2, 'one decision per application, the two interrupted ones resumed rather than recorded again');
+  assert.ok(reworks.every(entry => entry.state === 'applied'), `every rework applied, none failed: ${JSON.stringify(reworks.map(entry => entry.state))}`);
+  assert.equal(reworks[1].input?.binding, interruptedBeforeCap, 'the second is the rework interrupted before the cap');
+  const capBindings = reworks.slice(2).map(entry => entry.input?.binding ?? '');
+  assert.ok(capBindings.every(binding => binding.startsWith(capBindingPrefix)), 'every later rework is a cap round');
+  assert.equal(new Set(capBindings).size, capBindings.length, 'one applied round per cap');
+  const capCalls = decideCalls.filter(call => call.key === held.key && String((call.input as { binding?: unknown }).binding ?? '').startsWith(capBindingPrefix)).map(call => (call.input as { binding: string }).binding);
+  assert.deepEqual(capCalls, [capBindings[0], ...capBindings], 'the first cap was requested twice — once resuming the interrupted rework, once for its own round — and every cap after it once: never every cycle');
+  const capRequest = state.actions[`retry:cap-request:${held.id}`];
+  assert.equal(capRequest?.state, 'done', capRequest?.detail);
+  assert.match(capRequest.detail, /its risk lane needs no approver, and the control plane applied it at once/, 'the cap branch recorded its own lane-applied rework without launching an approver');
 });
 
 test('unit:soak-invariants-hold — launches that keep failing for one cause are blocked after three with git\'s error named, a refused block is asked for again only after its backoff, the item is dispatched again once unblocked, an item failing for changing causes is never blocked, and every invariant holds', { timeout: 300_000 }, async () => {

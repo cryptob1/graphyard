@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { Refusal, demand, itemLane, resolveEscalation, reworkNeedsApprover, standingEscalations, type Principal, type Work } from '../model.js';
+import { Refusal, demand, interruptedLaneRework, itemLane, laneApprover, resolveEscalation, reworkNeedsApprover, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
@@ -57,24 +57,35 @@ export async function requestDecision(services: Services, caller: Principal, id:
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
   // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): once recorded,
-  // it is applied at once with the lane as its ground. A replayed request whose application was
-  // interrupted resumes it; a high-lane rework waits for its independent approver as ever.
+  // it is applied at once with the lane as its ground. Any later rework request on the item resumes
+  // one whose application was interrupted; a high-lane rework waits for its independent approver as ever.
   const requested = await recordRequest(services, caller, id, data, input, key, fingerprint);
-  return requested.action === 'rework' && (requested.state === 'requested' || (requested.state === 'approved' && requested.approvedBy === laneApprover))
+  return requested.action === 'rework' && (requested.state === 'requested' || interruptedLaneRework(requested))
     ? applyLaneRework(services, requested) : requested;
 }
 
-/** The ledger's approver of a rework its lane applied without an approver decision (GY-883). */
-export const laneApprover = 'graphyard-risk-lane';
+export { laneApprover } from '../model.js';
 
 async function applyLaneRework(services: Services, requested: DecisionRecord): Promise<DecisionRecord> {
   let applying: { decision: DecisionRecord; work: Work; reason: string } | null = null;
   const settled = await services.engine.store.transaction(async db => {
     const work = await findWork(db, requested.workId); demand(work, 'Work item not found', 404);
     const decision = (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
-    const resuming = decision.state === 'approved' && decision.approvedBy === laneApprover;
+    const resuming = interruptedLaneRework(decision);
     if (!resuming && (decision.state !== 'requested' || reworkNeedsApprover(work!))) return decision;
     const lane = itemLane(work!), reason = `the ${lane} risk lane applies a rework without an approver decision (GY-883)`;
+    // The requester's authority is re-read here, as an approver's application re-reads it (GY-1057):
+    // an identity revoked or narrowed since it asked no longer carries its request. No approver will
+    // judge it, so the lane settles it rather than leave it standing — as stale, the race it is, and
+    // never as a refusal: it judged no rework, so standingRefusal must not hold it against a live
+    // requester asking for the same one.
+    try { await requesterAuthority(services, db, decision, work!); }
+    catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+      await record(db, work!, laneApprover, 'decision.stale', { id: decision.id, action: decision.action, reason: `${error.message}; the ${lane} risk lane did not apply it`,
+        expected: { requester: decision.requestedBy, authority: 'live' }, current: { requester: decision.requestedBy, authority: error.message }, observedBy: { id: laneApprover, role: 'risk-lane' } });
+      return (await readDecisions(db, work!)).find(entry => entry.id === decision.id)!;
+    }
     if (!resuming) {
       const precondition = decisionPrecondition(decision.action, decision.input, work!);
       if (precondition) return decision;
@@ -88,8 +99,17 @@ async function applyLaneRework(services: Services, requested: DecisionRecord): P
   let outcome: { kind: string; details: object };
   try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, { id: laneApprover, role: 'admin' } as Principal, reason) } }; }
   catch (error) {
-    if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
-    outcome = { kind: 'decision.failed', details: { error: error.message } };
+    if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) {
+      // A server fault leaves the rework approved for the next request to resume. Each one is
+      // counted on the ledger (GY-1057), so a fault that recurs on every resume settles it failed
+      // at the bound instead of answering every later request with a 500 forever.
+      const faults = await services.engine.store.transaction(async db => {
+        await record(db, work, laneApprover, 'decision.interrupted', { id: decision.id, action: decision.action, error: message(error) });
+        return Number((await db.query("SELECT count(*) AS n FROM events WHERE work_id=$1 AND kind='decision.interrupted' AND payload->>'id'=$2", [work.id, decision.id])).rows[0].n);
+      });
+      if (faults < laneInterruptionBound) throw error;
+      outcome = { kind: 'decision.failed', details: { error: `its application was interrupted by a server fault ${faults} times, the last: ${message(error)}` } };
+    } else outcome = { kind: 'decision.failed', details: { error: error.message } };
   }
   return services.engine.store.transaction(async db => {
     await record(db, work, laneApprover, outcome.kind, { id: decision.id, ...outcome.details });
@@ -97,12 +117,26 @@ async function applyLaneRework(services: Services, requested: DecisionRecord): P
   });
 }
 
+/** How many server faults may interrupt one lane rework's application before it is recorded failed (GY-1057). */
+export const laneInterruptionBound = 3;
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+
 async function recordRequest(services: Services, caller: Principal, id: string, data: z.infer<typeof decisionRequestSchema>, input: any, key: string, fingerprint: string): Promise<DecisionRecord> {
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
+    // A lane-approved rework whose application was interrupted is resumed by the next rework request
+    // on the item, whoever asks and under whatever key (GY-1057): no approver can resume it, and it
+    // holds the item's one rework slot, so it is returned for requestDecision to finish.
+    // The new key's receipt names it as any other path's does, so a replay of that key returns this
+    // decision — as it stands once resumed — rather than being evaluated as a fresh request.
+    const interrupted = data.action === 'rework' ? (await readDecisions(db, work!)).find(interruptedLaneRework) : undefined;
+    if (interrupted) {
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(interrupted)]);
+      return interrupted;
+    }
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
     // The repair lane's decision names the fault it repairs (GY-406): a merge-path location. The
     // name is not matched against a ledger record (GY-428, declined): a merge left pending records no

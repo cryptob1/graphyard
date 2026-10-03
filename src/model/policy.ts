@@ -23,13 +23,20 @@ export type Lane = typeof lanes[number];
  * `src/server/`, beside the public-API routes and the assembler that wires them
  * (`src/server/index.ts`); the server bootstrap that loads credentials (`src/server/main.ts`), the
  * operator agent's credential handling (`src/operator-agent.ts`) and the proof-authority grants
- * (`src/proof-grants.ts`).
+ * (`src/proof-grants.ts`). The authority surfaces are high too (GY-1057): the engine every
+ * lifecycle mutation is dispatched through (`src/engine.ts`), which enforces identity and lease
+ * epochs; the two-party decision enforcement (`src/server/decision*.ts`, `src/model/approval.ts`);
+ * and the trusted-evidence chain — every GitHub workflow, which reads producer credentials and
+ * publishes the evidence merges rest on, and the protected scripts that plan, run and publish it.
  */
 export const highRiskPaths = [
   /^migrations\/schema/, /^auth\/credentials/,
   /^src\/store\//, /^src\/server\/(routes|auth|principals|index|main)/,
   /^src\/operator-agent\.ts$/, /^src\/proof-grants\.ts$/,
   /^src\/install\//, /^deploy\//, /^Dockerfile(\.|$)/, /^compose\.ya?ml$/,
+  /^src\/engine\.ts$/, /^src\/server\/decision/, /^src\/model\/approval\.ts$/,
+  /^\.github\/workflows\//,
+  /^scripts\/(contracts|acceptance-contract|unit-contract|enumerate-ci-proofs|prepare-acceptance|run-acceptance|run-unit-acceptance|publish-acceptance)\.mjs$/,
 ] as const;
 
 /** The shipped low-risk path policy: a change only of tests or of docs is low. */
@@ -71,6 +78,9 @@ export const laneSpeedTargets: Record<Lane, number> = { low: 30 * 60_000, medium
  * one approving review — the producer-run proofs and manual attestations its criteria name are not
  * required of it, and its reworks are applied without an approver; medium adds its producer-run
  * proofs; high keeps the full path: producer proofs, manual attestations and approver decisions.
+ * No lane waives an `e2e:` proof or an inherited bootstrap obligation (GY-1057): a low item whose
+ * criteria name an `e2e:` proof lands on its CI checks, one approving review and that proof — an
+ * item that should land on the first two alone names no `e2e:` proof.
  */
 export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
 export function laneRequirements(lane: Lane): LaneRequirements {
@@ -118,6 +128,17 @@ export function itemLane(work: { observation?: Parameters<typeof observedPaths>[
  * change nobody has observed rides high, so it keeps its approver.
  */
 export const reworkNeedsApprover = (work: Parameters<typeof itemLane>[0]) => laneRequirements(itemLane(work)).reworkApprover;
+
+/** The ledger's approver of a rework its lane applied without an approver decision (GY-883). */
+export const laneApprover = 'graphyard-risk-lane';
+
+/**
+ * A rework its lane approved whose application never recorded an outcome — the server stopped, or
+ * a fault interrupted the engine call (GY-1057). It is not standing for an approver: none can
+ * resume it, so the loop requests the rework again and the control plane resumes this one.
+ */
+export const interruptedLaneRework = (decision: { action: string; state: string; approvedBy?: string | null }) =>
+  decision.action === 'rework' && decision.state === 'approved' && decision.approvedBy === laneApprover;
 
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a
