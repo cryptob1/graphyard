@@ -2450,6 +2450,15 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = landableCheckRun(work, all, new Date());
     if (!body) return;
     const success = body.conclusion === 'success';
+
+    // If skipOnMoved is requested (e.g. in processJob), check whether the PR head or base has moved
+    // before relying on cached verdicts or writing new check runs (GY-1150).
+    if (skipOnMoved && work.candidate) {
+      const pr = await this.request(`/pulls/${work.candidate.pr}`);
+      const current = pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha;
+      if (!current) return { skipped: true };
+    }
+
     // Check in-memory cache and standing run before making PR reads (GY-1050).
     const cached = this.landableBodies.get(body.head_sha);
     if (landableCheckCurrent(cached, body)) return;
@@ -2458,11 +2467,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       this.cacheLandableBody(body.head_sha, body);
       return;
     }
-    if (success) {
-      const pr = await this.request(`/pulls/${work.candidate!.pr}`);
-      const current = pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha;
+    if (work.candidate && !skipOnMoved) {
+      const pr = await this.request(`/pulls/${work.candidate.pr}`);
+      const current = pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha;
       if (!current) {
-        if (skipOnMoved) return { skipped: true };
         requireCurrent(false, 'PR changed before the landability check was published; retry');
       }
     }

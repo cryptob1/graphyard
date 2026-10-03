@@ -223,8 +223,8 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   const blockers = [
     // The merge queue lands published speculative tips that are deliberately behind the base branch,
     // so GitHub's "require branches to be up to date" setting must stay off (see assertMergeProtection).
-    ...(checks?.strict === false ? [] : ['Require branches to be up to date before merging is enabled; the merge queue requires it off']),
-    ...(Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === CHECK_NAME && check?.app_id === config.githubAppId) ? [] : [`Required check ${CHECK_NAME} is not bound to Graphyard App ${config.githubAppId}`]),
+    ...(checks && checks.strict !== false ? ['Require branches to be up to date before merging is enabled; the merge queue requires it off'] : []),
+    ...(checks ? (Array.isArray(checks.checks) && checks.checks.some((check: any) => check?.context === CHECK_NAME && check?.app_id === config.githubAppId) ? [] : [`Required check ${CHECK_NAME} is not bound to Graphyard App ${config.githubAppId}`]) : []),
     ...(current?.enforce_admins?.enabled === true ? [] : ['Administrator enforcement is disabled']),
     ...(current?.allow_force_pushes?.enabled === true ? ['Force pushes are allowed on the managed base branch'] : []),
     ...(current?.allow_deletions?.enabled === true ? ['Deletion of the managed base branch is allowed'] : []),
@@ -248,7 +248,7 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   const repairBypass = queue ? { ruleset: mergeQueueRulesetName, actor: repairBypassActor(config.githubAppId), configured: bypass ? bypass.exact : null, observed: bypass?.actors ?? null } : null;
   const changes = [
     ...(conversationResolution ? ['required_conversation_resolution true to false'] : []),
-    ...(landable ? [] : [`required check ${LANDABLE_CHECK}: missing to required from App ${config.githubAppId}`]),
+    ...(!checks ? [`required status checks: missing to required (${GRAPHYARD_CHECKS.join(' and ')}) from App ${config.githubAppId}`] : (landable ? [] : [`required check ${LANDABLE_CHECK}: missing to required from App ${config.githubAppId}`])),
     ...(observed.requiredApprovals === protection.requiredApprovals ? [] : [`required_approving_review_count ${observed.requiredApprovals} to ${protection.requiredApprovals}`]),
     ...(observed.requireLastPushApproval === protection.requireLastPushApproval ? [] : [`require_last_push_approval ${observed.requireLastPushApproval} to ${protection.requireLastPushApproval}`]),
     ...(observed.dismissStaleReviews === protection.dismissStaleReviews ? [] : [`dismiss_stale_reviews ${observed.dismissStaleReviews} to ${protection.dismissStaleReviews}`]),
@@ -319,9 +319,13 @@ export function applyMergeQueue(config: { repository: string; baseBranch: string
  * The required status checks a write sets: every observed one as it is, with `graphyard/landable`
  * bound to the App (GY-887) in place of any entry of that name another producer could satisfy.
  */
-export function requiredStatusChecks(current: any, githubAppId: number) {
+export function requiredStatusChecks(current: any, githubAppId: number, bootstrapStatusChecks = false) {
   const observed = (current?.required_status_checks?.checks ?? []).map((check: any) => ({ context: String(check.context), app_id: check.app_id ?? null }));
-  return [...observed.filter((check: { context: string }) => check.context !== LANDABLE_CHECK), { context: LANDABLE_CHECK, app_id: githubAppId }];
+  const checks = observed.filter((check: { context: string }) => check.context !== LANDABLE_CHECK);
+  if (bootstrapStatusChecks && !checks.some((check: any) => check.context === CHECK_NAME)) {
+    checks.unshift({ context: CHECK_NAME, app_id: githubAppId });
+  }
+  return [...checks, { context: LANDABLE_CHECK, app_id: githubAppId }];
 }
 const logins = (list: any[] | undefined, field: 'login' | 'slug') => (list ?? []).map((entry: any) => entry[field]);
 /**
@@ -329,10 +333,10 @@ const logins = (list: any[] | undefined, field: 'login' | 'slug') => (list ?? []
  * has no subresource for that one setting — with every other observed setting kept as it is and
  * the review settings as desired.
  */
-export function conversationPayload(current: any, desired: ReviewProtection, githubAppId: number) {
+export function conversationPayload(current: any, desired: ReviewProtection, githubAppId: number, bootstrapStatusChecks = false) {
   const reviews = current?.required_pull_request_reviews, dismissal = reviews?.dismissal_restrictions, bypass = reviews?.bypass_pull_request_allowances, restrictions = current?.restrictions;
   return {
-    required_status_checks: { strict: current?.required_status_checks?.strict === true, checks: requiredStatusChecks(current, githubAppId) },
+    required_status_checks: { strict: current?.required_status_checks?.strict === true, checks: requiredStatusChecks(current, githubAppId, bootstrapStatusChecks) },
     enforce_admins: current?.enforce_admins?.enabled === true,
     required_pull_request_reviews: { required_approving_review_count: desired.requiredApprovals, dismiss_stale_reviews: desired.dismissStaleReviews, require_code_owner_reviews: reviews?.require_code_owner_reviews === true, require_last_push_approval: desired.requireLastPushApproval,
       ...(dismissal ? { dismissal_restrictions: { users: logins(dismissal.users, 'login'), teams: logins(dismissal.teams, 'slug'), apps: logins(dismissal.apps, 'slug') } } : {}),
@@ -370,7 +374,7 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   if (reviewChanges && plan.current.requireConversationResolution) {
     // Conversation resolution has no subresource: the whole protection is written back as observed,
     // with the review settings as desired and conversation resolution off.
-    run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`, '--input', '-'], JSON.stringify(conversationPayload(current, plan.desired, config.githubAppId)));
+    run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`, '--input', '-'], JSON.stringify(conversationPayload(current, plan.desired, config.githubAppId, !current?.required_status_checks)));
   } else if (reviewChanges) {
     // Only the review subresource changes; the App-bound check, the strict-off setting, and admin enforcement stay as observed.
     run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_pull_request_reviews`, '--input', '-'],
@@ -381,7 +385,7 @@ export async function applyProtection(config: { repository: string; baseBranch: 
     // If the branch had no required_status_checks subresource, GitHub returns 404 on PATCH; PUT the whole protection payload instead (GY-1050).
     if (!current?.required_status_checks) {
       run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`, '--input', '-'],
-        JSON.stringify(conversationPayload(current, plan.desired, config.githubAppId)));
+        JSON.stringify(conversationPayload(current, plan.desired, config.githubAppId, true)));
     } else {
       run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_status_checks`, '--input', '-'],
         JSON.stringify({ strict: current?.required_status_checks?.strict === true, checks: requiredStatusChecks(current, config.githubAppId) }));
