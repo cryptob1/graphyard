@@ -62,7 +62,7 @@ test('unit:sync-restores-out-of-scope — two out-of-scope edits are restored in
   const baseTip = git('rev-parse', 'refs/remotes/origin/main');
   const diff = () => [git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD')] as const;
   const [raw, numstat] = diff();
-  const refused = localScopeFindings(planned, raw, numstat).filter(finding => finding.refused).map(finding => finding.path).sort();
+  const refused = (await localScopeFindings(planned, raw, numstat)).filter(finding => finding.refused).map(finding => finding.path).sort();
   assert.deepEqual(refused, ['kept.txt', 'shared.txt']);
 
   // The shipped command itself (GY-1080): `sync GY-859 --restore` through its command harness, run
@@ -86,7 +86,7 @@ test('unit:sync-restores-out-of-scope — two out-of-scope edits are restored in
 
   // Only in-scope differences remain against the base.
   const [afterRaw, afterNumstat] = diff();
-  const after = localScopeFindings(planned, afterRaw, afterNumstat);
+  const after = await localScopeFindings(planned, afterRaw, afterNumstat);
   assert.deepEqual(after.map(finding => [finding.path, finding.kind]).sort(), [['in-scope.txt', 'in-scope'], ['new.txt', 'new']]);
   assert.equal(await readFile(join(worker, 'shared.txt'), 'utf8'), 'base\n');
   assert.equal(await readFile(join(worker, 'kept.txt'), 'utf8'), 'the base holds this\n');
@@ -112,7 +112,7 @@ test('unit:sync-restores-out-of-scope — an out-of-scope rename restores the or
   const baseTip = git('rev-parse', 'HEAD');
   git('mv', 'old-name.txt', 'new-name.txt'); git('commit', '--quiet', '-m', 'Rename');
   const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
-  const refused = localScopeFindings(planned, raw, numstat).filter(finding => finding.refused).map(finding => finding.path);
+  const refused = (await localScopeFindings(planned, raw, numstat)).filter(finding => finding.refused).map(finding => finding.path);
   assert.deepEqual(refused, ['old-name.txt']);
   // The `--restore` branch of sync: restore, classify again, and report a clean branch.
   // The exit code is read from a cleared slate, so an earlier test that set it cannot fail this one (GY-1080).
@@ -120,7 +120,7 @@ test('unit:sync-restores-out-of-scope — an out-of-scope rename restores the or
   const previousExitCode = process.exitCode;
   process.exitCode = undefined;
   let exitCode: typeof process.exitCode;
-  try { restoreAndReport(git, report => reports.push(report), { work: { key: 'GY-7', plannedFiles: planned }, baseBranch: 'main', baseTip, regenerated: [], generated: [], refused }); }
+  try { await restoreAndReport(git, report => reports.push(report), { work: { key: 'GY-7', plannedFiles: planned }, baseBranch: 'main', baseTip, regenerated: [], generated: [], refused }); }
   finally { exitCode = process.exitCode; process.exitCode = previousExitCode; }
   assert.equal(exitCode ?? 0, 0);
   assert.equal(reports.length, 1);
@@ -129,7 +129,7 @@ test('unit:sync-restores-out-of-scope — an out-of-scope rename restores the or
   assert.deepEqual(reports[0].refused, []);
   assert.match(reports[0].next, /plain git push \(a force push is never needed or allowed\)/);
   assert.equal(git('show', 'HEAD:old-name.txt'), git('show', `${baseTip}:old-name.txt`));
-  const after = localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'));
+  const after = await localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'));
   assert.ok(after.every(finding => !finding.refused));
 });
 
@@ -145,7 +145,7 @@ test('unit:sync-restores-out-of-scope — a refused filename that is valid paths
   await writeFile(join(directory, magic), 'edited out of scope\n');
   await writeFile(join(directory, 'in-scope.txt'), 'in scope, changed\n');
   git('add', '.'); git('commit', '--quiet', '-m', 'Worker changes');
-  const refused = localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD')).filter(finding => finding.refused).map(finding => finding.path);
+  const refused = (await localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'))).filter(finding => finding.refused).map(finding => finding.path);
   assert.deepEqual(refused, [magic]);
 
   assert.deepEqual(restoreOutOfScope(git, baseTip, refused), [magic]);
@@ -179,7 +179,7 @@ test('unit:sync-restores-out-of-scope — a refused submodule is restored to the
   at(join(worker, 'vendor/library'))('checkout', '--quiet', second);
   git('add', 'vendor/library'); git('commit', '--quiet', '-m', 'Bump the library');
   const pushed = git('rev-parse', 'HEAD');
-  const refused = localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD')).filter(finding => finding.refused).map(finding => finding.path);
+  const refused = (await localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'))).filter(finding => finding.refused).map(finding => finding.path);
   assert.deepEqual(refused, ['vendor/library']);
 
   assert.deepEqual(restoreOutOfScope(git, baseTip, refused), ['vendor/library']);
@@ -209,14 +209,14 @@ test('unit:sync-restores-out-of-scope — a submodule clone missing the base com
   const baseTip = git('rev-parse', 'HEAD');
   git('update-index', '--cacheinfo', `160000,${first},vendor/library`); git('commit', '--quiet', '-m', 'Worker pins the old library');
   const pushed = git('rev-parse', 'HEAD');
-  const refused = localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD')).filter(finding => finding.refused).map(finding => finding.path);
+  const refused = (await localScopeFindings(planned, git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD'))).filter(finding => finding.refused).map(finding => finding.path);
   assert.deepEqual(refused, ['vendor/library']);
 
   const reports: any[] = [];
   const previousExitCode = process.exitCode;
   process.exitCode = undefined;
   let exitCode: typeof process.exitCode;
-  try { restoreAndReport(git, report => reports.push(report), { work: { key: 'GY-7', plannedFiles: planned }, baseBranch: 'main', baseTip, regenerated: [], generated: [], refused }); }
+  try { await restoreAndReport(git, report => reports.push(report), { work: { key: 'GY-7', plannedFiles: planned }, baseBranch: 'main', baseTip, regenerated: [], generated: [], refused }); }
   finally { exitCode = process.exitCode; process.exitCode = previousExitCode; }
   assert.equal(exitCode, 1);
   assert.equal(reports.length, 1);

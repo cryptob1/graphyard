@@ -17,7 +17,7 @@ Gate: reviewer approval of the exact head plus required CI; threads are inputs. 
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` bounds changes: at `complete`, each new head and landing, non-new files must match the base byte-for-byte. Carried files (unlanded commits) never eject; only scope requests or audited revisions widen it.
+`plannedFiles` bounds changes: at `complete`, each new head and landing, files inside scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; every other file must match base byte-for-byte. Carried files (unlanded commits) never eject; only scope requests or audited revisions widen it.
 
 `evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals. Published as required check `graphyard/landable` (`success`, or `failure` with reasons), never a verdict input.
 

@@ -38,7 +38,7 @@ Once gated, a speculative tip pushed onto the candidate branch once and `refs/gr
 
 Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. On republication, the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch; never a person's, a moved head or changed patch.
 
-Before merging, a carried review missing from the PR re-posts the tip's reviewed head's latest approval (`review.carry-refreshed`); with none usable, `mergerefused` clears it and requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention; the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), judged in the high risk lane, applied in low/medium.
+Before merging, a carried review missing from the PR re-posts the tip's reviewed head's latest approval (`review.carry-refreshed`); with none usable, `mergerefused` clears it and requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention; the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), judged in the high risk lane, applied in low/medium; refusing rework lifts the refusal (`merge.refusal.lifted`). Each action fires once per recovery phase: never retried for good.
 
 ### Parallel tips
 

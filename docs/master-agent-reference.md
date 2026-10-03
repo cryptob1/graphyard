@@ -47,7 +47,7 @@ One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-
 
 A `resync` completes only on observations newer than claim: `POST /api/work/:id/resync` with `{ since }` wakes observation, reporting `observed`, `observedAt`, `job` (`wake: false` only reads); unobserved fails with `no observation newer than the claim was saved`. Unheld jobs stall after 30 min; held, failed or missing stall after three. Row bookkeeping (claim, renew, settle) never refuses prior observation reads.
 
-A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`). An item's throw fails only its `isolated:KIND:ITEM-ID` action.
+A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`). A failed snapshot read retries once after 0.5–1.5 s; a failed cycle waits min(interval, 30 s), doubling to the ceiling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
 ## Resources and disk
 
