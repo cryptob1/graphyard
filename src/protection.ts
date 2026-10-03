@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { defaultParallelTips } from './merge-queue.js';
 import { CHECK_NAME, nativeReviewRequired, reviewProviderOf, reviewProviders, type ReviewProvider, type Work } from './model.js';
 import { LANDABLE_CHECK } from './landable-check.js';
 
@@ -91,6 +92,24 @@ export function ciConcurrencyAdvisories(checks: string[], workflows: WorkflowFil
     if (!job || cancels(workflow.concurrency) || cancels(job.concurrency)) return [];
     return [`Required check ${check} runs in ${path} (job ${job.id}), which never cancels superseded pull-request runs; ${CI_CONCURRENCY_ADVICE}`];
   }));
+}
+
+/**
+ * Advisories for parallel-tips concurrency (GY-501): the merge queue validates `parallelTips` tips
+ * at once, each running every pull-request workflow's jobs, so CI needs parallelTips × jobs per run
+ * concurrent Actions jobs. GitHub does not report the account's limit, so the operator declares it
+ * as `mergeQueue.ciConcurrency`: a declared limit below the need is reported with the value to
+ * raise it to (or the parallelTips it supports); an undeclared one states the need and asks for it.
+ */
+export function parallelTipsAdvisories(parallelTips: number, workflows: WorkflowFile[], ciConcurrency?: number) {
+  if (parallelTips <= 1) return [];
+  const jobsPerRun = workflows.map(({ text }) => readWorkflow(text)).filter(workflow => workflow.pullRequest).reduce((total, workflow) => total + Math.max(1, workflow.jobs.length), 0);
+  if (!jobsPerRun) return [];
+  const required = parallelTips * jobsPerRun;
+  const need = `${parallelTips} parallel tips × ${jobsPerRun} pull-request job(s) per run need ${required} concurrent Actions jobs`;
+  if (ciConcurrency === undefined) return [`The merge queue validates ${parallelTips} tips concurrently: ${need}. GitHub does not report your concurrency limit; declare it as mergeQueue.ciConcurrency in .graphyard/master.json, keep it at least ${required}, or lower mergeQueue.parallelTips`];
+  if (ciConcurrency >= required) return [];
+  return [`CI concurrency limit ${ciConcurrency} (mergeQueue.ciConcurrency) is lower than parallelTips × jobs per run: ${need}. Raise the limit to at least ${required}, or set mergeQueue.parallelTips to ${Math.max(1, Math.floor(ciConcurrency / jobsPerRun))}`];
 }
 
 // ---- GitHub's merge queue (GY-258) -------------------------------------------------------------
@@ -197,7 +216,7 @@ export function withMergeSettings<T extends object>(protection: T, settings: Rep
   return protection;
 }
 
-export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows()) {
+export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number; mergeQueue?: { parallelTips?: number; ciConcurrency?: number } }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows()) {
   const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
@@ -238,7 +257,13 @@ export function protectionPlan(current: any, config: { repository: string; baseB
     ...(repairBypass?.configured === false ? [`repair lane bypass on "${mergeQueueRulesetName}": ${JSON.stringify(repairBypass.observed)} to only App ${config.githubAppId} (Integration, pull_request)`] : []),
     ...(autoMerge && !autoMerge.enabled ? [`allow_auto_merge false to true (${config.repository} cannot have a merge queue, so GitHub merges through auto-merge)`] : []),
   ];
-  const advisories = ciConcurrencyAdvisories(work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks), workflows);
+  const requiredChecks = work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks);
+  // Planned against the parallel-tip window the loop actually runs (GY-501): the master config's
+  // `mergeQueue.parallelTips`, else the product default every installation gets.
+  const advisories = [
+    ...ciConcurrencyAdvisories(requiredChecks, workflows),
+    ...parallelTipsAdvisories(config.mergeQueue?.parallelTips ?? defaultParallelTips, workflows, config.mergeQueue?.ciConcurrency),
+  ];
   return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, landableCheck: landable, changes, blockers, advisories,
     // GitHub performs the merge through its queue (GY-258); null when the branch rules were not read.
     mergeQueue: queue ? { ...queue, ruleset: mergeQueueRuleset(config) } : null,
@@ -324,9 +349,9 @@ export function conversationPayload(current: any, desired: ReviewProtection, git
   };
 }
 
-export async function applyProtection(config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], run: ProtectionRun = protectionRun) {
+export async function applyProtection(config: { repository: string; baseBranch: string; githubAppId: number; mergeQueue?: { parallelTips?: number; ciConcurrency?: number } }, work: Work[], run: ProtectionRun = protectionRun, workflows: WorkflowFile[] = readWorkflows()) {
   const current = readProtection(config, run);
-  const plan = protectionPlan(current, config, work);
+  const plan = protectionPlan(current, config, work, undefined, workflows);
   if (plan.blockers.length) throw new Error(plan.refusal!);
   if (!plan.changes.length) return { ...plan, applied: false, result: 'branch protection already matches every open review policy' };
   let queueRefused = false;
@@ -363,7 +388,7 @@ export async function applyProtection(config: { repository: string; baseBranch: 
     }
   }
   const reread = readProtection(config, run);
-  const verified = protectionPlan(reread, config, work);
+  const verified = protectionPlan(reread, config, work, undefined, workflows);
   if (!verified.consistent) throw new Error(`GitHub did not report the reconciled protection; branch protection remains inconsistent with the open review policies: ${[...verified.changes, ...verified.blockers].join('; ')}`);
   return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${GRAPHYARD_CHECKS.join(' and ')}; the queue's only bypass actor is App ${config.githubAppId} in pull-request mode, for the audited repair lane` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${GRAPHYARD_CHECKS.join(' and ')} (the repository cannot have a merge queue)` : ''}` };
 }
