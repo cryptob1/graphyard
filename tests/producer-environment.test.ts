@@ -93,13 +93,75 @@ test('unit:producer-environment a secret holding a line break is refused before 
 });
 
 test('unit:producer-environment a live-install proof names each .env value it lacks; other proofs need none', () => {
-  assert.deepEqual(missingProducerEnv(['manual:install-hetzner-live'], {}), ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY']);
-  assert.deepEqual(missingProducerEnv(['manual:install-hetzner-live'], { HCLOUD_TOKEN: 'x' }), ['HETZNER_SPEND_CAP_USD_MONTHLY']);
-  assert.deepEqual(missingProducerEnv(['manual:install-hetzner-live'], { HCLOUD_TOKEN: 'x', HETZNER_SPEND_CAP_USD_MONTHLY: '5' }), []);
+  for (const proof of ['manual:install-hetzner-live', 'manual:host-install-live']) {
+    assert.deepEqual(missingProducerEnv([proof], {}), ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY']);
+    assert.deepEqual(missingProducerEnv([proof], { HCLOUD_TOKEN: 'x' }), ['HETZNER_SPEND_CAP_USD_MONTHLY']);
+    assert.deepEqual(missingProducerEnv([proof], { HCLOUD_TOKEN: 'x', HETZNER_SPEND_CAP_USD_MONTHLY: '5' }), []);
+    assert.equal(needsProducerEnv(['unit:install-plan', proof]), true);
+  }
   assert.deepEqual(missingProducerEnv(['manual:install-railway-live', 'unit:install-plan'], {}), []);
-  assert.equal(needsProducerEnv(['unit:install-plan', 'manual:install-hetzner-live']), true);
   assert.equal(needsProducerEnv(['manual:install-railway-live', 'unit:install-plan', 'integration:x']), false, '.env is read only for a proof that needs it');
 });
+
+test('unit:host-install-live-producer-env needsProducerEnv and missingProducerEnv treat manual:host-install-live as a live-install proof', () => {
+  assert.deepEqual(missingProducerEnv(['manual:host-install-live'], {}), ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY']);
+  assert.deepEqual(missingProducerEnv(['manual:host-install-live'], { HCLOUD_TOKEN: 'x' }), ['HETZNER_SPEND_CAP_USD_MONTHLY']);
+  assert.deepEqual(missingProducerEnv(['manual:host-install-live'], { HETZNER_SPEND_CAP_USD_MONTHLY: '5' }), ['HCLOUD_TOKEN']);
+  assert.deepEqual(missingProducerEnv(['manual:host-install-live'], { HCLOUD_TOKEN: 'x', HETZNER_SPEND_CAP_USD_MONTHLY: '5' }), []);
+  assert.equal(needsProducerEnv(['manual:host-install-live']), true);
+  assert.equal(needsProducerEnv(['unit:install-plan', 'manual:host-install-live']), true);
+  assert.equal(needsProducerEnv(['manual:install-railway-live', 'unit:install-plan', 'integration:x']), false, 'proofs that provision nothing still read no .env');
+  assert.deepEqual(missingProducerEnv(['manual:install-railway-live', 'unit:install-plan'], {}), []);
+});
+
+test('unit:host-install-live-producer-env a launch for manual:host-install-live reads .env, passes both names to the producer, and is refused when .env lacks one', async () => {
+  const { root, cleanup } = await installation();
+  try {
+    const item = work('GY-717', 'manual', ['manual:host-install-live']);
+    let calls: string[][] = [];
+
+    // Refused before any session when the host's .env lacks one (missing HCLOUD_TOKEN)
+    await writeFile(join(root, '.env'), 'HETZNER_SPEND_CAP_USD_MONTHLY=25\n');
+    await assert.rejects(
+      launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable }),
+      /refuses to launch the GY-717 manual proofs .*HCLOUD_TOKEN is not set in .*\.env.*docs\/install\.md/
+    );
+    assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
+    assert.deepEqual((await readProducerLedger(root)).producers, []);
+
+    // Refused before any session when the host's .env lacks one (missing HETZNER_SPEND_CAP_USD_MONTHLY)
+    await writeFile(join(root, '.env'), 'HCLOUD_TOKEN=abc\n');
+    await assert.rejects(
+      launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable }),
+      /refuses to launch the GY-717 manual proofs .*HETZNER_SPEND_CAP_USD_MONTHLY is not set in .*\.env.*docs\/install\.md/
+    );
+    assert.deepEqual(calls, [], 'Herdr was never asked for a tab');
+    assert.deepEqual((await readProducerLedger(root)).producers, []);
+
+    // A launch for it reads .env and passes both names to the producer
+    const secret = token.replaceAll("'", '');
+    await writeFile(join(root, '.env'), `HCLOUD_TOKEN='${secret}'\nHETZNER_SPEND_CAP_USD_MONTHLY=25\nGITHUB_TOKEN=ghp_never\n`);
+    calls = [];
+    const launched = await launchProducer(root, item, item.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    assert.ok(!calls.flat().some(word => word.includes(secret) || word.includes('ghp_never') || /^(HCLOUD_TOKEN|HETZNER_SPEND_CAP_USD_MONTHLY)=/.test(word)), 'no Herdr argument carries a secret');
+    const typed = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.deepEqual(typed.words.slice(0, 6), ['sh', '-c', 'set -a; . "$1"; set +a; shift 2; exec "$@"', 'sh', join(launched.checkout, 'producer.env'), '--']);
+    assert.equal(typed.kind, 'codex', 'the runtime is what the wrapper execs');
+    assert.equal(await readFile(join(launched.checkout, 'producer.env'), 'utf8'), `HCLOUD_TOKEN='${secret}'\nHETZNER_SPEND_CAP_USD_MONTHLY='25'\n`);
+    assert.ok(relative(join(launched.checkout, 'checkout'), join(launched.checkout, 'producer.env')).startsWith('..'), 'producer.env is outside the git checkout');
+
+    // Proofs that provision nothing still read no .env: a malformed .env does not refuse them, and no secrets file is created
+    await writeFile(join(root, '.env'), 'HCLOUD_TOKEN="unpaired\nHETZNER_SPEND_CAP_USD_MONTHLY=25\n');
+    const noProvisionItem = work('GY-75', 'manual', ['manual:install-railway-live']);
+    calls = [];
+    const noProvisionLaunched = await launchProducer(root, noProvisionItem, noProvisionItem.autoDispatch!.producers[0] as any, (await loadMasterConfig(root)).producers[0], [], new Date().toISOString(), { run: herdr(calls), filesystem: durable });
+    const noProvisionTyped = expandTypedCommand(calls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.notEqual(noProvisionTyped.words[0], 'sh', 'no secrets wrapper');
+    assert.ok(!calls.flat().some(word => word.includes('HETZNER_SPEND_CAP_USD_MONTHLY')));
+    await assert.rejects(stat(join(noProvisionLaunched.checkout, 'producer.env')), { code: 'ENOENT' });
+  } finally { await cleanup(); }
+});
+
 
 async function installation(pi = false) {
   const base = await realpath(await temporaryDirectory('producer-env-launch'));

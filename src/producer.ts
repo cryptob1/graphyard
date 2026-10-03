@@ -27,13 +27,14 @@ import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js'
  */
 export const producerEnvNames = ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY'] as const;
 /**
- * The proofs that provision real servers, and the .env names each cannot run without (GY-1071): a
+ * The proofs that provision real servers, and the .env names each cannot run without (GY-1071, GY-1138): a
  * launch for one of them on a host whose .env lacks a name is refused before any session exists,
  * as a host-configuration fault naming what is missing, rather than started into a proof that
  * would fail for want of a credential.
  */
 export const liveInstallProofEnv: readonly { proof: RegExp; names: readonly (typeof producerEnvNames)[number][] }[] = [
   { proof: /^manual:install-hetzner-live$/, names: producerEnvNames },
+  { proof: /^manual:host-install-live$/, names: producerEnvNames },
 ];
 const liveInstallRules = (proofs: readonly string[]) => liveInstallProofEnv.filter(rule => proofs.some(proof => rule.proof.test(proof)));
 export function missingProducerEnv(proofs: readonly string[], env: Record<string, string>) {
