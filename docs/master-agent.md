@@ -66,7 +66,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request above one. `run.reviewerProfile`'s profile defaults to 4 sessions; pending sessions count before Herdr shows them. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Launches bind heads.** Stale merge/rework refusals wake observation, then retry. `dispatch.waiting` shows `waitedMs`/`reason`; 15m+ review waits raise attention.
+**Launches bind heads**; stale refusals wake observation, then retry. 15m+ `dispatch.waiting` reviews raise attention.
 
 **Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's open pane is closed next dispatch tick, freeing its name; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then a quoting rework.
 
