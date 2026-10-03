@@ -64,14 +64,20 @@ export async function remedyStep(cycle: Cycle) {
     const key = `remedy:${kind}`;
     if (cycle.launcher.busy(key)) continue;
     for (const entry of rows) applied.set(entry.row.id, entry.reason);
-    launch('config', rows[0].work, key, [], async sink => {
+    const distinct = [...new Map(rows.map(entry => [entry.work.key, entry.work])).values()];
+    const sole = distinct.length === 1 ? distinct[0] : null;
+    await record(state, key, { kind: 'config', work: sole?.key ?? null, principal: null, epoch: sole?.epoch ?? null,
+      state: 'started',
+      detail: `Applying the ${kind} remedy for the stalled ${rows.map(r => `${r.work.key}'s ${r.row.kind}`).join(', ')}`,
+      attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+    launch('config', sole, key, [], async sink => {
       const outcome = await applyInstallationAccept(effects.browserFlow!);
       const recorded: string[] = [], refused: string[] = [];
       for (const entry of rows) {
         try { await effects.recordRemedy!(entry.row.id, { remedy: 'installation-accept', reason: entry.reason, ...outcome }); recorded.push(`${entry.work.key}'s ${entry.row.kind}`); }
         catch (error) { refused.push(`${entry.work.key}'s ${entry.row.kind} (${message(error)})`); }
       }
-      sink.push(await record(state, key, { kind: 'config', work: rows[0].work.key, principal: null, epoch: null,
+      sink.push(await record(state, key, { kind: 'config', work: sole?.key ?? null, principal: null, epoch: sole?.epoch ?? null,
         state: outcome.outcome === 'refused' ? 'failed' : 'done',
         detail: `Applied the ${kind} remedy (${outcome.flows.join(', then ')}) for the stalled ${recorded.concat(refused).join(', ')}: ${outcome.outcome} — ${outcome.detail}${recorded.length ? `. Recorded on ${recorded.join(', ')}` : ''}${refused.length ? `. Not recorded on ${refused.join(', ')}` : ''}`.slice(0, 2000),
         attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));

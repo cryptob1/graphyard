@@ -116,6 +116,7 @@ test('unit:stall-remedy-installation-accept — a row stalled on the permission 
   assert.match(recorded.detail, /verified through the API: Installation 161493384 now grants/);
   assert.equal(reported.length, 1, 'the loop reports the remedy it applied');
   assert.equal(reported[0].state, 'done');
+  assert.equal(reported[0].work, 'GY-864', 'a single-item remedy attributes the action to that item');
   assert.match(reported[0].detail, /installation-accept remedy .* for the stalled GY-864's resync: applied/);
   const raised = stalledActionAttention({ work: [work], now: at }).find(entry => entry.subject === 'GY-864')!;
   assert.match(raised.next, /the loop applied the installation-accept remedy \(installation-accept, then app-permissions, then installation-accept\)/, 'the attention names what the remedy did');
@@ -143,6 +144,15 @@ test('unit:stall-remedy-installation-accept — a refused remedy (a pending sudo
   const again = await runRemedyStep([work], async () => { throw new Error('applied twice'); }, shift(at, 120_000));
   assert.deepEqual(again.ran, [], 'the refused remedy is not retried in a loop');
   assert.match(stalledActionAttention({ work: [work], now: at })[0].next, /was refused at .* The loop does not apply it again for this unchanged run/);
+
+  // After the row completes and later reopens with a fresh stall on the same reason, a new run starts and the remedy is applied again.
+  row.history.push({ at: shift(at, 180_000), event: 'completed', requester: 'graphyard', executor: 'x', result: 'done', reason: 'cleared' });
+  for (let n = 0; n < actionStallThreshold; n++) {
+    row.history.push({ at: shift(at, (190 + n) * 60_000), event: 'failed', requester: 'graphyard', executor: 'x', result: 'failed', reason: holdReason('GY-515') });
+  }
+  assert.equal(standingRemedy(work, row.id, row.stall!.reason), null, 'fresh run has no standing remedy');
+  const fresh = await runRemedyStep([work], async () => ({ outcome: 'refused', verified: false, reason: sudo }), shift(at, 300 * 60_000));
+  assert.deepEqual(fresh.ran, ['installation-accept'], 'fresh run applies the remedy again');
 });
 
 test('unit:stall-remedy-installation-accept — a flow that cannot run (no browser profile) is a refusal carrying its message, not a crash', async () => {
@@ -162,6 +172,7 @@ test('unit:stall-remedy-recorded-once — the remedy is applied and recorded onc
   const first = await runRemedyStep(work, applied, at);
   assert.deepEqual(first.ran, ['installation-accept'], 'one installation to accept: the flow runs once for both rows');
   assert.deepEqual(first.records.map(entry => entry.row).sort(), [a.row.id, b.row.id].sort(), 'and its outcome is recorded on each');
+  assert.equal(first.reported[0].work, null, 'a remedy shared by several items attributes the action to none alone');
   assert.deepEqual(owedRemedies(work), []);
 
   // The rows go on failing for the same reason while the held jobs resume: still one run, no second application.
