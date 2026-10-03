@@ -661,7 +661,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // any session of the day; the world's tick renews its lease and pushes its head.
     const attempt = (attempts.get(work.key) ?? 0) + 1; attempts.set(work.key, attempt);
     sessions.push({ work: work.id, key: work.key, branch, profile, epoch, attempt, pane: result.pane!, pushAt: clock.now() + plan.workMs, diesAt: null, exitsAt: null, dispatchAt: clock.now(), state: 'working', syncs: 0,
-      scopeAt: null, misreadAt: null, misread: false, credentialAt: null });
+      scopeAt: null, misreadAt: null, misread: false, credentialAt: null, retryingAt: null });
     return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
   } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
   async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
