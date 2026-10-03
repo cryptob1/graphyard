@@ -244,7 +244,7 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
 const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
-function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
+export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
     waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
@@ -252,15 +252,19 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   // An applied request is answered and cleared, exactly as an operator widening clears it;
   // a refused one stays open, carrying its refusal, because someone still has to decide it.
   work.scopeRequest = verdict.state === 'approved' ? null : { ...request, decision };
+  // The timing baseline granted as a companion stays outside plannedFiles: only its own test files' lines pass (GY-1023).
+  const widening = verdict.paths.filter(path => !verdict.companions?.includes(path));
   if (verdict.state === 'approved') {
     // Non-weakening intent the item already carried: applied to the live attempt, which
     // keeps its lease and its containment fence exactly as an operator widening would. A wide
     // ask is folded into directory entries, as a routed one is, rather than overrun the cap;
     // an ask no fold represents was refused by the rule above, never applied past the cap.
-    work.plannedFiles = widenedPlannedFiles(work, verdict.paths).plannedFiles;
-    work.policyRevision++;
-    work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
-    work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    if (widening.length) {
+      work.plannedFiles = widenedPlannedFiles(work, widening).plannedFiles;
+      work.policyRevision++;
+      work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
+      work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    }
     if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
   } else {
     // Refused and escalated: the reason is the item's blocker, so the ready gate holds it

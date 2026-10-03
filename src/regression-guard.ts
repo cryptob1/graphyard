@@ -13,9 +13,11 @@ import { pathScopeContains, type Observation, type ScopeFile, type Work } from '
  * and by `graphyard sync` (local diff against `origin/<base>`). The one exception is the
  * enumerated set of generated files (see generated-files.ts): regenerated from their sources and
  * verified current by CI, they are owned by nobody, so a candidate that regenerates one is not
- * rewriting shipped work. Deleting one is still a deletion.
+ * rewriting shipped work. Deleting one is still a deletion. The timing baseline is the other: a
+ * change that writes only its own test files' lines there carries the implied companion verdict
+ * (model/timing-companion.ts), read from both versions' contents by whoever compared the file.
  */
-export type ScopeKind = 'in-scope' | 'new' | 'generated' | 'matches-base' | 'already-absent' | 'reverted' | 'rewritten' | 'deleted' | 'renamed' | 'binary' | 'unverified';
+export type ScopeKind = 'in-scope' | 'new' | 'generated' | 'companion' | 'matches-base' | 'already-absent' | 'reverted' | 'rewritten' | 'deleted' | 'renamed' | 'binary' | 'unverified';
 export interface ScopeFinding { path: string; kind: ScopeKind; refused: boolean; detail: string }
 
 /**
@@ -36,7 +38,7 @@ export const inPlannedScope = (plannedFiles: string[], path: string) => plannedF
 const generatedFiles = configuredGeneratedFiles();
 export function classifyScope(plannedFiles: string[], files: ScopeFile[], generated: readonly string[] = generatedFiles): ScopeFinding[] {
   const findings: ScopeFinding[] = [];
-  const add = (path: string, kind: ScopeKind, detail: string) => findings.push({ path, kind, refused: !['in-scope', 'new', 'generated', 'matches-base', 'already-absent'].includes(kind), detail });
+  const add = (path: string, kind: ScopeKind, detail: string) => findings.push({ path, kind, refused: !['in-scope', 'new', 'generated', 'companion', 'matches-base', 'already-absent'].includes(kind), detail });
   for (const file of files) {
     const movedFrom = file.previousPath && file.previousPath !== file.path ? file.previousPath : undefined;
     // A rename is judged at both ends: the old path leaves the head, the new path appears on it.
@@ -46,6 +48,8 @@ export function classifyScope(plannedFiles: string[], files: ScopeFile[], genera
     }
     if (inPlannedScope(plannedFiles, file.path)) { add(file.path, 'in-scope', 'inside the planned files'); continue; }
     if (file.status !== 'removed' && isGeneratedFile(generated, file.path)) { add(file.path, 'generated', 'generated file; regenerated from its sources and verified by CI, owned by no work item'); continue; }
+    // The timing baseline written only for this change's own test files is implied by them (GY-1023).
+    if (file.status !== 'removed' && file.companion?.allowed && file.baseSha) { add(file.path, 'companion', file.companion.detail); continue; }
     if (file.status === 'removed') {
       if (file.baseSha === undefined) add(file.path, 'unverified', 'not compared against the base branch tip');
       else if (file.baseSha === null) add(file.path, 'already-absent', 'the base branch does not hold this file either');
@@ -59,7 +63,7 @@ export function classifyScope(plannedFiles: string[], files: ScopeFile[], genera
     } else if (file.baseSha === (file.mergeSha ?? file.sha)) add(file.path, 'matches-base', file.mergeSha ? 'the three-way merge result is identical to the base branch tip' : 'identical to the base branch tip');
     else if (file.binary) add(file.path, 'binary', 'binary or oversized content differs from the base branch tip');
     else if (file.additions === 0 && file.deletions > 0) add(file.path, 'reverted', `removes ${file.deletions} line${file.deletions === 1 ? '' : 's'} that the base branch holds and adds nothing`);
-    else add(file.path, 'rewritten', `differs from the base branch tip (+${file.additions} −${file.deletions})`);
+    else add(file.path, 'rewritten', `differs from the base branch tip (+${file.additions} −${file.deletions})${file.companion ? `; ${file.companion.detail}` : ''}`);
   }
   return findings;
 }
