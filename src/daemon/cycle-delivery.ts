@@ -266,8 +266,16 @@ export async function mergeStep(cycle: Cycle) {
     const stale = mergeObservationWait(item);
     if (stale) {
       const waitKey = `wait:merge:${item.id}`;
-      if (detailChanged(state.actions[waitKey], stale)) performed.push(await record(state, waitKey, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: stale, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      const waitPrevious = state.actions[waitKey];
+      const reason = `Merge authorization is no longer current: ${staleObservationReason}`;
+      const since = waitPrevious && waitPrevious.detail === stale ? (waitPrevious.since ?? waitPrevious.at) : new Date(now()).toISOString();
+      if (detailChanged(waitPrevious, stale)) {
+        performed.push(await record(state, waitKey, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: stale, attempts: (waitPrevious?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist));
+      } else if (!waitPrevious.since) {
+        waitPrevious.since = since;
+      }
       await wakeObservationJob(cycle, item, 'guarded merge');
+      await actOnRepeatedRefusal(cycle, item, key, reason, since);
       return;
     }
     // A merge the server refused for a stale observation waits for the observation its refusal
