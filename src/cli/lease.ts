@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { writeWorkerCredential, type MintedPushCredential } from '../worker-credential.js';
 import { spawnSync } from 'node:child_process';
-import { defineCommands, workMutation } from './registry.js';
+import { defineCommands, workMutation, type CliCommand } from './registry.js';
 import { verifyCommand } from './verify.js';
 import { completeCommand } from './complete.js';
 
@@ -72,6 +72,17 @@ export function bindEvidence(input: unknown, work: { key: string; candidate?: { 
   return evidence;
 }
 
+/**
+ * `release GY-N EPOCH` gives up the lease. The word is shared with release candidates, so
+ * src/cli/release.ts owns the one `release` entry and hands it a work key.
+ */
+export const releaseLeaseCommand: CliCommand = {
+  name: 'release',
+  scope: 'work',
+  help: ['  release GY-N EPOCH            Release current lease'],
+  run: async (context, work) => context.print(await workMutation(context, work)('release', { epoch: Number(context.args[0]) })),
+};
+
 /** The worker protocol on one claimed item: lease, blockers, submission and evidence. */
 export const leaseCommands = defineCommands([
   {
@@ -85,12 +96,6 @@ export const leaseCommands = defineCommands([
     scope: 'work',
     help: ['  heartbeat GY-N EPOCH          Extend current lease (refused once the epoch is submitted)'],
     run: async (context, work) => context.print(await workMutation(context, work)('heartbeat', { epoch: Number(context.args[0]) })),
-  },
-  {
-    name: 'release',
-    scope: 'work',
-    help: ['  release GY-N EPOCH            Release current lease'],
-    run: async (context, work) => context.print(await workMutation(context, work)('release', { epoch: Number(context.args[0]) })),
   },
   {
     name: 'register',
