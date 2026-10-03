@@ -18,7 +18,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
-import { currentRestore } from '../merge-queue.js';
+import { baseRefreshConflict, currentRestore } from '../merge-queue.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -72,7 +72,9 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
     const byKey = new Map(work.map(item => [item.key, item]));
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind)) && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now)))
+      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+        && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now)))
         derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
@@ -104,6 +106,21 @@ export function restoreInMotion(work: Work | undefined, now: number): boolean {
   if (restore?.performedAt) return false;
   const ejected = work.queueEjection?.sha === work.candidate.sha ? work.queueEjection : null;
   const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
+  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
+}
+/**
+ * GY-1129. Whether a base refresh conflict is still in motion or in rework: the candidate has a confirmed
+ * conflict with the base branch, and rework has been requested or the item has entered stage build, or
+ * the conflict was reported within `restoreWaitBoundMs`. The control plane requests and approves rework
+ * on its own, so a base conflict actively being handled is self-handled, not a merge fault
+ * (GY-501, GY-1073, GY-417 on 3 October 2026: each counted while in rework or within minutes of the conflict).
+ * A conflict left unhandled past the bound counts as a merge fault.
+ */
+export function baseConflictInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.candidate) return false;
+  if (!baseRefreshConflict(work)) return false;
+  if (work.reworkRequested || work.stage === 'build') return true;
+  const since = work.baseRefresh?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
 /**

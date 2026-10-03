@@ -181,3 +181,38 @@ test(`manual:fault-class-merge — ${instances[0].id}: a merge request a restart
   storeAction(state, 'merge:refused', { kind: 'merge', work: 'GY-999', principal: null, state: 'failed', detail: 'GitHub refused the guarded merge', attempts: 1, epoch: 1, cycle: 1, at: new Date(now).toISOString() });
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'action:merge').length, 1);
 });
+
+// ---- base-conflict: self-handled base refresh conflict in rework or under 30 minutes (GY-1129) ----
+
+const gy1129Instances = [
+  { id: 'base-conflict|GY-501|2026-10-03T01:48:21.031Z', kind: 'base-conflict', subject: 'GY-501', at: '2026-10-03T01:48:21.031Z',
+    head: 'bfe5c971a12513ea32dbf6828557343e7c8449c2', base: '1f8c8d17a255304a991873ea2f64fa4c5ea2c2bf',
+    conflict: 'Candidate bfe5c971a125 cannot be brought onto base branch tip 1f8c8d17a255 without resolving a conflict, which is content nobody reviewed or proved: Speculative merge of 1f8c8d17a255 into graphyard-merge-check/gy-501 conflicts and cannot be resolved by Graphyard. Run graphyard sync GY-501, resolve it and push; the approval and proofs bound to bfe5c971a125 do not survive the resolution.',
+    stage: 'merge', reworkRequested: true },
+  { id: 'base-conflict|GY-1073|2026-10-03T02:08:38.001Z', kind: 'base-conflict', subject: 'GY-1073', at: '2026-10-03T02:08:38.001Z',
+    head: 'cf391b944d4fd37ab8706fa2bbcfba4bbd698e4f', base: 'e7ab679fb2ebaa0d087b32873afda18e8d8ee5ff',
+    conflict: 'Candidate cf391b944d4f cannot be brought onto base branch tip e7ab679fb2eb without resolving a conflict, which is content nobody reviewed or proved: Speculative merge of e7ab679fb2eb into graphyard-merge-check/gy-1073 conflicts and cannot be resolved by Graphyard. Run graphyard sync GY-1073, resolve it and push; the approval and proofs bound to cf391b944d4f do not survive the resolution.',
+    stage: 'build', reworkRequested: false },
+  { id: 'base-conflict|GY-417|2026-10-03T02:14:59.107Z', kind: 'base-conflict', subject: 'GY-417', at: '2026-10-03T02:14:59.107Z',
+    head: '938b292d6ea58324dbec487c44f4089d0063ebee', base: 'e7ab679fb2ebaa0d087b32873afda18e8d8ee5ff',
+    conflict: 'Candidate 938b292d6ea5 cannot be brought onto base branch tip e7ab679fb2eb without resolving a conflict, which is content nobody reviewed or proved: Speculative merge of e7ab679fb2eb into graphyard-merge-check/gy-417 conflicts and cannot be resolved by Graphyard. Run graphyard sync GY-417, resolve it and push; the approval and proofs bound to 938b292d6ea5 do not survive the resolution.',
+    stage: 'merge', reworkRequested: false },
+] as const;
+
+for (const entry of gy1129Instances) {
+  test(`manual:fault-class-merge — ${entry.id}: a base conflict in rework or under 30 minutes is self-handled, not a merge fault`, () => {
+    const key = entry.subject, now = Date.parse(entry.at), branch = `graphyard/${key.toLowerCase()}-1`;
+    const conflicting = (at: string, reworkRequested = entry.reworkRequested, stage = entry.stage) => item(key, at, {
+      stage: stage as Work['stage'],
+      reworkRequested,
+      candidate: { sha: entry.head, baseSha: entry.base, pr: 500, branch } as Work['candidate'],
+      submission: { epoch: 1, pr: 500 } as Work['submission'],
+      observation: { candidate: { sha: entry.head, baseSha: entry.base, pr: 500, branch }, merged: false, prState: 'open', checks: [], reviews: [], files: [], scopeFiles: [], at, baseTip: entry.base } as unknown as Work['observation'],
+      baseRefresh: { from: { sha: entry.head, baseSha: entry.base }, base: entry.base, baseTree: '', policyRevision: 2, at, head: null, conflict: entry.conflict, merge: null, carry: null } as Work['baseRefresh'],
+    });
+    const faults = (work: Work, testNow = now) => cycleFaults(emptyDaemonState(config()), [work], testNow, { config: config() }).filter(fault => fault.subject === key && fault.kind === 'base-conflict');
+    assert.deepEqual(faults(conflicting(entry.at)), [], `at recorded time (${entry.at}), the base conflict is in rework or motion and not counted as a merge fault`);
+    // Not weakened: the same conflict unhandled after two hours with no rework requested is a merge fault.
+    assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), false, 'merge'), now).length, 1, 'a base conflict unhandled for two hours still counts as a merge fault');
+  });
+}
