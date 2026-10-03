@@ -9,7 +9,7 @@ import { candidateKey, decisionKey } from './reconcile.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { missingProofs } from './metrics.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, maxApproverLaunches, standingVerdict } from './decisions.js';
+import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, maxApproverLaunches, awaitingObservation, mergeObservationLanded, mergeObservationWait, observationWakeDue, staleMergeRefusal, standingVerdict } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { deploymentDetail } from './deployment.js';
@@ -41,6 +41,23 @@ export function mergeRetryDue(previous: DaemonAction | undefined, work: Work, cy
   if (readyToRetry(previous, cycle)) return true;
   if (previous?.state !== 'failed' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
   return now - Date.parse(previous.at) >= Math.min(mergeRetryBaseMs * 2 ** Math.max(0, previous.attempts - 1), mergeRetryCapMs);
+}
+
+/**
+ * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework, a
+ * guarded merge — through the effects' `resync`. One wake stands until an observation newer than it
+ * lands (`observationWakeDue`); it is stamped on the snapshot's clock, the one the observation's
+ * time is on. A wake that failed stamps no standing wake: it is sent again on the cycle backoff.
+ */
+export async function wakeObservationJob(cycle: Cycle, item: Work, why: string) {
+  const { state, effects, now, snapshot, clock, performed } = cycle;
+  if (!effects.wakeObservation) return;
+  const key = `wake:observation:${item.id}`, previous = state.actions[key];
+  if (previous?.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, githubPause(snapshot.jobs, clock))) return;
+  const note = async (outcome: 'done' | 'failed', detail: string, at: number) =>
+    performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: outcome, detail, attempts: outcome === 'failed' ? (previous?.state === 'failed' ? previous.attempts : 0) + 1 : 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
+  try { await effects.wakeObservation(item); await note('done', `Woke the observation job of ${item.key}: its ${why} waits for an observation newer than ${item.observation?.at ?? 'none'}`, clock); }
+  catch (error) { await note('failed', `Could not wake the observation job of ${item.key}: ${message(error)}`, now()); }
 }
 
 /** How long the guarded merge may refuse one candidate for one unchanged reason before the loop acts on it (GY-831). */
@@ -192,7 +209,21 @@ export async function mergeStep(cycle: Cycle) {
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
     const key = candidateKey('merge', item);
     const previous = state.actions[key];
-    if (!mergeRetryDue(previous, item, state.cycle, now())) return;
+    // The merge keeps its two-minute bound (GY-710). A candidate the merge gate refuses for a stale
+    // observation is not asked — the refusal would only restate it — but wakes the item's
+    // observation job, and is asked on the first cycle after that observation lands.
+    const stale = mergeObservationWait(item);
+    if (stale) {
+      const waitKey = `wait:merge:${item.id}`;
+      if (detailChanged(state.actions[waitKey], stale)) performed.push(await record(state, waitKey, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: stale, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      await wakeObservationJob(cycle, item, 'guarded merge');
+      return;
+    }
+    // A merge the server refused for a stale observation waits for the observation its refusal
+    // woke, and is asked on the first cycle after it lands — not on the retry backoff (GY-710).
+    if (awaitingObservation(previous, state.actions[`wake:observation:${item.id}`])) {
+      if (!mergeObservationLanded(state.actions[`wake:observation:${item.id}`], item)) { await wakeObservationJob(cycle, item, 'guarded merge'); return; }
+    } else if (!mergeRetryDue(previous, item, state.cycle, now())) return;
     // With automatic merging off the guarded merge runs for exactly the candidate an approver
     // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
     // approver rather than on a person, and says which decision it is waiting for.
@@ -242,6 +273,10 @@ export async function mergeStep(cycle: Cycle) {
         const since = !race && previous?.state === 'failed' && previous.detail === detail ? previous.since ?? previous.at : new Date(now()).toISOString();
         performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'failed', detail,
           attempts: race ? previous?.attempts ?? 0 : state.actions[key].attempts, cycle: state.cycle, ...(race ? {} : { since }) }, now(), effects.persist, null));
+        // A refusal for an authorization no longer current — the observation past its two-minute
+        // bound since the snapshot — wakes the observation job at once, and the merge is asked
+        // again as soon as that observation lands (GY-710).
+        if (!race && staleMergeRefusal.test(message(error))) await wakeObservationJob(cycle, target, 'guarded merge');
         if (!race) await actOnRepeatedRefusal(cycle, target, key, message(error), since);
         return;
       }
