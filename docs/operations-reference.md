@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
+Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failures log route and SQL.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up). Without `--deployment-url` it reads `productionEnvironment` deployments; the newest, if successful, counts even when inactive.
 
 ## Lost worker before submission
 
@@ -19,7 +19,7 @@ On the worker, `graphyard master settle-containment GY-N "reason"` verifies noth
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643 (2026-09-26): 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643: 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
 
 ## Retro synthesis
 
@@ -27,7 +27,7 @@ With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rew
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile, however long its workflow run waits for a runner (`check.rerun.waiting`; master status says *waiting for a runner*); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). Its passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval and proofs without rework, however long it waits for a runner (`check.rerun.waiting`); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). Its passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
 
 ## Accepted evidence turns out to be wrong
 
