@@ -43,15 +43,9 @@ import { slowReportReader } from '../master/report-cache.js';
 import { coordinationStep } from './coordination-snapshot.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget daemon metric, read from here as it always was.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
-
-// Observation throughput and the queue head's lag live beside the observation schedule they read;
-// the report reads them from here, as do the tests.
 export { observationThroughputStatus };
-// The attention builders live in `status-attention.ts`; the report reads them from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
