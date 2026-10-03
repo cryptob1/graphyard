@@ -6,6 +6,7 @@ import { GitHub, landingCheck, scopeLookupBudget, type LandingGitHub } from '../
 import type { HerdrAgent } from '../../src/master.js';
 import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
+import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
 import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
@@ -133,6 +134,10 @@ export class SimulatedGitHub {
   runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number }[]>();
   /** Every rerun the control plane asked for: the item, the tip and the failed check run. */
   reruns: { key: string; sha: string; checkRunId: number; at: number }[] = [];
+  /** The `graphyard/landable` runs the control plane published per head (GY-887), with how often each was written. */
+  landable = new Map<string, { id: number; body: LandableCheckRun; writes: number }[]>();
+  /** Every GitHub request publishing the landability verdict cost: the head's run listing, the pull request read before a success, and each write. */
+  landableRequests: { key: string; head: string; kind: 'list' | 'pull' | 'post' | 'patch'; at: number }[] = [];
   /** Each item's first speculative tip, the one its flake hits. */
   private flakeTips = new Map<string, string>();
   /**
@@ -616,6 +621,26 @@ export class SimulatedGitHub {
         if (pr.head !== work.candidate.sha) return;
         const previous = pr.graphyardCheck.get(pr.head);
         if (previous?.conclusion !== (passed ? 'success' : 'failure')) pr.graphyardCheck.set(pr.head, { conclusion: passed ? 'success' : 'failure', at: clock.now() });
+      },
+      // As GitHub.publishLandable: a success is written only while the pull request still has that
+      // head, and a run that already says the same is not written again.
+      async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}) {
+        const body = landableCheckRun(work, all, new Date(clock.now()));
+        if (!body) return;
+        const request = (kind: 'list' | 'pull' | 'post' | 'patch') => world.landableRequests.push({ key: work.key, head: body.head_sha, kind, at: clock.now() });
+        const success = body.conclusion === 'success';
+        if (success) {
+          request('pull');
+          if (world.pr(work).head !== body.head_sha) return;
+        }
+        request('list');
+        const runs = world.landable.get(body.head_sha) ?? [];
+        const existing = runs.at(-1);
+        if (landableCheckCurrent(existing?.body, body)) return;
+        await beforeWrite(success);
+        request(existing ? 'patch' : 'post');
+        if (existing) { existing.body = body; existing.writes++; }
+        else world.landable.set(body.head_sha, [...runs, { id: ++world.serial, body, writes: 1 }]);
       },
       async mergeQueueState(number: number): Promise<GitHubMergeQueueState> {
         const pr = world.prs.get(number)!;
