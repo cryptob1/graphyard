@@ -630,7 +630,9 @@ export function answeringRecord(records: readonly ReviewRecord[], requestId: str
 function withdrawnSinceSettled(record: ReviewRecord, observation: Work['observation'] | undefined) {
   const listed = observation?.reviews.find(review => review.id === record.verdict!.reviewId);
   if (listed) return !conflictingVerdictStates.includes(listed.state);
-  return !!observation?.dismissedReviewIds?.includes(record.verdict!.reviewId);
+  if (observation?.dismissedReviewIds) return observation.dismissedReviewIds.includes(record.verdict!.reviewId);
+  const settledAt = Date.parse(record.closedAt ?? record.verdict!.submittedAt), observedAt = Date.parse(observation?.at ?? '');
+  return Number.isFinite(settledAt) && Number.isFinite(observedAt) && observedAt > settledAt;
 }
 /** The reviewer session a launch was refused for, when it already answers the requested head. */
 export const answeredByPendingReview = (error: unknown, request: { sha: string }) =>

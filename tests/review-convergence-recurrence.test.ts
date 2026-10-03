@@ -114,6 +114,7 @@ function itemForConflict(instance: typeof instances[0] | typeof instances[1], ob
     candidate,
     checks: [],
     reviews,
+    dismissedReviewIds: [],
     merged: false,
     mergeSha: null,
     mergeable: true,
