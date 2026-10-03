@@ -130,10 +130,12 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     if (typeof value !== 'string' || !/^[0-9a-f]{7,40}$/i.test(value)) return unavailable(`Deployment endpoint did not report a commit at ${config.run.deploymentShaField}`);
     sha = value.toLowerCase(); source = 'endpoint';
   } else {
-    // Not filtered by ref: a platform that deploys the base branch (Railway) records each release
-    // with its commit SHA as the ref, so `ref=main` saw only the CI reporting environment's records,
-    // and on 2026-09-24 GY-159 stayed pending behind a release production had already served. The
-    // listing is read page by page, newest first, until a release answers or a bound is reached.
+    // The listing is filtered by the production environment (`environment=...`), so non-production
+    // deployments (such as CI proof reporting records) cannot hide releases or consume the listing
+    // bound (GY-1106). It is not filtered by ref: a platform that deploys the base branch (Railway)
+    // records each release with its commit SHA as the ref, so `ref=main` saw only the CI reporting
+    // environment's records (GY-159). The listing is read page by page, newest first, until a release
+    // answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     let production: string;
     try { production = config.run.productionEnvironment ?? productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
@@ -144,7 +146,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     for (let page = 1; page <= deploymentListingPages && !sha && !exhausted; page++) {
       let deployments: any[];
       requests++;
-      try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentPageSize}&page=${page}`])); }
+      try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?environment=${encodeURIComponent(production)}&per_page=${deploymentPageSize}&page=${page}`])); }
       catch (error) {
         if (page === 1) return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`);
         return unavailable(`No release was found in the first ${listed} GitHub deployment(s), and page ${page} of the listing could not be read: ${message(error)}`);
@@ -183,7 +185,17 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         if (state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
       }
     }
-    if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
+    if (!listed && !namesake.size) {
+      try {
+        const probe = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentPageSize}&page=1`]));
+        if (Array.isArray(probe)) {
+          for (const deployment of probe) {
+            if (typeof deployment?.environment === 'string' && deployment.environment.endsWith(` / ${production}`) && namesake.size < 5) namesake.add(deployment.environment);
+          }
+        }
+      } catch {}
+    }
+    if (!listed && !namesake.size) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
     // What lies past the listing bound is unread — a rollback to an older release included — so no
     // release is asserted, the last one observed neither: the observation is unavailable and says why.
     if (!sha && !exhausted) return unavailable(`None of the newest ${listed} GitHub deployment(s) is a successful ${production} release of the managed base branch, and older ones are past the ${deploymentListingPages}-page read bound, so the release production serves is not known`);

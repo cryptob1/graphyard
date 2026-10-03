@@ -367,7 +367,7 @@ test('unit:deployment-source-is-a-release — failed attempts never hide the rel
     let unreadable: number | null = null, broken = false;
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const page = /\/deployments\?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
+      const page = /\/deployments\?(?:.*&)?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
       if (page) { const size = Number(page[1]), number = Number(page[2]); return listing(listed.slice((number - 1) * size, number * size)); }
       const asked = statusRead(args);
       if (asked) {
@@ -424,7 +424,7 @@ test('unit:deployment-source-is-a-release — records that are not releases neve
     const pages: number[] = [], statuses: string[] = [];
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const page = /\/deployments\?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
+      const page = /\/deployments\?(?:.*&)?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
       if (page) { const size = Number(page[1]), number = Number(page[2]); pages.push(number); return listing(listed.slice((number - 1) * size, number * size)); }
       const asked = statusRead(args);
       if (asked) { statuses.push(...asked.map(String)); return statusAnswer(asked, () => 'success'); }
