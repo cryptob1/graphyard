@@ -2,7 +2,7 @@
 // structural item filed per recurring class.
 import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
@@ -18,6 +18,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
+import { currentRestore } from '../merge-queue.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -37,6 +38,8 @@ export interface FaultSources {
   loop?: AttentionItem[];
   /** Herdr could not be read this cycle: every kind read from its inventory (herdrFaultKinds) goes unobserved. */
   herdrUnavailable?: boolean;
+  /** The loop puts a rule-refused scope request to the independent approver (GY-176), so that refusal is still being decided (GY-1085). */
+  scopeRoutes?: boolean;
 }
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
@@ -55,7 +58,8 @@ export interface FaultSources {
  * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
-  const own = work.flatMap(item => workFaults(item, now));
+  const routes = sources.scopeRoutes ?? true;
+  const own = work.flatMap(item => workFaults(item, now, routes));
   const derived: FaultObservation[] = [];
   const { config } = sources;
   if (config) {
@@ -66,8 +70,10 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
+    const byKey = new Map(work.map(item => [item.key, item]));
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))) derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind)) && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now)))
+        derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
@@ -76,8 +82,29 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
   const derivedKinds = new Set(derived.map(fault => `${fault.kind}|${fault.subject}`));
   if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor') && !derivedKinds.has(`${fault.kind}|${fault.subject}`)));
-  const shown = new Set(own.map(fault => `${fault.subject}|${fault.kind}`));
+  // A scope request the product is still settling (standingScopeRequest) is no fault however its attention line reads: the snapshot may
+  // predate the rule's decision this cycle took, so the line can still name a refusal the approver is about to judge (GY-1085).
+  const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
+  const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
+}
+/** How long an ejected tip's restore may stay owed before its contaminated head counts as a merge fault (GY-1087). */
+export const restoreWaitBoundMs = 30 * 60_000;
+/**
+ * GY-1087. Whether the branch restore an ejection owes is still in motion: the candidate is the
+ * ejected tip, or a restore is requested for it, the restore has not run yet, and the ejection or
+ * request is inside `restoreWaitBoundMs`. The reconciliation job runs it on its own (GY-127), so the
+ * contaminated head it clears is a handoff the control plane already made, not a merge fault
+ * (GY-417, GY-971 on 1 October 2026: each counted seconds after its ejection). A restore that ran
+ * and failed, a head found contaminated with no ejection, and a restore owed past the bound count.
+ */
+export function restoreInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.candidate) return false;
+  const restore = currentRestore(work)?.restore ?? null;
+  if (restore?.performedAt) return false;
+  const ejected = work.queueEjection?.sha === work.candidate.sha ? work.queueEjection : null;
+  const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
+  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
 /**
  * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
@@ -114,7 +141,7 @@ export const herdrFaultKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['sess
  * no action named is the blocker holding it. A derived line of the item's own kind always restates it.
  */
 export const restatements: Partial<Record<FaultKind, FaultKind[]>> = {
-  'containment-settleable': ['containment'], 'containment-grace': ['containment'], 'reviewer-exhausted': ['role-capacity'], 'session': ['escalation:lease-loss'], 'stalled-item': ['blocker', 'sandbox-blocker'],
+  'containment-settleable': ['containment'], 'containment-grace': ['containment'], 'reviewer-exhausted': ['role-capacity'], 'session': ['escalation:lease-loss'], 'stalled-item': ['blocker', 'sandbox-blocker', 'workflow-permission'],
 };
 /**
  * A failing run ends when its action succeeds (noteActionOutcome), and also when the loop no longer
@@ -292,7 +319,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
     refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
-  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available }), ...invariantFaults(invariants)],
+  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
   await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed);

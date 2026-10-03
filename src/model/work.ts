@@ -10,19 +10,19 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { namedPaths, pathScope, pathScopeContains, plannedFilesMax, type ScopeDecision, type ScopeRequestState } from './scope.js';
+import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathScopeContains, plannedCompanions, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
 import type { RepairAudit } from '../master/repair-lane.js';
 import type { Closure } from './closure.js';
-import type { TriageRecord } from './machine-backlog.js';
+import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema } from './interventions.js';
 import { demand } from './refusal.js';
 
-export const CHECK_NAME = 'Graphyard / merge';
+export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
@@ -176,7 +176,7 @@ export interface Work extends Create {
   /** What the research step found before build, and the product questions it asked (src/research.ts). */
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
-  closure?: Closure | null; triage?: TriageRecord | null; // triage is a machine-filed item's judgement (GY-402, model/machine-backlog.ts)
+  closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it ships (GY-845), model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
@@ -246,7 +246,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 
 // ---- plannedFiles derived from the criteria (GY-140) ---------------------------------------------
 
-interface CriterionText { id: string; text: string }
+interface CriterionText { id: string; text: string; proofs?: readonly string[] }
 const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i;
 const testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/;
 const sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
@@ -279,9 +279,9 @@ export interface PlannedFilesDerivation {
  * resolved against the tree of the base branch the item will be worked on, and every file a
  * criterion names that the tree holds is carried in. Only criteria are read — a path the
  * description mentions in prose is not a requirement and adds nothing — and only exact files
- * are carried: a criterion naming a directory widens nothing on its own.
+ * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
-export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[] }, tree: ReadonlySet<string>): PlannedFilesDerivation {
+export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null }, tree: ReadonlySet<string>): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria));
   const added: PlannedFilesDerivation['added'] = [];
@@ -289,6 +289,7 @@ export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; cri
     if (!tree.has(path) || planned.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path)) continue;
     added.push({ path, criterion: criterion.id });
   }
+  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria }, tree, itemDocumentationPaths(item))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
   return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
 }
 export function plannedFilesRefusal(missing: readonly string[], base: string) {
@@ -297,10 +298,10 @@ export function plannedFilesRefusal(missing: readonly string[], base: string) {
 
 /**
  * GY-140 AC-3: per open item, every scope request — open, or the last one decided — whose paths a
- * criterion already names. Such a request should never have been needed: the file belonged in
+ * criterion already names, or that is a companion the item's record implies (GY-955). Such a request should never have been needed: the file belonged in
  * plannedFiles at authoring time. Counted, so the authoring fault is measured rather than recalled.
  */
-export function impliedScopeRequests(work: readonly Pick<Work, 'key' | 'stage' | 'criteria' | 'scopeRequest' | 'scopeDecision'>[]) {
+export function impliedScopeRequests(work: readonly (Pick<Work, 'key' | 'stage' | 'criteria' | 'scopeRequest' | 'scopeDecision'> & Partial<Pick<Work, 'plannedFiles' | 'documentation'>>)[]) {
   const items = work.filter(item => item.stage !== 'done').flatMap(item => {
     const requests = [
       ...(item.scopeRequest ? [{ state: 'open' as const, paths: item.scopeRequest.paths, requestedBy: item.scopeRequest.requestedBy, requestedAt: item.scopeRequest.at }] : []),
@@ -308,8 +309,8 @@ export function impliedScopeRequests(work: readonly Pick<Work, 'key' | 'stage' |
     ];
     return requests.flatMap(request => {
       const named = request.paths.flatMap(path => {
-        const criterion = item.criteria.find(entry => namedPaths(entry.text).some(scope => pathScopeContains(scope, path)));
-        return criterion ? [{ path, criterion: criterion.id }] : [];
+        const criterion = item.criteria.find(entry => namedPaths(entry.text).some(scope => pathScopeContains(scope, path)))?.id ?? (companionGround(path, item, request.paths, itemDocumentationPaths(item)) ? 'companion' : null);
+        return criterion ? [{ path, criterion }] : [];
       });
       return named.length ? [{ key: item.key, ...request, named }] : [];
     });

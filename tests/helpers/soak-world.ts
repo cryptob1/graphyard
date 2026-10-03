@@ -1,8 +1,12 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
 import { GitHub, landingCheck, scopeLookupBudget, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
 import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
+import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
 import { failingTestTitle, heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
@@ -130,6 +134,10 @@ export class SimulatedGitHub {
   runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number }[]>();
   /** Every rerun the control plane asked for: the item, the tip and the failed check run. */
   reruns: { key: string; sha: string; checkRunId: number; at: number }[] = [];
+  /** The `graphyard/landable` runs the control plane published per head (GY-887), with how often each was written. */
+  landable = new Map<string, { id: number; body: LandableCheckRun; writes: number }[]>();
+  /** Every GitHub request publishing the landability verdict cost: the head's run listing, the pull request read before a success, and each write. */
+  landableRequests: { key: string; head: string; kind: 'list' | 'pull' | 'post' | 'patch'; at: number }[] = [];
   /** Each item's first speculative tip, the one its flake hits. */
   private flakeTips = new Map<string, string>();
   /**
@@ -375,6 +383,17 @@ export class SimulatedGitHub {
     }
     return this.runs.get(head)!.filter(run => run.at <= now);
   }
+  /** Heads whose CI finished and whose check_run webhook was already delivered (GY-806). */
+  private announced = new Set<string>();
+  /** The check_run webhooks GitHub sends by `now`: one per open pull request head whose CI has finished, delivered once. */
+  completedChecks(now: number): { pr: number; sha: string }[] {
+    const deliveries: { pr: number; sha: string }[] = [];
+    for (const pr of this.prs.values()) {
+      if (!pr.open || pr.merged || this.announced.has(pr.head) || now - (pr.pushed.get(pr.head) ?? now) < this.options.ciMs) continue;
+      this.announced.add(pr.head); deliveries.push({ pr: pr.number, sha: pr.head });
+    }
+    return deliveries;
+  }
   /** GitHub's "rerun failed jobs": the failed run's job runs again on the same commit, reporting `ciMs` later. A documentation-budget breach is not a flake: the rerun judges the commit's pages again (GY-574). */
   rerun(checkRunId: number) {
     const [head, runs] = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId)) ?? [];
@@ -597,6 +616,7 @@ export class SimulatedGitHub {
           world.restoreWrites.push({ key: work.key, write: kind, refused, at: clock.now() });
           if (refused) throw new Refusal(`GitHub ${kind === 'reset' ? 'PATCH /git/refs/heads/' + pr.branch : 'POST /merges'} failed (403): Protected branch update failed for refs/heads/${pr.branch}`, 502);
         };
+        let built: { sha: string; base: string } | null = null;
         const provider: GitHub = Object.assign(Object.create(GitHub.prototype), {
           config: { repository: world.options.repository, base },
           request: async (path: string) => {
@@ -607,14 +627,16 @@ export class SimulatedGitHub {
           ownReviewedHead: async () => pr.head,
           refHead: async () => pr.head,
           describeMerge: async () => null,
-          updateBranch: async (_branch: string, own: string) => { write('reset'); pr.head = own; pr.pushed.set(own, clock.now()); },
-          mergeBranch: async (_branch: string, tip: string, message: string) => {
-            write('merge');
-            const own = pr.head, onto = world.commits.get(tip)!;
-            const merged = world.record({ sha: sha('restore', own, tip), tree: sha('tree', 'restore', own, tip), parents: [own, tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message },
-              world.mergedContents(own, tip, work.plannedFiles ?? []));
-            pr.head = merged.sha; pr.base = tip; pr.pushed.set(merged.sha, clock.now());
-            return merged.sha;
+          // The restored commit is built off the branch (GY-1087), so the branch's one write is the move to it.
+          updateBranch: async (_branch: string, head: string) => {
+            write('reset'); pr.head = head; pr.pushed.set(head, clock.now());
+            if (built?.sha === head) pr.base = built.base;
+          },
+          mergeOnScratch: async (_key: string, own: string, tip: string, message: string) => {
+            const onto = world.commits.get(tip)!;
+            built = { sha: sha('restore', own, tip), base: tip };
+            return world.record({ sha: sha('restore', own, tip), tree: sha('tree', 'restore', own, tip), parents: [own, tip], files: [...new Set([...world.commits.get(own)!.files, ...onto.files])], at: clock.now(), message },
+              world.mergedContents(own, tip, work.plannedFiles ?? [])).sha;
           },
         });
         return provider.restoreBranch(work, restore);
@@ -632,6 +654,26 @@ export class SimulatedGitHub {
         if (pr.head !== work.candidate.sha) return;
         const previous = pr.graphyardCheck.get(pr.head);
         if (previous?.conclusion !== (passed ? 'success' : 'failure')) pr.graphyardCheck.set(pr.head, { conclusion: passed ? 'success' : 'failure', at: clock.now() });
+      },
+      // As GitHub.publishLandable: a success is written only while the pull request still has that
+      // head, and a run that already says the same is not written again.
+      async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}) {
+        const body = landableCheckRun(work, all, new Date(clock.now()));
+        if (!body) return;
+        const request = (kind: 'list' | 'pull' | 'post' | 'patch') => world.landableRequests.push({ key: work.key, head: body.head_sha, kind, at: clock.now() });
+        const success = body.conclusion === 'success';
+        if (success) {
+          request('pull');
+          if (world.pr(work).head !== body.head_sha) return;
+        }
+        request('list');
+        const runs = world.landable.get(body.head_sha) ?? [];
+        const existing = runs.at(-1);
+        if (landableCheckCurrent(existing?.body, body)) return;
+        await beforeWrite(success);
+        request(existing ? 'patch' : 'post');
+        if (existing) { existing.body = body; existing.writes++; }
+        else world.landable.set(body.head_sha, [...runs, { id: ++world.serial, body, writes: 1 }]);
       },
       async mergeQueueState(number: number): Promise<GitHubMergeQueueState> {
         const pr = world.prs.get(number)!;
@@ -706,4 +748,52 @@ export class SimulatedHerdr {
   /** The pane inventory (`herdr pane list`): every pane, with or without an agent in it. */
   paneList(): { pane_id: string }[] { return [...new Set([...this.agents.keys(), ...this.shells.keys()])].map(pane_id => ({ pane_id })); }
   byName(name: string) { return [...this.agents.values()].find(agent => agent.name === name); }
+}
+
+// ---------------------------------------------------------------------------
+// Pi: headless runs (GY-453), detached from the loop that started them. A run's process lives here,
+// in the world, not in the loop: the loop's restart (`detachRuns`) leaves it running, and the loop
+// that follows adopts it from its directory under the real run registry on disk. The world ends a
+// run with a submission, or kills it from outside so it ends without one: lost.
+// ---------------------------------------------------------------------------
+interface SimulatedRunProcess { state: 'live' | 'submitted' | 'killed' | 'cancelled'; payload: unknown; detail: string; wake: Set<() => void> }
+export class SimulatedPi implements Runner {
+  readonly name = 'pi';
+  processes = new Map<string, SimulatedRunProcess>();
+  started: string[] = [];
+  start<T>(_prompt: string, options: RunOptions<T>): Run<T> {
+    const directory = join(options.runs!, randomUUID());
+    mkdirSync(directory, { recursive: true });
+    this.processes.set(directory, { state: 'live', payload: null, detail: '', wake: new Set() });
+    this.started.push(directory);
+    return this.adopt(directory, options);
+  }
+  adopt<T>(directory: string, options: Pick<RunOptions<T>, 'tool' | 'validate'>): Run<T> {
+    const child = this.processes.get(directory)!, events: RunEvent[] = [], listeners = new Set<(event: RunEvent) => void>();
+    let resolve!: (result: RunResult<T>) => void, detached = false;
+    const result = new Promise<RunResult<T>>(done => { resolve = done; });
+    const settle = () => {
+      if (detached || child.state === 'live') return;
+      child.wake.delete(settle);
+      if (child.state === 'submitted') { const payload = options.validate(child.payload); resolve({ ok: true, tool: options.tool, payload, payloads: [payload] }); }
+      else resolve({ ok: false, failure: { reason: child.state === 'killed' ? 'lost' : 'cancelled', detail: child.detail }, payloads: [] });
+    };
+    child.wake.add(settle); settle();
+    return { id: directory, directory, events,
+      onEvent: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+      cancel: reason => this.end(directory, 'cancelled', null, reason ?? 'cancelled'),
+      detach: () => { detached = true; child.wake.delete(settle); },
+      result: () => result };
+  }
+  private end(directory: string, state: SimulatedRunProcess['state'], payload: unknown, detail: string) {
+    const child = this.processes.get(directory);
+    if (!child || child.state !== 'live') return;
+    Object.assign(child, { state, payload, detail });
+    for (const wake of [...child.wake]) wake();
+  }
+  /** The agent submits through its Graphyard tool and exits. */
+  submit(directory: string, payload: unknown) { this.end(directory, 'submitted', payload, ''); }
+  /** Killed from outside (OOM, a host reboot): gone, recording no exit. */
+  kill(directory: string) { this.end(directory, 'killed', null, 'the run\'s process is gone and recorded no exit'); }
+  live() { return [...this.processes.values()].filter(child => child.state === 'live').length; }
 }

@@ -1,6 +1,6 @@
 import type { Work } from './model.js';
 import { isDelivered } from './model/closure.js';
-import { followUpEntries, followUpParent, machineKind, overdueTriage, triageAttention, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
+import { awaitsParent, followUpEntries, followUpParent, machineKind, overdueTriage, triageAttention, triageJudgementSchema, untriaged, type TriageJudgement } from './model/machine-backlog.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import type { ResearchSettings } from './research.js';
 import type { Run, RunResult, Runner } from './runner/types.js';
@@ -72,18 +72,23 @@ export interface TriageStepInput {
 }
 
 /**
- * Start a triage run for each machine-filed item awaiting triage, oldest first, up to
+ * Start a triage run for each machine-filed item awaiting triage, oldest first, but a follow-up whose parent has not shipped, up to
  * `triageConcurrency` in flight. Each run settles on its own and records its judgement; a failed run
  * is noted and the item judged again after `triageRetryMs`.
  */
 export function triageStep(input: TriageStepInput): TriageStepAction[] {
   const actions: TriageStepAction[] = [];
   if (!input.settings.enabled) return actions;
-  const waiting = input.work.filter(item => untriaged(item) && !live.has(item.id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  // A follow-up whose parent has not shipped is never judged (GY-845): its findings may still change,
+  // and the migration folds it back onto the parent.
+  const waiting = input.work.filter(item => untriaged(item) && !awaitsParent(item, input.work) && !live.has(item.id)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const work of waiting) {
     if (live.size >= (input.settings.triageConcurrency ?? triageConcurrency)) break;
     const failed = failedAt.get(work.id);
     if (failed !== undefined && input.clock - failed < triageRetryMs) continue;
+    // Started outside the run registry, as a scratch run (runner/pi.ts): nothing adopts it after a
+    // restart, so it bounds itself, ends with this process, and a run left by a loop killed outright
+    // is ended and removed by the next scratch run before it starts, never judged twice at once.
     const run = input.runner.start(triagePrompt(input.config, work, input.work), {
       cwd: input.cwd, env: { GRAPHYARD_PI_ROLE: triageRole }, tool: triageTool, timeoutMs: triageTimeoutMs(input.settings), validate: payload => triageJudgementSchema.parse(payload) });
     const settled = run.result().then(result => settleTriage(input, work, result)).catch(() => { failedAt.set(work.id, Date.now()); }).finally(() => { if (live.get(work.id)?.run === run) live.delete(work.id); });

@@ -8,21 +8,24 @@ import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
+import { LANDABLE_CHECK, landableCarried, landableCheckCurrent, landableCheckRun, type LandableCheckRun } from './landable-check.js';
 import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
+import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+export { LANDABLE_CHECK };
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
-import { workerPushPermissions } from './worker-credential.js';
+import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 import { checkFailureOf, type CheckFailure } from './merge-queue.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -195,6 +198,33 @@ const requestKinds: [RegExp, string][] = [
   [/^\/rate_limit/, 'rate-limit'],
 ];
 export const requestKind = (path: string) => requestKinds.find(([pattern]) => pattern.test(path))?.[1] ?? 'other';
+/** The endpoint a request spent on, with its SHAs, numbers and ranges generalised: `GET /pulls/:n`, `GET /compare/:range`. */
+export const requestEndpoint = (method: string, path: string) => `${method} ${path.replace(/^\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*$/, '').replace(/[a-f0-9]{40}/g, ':sha').replace(/\/\d+/g, '/:n').replace(/^\/contents\/.*/, '/contents/:path').replace(/^\/compare\/.*/, '/compare/:range').replace(/^\/git\/ref\/heads\/.*/, '/git/ref/heads/:branch').replace(/^\/branches\/.*\/protection$/, '/branches/:branch/protection')}`;
+/**
+ * A GET whose answer never changes (GY-806): a commit read by its SHA, or a compare between two
+ * exact SHAs. Such a read is asked of GitHub once and then served from the immutable cache with no
+ * request at all — not even a conditional one — for as long as the entry is kept.
+ */
+export const immutableRead = (path: string) => /^\/repos\/[^/]+\/[^/]+\/(commits\/[a-f0-9]{40}|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}(\?[^/]*)?)$/.test(path)
+  // `contains` keeps the one answer it needs from its `?per_page=1` compare in the ancestry cache already.
+  && !/\?per_page=1$/.test(path);
+/**
+ * One observation cycle (GY-806): every observation that starts within it shares one read of the
+ * base branch's ref, instead of each item re-reading it. A push to the base branch (webhook) or a
+ * ref this adapter writes itself ends the cycle early; without a webhook the ref is at most one
+ * cycle old, the same staleness the polling backstop already allows.
+ */
+export const baseRefCycleMs = 15_000;
+/** How long one read of the base branch's protection is shared; a protection or repository webhook ends it early. */
+export const protectionShareMs = 5 * 60_000;
+/** The share of one token's hourly limit the recorded workload must stay under once replayed (GY-806). */
+export const billableBudgetShare = 0.6;
+/** The events that drive an observation at once, ahead of polled jobs (GY-806). */
+export const observationEvents = ['pull_request', 'pull_request_review', 'check_run', 'check_suite', 'push'] as const;
+/** The events that end the shared protection read. */
+export const protectionEvents = ['branch_protection_rule', 'branch_protection_configuration', 'repository_ruleset', 'repository'] as const;
+/** How long a webhook wake waits to be claimed before it is dropped from the front of the claim (its job stays due). */
+export { webhookWakeTtlMs } from './store/store.js';
 
 /** The live budget, the rate it is being spent at, and what the control plane is doing about it. */
 export interface GitHubBudget {
@@ -220,6 +250,14 @@ export interface GitHubBudget {
   paused: { since: string; until: string; reason: string } | null;
   /** What the last hour was spent on, which is what a pause incident names. */
   lastHour: { requests: number; byKind: { kind: string; requests: number }[] };
+  /**
+   * Billable requests over the last hour against the hourly budget, by endpoint (GY-806):
+   * `perHour` is what the last hour charged, `limit` the token's hourly limit (GitHub's default
+   * when none was read yet), `share` their ratio, and `target` the share the fleet must stay under.
+   * The count is the installation's: every replica sharing the quota (`instances`, this one
+   * included) adds its charges through the charge ledger (src/github-charges.ts).
+   */
+  billable: { perHour: number; limit: number; share: number; target: number; instances: number; byEndpoint: { endpoint: string; requests: number; share: number }[] };
   /** The schedule in force, and what each observation cost the job that made it. */
   cadence: Record<CadenceBand, number>;
   /** The throughput the observation workers have been achieving (GY-492), from the job durations of the last window. */
@@ -588,7 +626,7 @@ export class GitHub {
     const u = this.usage;
     u.token = token || u.token;
     u.total++; if (response.status === 304) u.notModified++;
-    const kind = `${method} ${path.replace(/^\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*$/, '').replace(/[a-f0-9]{40}/g, ':sha').replace(/\/\d+/g, '/:n').replace(/^\/contents\/.*/, '/contents/:path').replace(/^\/compare\/.*/, '/compare/:range')}`;
+    const kind = requestEndpoint(method, path);
     u.byKind.set(kind, (u.byKind.get(kind) ?? 0) + 1);
     u.remaining = response.headers.get('x-ratelimit-remaining') ?? u.remaining; u.reset = response.headers.get('x-ratelimit-reset') ?? u.reset;
     if (Date.now() - u.since < 60_000) return;
@@ -598,6 +636,21 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /**
+   * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
+   * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
+   * compare carries every changed file's patch, so an entry count alone does not bound the heap.
+   */
+  private immutable = new ImmutableCache();
+  private immutableReads = new Map<string, Promise<any>>();
+  /** The clock the shared per-cycle reads are timed on; a replay drives it. */
+  clock: () => number = Date.now;
+  /** The base branch's ref, read once per observation cycle and shared by every item's observation (GY-806). */
+  private sharedRef: { at: number; read: Promise<{ tip: string; tree: string }> } | null = null;
+  /** The base branch's protection, read at most every `protectionShareMs` and shared (GY-806). */
+  private sharedProtection = new Map<string, { at: number; read: Promise<any> }>();
+  /** How many immutable responses the hot layer keeps; a miss past it is answered by the persisted layer. */
+  immutableHotEntries = immutableEntries;
   /** Files changed between two pinned commits (GY-500); immutable, so each pair is compared once. */
   private baseChangeLists = new Map<string, string[] | null>();
   /**
@@ -615,11 +668,16 @@ export class GitHub {
   /** Load the persisted caches into the maps and write new entries behind. Resolves once loaded; never rejects. */
   attachCache(store: GitHubCacheStore) {
     this.persisted = store;
-    const warming = store.load({ etag: this.cache, ancestry: this.ancestry, blob: this.blobs, history: this.histories },
-      { etag: etagCacheEntries, ancestry: ancestryEntries, blob: ancestryEntries, history: historyEntries }).then(() => { if (this.warming === warming) this.warming = null; });
+    // The cache's database is the one every replica shares, so its charge ledger counts them all (GY-806).
+    this.chargeLedger = store.charges;
+    const warming = store.load({ etag: this.cache, ancestry: this.ancestry, blob: this.blobs, history: this.histories, immutable: this.immutable },
+      { etag: etagCacheEntries, ancestry: ancestryEntries, blob: ancestryEntries, history: historyEntries, immutable: immutableEntries }).then(() => { if (this.warming === warming) this.warming = null; });
     this.warming = warming;
     return warming;
   }
+  /** The installation's charges across replicas (src/github-charges.ts), attached with the cache: `budget().billable` counts them all. */
+  private chargeLedger: GitHubChargeLedger | null = null;
+  attachChargeLedger(ledger: GitHubChargeLedger) { this.chargeLedger = ledger; }
   /** A request made while the persisted cache is still loading waits for it, at most two seconds. */
   private async warm() {
     if (!this.warming) return;
@@ -628,6 +686,8 @@ export class GitHub {
     clearTimeout(timer);
   }
   private preflightState: AppPermissionReport | null = null;
+  /** The wanted worker push permissions the last mint found ungranted (GY-1100); null until a mint. */
+  private pushShortfalls: PushPermissionShortfall[] | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
   // A rejected App credential is retried once a minute, not once per queued job: every request
@@ -639,7 +699,7 @@ export class GitHub {
   /** The limit, what is left of it and when it resets, as the last installation response said. */
   private rate: { limit: number | null; remaining: number | null; used: number | null; resetAt: number | null; observedAt: number | null } = { limit: null, remaining: null, used: null, resetAt: null, observedAt: null };
   /** Every request that cost budget in the last hour, with the endpoint family it spent on. */
-  private charges: { at: number; kind: string }[] = [];
+  private charges: { at: number; kind: string; endpoint: string }[] = [];
   /** What each item's last observation cost, against the job that made it. */
   private costs = new Map<string, { at: number; requests: number; uncached: number; band: CadenceBand; cadenceMs: number }>();
   /** The same costs as a fleet sample, for the mean an operator reads. */
@@ -679,7 +739,7 @@ export class GitHub {
    * Only installation requests report the budget this class is spending; App-level calls
    * (`/app`, token refresh) are counted as requests against a different allowance.
    */
-  private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true, token: string | null = null) {
+  private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true, token: string | null = null, method = 'GET') {
     const resource = response.headers.get('x-ratelimit-resource');
     const number = (name: string) => { const value = Number(response.headers.get(name)); return Number.isFinite(value) ? value : null; };
     const remaining = number('x-ratelimit-remaining');
@@ -697,7 +757,9 @@ export class GitHub {
     if (response.status === 304 || !charged || response.status === 429 || response.status === 403 && remaining === 0) return;
     // A measured stretch is an observation job the pace started; every other request is spend the pace must leave room for.
     if (tracked && token !== null) this.budgets.charge(token, now, !!meter);
-    this.charges.push({ at: now, kind: requestKind(path) });
+    const charge = { at: now, kind: requestKind(path), endpoint: requestEndpoint(method, path) };
+    this.charges.push(charge);
+    this.chargeLedger?.charge(now, charge.endpoint, charge.kind);
     if (this.charges.length > 8192) this.charges = this.charges.filter(charge => now - charge.at <= budgetLedgerMs);
   }
   /** Run `fn` counting the requests it makes and the ones that actually cost budget. */
@@ -764,8 +826,15 @@ export class GitHub {
     const used = expired ? null : this.rate.used;
     const resetAt = expired ? null : this.rate.resetAt;
     const exhaustion = remaining !== null && perMinute > 0 ? now + (remaining / perMinute) * 60_000 : null;
-    const counts = new Map<string, number>();
-    for (const charge of this.charges) counts.set(charge.kind, (counts.get(charge.kind) ?? 0) + 1);
+    const counts = new Map<string, number>(), endpoints = new Map<string, number>();
+    for (const charge of this.charges) { counts.set(charge.kind, (counts.get(charge.kind) ?? 0) + 1); endpoints.set(charge.endpoint, (endpoints.get(charge.endpoint) ?? 0) + 1); }
+    const hourly = limit ?? defaultHourlyLimit, share = (requests: number) => Math.round(requests / hourly * 10_000) / 10_000;
+    // The billable report is the installation's (GY-806): every other replica's last hour, as the
+    // charge ledger last read it, is added to this process's own charges.
+    const fleet = this.chargeLedger?.fleet() ?? { rows: [], instances: 0 };
+    const billed = new Map(endpoints);
+    for (const row of fleet.rows) billed.set(row.endpoint, (billed.get(row.endpoint) ?? 0) + row.requests);
+    const billedTotal = this.charges.length + fleet.rows.reduce((total, row) => total + row.requests, 0);
     const samples = this.samples.filter(sample => now - sample.at <= budgetLedgerMs);
     const mean = (values: number[]) => values.length ? Math.round(values.reduce((total, value) => total + value, 0) / values.length * 100) / 100 : null;
     return {
@@ -782,6 +851,8 @@ export class GitHub {
       paused: this.blockedUntil > now ? { since: new Date(this.pausedSince || now).toISOString(), until: new Date(this.blockedUntil).toISOString(),
         reason: this.pauseReason || 'GitHub refused a request for rate limiting' } : null,
       lastHour: { requests: this.charges.length, byKind: [...counts].map(([kind, requests]) => ({ kind, requests })).sort((a, b) => b.requests - a.requests || a.kind.localeCompare(b.kind)) },
+      billable: { perHour: billedTotal, limit: hourly, share: share(billedTotal), target: billableBudgetShare, instances: 1 + fleet.instances,
+        byEndpoint: [...billed].map(([endpoint, requests]) => ({ endpoint, requests, share: share(requests) })).sort((a, b) => b.requests - a.requests || a.endpoint.localeCompare(b.endpoint)) },
       cadence: { ...observationCadenceMs },
       throughput: observationThroughput(this.jobDurations, now),
       observations: { count: samples.length, meanRequests: mean(samples.map(sample => sample.requests)), meanUncached: mean(samples.map(sample => sample.uncached)),
@@ -844,7 +915,10 @@ export class GitHub {
       const app = typeof installation.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(this.config.appId);
       const installationUrl = typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId);
       const suspended = !!installation.suspended_at;
-      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl))];
+      // A push shortfall a mint met is kept current here, so accepting the permission clears it.
+      if (this.pushShortfalls) this.pushShortfalls = grantedPushPermissions(granted).missing;
+      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl)),
+        ...(this.pushShortfalls ?? []).map(shortfall => describePushShortfall(shortfall, app, installationUrl))];
       this.preflightState = { ...base, app, account: typeof installation.account?.login === 'string' ? installation.account.login : null, installationUrl, verifiedAt: base.observedAt, error: null, suspended, granted, missing, blockedFeatures: blockedFeatures(missing), attention };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'GitHub App permissions could not be read';
@@ -902,7 +976,7 @@ export class GitHub {
       const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
         method: 'POST', headers: this.appHeaders(), signal: AbortSignal.timeout(15_000),
       });
-      this.record('/app/installations/access_tokens', response, false);
+      this.record('/app/installations/access_tokens', response, false, Date.now(), true, null, 'POST');
       const refused = await this.refusal(response, 'installation authentication');
       if (refused instanceof GitHubPermissionRefusal) this.authenticationRefusal = { until: Date.now() + 60_000, error: refused };
       if (refused) throw refused;
@@ -914,21 +988,88 @@ export class GitHub {
   }
   /**
    * A worker session's push credential (GY-999): an installation token narrowed to this one
-   * repository and to the two permissions pushing a branch and opening its pull request need. It
-   * is never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * repository and to the permissions pushing a branch and opening its pull request need. It is
+   * never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * It asks only for the wanted permissions the installation grants (GY-1100): the preflight's
+   * verified reading when there is one, else the installation read now. A wanted permission the
+   * installation lacks is left out and raised as permission attention instead of failing the mint;
+   * a 422 on a preflight reading re-reads the installation once, in case it changed since.
    */
   async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
-    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
-      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions: workerPushPermissions }),
-    });
-    this.record('/app/installations/access_tokens', response, false);
+    const bypass = await this.workerPushBypass();
+    demand(!bypass, bypass ?? '', 409);
+    const cached = this.preflightState?.verifiedAt ? this.preflightState.granted : null;
+    let response = await this.requestPushToken(cached ?? await this.installationGrants());
+    if (response.status === 422 && cached) response = await this.requestPushToken(await this.installationGrants());
     const refused = await this.refusal(response, 'worker push credential');
     if (refused) throw refused;
     const result: any = await response.json();
     demand(typeof result?.token === 'string' && result.token.length >= 20 && Number.isFinite(Date.parse(result.expires_at)), 'GitHub returned no worker push token', 502);
     return { token: result.token, expiresAt: new Date(Date.parse(result.expires_at)).toISOString(), permissions: result.permissions && typeof result.permissions === 'object' ? result.permissions : {} };
+  }
+  /** The installation's granted permissions read now with the App JWT. */
+  private async installationGrants(): Promise<Record<string, string>> {
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    this.record('/app/installations', response, false);
+    const refused = await this.refusal(response, 'GET /app/installations');
+    if (refused) throw refused;
+    const installation: any = await response.json();
+    demand(installation?.permissions && typeof installation.permissions === 'object', 'GitHub returned an installation without permissions', 502);
+    return Object.fromEntries(Object.entries(installation.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string>;
+  }
+  private async requestPushToken(granted: Record<string, string>) {
+    const { permissions, missing } = grantedPushPermissions(granted);
+    demand(permissions.contents === 'write', `The App installation grants no Contents: write, so no worker push credential can be minted; accept it at ${this.preflightState?.installationUrl ?? installationSettingsUrl(this.config.installationId)}`, 502);
+    this.pushShortfalls = missing;
+    const report = this.preflightState;
+    if (report) {
+      report.attention = [...report.attention.filter(line => !line.includes(pushShortfallMarker)),
+        ...missing.map(shortfall => describePushShortfall(shortfall, report.app, report.installationUrl))];
+    }
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
+    });
+    this.record('/app/installations/access_tokens', response, false);
+    return response;
+  }
+  /**
+   * Why this App's token may not be handed to a worker, or null (GY-1066). On an organization
+   * repository Graphyard's merge-queue ruleset names the control-plane App as its one pull-request
+   * bypass actor (src/protection.ts repairBypassActor), and a token of that App with `contents`
+   * write can merge a pull request past the queue and the guarded final recheck. So while any merge
+   * queue on the base branch lists this App as a bypass actor — or its bypass list cannot be read —
+   * no worker credential is minted from it. A user-owned repository has no queue and is unaffected.
+   * Graphyard has no separate worker App yet, so such a repository launches no worker at all; the
+   * refusal says so, and docs/protocol/leases.md records the limitation. A read GitHub fails
+   * transiently is answered 502, to be asked again, not as this refusal.
+   */
+  async workerPushBypass(): Promise<string | null> {
+    const stranded = '; no worker can launch on this repository until workers push as an App the queue does not exempt (docs/protocol/leases.md)';
+    const rules = await this.request(`/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
+    demand(Array.isArray(rules), `GitHub did not answer the rules of ${this.config.base}, so no worker push credential is minted`, 502);
+    const rulesets = [...new Set(rules.filter((rule: any) => rule?.type === 'merge_queue').map((rule: any) => Number(rule?.ruleset_id)))];
+    for (const id of rulesets) {
+      let ruleset: any = null;
+      if (Number.isSafeInteger(id) && id > 0) {
+        try { ruleset = await this.request(`/rulesets/${id}`); }
+        catch (error) {
+          // Only GitHub's own answer that the ruleset is hidden from this App (403, 404) is a standing
+          // fact; a 5xx, a rate limit or a timeout is transient, so the mint is retryable (502), never a policy refusal.
+          const status = error instanceof GitHubPermissionRefusal && error.kind === 'permission' ? 403 : Number(/ failed \((\d{3})\)/.exec(error instanceof Error ? error.message : '')?.[1]);
+          if (status !== 403 && status !== 404) throw new Refusal(`The merge queue on ${this.config.base} (ruleset ${id}) could not be read now (${error instanceof Error ? error.message : String(error)}), so no worker push credential is minted; ask again`, 502);
+        }
+      }
+      // GitHub answers whether the caller — this installation — may bypass; the actor list is the fallback when it does not.
+      const bypass = ruleset?.current_user_can_bypass;
+      if (bypass === 'never') continue;
+      const actors = ruleset?.bypass_actors;
+      if (bypass === 'always' || bypass === 'pull_requests_only') return `App ${this.config.appId} may bypass the merge queue on ${this.config.base} (ruleset ${id}: ${bypass}), so a token of it could merge a worker's own pull request past the queue; no worker push credential is minted from it${stranded}`;
+      if (!Array.isArray(actors)) return `The bypass actors of the merge queue on ${this.config.base} (ruleset ${id}) cannot be read, so App ${this.config.appId} may be able to merge past the queue; no worker push credential is minted from it${stranded}`;
+      if (actors.some((actor: any) => actor?.actor_type === 'Integration' && Number(actor?.actor_id) === this.config.appId)) return `App ${this.config.appId} is a bypass actor of the merge queue on ${this.config.base} (ruleset ${id}), so a token of it could merge a worker's own pull request past the queue; no worker push credential is minted from it${stranded}`;
+    }
+    return null;
   }
   private async authenticate() {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
@@ -946,9 +1087,60 @@ export class GitHub {
     return this.apiRequest(`/repos/${this.config.repository}${path}`, method, body);
   }
   private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
+    if (method === 'GET' && immutableRead(path)) return this.immutableRequest(path);
+    // A ref this adapter moves itself ends the shared base-ref read (GY-806): the next observation reads the new tip.
+    if (method !== 'GET' && /\/(git\/refs|merges$|pulls\/\d+\/merge$)/.test(path)) this.sharedRef = null;
+    return this.send(path, method, body, true);
+  }
+  /**
+   * A commit by SHA or a compare of two exact SHAs (GY-806): asked of GitHub once, then served from
+   * the immutable cache with no request, however many observations ask. Concurrent first reads of
+   * the same path share one request. A cached answer needs no token, so it is served through a pause.
+   * A miss in the bounded hot layer asks the persisted layer first, so eviction and restarts never
+   * make GitHub answer a path still in use twice; every hit marks the persisted row used, so only
+   * answers nothing reads any more age out of its bound.
+   */
+  private async immutableRequest(path: string): Promise<any> {
+    await this.warm();
+    const hot = this.immutable.get(path);
+    if (hot !== undefined) {
+      this.immutable.set(path, hot);
+      this.persisted?.touch('immutable', path);
+      return JSON.parse(hot);
+    }
+    let reading = this.immutableReads.get(path);
+    if (!reading) {
+      reading = (async () => {
+        // A hot-layer miss asks the persisted layer, which keeps every answer still read, before GitHub.
+        if (this.persisted) {
+          const stored = await this.persisted.lookup('immutable', path);
+          if (stored !== undefined && stored !== null) {
+            this.keepImmutable(path, stored);
+            this.persisted.touch('immutable', path);
+            return stored;
+          }
+        }
+        const value = await this.send(path, 'GET', undefined, false);
+        if (value !== null && value !== undefined) {
+          this.keepImmutable(path, value);
+          this.persisted?.put('immutable', path, value);
+        }
+        return value;
+      })().finally(() => this.immutableReads.delete(path));
+      this.immutableReads.set(path, reading);
+    }
+    return structuredClone(await reading);
+  }
+  /** Keep an immutable answer in the hot layer as its text, evicting the oldest-used past either bound. */
+  private keepImmutable(path: string, value: unknown) {
+    this.immutable.set(path, value);
+    while (this.immutable.size > this.immutableHotEntries) this.immutable.delete(this.immutable.keys().next().value!);
+  }
+  /** One request to GitHub. `conditional` uses and keeps the ETag cache; an immutable read needs neither. */
+  private async send(path: string, method: string, body: unknown, conditional: boolean): Promise<any> {
     await this.authenticate();
     if (method === 'GET') await this.warm();
-    const cached = method === 'GET' ? this.cache.get(path) : undefined;
+    const cached = method === 'GET' && conditional ? this.cache.get(path) : undefined;
     const started = Date.now(), bearer = this.token, token = tokenIdentity(bearer);
     let response: Response;
     try {
@@ -963,7 +1155,7 @@ export class GitHub {
     // A slow request is named so a stalled observation can be traced to the call that held it.
     if (Date.now() - started > 5_000) console.error(`GitHub ${method} ${path} took ${Date.now() - started} ms (${response.status})`);
     this.meter(method, path, response, token);
-    this.record(path, response, true, Date.now(), true, token);
+    this.record(path, response, true, Date.now(), true, token, method);
     // A 304 costs no rate budget. Refresh the entry's recency so a full observation round stays cached.
     if (response.status === 304 && cached) { this.rateFailures = 0; this.cache.keep(path, cached.etag, cached.text); this.persisted?.touch('etag', path); return JSON.parse(cached.text); }
     const refused = await this.refusal(response, `${method} ${path}`);
@@ -975,7 +1167,7 @@ export class GitHub {
     if (method === 'GET') {
       this.cache.delete(path);
       // The entry keeps the answer's text, not its object graph, within the cache's byte bound (GY-975).
-      if (etag && text !== null) {
+      if (etag && conditional && text !== null) {
         this.cache.keep(path, etag, text);
         this.persisted?.put('etag', path, value, etag);
       }
@@ -1020,11 +1212,13 @@ export class GitHub {
   /**
    * The managed branch's protection as the gates read it: whether it is the protection Graphyard
    * requires, and whether it requires every review conversation resolved before a merge (GY-139).
-   * An unreadable protection is neither.
+   * An unreadable protection is neither. `shared` takes the observation cycle's read (GY-806); every
+   * other caller, a guard before a write included, reads it fresh.
    */
-  async branchProtection(requireNativeReview = false): Promise<{ protected: boolean; conversationResolution: boolean; requiredChecks: { name: string; appId: number | null }[] }> {
+  async branchProtection(requireNativeReview = false, shared = false): Promise<{ protected: boolean; conversationResolution: boolean; requiredChecks: { name: string; appId: number | null }[] }> {
     try {
-      const p = await this.request(`/branches/${encodeURIComponent(this.config.base)}/protection`);
+      const path = `/branches/${encodeURIComponent(this.config.base)}/protection`;
+      const p = shared ? await this.sharedProtectionRead(path) : await this.request(path);
       // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
       // queue supersedes that setting with a published tip that already contains its validated base.
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
@@ -1039,9 +1233,10 @@ export class GitHub {
    * branch-rules endpoint, which reports every ruleset rule that applies to the branch. An
    * unreadable answer requires nothing extra: the policy's checks still gate.
    */
-  private async requiredStatusChecks(): Promise<{ name: string; appId: number | null }[]> {
+  private async requiredStatusChecks(shared = false): Promise<{ name: string; appId: number | null }[]> {
     try {
-      const rules = await this.request(`/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`);
+      const path = `/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`;
+      const rules = shared ? await this.sharedProtectionRead(path) : await this.request(path);
       if (!Array.isArray(rules)) return [];
       return mergeRequiredChecks(rules.filter((rule: any) => rule?.type === 'required_status_checks')
         .flatMap((rule: any) => (rule.parameters?.required_status_checks ?? []).map((check: any) => ({ name: check?.context, appId: check?.integration_id ?? null }))));
@@ -1090,9 +1285,53 @@ export class GitHub {
    * The managed branch's head and its tree, read from `refs/heads/<base>`. A pull request's
    * `base.sha` is GitHub's cached view of the same ref, refreshed only when it recomputes the
    * pull request, and it is never used for the base tip: a binding decided against it was the
-   * root cause of approvals dismissed for a merge base that had not actually changed.
+   * root cause of approvals dismissed for a merge base that had not actually changed. Read fresh:
+   * a guard before a write compares against the branch as it is now.
    */
-  async baseBranch(): Promise<{ tip: string; tree: string }> {
+  async baseBranch(): Promise<{ tip: string; tree: string }> { return this.readBaseBranch(); }
+  /**
+   * The base branch as the current observation cycle read it (GY-806): one read per `baseRefCycleMs`
+   * shared by every observation, ended early by a base push or a ref this adapter writes. Only
+   * observations use it; guards use `baseBranch`.
+   */
+  async cycleBaseBranch(): Promise<{ tip: string; tree: string }> {
+    const now = this.clock();
+    if (!this.sharedRef || now - this.sharedRef.at >= baseRefCycleMs || now < this.sharedRef.at) {
+      const entry = { at: now, read: this.readBaseBranch() };
+      this.sharedRef = entry;
+      // A failed read is not shared past its own callers.
+      entry.read.catch(() => { if (this.sharedRef === entry) this.sharedRef = null; });
+    }
+    return { ...await this.sharedRef.read };
+  }
+  /**
+   * A base-branch protection read as GitHub returns it — the branch protection or the branch's
+   * rules, keyed by its path — read at most every `protectionShareMs` and shared by every
+   * observation (GY-806); a protection, ruleset or repository webhook ends the share early.
+   */
+  private sharedProtectionRead(path: string): Promise<any> {
+    const now = this.clock();
+    let entry = this.sharedProtection.get(path);
+    if (!entry || now - entry.at >= protectionShareMs || now < entry.at) {
+      const fresh = { at: now, read: this.request(path) };
+      entry = fresh;
+      this.sharedProtection.set(path, fresh);
+      fresh.read.catch(() => { if (this.sharedProtection.get(path) === fresh) this.sharedProtection.delete(path); });
+    }
+    return entry.read.then(value => structuredClone(value));
+  }
+  /**
+   * What a verified webhook delivery means for this adapter's shared reads (GY-806): a push to the
+   * base branch ends the shared ref read, and a protection or repository event ends the shared
+   * protection read. The wake of the items it names is the job row's (`Store.takeJob`), not this
+   * adapter's, so every replica claims them first.
+   */
+  noteWebhook(event: string, payload: any) {
+    const ref = typeof payload?.ref === 'string' ? payload.ref : '';
+    if (event === 'push' && ref === `refs/heads/${this.config.base}`) this.sharedRef = null;
+    if ((protectionEvents as readonly string[]).includes(event)) this.sharedProtection.clear();
+  }
+  private async readBaseBranch(): Promise<{ tip: string; tree: string }> {
     const tip = await this.refHead(this.config.base);
     return { tip, tree: await this.commitTree(tip) };
   }
@@ -1199,14 +1438,14 @@ export class GitHub {
    * items' unlanded candidates in this head's history, and name the merge that took a delivery
    * off the base branch; without it those two answers are left out, never guessed.
    */
-  async observe(work: Work, peers?: Work[]): Promise<Observation> {
+  async observe(work: Work, peers?: Work[], shared = true): Promise<Observation> {
     const startedAt = new Date().toISOString();
     const pr = await this.computedMergeability(await this.request(`/pulls/${work.submission!.pr}`));
     demand(pr.base.repo.full_name.toLowerCase() === this.config.repository.toLowerCase() && pr.head.repo?.full_name.toLowerCase() === this.config.repository.toLowerCase(), 'MVP requires same-repository pull requests');
     demand(pr.base.ref === this.config.base, 'Pull request targets an unmanaged branch');
     const [checks, reviews, protection, files, branch, rulesetChecks] = await Promise.all([
-      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy)), this.pages(`/pulls/${pr.number}/files`), this.baseBranch(),
-      this.requiredStatusChecks(),
+      this.pages(`/commits/${pr.head.sha}/check-runs?filter=all`, 'check_runs'), this.pages(`/pulls/${pr.number}/reviews`), this.branchProtection(nativeReviewRequired(work.policy), shared), this.pages(`/pulls/${pr.number}/files`), shared ? this.cycleBaseBranch() : this.baseBranch(),
+      this.requiredStatusChecks(shared),
     ]);
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
@@ -1267,7 +1506,7 @@ export class GitHub {
       candidate: { sha: pr.head.sha, baseSha: candidateBase, pr: pr.number, branch: pr.head.ref, author: pr.user.login, ...(Number.isFinite(Date.parse(pr.created_at)) ? { createdAt: pr.created_at } : {}) },
       // Canonical oldest-to-newest ordering makes legacy consumers deterministic;
       // gates also compare immutable run IDs rather than trusting response order.
-      checks: checks.filter(c => c.name !== CHECK_NAME).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
+      checks: checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
         ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
@@ -1489,9 +1728,10 @@ export class GitHub {
     this.blobContents.set(sha, content);
     return content;
   }
+  /** Two fresh observations that must agree: the final check before a merge shares no cycle read (GY-806). */
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
-    const first = await this.observe(work, peers);
-    const second = await this.observe(work, peers);
+    const first = await this.observe(work, peers, false);
+    const second = await this.observe(work, peers, false);
     const gates = (o: Observation) => JSON.stringify({ candidate: o.candidate, checks: o.checks, reviews: o.reviews, agentReview: o.agentReview, protected: o.protected, conversations: o.conversations, merged: o.merged, mergeable: o.mergeable, conflicting: o.conflicting || undefined, mergeabilityUnknown: o.mergeabilityUnknown || undefined, prState: o.prState, draft: o.draft, scopeFiles: o.scopeFiles, landing: o.landing });
     demand(gates(first) === gates(second), 'GitHub gates changed during final verification; retry');
     return second;
@@ -1788,9 +2028,22 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // one request wide, the item is queued (a worker push at that point is a new head the queue
     // would eject for anyway), and the next observation reads the branch afresh, so the worker's
     // head is at worst reported as replaced rather than silently kept. Narrow, and accepted.
-    if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
-    const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
+    // The tip is built on the scratch branch and the pull request's branch is moved once, to it
+    // (GY-1087). Resetting the branch to the reviewed head and then merging onto it was two pushes:
+    // GitHub raised a pull_request event for each, both resolved to the tip, CI's per-PR concurrency
+    // cancelled one of the two runs, and when the later-created run was the one cancelled — before
+    // any job started — GitHub read the head's required checks as expected for good (GY-1063:
+    // "3 of 4 required status checks are expected"), so auto-merge never fired.
+    let merged: string | null;
+    try { merged = await this.mergeOnScratch(work.key, reviewedHead, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`); }
+    catch (error) {
+      // A conflicting tip still leaves the branch at the item's own reviewed head, never at the
+      // earlier tip and the predecessors it carries.
+      if (error instanceof SpeculativeConflict && reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
+      throw error;
+    }
     const tip = merged ?? reviewedHead;
+    if (tip !== pr.head.sha) await this.updateBranch(pr.head.ref, tip);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
@@ -1861,27 +2114,31 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // record is what lets a second attempt tell a lasting refusal from a transient one.
     const refused = (kind: RestoreFailureKind, reason: string): BaseRefresh => record({}, 'unpublished', kind, reason);
     await beforeWrite();
+    // The restored commit is built on the scratch branch and the pull request's branch is moved
+    // once, as a speculative tip is (GY-1087): one push, so one CI run binds to the restored head.
+    let merged: string | null, conflict: string | null = null;
+    try { merged = await this.mergeOnScratch(work.key, own, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
+    catch (error) {
+      if (error instanceof SpeculativeConflict) { merged = null; conflict = error.message; }
+      else if (!(error instanceof Refusal)) throw error;
+      else return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
+    }
+    // A conflicting restore still moves the branch to the item's own reviewed head; the merge is the worker's.
+    const produced = merged ?? own;
     // The same one-request window as in publishSpeculativeTip: a worker push between the head
     // check above and this forced update is overwritten by the restore. The head being restored
     // is one no worker may push over (a contaminated tip), the record names the head it moved
     // from, and the next observation reads the branch afresh.
-    try { await this.updateBranch(pr.head.ref, own); }
+    try { await this.updateBranch(pr.head.ref, produced); }
     catch (error) {
       if (!(error instanceof Refusal)) throw error;
-      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to the reviewed head ${own.slice(0, 12)}: ${error.message}`);
+      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to ${merged ? `the reviewed head ${own.slice(0, 12)} merged onto the base, ${produced.slice(0, 12)}` : `the reviewed head ${own.slice(0, 12)}`}: ${error.message}`);
     }
-    let merged: string | null;
-    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
-    catch (error) {
-      if (error instanceof SpeculativeConflict)
-        return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${error.message}`);
-      if (!(error instanceof Refusal)) throw error;
-      return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
-    }
+    if (conflict !== null)
+      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${conflict}`);
     // The restore is done only when GitHub itself shows the branch at the commit it produced
     // (GY-854): a push GitHub does not reflect has happened, and a record that claimed it anyway
     // left the item waiting at a head no observation would ever read.
-    const produced = merged ?? own;
     let shown: string;
     try { shown = await this.refHead(pr.head.ref); }
     catch (error) {
@@ -1937,16 +2194,26 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
-    const branch = mergeCheckBranch(key);
-    await this.publishRef(`refs/heads/${branch}`, head);
     try {
-      await this.mergeBranch(branch, base, `Graphyard merge check for ${key} [skip ci]`);
+      await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
       return null;
     } catch (error) {
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
-    } finally {
-      // A scratch branch left behind by a failed delete is overwritten by the next check, but it
+    }
+  }
+  /**
+   * Merges `base` onto `head` on the item's scratch branch and returns the merge commit, or null
+   * when `head` already contains `base`; a conflict throws SpeculativeConflict. No branch a pull
+   * request, a person or a check reads is written (GY-1087): the caller moves the pull request's
+   * branch to the result in one push, so GitHub starts one set of workflow runs for the new head.
+   */
+  async mergeOnScratch(key: string, head: string, base: string, message: string): Promise<string | null> {
+    const branch = mergeCheckBranch(key);
+    await this.publishRef(`refs/heads/${branch}`, head);
+    try { return await this.mergeBranch(branch, base, message); }
+    finally {
+      // A scratch branch left behind by a failed delete is overwritten by the next merge, but it
       // is visible in the repository until then, so the failure is named.
       await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(error => console.error(`Graphyard could not delete merge-check branch ${branch}: ${error instanceof Error ? error.message : String(error)}`));
     }
@@ -1956,11 +2223,22 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * An Actions check run's id is its job's id, which names the run; only the failed jobs rerun, on
    * the same sha, so the rerun's check run is the one the gates read next.
    */
-  async rerunFailedJobs(checkRunId: number): Promise<{ runId: number }> {
+  async rerunFailedJobs(checkRunId: number): Promise<{ runId: number; attempt?: number }> {
     const job = await this.request(`/actions/jobs/${checkRunId}`);
     demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
     await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
-    return { runId: job.run_id };
+    return { runId: job.run_id, ...(Number.isSafeInteger(job.run_attempt) ? { attempt: job.run_attempt } : {}) };
+  }
+  /**
+   * The workflow run a rerun was requested on (GY-1096): its status (`queued`, `waiting`,
+   * `in_progress`, `completed`, ...), conclusion and current attempt, or null when GitHub has none.
+   */
+  async rerunWorkflowRun(runId: number): Promise<RerunWorkflowRun | null> {
+    let run: any;
+    try { run = await this.request(`/actions/runs/${runId}`); }
+    catch (error) { if (error instanceof Refusal && /\(404\)/.test(error.message)) return null; throw error; }
+    demand(typeof run?.status === 'string', `GitHub did not return a readable workflow run ${runId}`, 502);
+    return { status: run.status, conclusion: typeof run.conclusion === 'string' ? run.conclusion : null, attempt: Number.isSafeInteger(run.run_attempt) ? run.run_attempt : null };
   }
   /**
    * The pull request's place in GitHub's merge queue (GY-258): whether the base branch has a queue,
@@ -1988,10 +2266,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * GitHub still enforces branch protection and every required check. These are the only ways
    * Graphyard ever asks GitHub to merge.
    */
-  async enqueuePullRequest(state: GitHubMergeQueueState, sha: string) {
+  async enqueuePullRequest(state: GitHubMergeQueueState, sha: string, mergeNow = false) {
     if (state.queue) return void await this.graphql(enqueueMutation, { id: state.pullRequestId, head: sha });
     const variables = { id: state.pullRequestId, head: sha, method: autoMergeMethod() };
-    if (mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
+    if (mergeNow || mergeableNow(state)) return void await this.graphql(headBoundMergeMutation, variables);
     try { await this.graphql(autoMergeMutation, variables); }
     catch (error) {
       // The pull request became mergeable (clean, unstable or has_hooks) between the read and the
@@ -2019,6 +2297,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = { name: CHECK_NAME, head_sha: audit.head, status: 'completed', conclusion: 'success', external_id: work.id,
       output: { title: 'Repair lane: merge-path repair', summary: `Repair-lane merge of ${work.key} at ${audit.head}, decision ${audit.decision} (requested by ${audit.requestedBy}, approved by ${audit.approver}) for the fault in ${audit.fault}; bypassing a normal guarded merge ${audit.bypassed.state} since ${audit.bypassed.since}` } };
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    await this.upsertLandable(landableCarried(work, audit.head, body.output.title, body.output.summary));
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: autoMergeMethod() });
   }
   /**
@@ -2035,7 +2314,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   /** Every check run on a commit, as the gates read a candidate's: what the main guard judges a merge commit by (GY-500). */
   async commitChecks(sha: string): Promise<{ name: string; result: string; appId: number; id?: number }[]> {
-    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME)
+    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME && check.name !== LANDABLE_CHECK)
       .map(check => ({ name: check.name, result: check.status === 'completed' ? check.conclusion : check.status, appId: check.app?.id, ...(Number.isSafeInteger(check.id) ? { id: check.id } : {}) }));
   }
   /**
@@ -2103,6 +2382,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary)) {
       await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
     }
+    await this.upsertLandable(landableCarried(work, revert.head, body.output.title, body.output.summary));
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: revert.head, method: autoMergeMethod() });
     const merged = await this.request(`/pulls/${revert.pr}`);
     return merged?.merged && typeof merged.merge_commit_sha === 'string' ? merged.merge_commit_sha : null;
@@ -2113,10 +2393,36 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * while the head stays authorized: a withdrawn head is dequeued, which discards the group.
    */
   async publishGroupCheck(work: Work, groupHead: string) {
+    const summary = `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}`;
+    // The group commit carries the authorized head's landability verdict too (GY-887): branch protection requires both.
+    await this.upsertLandable(landableCarried(work, groupHead, 'Landable', summary));
     const existing = (await this.pages(`/commits/${groupHead}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
     if (existing?.status === 'completed' && existing.conclusion === 'success' && existing.external_id === work.id) return;
     const body = { name: CHECK_NAME, head_sha: groupHead, status: 'completed', conclusion: 'success', external_id: work.id,
-      output: { title: 'All required gates passed', summary: `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}` } };
+      output: { title: 'All required gates passed', summary } };
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+  }
+  /**
+   * GY-887. Publishes the landability verdict as `graphyard/landable` on the candidate head
+   * (landable-check.ts): created on a new head, updated when the verdict or its reasons change, and
+   * left alone when the published run already says the same. Success is written only while the pull
+   * request still has that head on that base, as `publish` writes its own.
+   */
+  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}) {
+    const body = landableCheckRun(work, all, new Date());
+    if (!body) return;
+    const success = body.conclusion === 'success';
+    if (success) {
+      const pr = await this.request(`/pulls/${work.candidate!.pr}`);
+      requireCurrent(pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha, 'PR changed before the landability check was published; retry');
+    }
+    await this.upsertLandable(body, () => beforeWrite(success));
+  }
+  /** Creates or updates this App's `graphyard/landable` run on a head; an identical standing run is not rewritten. */
+  async upsertLandable(body: LandableCheckRun, beforeWrite: () => Promise<void> = async () => {}) {
+    const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
+    if (landableCheckCurrent(existing, body)) return;
+    await beforeWrite();
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
@@ -2134,11 +2440,15 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
-/** Required checks by name, deduplicated, without Graphyard's own merge check (GY-430). */
-function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+/**
+ * Required checks by name, deduplicated, without Graphyard's own merge check (GY-430) or its
+ * landability verdict (GY-887): the verdict is computed from these, so requiring itself would
+ * refuse every candidate forever once protection lists it.
+ */
+export function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
   const merged = new Map<string, { name: string; appId: number | null }>();
   for (const check of checks) {
-    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME) continue;
+    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME || check.name === LANDABLE_CHECK) continue;
     const appId = Number.isSafeInteger(check.appId) ? check.appId as number : null;
     const known = merged.get(check.name);
     // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
@@ -2372,7 +2682,7 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   state = { ...state, requestedAt: enqueueRequestCurrent(work, request) ? request!.at : null };
   try {
     if (action.kind === 'dequeue') await github.dequeuePullRequest(state);
-    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha); }
+    if (action.kind === 'enqueue') { await beforeWrite(); await github.enqueuePullRequest(state, work.candidate.sha, action.mergeNow); }
     if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
@@ -2553,6 +2863,18 @@ export const permissionHoldMs = 30 * 60_000;
 export const ancestryEntries = 16384;
 /** Commit-pair histories kept; each is immutable. */
 export const historyEntries = 2048;
+/** Whole immutable responses kept (commits by SHA, compares of two SHAs); the oldest-used is evicted past this. */
+export const immutableEntries = 4096;
+/** The JSON text the immutable hot layer retains in all, and the most one answer may take of it; a larger answer is served from the persisted layer. */
+export const immutableBytes = 64 * 1024 * 1024, immutableValueBytes = 8 * 1024 * 1024;
+/**
+ * The immutable hot layer: JSON text bounded by entries and bytes. `set` takes a parsed answer, as the
+ * persisted layer loads it, or text already kept; `get` returns the text, which each caller parses afresh.
+ */
+class ImmutableCache extends BoundedCache<string> {
+  constructor() { super(immutableEntries, immutableBytes, immutableValueBytes, text => 2 * text.length); }
+  override set(key: string, value: unknown) { return super.set(key, typeof value === 'string' ? value : JSON.stringify(value)); }
+}
 /** Peer containment compares one observation keeps in flight. */
 export const peerContainmentConcurrency = 8;
 async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
@@ -2650,7 +2972,7 @@ const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)
  * missing or older than that is raised as attention naming the head, its lag, and what the
  * workers have actually been achieving.
  */
-export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
+export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
   snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
   const throughput = coordinator?.githubBudget?.throughput ?? null;
   const reading = coordinator?.githubBudget ?? null;
@@ -2660,7 +2982,9 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
     perMinute: reading.perMinute ?? null, pacedPerMinute: reading.pace?.perMinute ?? null, paceTier: reading.pace?.tier ?? null,
     projectedExhaustionAt: reading.projectedExhaustionAt ?? null, exhaustsBeforeReset: !!reading.exhaustsBeforeReset,
     // Each token's own remaining, reset and projection at that reset (GY-690).
-    tokens: (reading.tokens ?? []).map(token => ({ token: token.token, current: token.current, remaining: token.remaining, resetAt: token.resetAt, perMinute: token.perMinute, otherPerMinute: token.otherPerMinute, projectedAtReset: token.projectedAtReset, belowReserveAtReset: token.belowReserveAtReset })) } : null;
+    tokens: (reading.tokens ?? []).map(token => ({ token: token.token, current: token.current, remaining: token.remaining, resetAt: token.resetAt, perMinute: token.perMinute, otherPerMinute: token.otherPerMinute, projectedAtReset: token.projectedAtReset, belowReserveAtReset: token.belowReserveAtReset })),
+    // Billable requests over the last hour against the hourly budget, by endpoint (GY-806).
+    billable: reading.billable ?? null } : null;
   const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
     const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
     if (locked || held) return oldest;
@@ -2719,9 +3043,20 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // claim only if claim order ever gains a correctness role.
   const all = await engine.store.list();
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
+  // A job an observation webhook made due is claimed ahead of all of it by `takeJob` itself (GY-806).
   const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
   const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
   if (!job) return false;
+  const viaWebhook = job.webhook === true;
+  // A poll of an item a webhook-driven observation refreshed within its poll interval is skipped
+  // (GY-806): nothing is asked of GitHub, and the job is due again when that interval ends. A job
+  // woken by a state change or a webhook is never skipped. The refresh is the job row's, so the
+  // replica that claims the poll need not be the one that made the refresh.
+  const refreshedUntil = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until ? new Date(job.refreshed_until).getTime() : null;
+  if (refreshedUntil !== null) {
+    await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
+    return true;
+  }
   const startedAt = Date.now();
   let work: Work | undefined;
   const guard = (snapshot: Work, success: boolean) => async () => {
@@ -2783,11 +3118,38 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       for (const owed of owedCheckReruns(work, engine.ciAppIds)) {
         const rerunHold = hold('check-rerun');
         if (rerunHold) { held ??= rerunHold; break; }
-        let outcome: { state: 'requested' | 'refused'; runId?: number; detail?: string };
+        let outcome: { state: 'requested' | 'refused'; runId?: number; attempt?: number; detail?: string };
         if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
-        else try { outcome = { state: 'requested', runId: (await github.rerunFailedJobs(owed.failedRunId)).runId }; }
+        else try { const requested = await github.rerunFailedJobs(owed.failedRunId); outcome = { state: 'requested', runId: requested.runId, ...(requested.attempt !== undefined ? { attempt: requested.attempt } : {}) }; }
         catch (error) { outcome = { state: 'refused', detail: error instanceof Error ? error.message.slice(0, 300) : 'GitHub refused the rerun' }; }
         work = await engine.recordCheckRerun(work.id, job.token, owed, outcome);
+      }
+      // An accepted rerun with no new check run after the visibility bound is asked of GitHub
+      // (GY-1096): with runners queued its workflow run waits, and that is a wait, not a failure,
+      // so the candidate keeps its position and owes no new head. A rerun not found at all is
+      // requested once more; only one that concluded failing, or vanished twice, lets it stand.
+      for (const due of dueCheckRerunProbes(work, engine.ciAppIds, new Date())) {
+        const rerunHold = hold('check-rerun');
+        if (rerunHold) { held ??= rerunHold; break; }
+        let found: RerunWorkflowRun | null = null;
+        if (typeof github.rerunWorkflowRun === 'function') try { found = await github.rerunWorkflowRun(due.runId!); }
+        catch (error) {
+          // A read GitHub keeps failing holds for a bounded time only, measured from the last answer.
+          const reason = error instanceof Error ? error.message.slice(0, 300) : String(error);
+          if (Date.now() - Date.parse(due.probedAt ?? due.rerequestedAt ?? due.at) < checkRerunUnreadableMs) { console.error(`Graphyard could not read workflow run ${due.runId} for the ${due.check} rerun of ${work.key}: ${reason}`); continue; }
+          work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun but no new ${due.check} run appeared and its workflow run could not be read for ${checkRerunUnreadableMs / 60_000} minutes: ${reason}` });
+          continue;
+        }
+        const probe = classifyRerunRun(due, found);
+        if (probe.kind !== 'missing') { work = await engine.recordCheckRerunProbe(work.id, job.token, due, probe); continue; }
+        if (due.rerequestedAt) {
+          work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun twice but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes of either request` });
+          continue;
+        }
+        let outcome: Parameters<Engine['recordCheckRerunProbe']>[3];
+        try { const again = await github.rerunFailedJobs(due.failedRunId); outcome = { kind: 'rerequested', runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}) }; }
+        catch (error) { outcome = { kind: 'refused', detail: `GitHub accepted the rerun but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes, and the second request was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}` }; }
+        work = await engine.recordCheckRerunProbe(work.id, job.token, due, outcome);
       }
       // A branch carrying another item's unlanded commits is restored by the control plane (GY-127):
       // on its own for a tip the queue ejected, on the coordinator's request otherwise. The restored
@@ -2860,6 +3222,12 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
         }
         else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+        // The landability verdict is recomputed from this observation's facts and published as its
+        // one required check on the head (GY-887); an unchanged verdict writes nothing.
+        if (!unpublishable && typeof github.publishLandable === 'function') {
+          const observed = work;
+          await github.publishLandable(observed, all.map(item => item.id === observed.id ? observed : item), success => guard(observed, success)());
+        }
         // A merge-path repair whose normal merge is stalled may take the audited repair lane (GY-406).
         if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work, new Date(), guard(work, true));
       }
@@ -2875,6 +3243,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });
+    if (viaWebhook && observed && !settled && !held && cadence && work) await engine.store.noteWebhookRefresh(job.work_id, job.token, cadence.ms);
     if (settled) return true;
     if (work?.stage === 'done') await engine.store.pool.query('DELETE FROM jobs WHERE work_id=$1 AND token=$2', [job.work_id, job.token]);
     if (held) await engine.store.holdJob(job.work_id, job.token, held, permissionHoldMs, heldOn(), observed);

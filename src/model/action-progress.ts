@@ -1,6 +1,7 @@
 import type { Work } from './work.js';
 import type { NextActionKind } from './next-action.js';
 import type { ActionRecord, ActionRow } from './actions.js';
+import { handoffWaitBound } from './action-kinds.js';
 
 /**
  * What the rows say about themselves.
@@ -26,6 +27,8 @@ import type { ActionRecord, ActionRow } from './actions.js';
 export const actionSettleMs = 10 * 60_000;
 /** A failed attempt backs off on a widening interval, never below the first step or above the last. */
 export const actionRetryMinMs = 30_000, actionRetryMaxMs = 10 * 60_000;
+/** How many records one row keeps of its own history, newest last (`actions.ts` trims to it on every write). */
+export const actionRecordLimit = 20;
 /** A row nobody has claimed for longer than this is idle while it is actionable; see `idleActionable`. */
 export const actionIdleMs = 5 * 60_000;
 /**
@@ -102,16 +105,26 @@ export interface ActionStall {
  */
 export function actionStall(row: ActionRow): ActionStall | null {
   const failures: ActionRecord[] = [];
+  let progressed = false;
   for (const entry of [...row.history].reverse()) {
     if (entry.event === 'failed') { failures.push(entry); continue; }
     // A claim or a reclaim sits between two attempts and says nothing about either. Anything else
     // — a completion, a reopening, a fresh request — is progress, and ends the run of failures.
     if (entry.event === 'claimed' || entry.event === 'reclaimed') continue;
+    progressed = true;
     break;
   }
   const run: ActionRecord[] = [];
   for (const entry of failures) { if (run.length && entry.reason !== run[0].reason) break; run.push(entry); }
   if (run.length < actionStallThreshold) return null;
+  // A reason naming a handoff in progress (`handoffWaitBound`) repeats because the effect has not
+  // landed yet, not because the attempt cannot succeed: it is a stall only once the run outlasts
+  // the bound the component delivering it keeps (GY-1090). A run that fills the row's whole
+  // retained record began before it, so it is read as having outlasted the bound: the record's
+  // trimming never hides a wait that stopped being one.
+  const bound = handoffWaitBound(run[0].reason);
+  const beyondRecord = !progressed && run.length === failures.length && row.history.length >= actionRecordLimit;
+  if (bound !== null && !beyondRecord && Date.parse(run[0].at) - Date.parse(run[run.length - 1].at) < bound) return null;
   return { reason: run[0].reason, failures: run.length, attempts: row.attempts, since: run[run.length - 1].at };
 }
 

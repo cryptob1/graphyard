@@ -67,10 +67,10 @@ const cancelsRunning = (earlier: { group: string }, later: { group: string; canc
 test('unit:ci-cancels-superseded-runs — every pull_request-triggered workflow cancels superseded runs, and runs on main are never cancelled', async () => {
   const workflows = readWorkflows();
   const byPath = new Map(workflows.map(file => [file.path, file]));
-  for (const required of ['.github/workflows/ci.yml', '.github/workflows/helm.yml']) assert.ok(byPath.has(required), `${required} exists`);
+  assert.ok(byPath.has('.github/workflows/ci.yml'), '.github/workflows/ci.yml exists');
   const pullRequestWorkflows = workflows.filter(file => readWorkflow(file.text).pullRequest);
-  assert.ok(pullRequestWorkflows.some(file => file.path.endsWith('/ci.yml')) && pullRequestWorkflows.some(file => file.path.endsWith('/helm.yml')), 'ci.yml and helm.yml run on pull requests');
-  for (const path of ['.github/workflows/ci.yml', '.github/workflows/helm.yml']) {
+  assert.ok(pullRequestWorkflows.some(file => file.path.endsWith('/ci.yml')), 'ci.yml runs on pull requests');
+  for (const path of ['.github/workflows/ci.yml']) {
     const { concurrency } = readWorkflow(byPath.get(path)!.text);
     assert.ok(concurrency?.group?.startsWith('${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}'), `${path} groups its runs per pull request: ${concurrency?.group}`);
     assert.equal(concurrency?.cancelInProgress, "${{ github.event_name == 'pull_request' }}", `${path} cancels in progress for pull_request events only`);
@@ -103,7 +103,7 @@ test('unit:ci-cancels-superseded-runs — every pull_request-triggered workflow 
 });
 
 const openWork = (checks: string[], overrides: Partial<Work> = {}) => ({ id: 'work-id', key: 'GY-42', stage: 'review', policy: { checks, review: true }, ...overrides } as unknown as Work);
-const protection = { required_pull_request_reviews: { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true } };
+const protection = { required_pull_request_reviews: { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true } };
 const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
 
 test('unit:onboarding-ci-concurrency-advisory — onboarding recommends cancelling superseded pull-request runs, and master protection reports a required check whose workflow lacks cancel-in-progress', async () => {

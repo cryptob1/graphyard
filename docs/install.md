@@ -19,7 +19,7 @@ A person is asked for exactly four things: **Which provider** (and `--workspace`
 
 Node 24; a checkout of `OWNER/REPO`; `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`; `gh auth status` logged in as a repository admin with `repo,admin:repo_hook`.
 
-Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --unshare-all --ro-bind / / -- true` must succeed (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
+Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true` (the probe Graphyard runs) must succeed (Ubuntu 24.04: `sysctl kernel.apparmor_restrict_unprivileged_userns=0`).
 
 ### Providers
 
@@ -60,7 +60,7 @@ At the printed `http://127.0.0.1:4311` the human registers and installs the App.
 
 ## Step 6: the first pull request
 
-Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`. **Verify** the check required on the base branch.
+Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`, which requires it and `graphyard/landable`, both bound to the App. **Verify** both checks required on the base branch.
 
 `--plan` and `--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
 

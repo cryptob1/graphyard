@@ -54,19 +54,19 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows the recommendation, a differing answer reworks, failure never blocks; product questions need a human.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. A branch restore owed under 30 minutes and a restart-resumed merge are self-handled, not `merge` faults.
 
 ## Machine-filed backlog
 
-Approvals' follow-up findings are recorded on the approved item's own record, never filed as items; an operator promotes one with `graphyard promote-followup` ([follow-ups](followups.md)). Legacy follow-up items and fault items are machine-filed: with `run.research`, Pi triages them (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then form or join its one follow-up item; closing it unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
 A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once those pass (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits the head's bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
-**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request above one. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request above one. `run.reviewerProfile`'s profile defaults to 4 sessions; pending sessions count before Herdr shows them. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then a quoting rework.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's still-open pane is closed next dispatch tick, freeing its name; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished producer runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then a quoting rework.
 
 **Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 

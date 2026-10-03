@@ -6,12 +6,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { attentionKind, classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
-import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
+import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { agentOwner, buildMasterStatus, controlPlaneAttention, fleetStatus, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
 import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
+import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
+import { retryStopAttention } from '../src/retry-stop.js';
+import { stoppedFollowUpAttention, type ReviewRecord } from '../src/reviewer.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
@@ -66,8 +70,9 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
-      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless']],
-    ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker']],
+      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
+      'nonexercising-proof', 'retry-stopped']],
+    ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
   for (const [source, kinds] of sources) for (const kind of kinds) {
     assert.ok(isFaultKind(kind), `${source}: ${kind} is in the catalogue`);
@@ -113,18 +118,19 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   assert.equal(dispatched.faultClass, 'session-liveness');
   assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.kind, entry.faultClass]), [['GY-8', 'action:dispatch', 'session-liveness']]);
   // Failures written outside the cycle's own steps carry their class too: an action a restart
-  // interrupted, a refused configuration reload and a refused watchdog window.
+  // interrupted, a refused configuration reload and a refused watchdog window. A merge a restart
+  // interrupted is the exception (GY-1087): asking GitHub again for the same head is a retry.
   const restarted = emptyDaemonState(config());
   storeAction(restarted, 'session:work-9:1', { kind: 'session', work: 'GY-9', principal: 'worker', state: 'started', detail: 'Launching', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
   storeAction(restarted, 'merge:work-9:1', { kind: 'merge', work: 'GY-9', principal: null, state: 'started', detail: 'Merging', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
   const resumed = reconcilePendingActions(restarted, [item('GY-9')], clock);
-  assert.deepEqual(resumed.map(entry => [entry.kind, entry.state, entry.faultClass]), [['session', 'indeterminate', 'session-liveness'], ['merge', 'failed', 'merge']]);
+  assert.deepEqual(resumed.map(entry => [entry.kind, entry.state, entry.faultClass]), [['session', 'indeterminate', 'session-liveness'], ['merge', 'failed', undefined]]);
   const [refused] = await noteConfigReload(restarted, { at: iso(1000), changed: [], refused: 'workers[0].agentName is stale' } as any, async () => {});
   assert.equal(refused.faultClass, 'configuration', 'a refused reload is a configuration fault');
   const [watchdog] = await noteWatchdog(restarted, { windowMs: 1000, refusal: 'The watchdog window is shorter than the interval' } as any, iso(2000), async () => {});
   assert.equal(watchdog.faultClass, 'configuration');
-  assert.deepEqual(restarted.faults.instances.map(entry => entry.faultClass), ['session-liveness', 'merge', 'configuration', 'configuration'], 'each is a recorded instance');
-  assert.ok(Object.values(restarted.actions).every(action => (action.state === 'failed' || action.state === 'indeterminate') === !!action.faultClass), 'every failed action, and only a failed one, carries a class');
+  assert.deepEqual(restarted.faults.instances.map(entry => entry.faultClass), ['session-liveness', 'configuration', 'configuration'], 'each is a recorded instance');
+  assert.ok(Object.values(restarted.actions).every(action => (action.kind !== 'merge' && (action.state === 'failed' || action.state === 'indeterminate')) === !!action.faultClass), 'every failed action but the retried merge, and only a failed one, carries a class');
   let persisted = 0;
   const failing = { snapshot: async () => ({ work: [], now: iso(0) }), persist: async () => { persisted++; } } as unknown as DaemonEffects;
   await runCycle(config(), state, { ...failing, agents: () => [], credentials: async () => ({}), observeDeployment: async () => { throw new Error('the deployment endpoint timed out'); } } as unknown as DaemonEffects, () => clock);
@@ -154,8 +160,9 @@ test('unit:fault-classes — master status and the dashboard group open problems
   // The dashboard's Work page: the same grouping over each open item's own record.
   const work = boardWork() as unknown as Work[];
   const open = work.filter(entry => entry.stage !== 'done');
-  open[0].scopeRequest = { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'graphyard-claude-1', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
-  open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW).toISOString() } as Work['scopeRequest'];
+  // Requests open past the loop's bound (GY-1085): one still being decided within it is no fault.
+  open[0].scopeRequest = { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'graphyard-claude-1', at: new Date(NOW - hour).toISOString() } as Work['scopeRequest'];
+  open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW - hour).toISOString() } as Work['scopeRequest'];
   open[0].lease = { owner: 'graphyard-claude-1', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
   open[1].lease = { owner: 'graphyard-claude-2', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
   const expected = groupFaults(open.flatMap(entry => workFaults(entry, NOW)));
@@ -894,5 +901,134 @@ test('unit:recurring-class-item — daemonSummary reports faults under the polic
   finally {
     for (const [name, value] of [['GRAPHYARD_FAULT_CLASS_THRESHOLD', previous.threshold], ['GRAPHYARD_FAULT_CLASS_WINDOW_HOURS', previous.windowHours]] as const)
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
+});
+
+// GY-950: a worker role at its concurrency limit was filed under the configuration class, though the
+// product itself treats the same refusal as a wait for a slot. GY-947's tripping instance was a
+// saturated, healthy fleet: 8 of 8 worker sessions live, every one on work.
+function saturatedFleet(idle = 0): AgentRegistry {
+  const at = iso(-hour);
+  let registry = emptyRegistry();
+  const change = (kind: Parameters<typeof applyRegistryMutation>[1], input: unknown) => { registry = applyRegistryMutation(registry, kind, input, { actor: 'operator', at }).registry; };
+  change('apply', { runtimes: [proposedRuntimes.find(runtime => runtime.name === 'claude')!], models: [{ name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'claude-primary', runtime: 'claude', model: 'opus', credential: { host: 'machine-a', home: '/agents/claude-primary' } }],
+    roles: fleetRoles.map(name => ({ name, accounts: ['claude-primary'], concurrency: name === 'worker' ? 8 : 2 })), reason: 'fixture' });
+  const session = (index: number): FleetSession => ({ id: `worker-session-${index}`, role: 'worker', account: 'claude-primary', runtime: 'claude', model: 'opus', host: 'machine-a',
+    work: index < 8 - idle ? `GY-${500 + index}` : null, principal: `graphyard-worker-${index}`, selectedAt: at, selectedBy: 'master', reason: 'fixture', skipped: [], endedAt: null, endReason: null });
+  registry.sessions.push(...Array.from({ length: 8 }, (_, index) => session(index)));
+  return registry;
+}
+const fleetFaults = (registry: AgentRegistry, host: string | null) => {
+  const state = emptyDaemonState(config());
+  trackFaults(state.faults, cycleFaults(state, [], clock, { config: config(), status: { github: true, fleet: fleetView(registry, clock, host) } as never }), iso(0));
+  return state.faults.instances;
+};
+
+test('unit:full-role-on-work-raises-no-configuration-fault — a worker role at its limit with every session on work raises no fleet attention and no configuration instance', () => {
+  for (const host of [null, 'machine-a']) {
+    const view = fleetView(saturatedFleet(), clock, host), worker = view.roles.find(role => role.role === 'worker')!;
+    assert.match(worker.blocked!, /role worker is at its concurrency limit \(8 of 8 live/, 'the role still says why it cannot launch');
+    assert.deepEqual(view.attention, [], `a full role whose sessions all carry work is a wait for a slot (host ${host})`);
+    assert.deepEqual(fleetStatus(view).attentionItems, []);
+    const status = buildMasterStatus({ work: [], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', { fleet: view });
+    assert.deepEqual(status.attentionItems.filter(entry => entry.subject === 'fleet'), []);
+    const instances = fleetFaults(saturatedFleet(), host);
+    assert.deepEqual(instances.filter(entry => entry.faultClass === 'configuration'), [], `the configuration detector records nothing: ${JSON.stringify(instances)}`);
+    assert.deepEqual(instances.filter(entry => entry.subject === 'fleet'), []);
+  }
+});
+
+test('unit:unaccounted-role-sessions-raise-capacity-not-configuration — a full role holding sessions with no work raises one line naming them, classified as capacity', () => {
+  for (const host of [null, 'machine-a']) {
+    const view = fleetView(saturatedFleet(2), clock, host);
+    assert.deepEqual(view.attention, ['role worker is at its concurrency limit (8 of 8 live) with 2 sessions carrying no work: worker-session-6 (claude-primary), worker-session-7 (claude-primary)']);
+    const [raised, ...rest] = fleetStatus(view).attentionItems;
+    assert.deepEqual(rest, []);
+    assert.deepEqual([raised.subject, raised.kind, raised.faultClass, raised.role, raised.human], ['fleet', 'fleet-capacity', 'capacity', 'master', false]);
+    assert.match(raised.next, /master registry session end ID --reason REASON/);
+    const instances = fleetFaults(saturatedFleet(2), host);
+    assert.deepEqual(instances.map(entry => [entry.kind, entry.faultClass, entry.subject]), [['fleet-capacity', 'capacity', 'fleet']], JSON.stringify(instances));
+  }
+  // A role at its limit by a master session (which never carries work) is accounted for.
+  let registry = saturatedFleet();
+  registry = applyRegistryMutation(registry, 'role.set', { role: { name: 'master', accounts: ['claude-primary'], concurrency: 1 }, reason: 'fixture' }, { actor: 'operator', at: iso(-hour) }).registry;
+  registry.sessions.push({ ...registry.sessions[0], id: 'master-session', role: 'master', work: null });
+  assert.deepEqual(fleetView(registry, clock).attention.filter(line => /role master/.test(line)), []);
+});
+
+test('unit:fault-classes — the fleet at-limit line is capacity; the genuine registry-configuration lines stay configuration', () => {
+  assert.deepEqual(faultClasses.filter(faultClass => (faultCatalogue[faultClass] as readonly string[]).includes('fleet-capacity')), ['capacity']);
+  assert.equal(faultClassOf('fleet'), 'configuration');
+  const view = { ...fleetView(saturatedFleet(1), clock), attention: ['role worker is at its concurrency limit (8 of 8 live) with 1 session carrying no work: s (a)', 'role approver is not configured; its sessions launch from local profiles until it is', 'idle serves no role; name it in a role or remove it'] };
+  assert.deepEqual(fleetStatus(view).attentionItems.map(entry => [entry.kind, entry.faultClass]), [['fleet-capacity', 'capacity'], ['fleet', 'configuration'], ['fleet', 'configuration']]);
+  // A paused role is the operator's own setting, still raised as before.
+  const paused = applyRegistryMutation(saturatedFleet(), 'role.set', { role: { name: 'producer', accounts: ['claude-primary'], concurrency: 0 }, reason: 'fixture' }, { actor: 'operator', at: iso(-hour) }).registry;
+  assert.ok(fleetView(paused, clock, 'machine-a').attention.includes('role producer is paused (concurrency 0)'));
+});
+
+test('manual:fault-class-configuration — GY-947\'s fleet instance (role worker at its limit, 8 of 8 live) recurs on the candidate as a capacity instance or none, never configuration', () => {
+  // The instance as GY-947 recorded it: fleet on fleet, "role worker is at its concurrency limit (8 of 8 live)", every session on work.
+  for (const idle of [0, 3]) for (const host of [null, 'machine-a']) {
+    const instances = fleetFaults(saturatedFleet(idle), host).filter(entry => entry.subject === 'fleet');
+    assert.deepEqual(instances.filter(entry => entry.faultClass === 'configuration'), [], `no configuration instance (idle ${idle}, host ${host}): ${JSON.stringify(instances)}`);
+    assert.ok(instances.every(entry => entry.faultClass === 'capacity'), JSON.stringify(instances));
+    assert.equal(instances.length, idle ? 1 : 0);
+  }
+});
+
+// GY-915: the non-exercising-proof rework line (GY-817) and the stopped-retry line (GY-598) set no
+// kind and matched no signature, so every instance was counted as unclassified and the loop filed
+// grab-bag GY-889 for them. These are the instance texts listed on GY-889: the 2026-09-27 trio
+// verbatim as the loop recorded them, GY-831's as recorded up to its truncation, and GY-876's and
+// GY-727's in the builder's wording.
+const gy889Lines = [
+  { subject: 'GY-537', text: 'The loop stopped retrying follow-up filing for approval 5327884989 (PR #372) for GY-537: 10 consecutive attempts failed with the same client error, so another attempt would get the same answer — the follow-ups could not be appended to GY-808: Graphyard refused the follow-ups for GY-808 (409): Idempotency key reused with different input' },
+  { subject: 'GY-853', text: 'GY-853 is awaiting rework for a non-exercising proof: unit:worker-submits-sandbox-failures-to-ci was recorded as not exercising AC-1 on 1d49f9919749: the mutation removing "Workers submit when their own criteria pass; the full test suite is CI\'s gate. The submission policy rule is exported from src/master/harness.ts and included in the worker prompt in src/master/dispatch.ts." survived — unit:worker-submits-sandbox-failures-to-ci does not exercise AC-1: no case ran against the tree with "Workers' },
+  { subject: 'GY-888', text: 'GY-888 is awaiting rework for a non-exercising proof: unit:coordinator-write-blocked-for-shell was recorded as not exercising AC-1 on 70826ae41197: the mutation removing "assertion that write operations to read-only mounted coordinator checkout fail with Permission denied or Read-only error" survived — unit:coordinator-write-blocked-for-shell does not exercise AC-1: it passed against the tree with "assertion that write operations to read-only mounted coordinator checkout fail with Permission den' },
+  { subject: 'GY-831', text: 'GY-831 is awaiting rework for a non-exercising proof: unit:carried-approval-rebinds was recorded as not exercising unit:carried-approval-rebinds on 5b4ac3a6decb: the mutation removing "refreshedCarriedApproval function re-binds a carried approval from an earlier pull request to a newer approval of …' },
+  { subject: 'GY-876', text: 'GY-876 is awaiting rework for a non-exercising proof: unit:master-status-fast was recorded as not exercising AC-1 on 71edb8fc5b78: the mutation removing "the bounded status read" survived. The unit proofs are a defect of the candidate\'s tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh' },
+  { subject: 'GY-727', text: 'GY-727 is awaiting rework for a non-exercising proof: unit:gy727-proof was recorded as not exercising AC-1 on 2823718ea08d: the mutation removing "the guarded branch" survived. The unit proofs are a defect of the candidate\'s tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh' },
+];
+
+test('unit:gy889-attention-lines-classified — every GY-889 instance line has a catalogue kind with a real class', () => {
+  for (const line of gy889Lines) {
+    const kind = attentionKind(line);
+    assert.notEqual(kind, 'unclassified', `${line.subject}: ${line.text}`);
+    assert.notEqual(faultClassOf(kind), 'unclassified', `${line.subject}: ${kind}`);
+  }
+  assert.deepEqual(gy889Lines.map(line => attentionKind(line)), ['retry-stopped', ...Array(5).fill('nonexercising-proof')]);
+  assert.deepEqual(classifyAttention(gy889Lines).map(entry => entry.faultClass), ['loop', ...Array(5).fill('proof')]);
+});
+
+test('unit:nonexercising-proof-kind — the non-exercising-proof rework line is a proof fault', () => {
+  const finding = 'unit:widget-renders was recorded as not exercising AC-1 on 0123456789ab: the mutation removing "the widget" survived';
+  const producer = { requestId: 'request-1', sinceMs: 3 * hour, group: 'unit', session: { state: 'completed', attempt: 1, resolution: `evidence does not exercise its criterion: ${finding}`, verdict: null }, unexercised: [finding] };
+  const [line, ...rest] = unansweredRequestAttention([{ key: 'GY-42', dispatch: { review: null, producers: [producer] } }]);
+  assert.equal(rest.length, 0);
+  assert.match(line.text, /^GY-42 is awaiting rework for a non-exercising proof: /);
+  assert.equal(line.kind, 'nonexercising-proof');
+  assert.equal(faultClassOf(line.kind!), 'proof');
+  const [classifiedLine] = classifyAttention([line]);
+  assert.deepEqual([classifiedLine.kind, classifiedLine.faultClass], ['nonexercising-proof', 'proof']);
+  // The same line without its kind, as a recorded instance carries it, is recognised by its wording.
+  assert.equal(attentionKind({ subject: line.subject, text: line.text }), 'nonexercising-proof');
+  // A producer request that settled with no finding stays the unanswered request it was.
+  const { unexercised: _finding, ...plain } = producer;
+  assert.equal(attentionKind(unansweredRequestAttention([{ key: 'GY-42', dispatch: { review: null, producers: [plain] } }])[0]), 'unanswered-request');
+});
+
+test('unit:retry-stop-kind — the stopped-retry line is a loop fault', () => {
+  const error = 'Graphyard refused the follow-ups for GY-808 (409): Idempotency key reused with different input';
+  const direct = retryStopAttention({ step: 'follow-up filing for approval 77 (PR #64)', item: 'GY-64', error, count: 10, at: iso(0) });
+  const record = { key: 'GY-64', pr: 64, followUps: { reviewId: 77, stoppedAt: iso(0), clientError: { error, count: 10 } } } as unknown as ReviewRecord;
+  const [stopped, ...rest] = stoppedFollowUpAttention([record]);
+  assert.equal(rest.length, 0);
+  for (const line of [direct, stopped]) {
+    assert.match(line.text, /^The loop stopped retrying follow-up filing for approval 77 \(PR #64\) for GY-64: 10 consecutive attempts/);
+    assert.equal(line.kind, 'retry-stopped');
+    assert.equal(faultClassOf(line.kind!), 'loop');
+    assert.deepEqual(classifyAttention([line]).map(entry => [entry.kind, entry.faultClass]), [['retry-stopped', 'loop']]);
+    assert.equal(attentionKind({ subject: line.subject, text: line.text }), 'retry-stopped', 'recognised by its wording without the kind');
   }
 });

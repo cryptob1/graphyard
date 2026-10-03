@@ -1,11 +1,12 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
-import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchOrder } from '../coordination.js';
+import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchSort } from '../coordination.js';
+import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
+import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, ejectedTipRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
@@ -17,6 +18,7 @@ import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { classified } from '../model/fault-classes.js';
+import { pendingFollowUpsReport } from '../model/followups-held.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
 
@@ -210,7 +212,11 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const restore = currentRestore(work);
     const contamination = contaminated || restore?.restore ? { head: contaminated?.head ?? restore!.restore!.contaminated, foreign: contaminated?.foreign ?? restore!.restore!.foreign, source: contaminated?.source ?? [],
       restore: restore?.restore ? { cause: restore.restore.cause, requested: restore.restore.requested, performedAt: restore.restore.performedAt, outcome: restore.restore.outcome, own: restore.restore.own, head: restore.head, conflict: restore.conflict,
-        failure: restore.restore.failure ?? null, escalated: restore.restore.escalated ?? null, attempts: restore.restore.attempts ?? null } : null } : null;
+        failure: restore.restore.failure ?? null, escalated: restore.restore.escalated ?? null, attempts: restore.restore.attempts ?? null,
+        // Whether the loop retries an unpublished restore on its own (GY-1056): only an ejected tip's
+        // restore is retried (ejectedTipRestore); a coordinator repair that failed to publish waits
+        // for graphyard master repair, so no row promises a retry that never runs.
+        retried: restore.restore.outcome === 'unpublished' && !restore.restore.escalated && !!ejectedTipRestore(work, snapshot.work) } : null } : null;
     const restored = restoredApproval(work), baseDismissal = mergeBaseDismissal(work);
     const approvalRestored = restored ? { reviewer: restored.reviewer, reviewId: restored.reviewId ?? null, sha: restored.sha, dismissal: restored.dismissal, at: restored.at,
       line: `${restored.reviewer}'s approval of ${restored.sha.slice(0, 12)} was dismissed by GitHub for a merge-base change while the head was unchanged (${restored.dismissal.reason ?? 'reason unread'}${restored.dismissal.at ? ` at ${restored.dismissal.at}` : ''}); the control plane restored it as the binding approval, requested no review, spent no attempt, and re-posts it through the reviewer App before the merge` } : null;
@@ -246,7 +252,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits blocks the candidate whatever else stands
       // (GY-127): the restore is the control plane's, and the row says whether it is owed, requested,
       // ran and published, or failed and escalated (GY-854).
-      : contaminated && !(contamination?.restore && contamination.restore.performedAt && contamination.restore.outcome === 'restored' && contamination.restore.head !== contaminated.head) ? [`${work.key} branch head ${contaminated.head.slice(0, 12)} carries the unlanded commits of ${contaminated.foreign.join(', ')} (${contaminated.source.includes('ejection') ? `a speculative tip published behind ${contaminated.foreign.join(', ')} and ejected from the merge queue` : 'found in its history by GitHub'}): kept, it is refused as an out-of-scope regression; landed, it would record ${contaminated.foreign.join(', ')} merged without ${contaminated.foreign.length === 1 ? 'its' : 'their'} content. ${contamination?.restore?.outcome === 'unrepairable' ? 'A restore found no own reviewed head under it: the foreign commits sit under something the control plane cannot move' : contamination?.restore?.outcome === 'unpublished' ? contamination.restore.escalated ? `The restore failed twice without the candidate changing and stopped repeating, escalated: ${contamination.restore.failure}` : `The restore could not publish its result and is retried once: ${contamination.restore.failure}` : contamination?.restore && !contamination.restore.performedAt ? `A restore is requested (${contamination.restore.cause}) and runs on the next reconciliation` : work.queueEjection?.sha === contaminated.head ? 'The control plane restores it to its own reviewed head merged onto the base on the next reconciliation' : `graphyard master repair ${work.key} REASON restores it to its own reviewed head merged onto the base`}`, 'contaminated']
+      : contaminated && !(contamination?.restore && contamination.restore.performedAt && contamination.restore.outcome === 'restored' && contamination.restore.head !== contaminated.head) ? [`${work.key} branch head ${contaminated.head.slice(0, 12)} carries the unlanded commits of ${contaminated.foreign.join(', ')} (${contaminated.source.includes('ejection') ? `a speculative tip published behind ${contaminated.foreign.join(', ')} and ejected from the merge queue` : 'found in its history by GitHub'}): kept, it is refused as an out-of-scope regression; landed, it would record ${contaminated.foreign.join(', ')} merged without ${contaminated.foreign.length === 1 ? 'its' : 'their'} content. ${contamination?.restore?.outcome === 'unrepairable' ? 'A restore found no own reviewed head under it: the foreign commits sit under something the control plane cannot move' : contamination?.restore?.outcome === 'unpublished' ? contamination.restore.escalated ? `The restore failed twice without the candidate changing and stopped repeating, escalated: ${contamination.restore.failure}` : contamination.restore.retried ? `The restore could not publish its result and is retried once: ${contamination.restore.failure}` : `The restore could not publish its result and nothing retries it on its own: ${contamination.restore.failure}; graphyard master repair ${work.key} REASON requests it again` : contamination?.restore && !contamination.restore.performedAt ? `A restore is requested (${contamination.restore.cause}) and runs on the next reconciliation` : work.queueEjection?.sha === contaminated.head ? 'The control plane restores it to its own reviewed head merged onto the base on the next reconciliation' : `graphyard master repair ${work.key} REASON restores it to its own reviewed head merged onto the base`}`, 'contaminated']
       : active && !['working', 'idle'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
@@ -353,6 +359,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
+    // Review follow-ups held on a parent until it ships (GY-845), apart from the backlog they have not joined yet.
+    pendingFollowUps: pendingFollowUpsReport(snapshot.work),
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }
@@ -367,12 +375,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
  */
 export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work']) {
   const contaminated = rows.flatMap(row => row.contamination ? [{ key: row.key, head: row.contamination.head, foreign: row.contamination.foreign, source: row.contamination.source,
-    restore: row.contamination.restore ? { cause: row.contamination.restore.cause, requestedBy: row.contamination.restore.requested?.by ?? null, performedAt: row.contamination.restore.performedAt, outcome: row.contamination.restore.outcome, own: row.contamination.restore.own, head: row.contamination.restore.head } : null,
+    restore: row.contamination.restore ? { cause: row.contamination.restore.cause, requestedBy: row.contamination.restore.requested?.by ?? null, performedAt: row.contamination.restore.performedAt, outcome: row.contamination.restore.outcome, own: row.contamination.restore.own, head: row.contamination.restore.head, retried: row.contamination.restore.retried } : null,
     line: row.contamination.restore?.outcome === 'restored' && row.contamination.restore.head !== row.contamination.head
       ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carried ${row.contamination.foreign.join(', ')}; restored to own reviewed head ${row.contamination.restore.own?.slice(0, 12) ?? '(unknown)'} merged onto the base as ${row.contamination.restore.head!.slice(0, 12)}`
       : row.contamination.restore?.outcome === 'conflict' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carried ${row.contamination.foreign.join(', ')}; reset to own reviewed head ${row.contamination.restore.own?.slice(0, 12) ?? '(unknown)'}, whose merge onto the base conflicts and is the worker's`
       : row.contamination.restore?.outcome === 'unrepairable' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')} under something the control plane cannot move; request rework`
-      : row.contamination.restore?.outcome === 'unpublished' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; the restore is not on the branch — ${row.contamination.restore.failure}${row.contamination.restore.escalated ? ' — escalated: it stops repeating' : ' — one retry follows'}`
+      : row.contamination.restore?.outcome === 'unpublished' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; the restore is not on the branch — ${row.contamination.restore.failure}${row.contamination.restore.escalated ? ' — escalated: it stops repeating' : row.contamination.restore.retried ? ' — one retry follows' : ` — nothing retries it on its own; graphyard master repair ${row.key} REASON requests it again`}`
       : row.contamination.restore ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; a ${row.contamination.restore.cause} restore is requested and runs on the next reconciliation`
       : `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; ${row.attention ?? 'a restore is owed'}` }] : []);
   const restoredApprovals = rows.flatMap(row => row.restoredApproval ? [{ key: row.key, reviewer: row.restoredApproval.reviewer, sha: row.restoredApproval.sha, reason: row.restoredApproval.dismissal.reason, at: row.restoredApproval.at, line: `${row.key}: ${row.restoredApproval.line}` }] : []);
@@ -380,12 +388,13 @@ export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work'])
 }
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
- * would be offered (smallest planned scope first within a priority), and the broad scopes that
+ * would be offered (within a priority: starving first, then cold before hot, then smallest planned
+ * scope, by the loop's own comparator over the same hot set and clock), and the broad scopes that
  * make a weak change-scope contract. Nothing is held for planned-file overlap: dispatch is
  * optimistic, and the merge queue and a sync round integrate whichever overlapping item lands second.
  */
 export function dispatchSchedule(work: Work[], now: number) {
-  const ready = work.filter(item => dispatchable(item, now)).sort(dispatchOrder);
+  const ready = dispatchSort(work.filter(item => dispatchable(item, now)), hotFileSet(work, now), now);
   return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles) })),
     highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
 }
