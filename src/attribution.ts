@@ -212,7 +212,7 @@ function rowToRecord(row: any): AttributionRecord {
 }
 /** One work item's attribution history, newest last, bounded. */
 export async function attributionHistory(store: Store, workId: string, limit = 200): Promise<AttributionRecord[]> {
-  return (await store.pool.query('SELECT * FROM attribution_records WHERE work_id=$1 ORDER BY seq DESC LIMIT $2', [workId, limit])).rows.map(rowToRecord).reverse();
+  return (await store.reportPool.query('SELECT * FROM attribution_records WHERE work_id=$1 ORDER BY seq DESC LIMIT $2', [workId, limit])).rows.map(rowToRecord).reverse();
 }
 
 // ---- Analytics ------------------------------------------------------------------------------
@@ -233,17 +233,17 @@ export interface AttributionDataset {
 }
 function iso(value: Date | string) { return value instanceof Date ? value.toISOString() : value; }
 export async function readAttribution(store: Store, query: AttributionQuery): Promise<AttributionDataset> {
-  const clock = iso((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
+  const clock = iso((await store.reportPool.query('SELECT clock_timestamp() AS now')).rows[0].now);
   const asOf = query.asOf ? Date.parse(query.asOf) : NaN;
   const observedAt = Number.isFinite(asOf) && asOf <= Date.parse(clock) ? new Date(asOf).toISOString() : clock;
   const to = observedAt, from = new Date(Date.parse(observedAt) - query.days * day).toISOString();
-  const recordRows = (await store.pool.query('SELECT * FROM attribution_records WHERE recorded_at>=$1 AND recorded_at<$2 ORDER BY recorded_at,seq LIMIT $3', [from, to, attributionLimits.records + 1])).rows;
-  const requestRows = (await store.pool.query(`SELECT document FROM validation_requests WHERE (document->>'createdAt')>=$1 AND (document->>'createdAt')<$2 ORDER BY document->>'createdAt',id LIMIT $3`, [from, to, attributionLimits.requests + 1])).rows;
+  const recordRows = (await store.reportPool.query('SELECT * FROM attribution_records WHERE recorded_at>=$1 AND recorded_at<$2 ORDER BY recorded_at,seq LIMIT $3', [from, to, attributionLimits.records + 1])).rows;
+  const requestRows = (await store.reportPool.query(`SELECT document FROM validation_requests WHERE (document->>'createdAt')>=$1 AND (document->>'createdAt')<$2 ORDER BY document->>'createdAt',id LIMIT $3`, [from, to, attributionLimits.requests + 1])).rows;
   const requests: ValidationRequest[] = requestRows.slice(0, attributionLimits.requests).map(r => r.document);
   const environmentIds = [...new Set([...requests.map(r => r.attribution?.environmentId).filter((id): id is string => !!id), ...recordRows.map(r => r.environment_id as string)])];
-  const environmentRows = environmentIds.length ? (await store.pool.query("SELECT DISTINCT ON (id) id,document FROM validation_definitions WHERE kind='environment' AND id=ANY($1::text[]) ORDER BY id,revision DESC", [environmentIds])).rows : [];
+  const environmentRows = environmentIds.length ? (await store.reportPool.query("SELECT DISTINCT ON (id) id,document FROM validation_definitions WHERE kind='environment' AND id=ANY($1::text[]) ORDER BY id,revision DESC", [environmentIds])).rows : [];
   const environments = Object.fromEntries(environmentRows.map(r => [r.id, { immutable: r.document.immutable !== false }]));
-  const blockedRows = (await store.pool.query(`SELECT w.document->>'id' AS id, w.document->>'key' AS key, v.key AS proof, v.value->'reanchor' AS reanchor, v.value->>'environmentId' AS environment
+  const blockedRows = (await store.reportPool.query(`SELECT w.document->>'id' AS id, w.document->>'key' AS key, v.key AS proof, v.value->'reanchor' AS reanchor, v.value->>'environmentId' AS environment
     FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v WHERE v.value->'reanchor'->>'state'='blocked' AND w.document->>'stage'<>'done' ORDER BY w.number LIMIT 500`)).rows;
   const blockedNow = blockedRows.filter(r => r.reanchor.at <= to).map(r => ({ workKey: r.key, workId: r.id, proof: r.proof, environmentId: r.reanchor.environmentId ?? r.environment ?? '', reasons: r.reanchor.reasons ?? [], since: r.reanchor.at, supersededRequestId: r.reanchor.supersededRequestId }));
   return { observedAt, from, to, days: query.days, records: recordRows.slice(0, attributionLimits.records).map(rowToRecord), recordsTruncated: recordRows.length > attributionLimits.records,
