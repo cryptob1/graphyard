@@ -163,8 +163,7 @@ export const workspaceCommands = defineCommands([
         const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
         if (!failure || epoch === undefined) throw error;
         const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
-        const partialWork = keepBlockedWork(work, epoch);
-        await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) });
+        const partialWork = keepBlockedWork(work, epoch); await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) });
         throw new Error(`${reason} Recorded as the blocker on ${work.key}.`);
       }
     },
@@ -259,8 +258,7 @@ export const workspaceCommands = defineCommands([
       const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
       if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
-      const workerStatus = await api('status');
-      if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
+      const workerStatus = await api('status'); if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
       const watchToken = await context.individualToken();
       process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
       process.env.GRAPHYARD_CLI = await context.activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;

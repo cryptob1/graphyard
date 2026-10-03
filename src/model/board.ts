@@ -280,7 +280,6 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
     counts: Object.fromEntries(groups.map(group => [group, board[group].length])) as Record<OpenGroup, number>, open, blockers: blockerCounts(groups.flatMap(group => board[group])) };
 }
 
-
 /**
  * The board from the status read every client has (`humanOnly`, `productionEnvironment`,
  * `production`, `ciAppIds`): what `GET /api/board` serves, and what `master status` builds for
@@ -316,6 +315,5 @@ export async function masterBoard(api: (path: string) => Promise<any>, snapshot:
     const decision = unanswered.find(row => row.work === entry.key);
     return decision ? { ...entry, actor: 'master' as const, command: `graphyard master approver ${entry.key} ${decision.id}` } : entry;
   });
-  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? blockerCounts(items),
-    owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
+  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? blockerCounts(items), owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
 }
