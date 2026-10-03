@@ -514,6 +514,7 @@
     "tests/system.test.ts": 29095,
     "tests/test-isolation.test.ts": 5273,
     "tests/timeline-backfill.test.ts": 3217,
+    "tests/timing-baseline-companion.test.ts": 1100,
     "tests/timing-stability.test.ts": 862,
     "tests/tip-flake-rerun.test.ts": 1968,
     "tests/tip-republish-approval.test.ts": 3059,
