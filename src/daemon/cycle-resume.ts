@@ -9,46 +9,15 @@ import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effect
 import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
-import { containmentClock, type ContainmentAssessment, type ContainmentObservation } from '../master/containment.js';
-import { isTransientSettlementRefusal } from '../quarantine.js';
+import { settleEndedAttemptFence } from './cycle-reclaim.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
 export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
   const { config, effects } = cycle;
-  return effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, epoch, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+  return effects.recordSession?.(item, { id: `${profile.principal}:${epoch}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
     ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
     ...(pane ? { pane, attach: `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` } : {}),
     subject: `${item.key}: ${item.title}`.slice(0, 300), state: finished ? 'finished' : 'running', outcome: outcome.slice(0, 500) }).catch(() => {}) ?? Promise.resolve();
-}
-
-/** Settles an attempt's containment quarantine in the same action that ended it, once supervisor death is confirmed on the host. */
-export async function settleEndedAttemptFence(cycle: Cycle, item: Work, epoch: number): Promise<boolean> {
-  const { state, effects, now, performed, clockOffset, snapshot } = cycle;
-  if (!item.containmentQuarantine || item.containmentQuarantine.epoch !== epoch) return false;
-  if (!effects.containment || !effects.settleContainment) return false;
-  const key = `settle:${item.id}:${epoch}`;
-  const previous = state.actions[key];
-  const transient = previous?.state === 'failed' && isTransientSettlementRefusal(previous.detail);
-  if (previous && (previous.state === 'done' || (!transient && !readyToRetry(previous, state.cycle)) || (transient && !(cycle.state.cycle > previous.cycle)))) return false;
-  const measured = await containmentClock(clockOffset, effects.controlPlaneClock);
-  const observed: ContainmentObservation = measured
-    ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source }
-    : { now: snapshot.now, clockOffset };
-  let assessments: Record<string, ContainmentAssessment> = {};
-  try { assessments = await effects.containment([item], observed); } catch {}
-  const assessment = assessments[item.id];
-  if (!assessment?.settleable) return false;
-  const attempts = (previous?.attempts ?? 0) + 1;
-  await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the verified-dead containment quarantine of ${item.key} epoch ${epoch}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist);
-  try {
-    await effects.settleContainment(item, assessment);
-    item.containmentQuarantine = null;
-    performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail: `Settled the containment quarantine of ${item.key} epoch ${epoch}: its supervisor is verified gone on ${assessment.host ?? 'this host'}, so the item can be claimed again`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
-    return true;
-  } catch (error) {
-    performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Containment settlement refused for ${item.key} epoch ${epoch}: ${message(error)}`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
-    return false;
-  }
 }
 
 /**
@@ -69,10 +38,10 @@ export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: Worker
   // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
   if (pane) await effects.closeSession(pane);
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
-  if (item.containmentQuarantine?.epoch === epoch) {
-    await settleEndedAttemptFence(cycle, item, epoch);
-  }
-  return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, and ${item.key} is dispatched again`;
+  // GY-1155: the ending is on the record and the supervisor was stopped, so the fence is settled
+  // in this same action once the host verifies it gone, rather than waiting out the grace window.
+  const settled = scope && await settleEndedAttemptFence(cycle, item, { epoch, owner: profile.principal, ...(preserved ? { preserved: observed } : {}), closed: `closed as failed: ${reason}` });
+  return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, ${settled ? 'its containment fence was settled, ' : ''}and ${item.key} is dispatched again`;
 }
 
 /** How long a worker holding a live lease may show no activity before it is re-prompted, and again after that before its item goes to a new attempt (GY-524). */

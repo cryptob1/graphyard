@@ -13,6 +13,8 @@ interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedA
 export interface Containment {
   command: string;
   args: string[];
+  /** The systemd scope unit the session runs in, named in a failure to verify it empty. */
+  unit?: string;
   signal: (signal: NodeJS.Signals) => void;
   empty: () => boolean;
 }
@@ -21,7 +23,7 @@ export function systemdContainment(command: string, args: string[], run: typeof 
   run('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
   const unit = `graphyard-watch-${process.pid}-${randomUUID()}.scope`;
   return {
-    command: 'systemd-run',
+    command: 'systemd-run', unit,
     args: ['--user', '--scope', '--quiet', `--unit=${unit}`, '--', command, ...args],
     signal: signal => { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, unit], { stdio: 'ignore' }); },
     empty: () => {
@@ -282,8 +284,20 @@ export function renewalGraceMs(error: unknown): number | null {
  * epoch from its argv; the launcher quotes it as the starting detail of a supervisor still setting up (GY-1033).
  */
 export const setupLine = (subject: string, epoch: number) => `graphyard: establishing containment for ${subject} epoch ${epoch}`;
+/**
+ * Why a supervisor could not lower its own containment fence (GY-1155): its shutdown did not
+ * verify the scope empty within its bound — the bound and what held it are named — or the settle
+ * it posted was refused. It is put on the item's record before the supervisor exits, so the fence
+ * it leaves standing is never silent, and the loop that observes the ended attempt settles it.
+ */
+export interface ContainmentShutdownFailure { reason: string; boundMs?: number; held?: string; refusal?: string }
+/** The durable containment fence a foreground supervisor raises, acknowledges, lowers, and reports a failure to lower. */
+export interface SupervisedQuarantine {
+  establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown>;
+  report?: (failure: ContainmentShutdownFailure) => Promise<unknown>;
+}
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: SupervisedQuarantine } = {}) {
   let deadline = 0, granted = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -395,36 +409,21 @@ export async function supervise(command: string, args: string[], epoch: number, 
             await delay(Math.min(options.shutdownPollMs ?? 50, remaining));
           } while (performance.now() < shutdownDeadline);
           containmentFailure ??= lastVerificationFailure;
+          // A fence this supervisor cannot lower is reported on the item's record before it exits.
+          const unsettled = async (failure: ContainmentShutdownFailure) => {
+            try { await options.quarantine?.report?.(failure); } catch { /* the loop still observes the ended attempt and settles it */ }
+            finish(new Error(failure.reason));
+          };
           if (!empty) {
             const boundMs = Math.round(options.shutdownTimeoutMs ?? 2000);
-            const held = containmentFailure instanceof Error ? containmentFailure.message : containmentFailure ? String(containmentFailure) : 'scope not empty';
-            const failure = {
-              reason: `Worker containment shutdown could not be verified within ${boundMs}ms: ${held}`,
-              boundMs,
-              held,
-            };
-            if (options.quarantine) {
-              (options.quarantine as any).failure = failure;
-              (options.quarantine as any).settlementFailure = failure;
-              try { await (options.quarantine as any).recordFailure?.(failure); } catch {}
-              try { await (options.quarantine as any).recordSettlementFailure?.(failure); } catch {}
-            }
-            finish(new Error(`Worker containment shutdown could not be verified: ${held} (within ${boundMs}ms)`));
+            const held = containmentFailure !== undefined ? (containmentFailure instanceof Error ? containmentFailure.message : String(containmentFailure)) : `${containment.unit ? `containment scope ${containment.unit}` : 'the containment scope'} still held processes`;
+            await unsettled({ reason: `Worker containment shutdown could not be verified: ${held} (its scope was not verified empty within ${boundMs}ms)`, boundMs, held });
             return;
           }
           try { await options.quarantine!.settle(); }
           catch (error) {
-            const failure = {
-              reason: `Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`,
-              refusal: error instanceof Error ? error.message : String(error),
-            };
-            if (options.quarantine) {
-              (options.quarantine as any).failure = failure;
-              (options.quarantine as any).settlementFailure = failure;
-              try { await (options.quarantine as any).recordFailure?.(failure); } catch {}
-              try { await (options.quarantine as any).recordSettlementFailure?.(failure); } catch {}
-            }
-            finish(new Error(failure.reason));
+            const refusal = error instanceof Error ? error.message : String(error);
+            await unsettled({ reason: `Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${refusal}`, refusal });
             return;
           }
         }
