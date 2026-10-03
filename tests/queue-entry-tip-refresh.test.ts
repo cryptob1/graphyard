@@ -11,6 +11,8 @@ import { landingRefreshNeeded, mergeParallelTipsEvent, predictQueue, queueRef, v
 import { carriedApproval, evidenceBindsCandidate, type Observation, type Principal, type TipMerge, type Work } from '../src/model.js';
 import { evaluateLandability } from '../src/model/landability.js';
 import { neededDecision } from '../src/daemon/decisions.js';
+import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
+import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1131: the queue verifies and refreshes waiting entries when work lands behind them, instead
@@ -33,6 +35,8 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
+  // The producer is a known principal, so no item stands on an unauthorized proof.
+  engine.principals = [operator, worker, coordinator, producer];
   // One tip validated at a time: every entry behind the head waits unverified until its turn,
   // which is exactly the wait a landing refresh answers.
   await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['operator', mergeParallelTipsEvent, JSON.stringify({ parallelTips: 1 })]);
@@ -370,4 +374,37 @@ test('unit:landability-holds-conflicting-entry — landability refuses an entry 
   const c = all.find(item => item.id === q.c.id)!;
   const cv = evaluateLandability(c, all, new Date());
   assert.equal(cv.verdict, 'landable', JSON.stringify(cv));
+});
+
+/** The base-conflict faults the master loop's fault classes count this cycle, read from the records the engine persisted. */
+async function baseConflictFaults() {
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/outside/graphyard.mjs',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master', autoMerge: true, mergeMethod: 'merge', workers: [] });
+  return cycleFaults(emptyDaemonState(config), await store.list(), Date.now(), { config }).filter(fault => fault.kind === 'base-conflict').map(fault => fault.subject);
+}
+
+test('unit:base-conflict-class-quiet-after-refresh — an entry refreshed at the landing never raises the base-conflict fault class on its way to landing, and a conflict is observed at the landing, never at the entry\'s turn', async () => {
+  // Clean: B is refreshed at the landing behind it, then heads the queue and lands. The loop's
+  // base-conflict class, read from the persisted records after every step, never names it.
+  const q = await queueOfThree('e');
+  const seen: string[][] = [];
+  await q.run(q.b); seen.push(await baseConflictFaults());
+  const refreshed = await reload(q.b);
+  assert.deepEqual([refreshed.queue!.speculation?.trigger, refreshed.queue!.speculation?.base], ['landing-refresh', q.main2], 'B was refreshed onto the landed tip, before its turn');
+  q.at.set(q.b.id, q.tips.get(q.b.key)!);
+  await q.run(q.b); seen.push(await baseConflictFaults());
+  await q.land(q.a, sha40('ef')); seen.push(await baseConflictFaults());
+  const { merged } = await q.land(q.b, sha40('ee')); seen.push(await baseConflictFaults());
+  assert.equal(merged.stage, 'done', 'B lands on its refreshed tip');
+  assert.deepEqual(seen.map(subjects => subjects.filter(subject => subject === q.b.key)), [[], [], [], []], 'the base-conflict class stays quiet for the refreshed entry at every step');
+  // Not weakened: a conflict the landing confirms is observed by the class at once, while the
+  // entry still waits behind the head, and it is the only entry the class names.
+  const conflicted = await queueOfThree('f');
+  conflicted.state.conflicts.add(conflicted.b.key);
+  assert.deepEqual((await baseConflictFaults()).filter(subject => [conflicted.b.key, conflicted.c.key].includes(subject)), [], 'nothing stands before the landing is verified');
+  await conflicted.run(conflicted.b); await conflicted.run(conflicted.c);
+  const b = await reload(conflicted.b);
+  assert.notEqual(predictQueue(await store.list(), Date.now()).find(entry => entry.id === b.id)?.position, 0, 'B has not reached its turn');
+  assert.deepEqual((await baseConflictFaults()).filter(subject => [conflicted.a.key, conflicted.b.key, conflicted.c.key].includes(subject)), [conflicted.b.key],
+    'the conflict is observed at the landing, on B alone; C, refreshed cleanly, stays quiet');
 });
