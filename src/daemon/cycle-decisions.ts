@@ -26,18 +26,10 @@ const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
-  // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
-  //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
-  //     used to wait for a master session to notice. The loop requests the decision with the
-  //     master's own operator-agent identity and launches the independent approver session for it;
-  //     it never approves its own request, so the separation the server enforces is unchanged.
-  //     Automatic merging turned off is the fourth: the merge itself then waits for that approval.
-  //     A request is not the end of it. The approver is a launched session like any other, so every
-  //     cycle reads the decision back and looks at its session again (see `approvalStep`): a
-  //     finished session is closed, a dead, stalled or hung one is replaced within a bound, a
-  //     refused one is left to the master to answer, a decision the server settled some other way
-  //     is requested again, and one no session will judge is escalated and left standing on the
-  //     silence measure.
+  // 4c. Routine decisions. A standing verdict, base merge conflict, delivered item fenced by a dead
+  //     supervisor, or manual merge when autoMerge is off each have one correct answer. The loop
+  //     requests it and launches the independent approver; it never approves its own request.
+  //     Each cycle reads the decision back and supervises the approver (see `approvalStep`).
   const stamp = new Date(clock).toISOString();
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;

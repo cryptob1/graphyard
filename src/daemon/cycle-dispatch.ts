@@ -153,8 +153,8 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //     is named here too: the work is not frozen by it, and it is not lost behind the work. An
   //     item parked on a human-only decision is named by the step above with the exact answer
   //     command, so it is not named twice. A judgment this loop requests itself (a rework round,
-  //     a superseded lease-loss: `loopRequestsJudgment`, GY-1084) is its own work, not owed.
-  for (const owed of humanNeededActions(open.filter(item => !parkedOnHuman(item)), new Date(clock), (work, judgment) => loopRequestsJudgment(work, judgment, config))) {
+  const exhausted = await cycle.exhaustedProofs();
+  for (const owed of humanNeededActions(open.filter(item => !parkedOnHuman(item)), new Date(clock), (work, judgment) => loopRequestsJudgment(work, judgment, config, exhausted))) {
     const key = `owed:${owed.work}:${owed.kind}:${owed.trigger ?? 'refusal'}:${owed.since}`;
     if (state.actions[key]) continue;
     performed.push(await record(state, key, { kind: 'human', work: owed.key, principal: null, state: 'done',

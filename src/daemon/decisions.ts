@@ -9,6 +9,10 @@ import { guardBroadScope, type MasterConfig, type ContainmentAssessment, contain
 import { researchRework } from '../research.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
+import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+
+/** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
+export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
 
 // ---- Routine decisions ---------------------------------------------------------------------
 /*
@@ -52,6 +56,35 @@ export function standingVerdict(work: Work): StandingVerdict | null {
   if (agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && agentVerdictBindsRequest(work, agent))
     return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} requested changes on ${agent.sha.slice(0, 12)}: ${agent.reason}` };
   return null;
+}
+
+/**
+ * GY-1118. What a change request standing against the current head calls for once the item is past
+ * its review-round cap, or null. One that names no `BLOCKING:` finding and was posted by the
+ * configured reviewer App is a `follow-up`: its findings become the item's follow-up batch and the
+ * request is withdrawn, so the head is reviewed again with no rework. One naming a blocking finding
+ * is an `escalate`: the loop requests no further rework and puts the finding to an independent
+ * approver. So is any other — an agent provider's verdict, or a person's review — since Graphyard
+ * cannot withdraw it as the reviewer App.
+ */
+export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string }
+export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
+  const cap = reviewRoundCapOf(config);
+  if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
+  const verdict = standingVerdict(work);
+  if (!verdict) return null;
+  const candidate = work.candidate!, observation = work.observation!;
+  const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
+  const body = review ? review.body : observation.agentReview?.reason;
+  const reviewId = review ? review.id ?? null : observation.agentReview?.verdictId ?? null;
+  const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
+  const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
+  const findings = followUpFindingsOf(body);
+  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };
+  const past = `${work.key} is in review round ${round}, past its cap of ${cap}`;
+  if (blocking.length) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} names ${blocking.length === 1 ? 'a blocking finding' : `${blocking.length} blocking findings`} on ${candidate.sha.slice(0, 12)}: ${blocking.join('; ')}` };
+  if (!own || reviewId === null) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} requested changes on ${candidate.sha.slice(0, 12)} naming no BLOCKING: finding, but Graphyard cannot withdraw a verdict it did not obtain through its reviewer App` };
+  return { kind: 'follow-up', ...base, reason: `${past}, and ${verdict.reviewer}'s change request ${reviewId} on ${candidate.sha.slice(0, 12)} names no BLOCKING: finding` };
 }
 
 /**
@@ -192,7 +225,7 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   const needed = neededDecision(work, config, exhausted);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
@@ -218,7 +251,7 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
  */
-export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -247,7 +280,11 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // so the loop asks for that round at once, naming the base tip it conflicts with.
   const sync = work.reworkRequested ? null : syncConflict(work);
   if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
-  const verdict = standingVerdict(work);
+  // Past the review-round cap (GY-1118) no review finding sends the item back: a change request is
+  // filed as follow-ups or escalated by the review-cap step (cappedReview), and threads are only
+  // the reviewer's inputs. Proofs, CI, conflicts and refused merges still return the head below.
+  const capped = pastReviewCap(work, reviewRoundCapOf(config));
+  const verdict = capped ? null : standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
   // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
@@ -280,7 +317,7 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // overridden and the loop resolves them, so a rework requested before it settles would invalidate
   // the review that clears them. After `botThreadReworkRounds` rework rounds a bot's thread is
   // advisory: bot findings alone had kept items cycling round after round on the same head family.
-  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
+  const threads = !capped && !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
   if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
     binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   // A lease-loss the control plane raised is operational: once the lost attempt can no longer act,
@@ -467,8 +504,8 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
  * loop's work in progress; one it does not request is still owed. A request the loop could not put,
  * or one refused or unanswered, is its own fault (`action:decision`, `decision-refused`, `decision-unanswered`).
  */
-export function loopRequestsJudgment(work: Work, row: { kind: string; trigger: string | null }, config: Pick<MasterConfig, 'autoMerge'>): boolean {
-  if (row.kind === 'request-rework') return neededDecision(work, config)?.action === 'rework';
+export function loopRequestsJudgment(work: Work, row: { kind: string; trigger: string | null }, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): boolean {
+  if (row.kind === 'request-rework') return neededDecision(work, config, exhausted)?.action === 'rework';
   return row.trigger === 'lease-loss' && !!leaseLossDecision(work);
 }
 /** Whether a request ended on its own timeout (`AbortSignal.timeout`) rather than on an answer: its outcome is unknown (GY-1084). */
@@ -641,7 +678,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
   return { stopped: false, grounds: '', unverified: assessment?.refusals.length ? assessment.refusals.join('; ') : `no host verification of the epoch ${quarantine.epoch} supervisor was possible from this loop` };
 }
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
-export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
+export function withheldDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
   if (!needed || needed.action === 'merge' || needed.action === 'attest' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
   const unverified = workerStopped(work, now, assessment).unverified;

@@ -1,3 +1,4 @@
+import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
 import { agentOwner, type AttentionItem, type AttentionOwner } from '../master.js';
 import type { Work } from '../model.js';
 import { humanNeededActions, type HumanNeededRow, type LoopRequests } from '../model/next-action.js';
@@ -51,7 +52,7 @@ type RoutedWatch = { work: string; action: string; decision: string; settledAt?:
  * widen or unblock what the approver is already judging. `routedScope` marks the row, so its owed
  * action is named the same way (`owedAttention`).
  */
-export function routedScopeStatus<S extends { work: { key: string; attention: string | null; attentionOwner: AttentionOwner | null }[]; attentionItems: AttentionItem[] }>(status: S, work: readonly Work[], approvals: readonly RoutedWatch[] = []): S {
+export function routedScopeStatus<S extends { work: { key: string; attention: string | null; attentionOwner: AttentionOwner | null }[]; attentionItems: AttentionItem[] }>(status: S, work: readonly Work[], approvals: readonly RoutedWatch[] = [], config?: { reviewRoundCap?: number }): S {
   const judging = new Map(approvals.filter(watch => watch.action === 'requirements' && watch.scope && !watch.settledAt).map(watch => [`${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`, watch.decision]));
   const rows = status.work.map(row => {
     const item = work.find(entry => entry.key === row.key), request = item?.scopeRequest;
@@ -60,6 +61,8 @@ export function routedScopeStatus<S extends { work: { key: string; attention: st
     const next = `Nothing to run: the approver judges requirements decision ${decision} (graphyard master decisions ${row.key}); ${request.requestedBy} reads the outcome with scope-request ${row.key} ${request.epoch} --wait`;
     return { ...row, routedScope: next, attention: `${row.key}'s scope request for ${request.paths.join(', ')} is with the independent approver: the rule refused it and the loop routed it as requirements decision ${decision}`, attentionOwner: agentOwner('control plane', next, 'approver') };
   });
+  // `master status` also shows each item's review round against the configured cap (GY-1118).
+  if (config) withReviewRounds(rows, work, reviewRoundCapOf(config));
   const routed = new Map(rows.flatMap((row, index) => row !== status.work[index] ? [[row.key, { from: status.work[index].attention, row }]] : []));
   return { ...status, work: rows, attentionItems: status.attentionItems.map(entry => {
     const change = routed.get(entry.subject);
