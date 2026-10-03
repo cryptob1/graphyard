@@ -219,10 +219,13 @@ test('unit:bot-threads-advisory-after-round-2 — after two rework rounds a bot 
   assert.equal(person.action, 'rework', "a person's thread still sends the item back");
   assert.match(person.reason, /1 review thread is still open .*maintainer on src\/claims\.ts:9/);
   assert.doesNotMatch(person.reason, /chatgpt-codex-connector/, 'the advisory bot thread is not a ground');
-  // The reviewer's own verdict is never advisory.
-  const refused = decide(item(4, [botFinding], [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'CHANGES_REQUESTED', id: 8, submittedAt: now.toISOString() }]));
+  // The reviewer's own verdict is never advisory within the review-round cap.
+  const verdict: Observation['reviews'] = [{ reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'CHANGES_REQUESTED', id: 8, submittedAt: now.toISOString() }];
+  const refused = decide(item(2, [botFinding], verdict));
   assert.equal(refused?.action, 'rework');
   assert.match(refused!.binding, /:verdict:/);
+  // Past it (GY-1118) neither the verdict nor a person's thread is reworked: the review-cap step files or escalates the verdict.
+  assert.equal(decide(item(4, [botFinding, personFinding], verdict)), null);
 });
 
 test('a thread rework request stays within the control plane\'s reason bound however many threads, and however long their paths', () => {
