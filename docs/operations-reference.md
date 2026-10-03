@@ -5,7 +5,7 @@
 
 Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop` naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
 
-Not decision faults: loop-made requests (rework, superseded lease-loss resolves), timed-out (read-back) requests, relaunching approvers; stalled actions, unproducible proofs, scope latency are `stalled-action`, `proof-gap`, `action:scope`.
+Not decision faults: loop-made requests (rework, superseded lease-loss resolves), timed-out requests, approver relaunches; stalled actions, unproducible proofs, scope latency are `stalled-action`, `proof-gap`, `action:scope`.
 
 ### Perpetual master loop
 
