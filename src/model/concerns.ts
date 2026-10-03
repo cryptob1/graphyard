@@ -78,6 +78,10 @@ export function dispatchHold(work: Work, all: Work[], now: Date): string | null 
   return resources.length ? `exclusive resources are held by ${resources.map(conflict => `${conflict.key} (${conflict.resource})`).join(', ')}` : null;
 }
 
+/** A delivered (merged or Done) item cannot refuse delivery and cannot be resolved, so an escalation on it is not owed. */
+export const isDeliveredWork = (work: Pick<Work, 'stage'> & { observation?: { merged?: boolean } | null; delivery?: unknown }): boolean =>
+  work.stage === 'done' || !!work.observation?.merged || !!work.delivery;
+
 /**
  * The step an item needs, with every standing concern accounted for.
  *
@@ -92,9 +96,12 @@ export function dispatchHold(work: Work, all: Work[], now: Date): string | null 
  * complete: naming it would replace one silence with another — a row failing on the resource every
  * settle window — and hide the judgment the item owes behind it. Nothing can move there, so what
  * is owed is what is named.
+ *
+ * Once delivered (merged or Done), an item cannot refuse delivery any more and cannot be resolved,
+ * so standing escalations on delivered work are skipped and never turn into actions or carried concerns.
  */
 export function carriedAction(work: Work, action: NextAction | null, all: Work[], now: Date): OpenAction | null {
-  const standing = work.ready ? standingEscalations(work) : [];
+  const standing = work.ready && !isDeliveredWork(work) ? standingEscalations(work) : [];
   const assignment = !!standing.length && action?.kind === 'dispatch' && action.inputs.kind === 'dispatch' && action.inputs.target === 'implementation';
   const held = assignment ? dispatchHold(work, all, now) : null;
   if (standing.length && (!action || held)) {
@@ -139,10 +146,14 @@ export type LoopRequests = (work: Work, judgment: { kind: NextActionKind; trigge
  * — one more unclaimed row, counted with the rest. Each row here names what is waiting, who
  * decides it, the command that answers it, and since when: from the moment the control plane
  * computed the action, not from the moment it grew old.
+ *
+ * Delivered work (merged or Done) is immutable and can never be resolved, so standing concerns on
+ * it are not owed and yield no rows.
  */
 export function humanNeededActions(all: readonly Work[], now: Date, loopRequests: LoopRequests = () => false): HumanNeededRow[] {
   const rows: HumanNeededRow[] = [];
   for (const work of all) {
+    if (isDeliveredWork(work)) continue;
     const action = openAction(work);
     if (!action) continue;
     const row = (work.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding) ?? null;

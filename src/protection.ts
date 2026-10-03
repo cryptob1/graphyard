@@ -1,7 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { defaultParallelTips } from './merge-queue.js';
 import { CHECK_NAME, nativeReviewRequired, reviewProviderOf, reviewProviders, type ReviewProvider, type Work } from './model.js';
+import { LANDABLE_CHECK } from './landable-check.js';
 
 export interface ReviewProtection { mode: 'native' | 'agent'; requiredApprovals: number; requireLastPushApproval: boolean; dismissStaleReviews: boolean }
 export type ProtectionRun = (command: string, args: string[], input?: string) => string;
@@ -92,6 +94,24 @@ export function ciConcurrencyAdvisories(checks: string[], workflows: WorkflowFil
   }));
 }
 
+/**
+ * Advisories for parallel-tips concurrency (GY-501): the merge queue validates `parallelTips` tips
+ * at once, each running every pull-request workflow's jobs, so CI needs parallelTips × jobs per run
+ * concurrent Actions jobs. GitHub does not report the account's limit, so the operator declares it
+ * as `mergeQueue.ciConcurrency`: a declared limit below the need is reported with the value to
+ * raise it to (or the parallelTips it supports); an undeclared one states the need and asks for it.
+ */
+export function parallelTipsAdvisories(parallelTips: number, workflows: WorkflowFile[], ciConcurrency?: number) {
+  if (parallelTips <= 1) return [];
+  const jobsPerRun = workflows.map(({ text }) => readWorkflow(text)).filter(workflow => workflow.pullRequest).reduce((total, workflow) => total + Math.max(1, workflow.jobs.length), 0);
+  if (!jobsPerRun) return [];
+  const required = parallelTips * jobsPerRun;
+  const need = `${parallelTips} parallel tips × ${jobsPerRun} pull-request job(s) per run need ${required} concurrent Actions jobs`;
+  if (ciConcurrency === undefined) return [`The merge queue validates ${parallelTips} tips concurrently: ${need}. GitHub does not report your concurrency limit; declare it as mergeQueue.ciConcurrency in .graphyard/master.json, keep it at least ${required}, or lower mergeQueue.parallelTips`];
+  if (ciConcurrency >= required) return [];
+  return [`CI concurrency limit ${ciConcurrency} (mergeQueue.ciConcurrency) is lower than parallelTips × jobs per run: ${need}. Raise the limit to at least ${required}, or set mergeQueue.parallelTips to ${Math.max(1, Math.floor(ciConcurrency / jobsPerRun))}`];
+}
+
 // ---- GitHub's merge queue (GY-258) -------------------------------------------------------------
 // GitHub executes merges and Graphyard only gates them: the base branch carries a merge queue whose
 // merge groups must pass `Graphyard / merge`, bound to the control-plane App. Branch protection has
@@ -105,6 +125,12 @@ export const mergeQueueRulesetName = 'Graphyard merge queue';
  * binds the App; the lane decides when the App may use the bypass (src/master/repair-lane.ts).
  */
 export const repairBypassActor = (githubAppId: number) => ({ actor_id: githubAppId, actor_type: 'Integration' as const, bypass_mode: 'pull_request' as const });
+/**
+ * The checks Graphyard's App publishes that GitHub requires, bound to that App: the merge gate and
+ * the landability verdict (GY-887), which every candidate head and merge group commit carries, so
+ * GitHub enforces what Graphyard decided beside the repository's own CI.
+ */
+export const GRAPHYARD_CHECKS = [CHECK_NAME, LANDABLE_CHECK] as const;
 /** The ruleset Graphyard writes: a queue that builds and merges one entry at a time, the App-bound required check, and the repair lane's one bypass actor. */
 export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: number }) {
   return {
@@ -114,20 +140,21 @@ export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: num
     rules: [
       // One entry at a time: each merge group is exactly one authorized head on the base it lands on.
       { type: 'merge_queue', parameters: { check_response_timeout_minutes: 60, grouping_strategy: 'ALLGREEN', max_entries_to_build: 1, max_entries_to_merge: 1, merge_method: 'MERGE', min_entries_to_merge: 1, min_entries_to_merge_wait_minutes: 0 } },
-      { type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: CHECK_NAME, integration_id: config.githubAppId }] } },
+      { type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: GRAPHYARD_CHECKS.map(context => ({ context, integration_id: config.githubAppId })) } },
     ],
   };
 }
 /**
  * Whether the base branch's active rules (GET /rules/branches/BRANCH) carry a merge queue and
- * require `Graphyard / merge` from the App; null when the rules could not be read.
+ * require every Graphyard check (`Graphyard / merge` and `graphyard/landable`) from the App; null
+ * when the rules could not be read.
  */
 export function mergeQueueState(rules: unknown, githubAppId: number): { queue: boolean; requiredCheck: boolean } | null {
   if (!Array.isArray(rules)) return null;
   return {
     queue: rules.some((rule: any) => rule?.type === 'merge_queue'),
-    requiredCheck: rules.some((rule: any) => rule?.type === 'required_status_checks' && Array.isArray(rule.parameters?.required_status_checks)
-      && rule.parameters.required_status_checks.some((check: any) => check?.context === CHECK_NAME && check?.integration_id === githubAppId)),
+    requiredCheck: GRAPHYARD_CHECKS.every(context => rules.some((rule: any) => rule?.type === 'required_status_checks' && Array.isArray(rule.parameters?.required_status_checks)
+      && rule.parameters.required_status_checks.some((check: any) => check?.context === context && check?.integration_id === githubAppId))),
   };
 }
 /**
@@ -189,7 +216,7 @@ export function withMergeSettings<T extends object>(protection: T, settings: Rep
   return protection;
 }
 
-export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows()) {
+export function protectionPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number; mergeQueue?: { parallelTips?: number; ciConcurrency?: number } }, work: Work[], rules: unknown = current?.[branchRules], workflows: WorkflowFile[] = readWorkflows()) {
   const { protection, items } = requiredReviewProtection(work);
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
@@ -208,6 +235,9 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   // protection does not require conversation resolution. A branch that still does lets GitHub
   // refuse a merge every Graphyard gate passed, over a bot's thread the reviewer already judged.
   const conversationResolution = current?.required_conversation_resolution?.enabled === true;
+  // The landability verdict (GY-887) is required beside the merge gate. Unlike the merge gate, which
+  // must already be bound before anything is reconciled, it is a change the apply makes itself.
+  const landable = Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === LANDABLE_CHECK && check?.app_id === config.githubAppId);
   const repository: RepositoryMergeSettings | null = current?.[repositoryMerge] ?? null, mode = mergeMode(repository, rules);
   // Auto-merge mode plans no queue ruleset: GitHub would refuse it, and the plan would never settle.
   const queue = mode === 'queue' ? mergeQueueState(rules, config.githubAppId) : null;
@@ -218,16 +248,23 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   const repairBypass = queue ? { ruleset: mergeQueueRulesetName, actor: repairBypassActor(config.githubAppId), configured: bypass ? bypass.exact : null, observed: bypass?.actors ?? null } : null;
   const changes = [
     ...(conversationResolution ? ['required_conversation_resolution true to false'] : []),
+    ...(landable ? [] : [`required check ${LANDABLE_CHECK}: missing to required from App ${config.githubAppId}`]),
     ...(observed.requiredApprovals === protection.requiredApprovals ? [] : [`required_approving_review_count ${observed.requiredApprovals} to ${protection.requiredApprovals}`]),
     ...(observed.requireLastPushApproval === protection.requireLastPushApproval ? [] : [`require_last_push_approval ${observed.requireLastPushApproval} to ${protection.requireLastPushApproval}`]),
     ...(observed.dismissStaleReviews === protection.dismissStaleReviews ? [] : [`dismiss_stale_reviews ${observed.dismissStaleReviews} to ${protection.dismissStaleReviews}`]),
     ...(queue && !queue.queue ? [`merge queue on ${config.baseBranch}: none to ruleset "${mergeQueueRulesetName}"`] : []),
-    ...(queue && !queue.requiredCheck ? [`merge queue required check ${CHECK_NAME}: missing to required from App ${config.githubAppId}`] : []),
+    ...(queue && !queue.requiredCheck ? [`merge queue required check ${GRAPHYARD_CHECKS.join(' and ')}: missing to required from App ${config.githubAppId}`] : []),
     ...(repairBypass?.configured === false ? [`repair lane bypass on "${mergeQueueRulesetName}": ${JSON.stringify(repairBypass.observed)} to only App ${config.githubAppId} (Integration, pull_request)`] : []),
     ...(autoMerge && !autoMerge.enabled ? [`allow_auto_merge false to true (${config.repository} cannot have a merge queue, so GitHub merges through auto-merge)`] : []),
   ];
-  const advisories = ciConcurrencyAdvisories(work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks), workflows);
-  return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, changes, blockers, advisories,
+  const requiredChecks = work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks);
+  // Planned against the parallel-tip window the loop actually runs (GY-501): the master config's
+  // `mergeQueue.parallelTips`, else the product default every installation gets.
+  const advisories = [
+    ...ciConcurrencyAdvisories(requiredChecks, workflows),
+    ...parallelTipsAdvisories(config.mergeQueue?.parallelTips ?? defaultParallelTips, workflows, config.mergeQueue?.ciConcurrency),
+  ];
+  return { repository: config.repository, branch: config.baseBranch, mode: protection.mode, items, current: { ...observed, requireConversationResolution: conversationResolution }, desired: { ...protection, requireConversationResolution: false }, landableCheck: landable, changes, blockers, advisories,
     // GitHub performs the merge through its queue (GY-258); null when the branch rules were not read.
     mergeQueue: queue ? { ...queue, ruleset: mergeQueueRuleset(config) } : null,
     // Or through auto-merge where the repository cannot have a queue (GY-310); mergeQueue is then null.
@@ -278,16 +315,24 @@ export function applyMergeQueue(config: { repository: string; baseBranch: string
   run('gh', ['api', '--method', existing ? 'PUT' : 'POST', existing ? `repos/${config.repository}/rulesets/${existing.id}` : `repos/${config.repository}/rulesets`, '--input', '-'], JSON.stringify(mergeQueueRuleset(config)));
 }
 
+/**
+ * The required status checks a write sets: every observed one as it is, with `graphyard/landable`
+ * bound to the App (GY-887) in place of any entry of that name another producer could satisfy.
+ */
+export function requiredStatusChecks(current: any, githubAppId: number) {
+  const observed = (current?.required_status_checks?.checks ?? []).map((check: any) => ({ context: String(check.context), app_id: check.app_id ?? null }));
+  return [...observed.filter((check: { context: string }) => check.context !== LANDABLE_CHECK), { context: LANDABLE_CHECK, app_id: githubAppId }];
+}
 const logins = (list: any[] | undefined, field: 'login' | 'slug') => (list ?? []).map((entry: any) => entry[field]);
 /**
  * The whole protection a PUT writes when conversation resolution has to be switched off — GitHub
  * has no subresource for that one setting — with every other observed setting kept as it is and
  * the review settings as desired.
  */
-export function conversationPayload(current: any, desired: ReviewProtection) {
+export function conversationPayload(current: any, desired: ReviewProtection, githubAppId: number) {
   const reviews = current?.required_pull_request_reviews, dismissal = reviews?.dismissal_restrictions, bypass = reviews?.bypass_pull_request_allowances, restrictions = current?.restrictions;
   return {
-    required_status_checks: { strict: current?.required_status_checks?.strict === true, checks: (current?.required_status_checks?.checks ?? []).map((check: any) => ({ context: String(check.context), app_id: check.app_id ?? null })) },
+    required_status_checks: { strict: current?.required_status_checks?.strict === true, checks: requiredStatusChecks(current, githubAppId) },
     enforce_admins: current?.enforce_admins?.enabled === true,
     required_pull_request_reviews: { required_approving_review_count: desired.requiredApprovals, dismiss_stale_reviews: desired.dismissStaleReviews, require_code_owner_reviews: reviews?.require_code_owner_reviews === true, require_last_push_approval: desired.requireLastPushApproval,
       ...(dismissal ? { dismissal_restrictions: { users: logins(dismissal.users, 'login'), teams: logins(dismissal.teams, 'slug'), apps: logins(dismissal.apps, 'slug') } } : {}),
@@ -304,9 +349,9 @@ export function conversationPayload(current: any, desired: ReviewProtection) {
   };
 }
 
-export async function applyProtection(config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], run: ProtectionRun = protectionRun) {
+export async function applyProtection(config: { repository: string; baseBranch: string; githubAppId: number; mergeQueue?: { parallelTips?: number; ciConcurrency?: number } }, work: Work[], run: ProtectionRun = protectionRun, workflows: WorkflowFile[] = readWorkflows()) {
   const current = readProtection(config, run);
-  const plan = protectionPlan(current, config, work);
+  const plan = protectionPlan(current, config, work, undefined, workflows);
   if (plan.blockers.length) throw new Error(plan.refusal!);
   if (!plan.changes.length) return { ...plan, applied: false, result: 'branch protection already matches every open review policy' };
   let queueRefused = false;
@@ -325,14 +370,19 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   if (reviewChanges && plan.current.requireConversationResolution) {
     // Conversation resolution has no subresource: the whole protection is written back as observed,
     // with the review settings as desired and conversation resolution off.
-    run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`, '--input', '-'], JSON.stringify(conversationPayload(current, plan.desired)));
+    run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`, '--input', '-'], JSON.stringify(conversationPayload(current, plan.desired, config.githubAppId)));
   } else if (reviewChanges) {
     // Only the review subresource changes; the App-bound check, the strict-off setting, and admin enforcement stay as observed.
     run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_pull_request_reviews`, '--input', '-'],
       JSON.stringify({ required_approving_review_count: plan.desired.requiredApprovals, require_last_push_approval: plan.desired.requireLastPushApproval, dismiss_stale_reviews: plan.desired.dismissStaleReviews }));
   }
+  if (!plan.landableCheck && !(reviewChanges && plan.current.requireConversationResolution)) {
+    // The landability verdict joins the required checks (GY-887): every observed check is kept, and strict stays as observed (off).
+    run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_status_checks`, '--input', '-'],
+      JSON.stringify({ strict: current?.required_status_checks?.strict === true, checks: requiredStatusChecks(current, config.githubAppId) }));
+  }
   const reread = readProtection(config, run);
-  const verified = protectionPlan(reread, config, work);
+  const verified = protectionPlan(reread, config, work, undefined, workflows);
   if (!verified.consistent) throw new Error(`GitHub did not report the reconciled protection; branch protection remains inconsistent with the open review policies: ${[...verified.changes, ...verified.blockers].join('; ')}`);
-  return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${CHECK_NAME}; the queue's only bypass actor is App ${config.githubAppId} in pull-request mode, for the audited repair lane` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${CHECK_NAME} (the repository cannot have a merge queue)` : ''}` };
+  return { ...verified, applied: true, result: `branch protection now matches the ${plan.mode} review policy of every open item${verified.mergeQueue ? `, and ${plan.branch} merges through GitHub's merge queue requiring ${GRAPHYARD_CHECKS.join(' and ')}; the queue's only bypass actor is App ${config.githubAppId} in pull-request mode, for the audited repair lane` : verified.autoMerge ? `, and ${plan.branch} merges through auto-merge requiring ${GRAPHYARD_CHECKS.join(' and ')} (the repository cannot have a merge queue)` : ''}` };
 }

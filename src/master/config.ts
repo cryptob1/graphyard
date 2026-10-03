@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions, onboardingMergeQueue
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitName, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema } from './profiles.js';
+import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, mergeParallelTips, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults } from './profiles.js';
 import { managedMasterInstructions } from './instructions.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
@@ -73,12 +73,24 @@ export async function externalCredential(root: string, file: string, label: stri
   await privateFile(file);
   await assertOutsideWorktrees(root, file, `${label} credential file`);
 }
-export async function loadMasterConfig(root: string): Promise<MasterConfig> {
+/**
+ * The master config as `.graphyard/master.json` stores it, validated: what every writer of the
+ * file reads, so a default only readers apply is never written back into it.
+ */
+export async function loadStoredMasterConfig(root: string): Promise<MasterConfig> {
   const config = await readMasterConfig(root);
   await externalCredential(root, config.credentialFile, 'Master');
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
   return config;
+}
+/**
+ * The master config as every reader counts it (GY-1075): the stored config with the reviewer
+ * defaults applied once, here, so no reader of `config.reviewers` can count the automatic
+ * profile at one session while the launchers count it at `automaticReviewerConcurrency`.
+ */
+export async function loadMasterConfig(root: string): Promise<MasterConfig> {
+  return withReviewerDefaults(await loadStoredMasterConfig(root));
 }
 
 export async function readWorkerCredential(root: string, file: string) {
@@ -229,9 +241,12 @@ export async function setupMaster(root: string, input: { url: string; token: str
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
-    // What this setup left under `mergeQueue` (GY-503): onboarding wrote the product-default
-    // shared-infrastructure globs on a first setup and keeps the repository's own list afterwards.
-    mergeQueue: { optimisticExclude: config.mergeQueue?.optimisticExclude ?? null, source: previous?.mergeQueue ? 'kept from the existing master config' : 'onboarding wrote the product defaults; tune mergeQueue.optimisticExclude in .graphyard/master.json' },
+    // What this setup left under `mergeQueue` (GY-503, GY-501): onboarding wrote the recommended
+    // parallel-tip window and the product-default shared-infrastructure globs on a first setup, and
+    // keeps the repository's own values afterwards; the report explains what parallelTips costs.
+    mergeQueue: { parallelTips: mergeParallelTips(config), optimisticExclude: config.mergeQueue?.optimisticExclude ?? null,
+      parallelTipsExplained: `The merge queue validates ${mergeParallelTips(config)} queue positions at once, each on its own speculative tip, so one CI duration can land that many entries; CI then needs parallelTips × jobs per pull-request run concurrent Actions jobs. Declare your limit as mergeQueue.ciConcurrency and graphyard master protection reports when it is too low; set mergeQueue.parallelTips to 1 to validate one tip at a time`,
+      source: previous?.mergeQueue ? 'kept from the existing master config' : 'onboarding wrote the product defaults; tune mergeQueue.parallelTips and mergeQueue.optimisticExclude in .graphyard/master.json' },
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.
@@ -242,7 +257,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
 
 export async function saveWorkerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
   const profile = workerProfileSchema.parse(profileInput);
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   if (profile.credentialFile) {
     await externalCredential(root, profile.credentialFile, 'Worker');
     const status = await verify(await readCredentialFile(profile.credentialFile));
@@ -262,7 +277,7 @@ export async function saveWorkerProfile(root: string, profileInput: unknown, ver
  */
 export async function saveProducerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
   const profile = producerProfileSchema.parse(profileInput);
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   await externalCredential(root, profile.credentialFile, 'Producer');
   const status = await verify(await readCredentialFile(profile.credentialFile));
   if (status.actor?.role !== 'producer' || status.actor.id !== profile.principal) throw new Error('Producer credential does not match the profile principal and producer role');
@@ -315,7 +330,7 @@ export function masterSettingsFromArgs(args: string[]): MasterOwnedSettings {
  * refused wherever it enters.
  */
 export async function saveMasterSettings(root: string, changes: MasterOwnedSettings) {
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   const unknown = Object.keys(changes).filter(field => field !== 'accounts' && !(masterOwnedRunFields as readonly string[]).includes(field));
   if (unknown.length) throw new Error(`saveMasterSettings changes only what the master owns (${masterOwnedRunFields.join(', ')} and accounts), never ${unknown.join(', ')}`);
   const run: Record<string, unknown> = { ...config.run }, changed: string[] = [];
@@ -349,7 +364,7 @@ export async function saveMasterSettings(root: string, changes: MasterOwnedSetti
  */
 export async function replaceProducerProfile(root: string, profileInput: unknown, verify: (token: string) => Promise<any>) {
   const profile = producerProfileSchema.parse(profileInput);
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   const index = config.producers.findIndex(item => item.name === profile.name);
   if (index < 0) throw new Error(`Unknown producer profile ${profile.name}; add it with master producer add`);
   await externalCredential(root, profile.credentialFile, 'Producer');
@@ -367,7 +382,7 @@ export async function replaceProducerProfile(root: string, profileInput: unknown
 
 /** Remove a producer profile. Sessions it already launched stay in the ledger and settle as usual. */
 export async function removeProducerProfile(root: string, name: string) {
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   const removed = config.producers.find(item => item.name === name);
   if (!removed) throw new Error(`Unknown producer profile ${name}`);
   config.producers = config.producers.filter(item => item.name !== name);

@@ -15,7 +15,7 @@ import { type FleetLaunchAccount, type FleetProbe, selectFleetSession } from '..
 import { capacityRetryAt } from '../model/capacity.js';
 import { type EscalationContext, contextFingerprint, escalationAction, handleEscalation, followPrecedent } from '../model/escalation-context.js';
 import { type AgentEnvironment, agentKindSchema, type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, type WorkerProfile } from './profiles.js';
-import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, privateFile, readCredentialFile } from './config.js';
+import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, loadStoredMasterConfig, privateFile, readCredentialFile } from './config.js';
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
@@ -48,7 +48,7 @@ async function identityHolds(config: MasterConfig, file: string, id: string, fet
  * once from stdin and never stored. Without `apply` it reports the plan and changes nothing.
  */
 export async function setupAutonomy(root: string, input: { adminToken?: string; apply: boolean; harness?: string }, fetcher: AutonomyFetch = fetch) {
-  const config = await loadMasterConfig(root);
+  const config = await loadStoredMasterConfig(root);
   const plan = autonomyPlan(config);
   const identities = [plan.operatorAgent, plan.approver];
   const describe = identities.map(({ id, capabilities, credentialFile, role }) => ({ id, capabilities, credentialFile, role }));
@@ -83,14 +83,12 @@ export async function setupAutonomy(root: string, input: { adminToken?: string; 
   return { applied: true, identities: describe, changes, humanOnly: humanOnlyDecisions, harness,
     next: 'The master now creates, releases, unblocks and adds requirements with its operator-agent identity, and requests every other decision with graphyard master decide; graphyard master approver GY-N DECISION launches the independent approver session' };
 }
-
 export async function agentToken(root: string, config: MasterConfig, which: 'operatorAgent' | 'approver') {
   const identity = config[which];
   if (!identity) throw new Error(`No ${which === 'operatorAgent' ? 'master operator-agent' : 'approver'} identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply`);
   await externalCredential(root, identity.credentialFile, which === 'operatorAgent' ? 'Operator-agent' : 'Approver');
   return readCredentialFile(identity.credentialFile);
 }
-
 /**
  * Fill the binding a decision needs from the item's current state, so the master names the
  * decision and its reason and Graphyard supplies the exact revision or candidate it binds to.
@@ -173,23 +171,28 @@ export async function approvedMerges(selected: Work[], decisions: (work: Work) =
 }
 /**
  * A roster rotation, previewed against the principals the server authenticates now. It may add
- * principals and rotate tokens; it may never drop a live principal or change its role. Tokens
- * are never read into the report.
+ * principals and rotate tokens; it may never drop a live principal or change its role. The
+ * operator stays a declared human session (GY-738): no human admin leaves every human-only
+ * request unanswerable, and an agent role declared human could answer one itself.
  */
-export function previewPrincipalRotation(live: { id: string; role: string; leases?: string[] }[], proposed: { id: string; role: string }[]) {
-  const dropped = live.filter(principal => !proposed.some(next => next.id === principal.id));
-  const changed = live.filter(principal => proposed.some(next => next.id === principal.id && next.role !== principal.role));
+export function previewPrincipalRotation(live: { id: string; role: string; leases?: string[]; sessionKind?: string | null }[], proposed: { id: string; role: string; sessionKind?: string | null }[]) {
+  const dropped = live.filter(principal => !proposed.some(next => next.id === principal.id)), changed = live.filter(principal => proposed.some(next => next.id === principal.id && next.role !== principal.role));
+  const humans = proposed.filter(next => next.sessionKind === 'human');
   const refusals = [...dropped.map(principal => `${principal.id} (${principal.role}${principal.leases?.length ? `, holding ${principal.leases.join(', ')}` : ''}) is live and would be dropped`),
-    ...changed.map(principal => `${principal.id} would change role from ${principal.role} to ${proposed.find(next => next.id === principal.id)!.role}`)];
-  return { kept: live.filter(principal => !dropped.includes(principal) && !changed.includes(principal)).map(principal => principal.id), added: proposed.filter(next => !live.some(principal => principal.id === next.id)).map(next => `${next.id} (${next.role})`), refusals, applicable: !refusals.length };
+    ...changed.map(principal => `${principal.id} would change role from ${principal.role} to ${proposed.find(next => next.id === principal.id)!.role}`),
+    ...live.filter(principal => principal.sessionKind === 'human' && proposed.some(next => next.id === principal.id && next.sessionKind !== 'human')).map(principal => `${principal.id} would stop being a declared human session`),
+    ...(humans.some(next => next.role === 'admin') ? [] : [`no admin principal is declared "sessionKind": "human"; declare the operator's (${proposed.filter(next => next.role === 'admin').map(next => next.id).join(', ') || 'none'}) so human-only requests can be answered`]),
+    ...humans.filter(next => next.role !== 'admin').map(next => `${next.id} (${next.role}) is an agent role and may not be declared human`)];
+  return { kept: live.filter(principal => !dropped.includes(principal) && !changed.includes(principal)).map(principal => principal.id), added: proposed.filter(next => !live.some(principal => principal.id === next.id)).map(next => `${next.id} (${next.role})`), humans: humans.map(next => next.id), refusals, applicable: !refusals.length };
 }
+/** The roster `master principals --apply` would deploy, read from `.graphyard/credentials.json`; a `sessionKind` is `human` or `ai` and nothing else, so a typo is refused at the preview instead of failing the redeployed server at start-up. */
 export async function readProposedRoster(root: string) {
   const file = resolve(root, '.graphyard/credentials.json'); await privateFile(file);
-  const parsed = JSON.parse(await readFile(file, 'utf8'));
-  if (!Array.isArray(parsed) || !parsed.every(entry => typeof entry?.id === 'string' && typeof entry?.role === 'string')) throw new Error('.graphyard/credentials.json must be the principal array the deployment runs with');
-  return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string }));
+  const parsed = JSON.parse(await readFile(file, 'utf8')); if (!Array.isArray(parsed) || !parsed.every(entry => typeof entry?.id === 'string' && typeof entry?.role === 'string')) throw new Error('.graphyard/credentials.json must be the principal array the deployment runs with');
+  const unknown = parsed.filter(entry => entry.sessionKind !== undefined && entry.sessionKind !== 'human' && entry.sessionKind !== 'ai').map(entry => entry.id);
+  if (unknown.length) throw new Error(`sessionKind is "human" or "ai", as the deployment parses it; ${unknown.join(', ')} would fail the redeployed server at start-up`);
+  return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string, sessionKind: entry.sessionKind === 'human' || entry.sessionKind === 'ai' ? entry.sessionKind as string : null }));
 }
-
 /** Stop this host's master loop, if one runs, and start it again detached, logging beside the config. */
 export async function restartMasterLoop(root: string, config: MasterConfig, lock: { pid: number; host: string; heartbeatAt: string } | null, options: { timeoutMs?: number } = {}) {
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
@@ -344,7 +347,6 @@ async function startHeadlessApprover(root: string, config: MasterConfig, work: W
   } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
   return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };
 }
-
 export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
 /**
  * `herdr` is this host's Herdr inventory and whether it could be read at all (GY-205): the role's
@@ -470,7 +472,6 @@ export async function saveApproverLaunch(root: string, launch: z.input<typeof ap
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await atomicPrivateWrite(file, [...kept, approverLaunchSchema.parse(launch)].slice(-retainedEscalationSessions));
 }
-
 /** The approver role's accounts as `roleCapacity` reads them: whether any is left, and each one's reset. */
 export async function approverRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
   const named = approverProfiles(config), profiles = named.length ? named : [{ name: approverProfile, kind: approverRuntime(config) }];
@@ -641,7 +642,6 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }
-
 export const broadScopeFlag = '--allow-broad-scope';
 /**
  * Where planned files are set — `master create`, `master requirements`, `master scope` — a
@@ -788,7 +788,7 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;
     const preview = previewPrincipalRotation(live, await readProposedRoster(root));
-    if (!args.includes('--apply')) return { ...preview, applied: false, next: preview.applicable ? 'Rerun with --apply to deploy the roster' : 'Restore every live principal in .graphyard/credentials.json; a rotation never drops one' };
+    if (!args.includes('--apply')) return { ...preview, applied: false, next: preview.applicable ? 'Rerun with --apply to deploy the roster' : 'Restore every live principal in .graphyard/credentials.json (a rotation never drops one) and keep the operator "sessionKind": "human"' };
     if (!preview.applicable) throw new Error(`Roster rotation refused: ${preview.refusals.join('; ')}`);
     const applier = resolve(root, 'scripts/provision-railway.mjs');
     try { await lstat(applier); } catch { throw new Error('This repository has no roster applier (scripts/provision-railway.mjs); deploy GRAPHYARD_PRINCIPALS with the configured provider'); }
