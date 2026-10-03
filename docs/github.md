@@ -46,7 +46,7 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the entry whose docs change crossed the budget — the first at which the running total exceeds it — and the refusal names the words over and the pages that grew; the entries ahead of it fit and still merge. An over-budget total only warns ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the entry whose docs change took the running total over budget, naming words over and pages that grew; entries ahead merge. A total the base carries, no page grown, is attributed to nobody. The word budget never gates merges ([development](development.md#documentation)): an overage only warns.
 
 ### Optimistic merges
 
