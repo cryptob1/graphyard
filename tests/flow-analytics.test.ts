@@ -12,12 +12,14 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
   classifyWait, computeFlow, coveredWindow, dayBuckets, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, flowWindowLabel, flowWindowMessage, flowWindows, gateFactStep,
-  mergeReadyGate, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
+  coveredUntil, mergeReadyGate, pooledFlowDrilldown, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { attributionWindows } from '../src/attribution.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import InsightsFlow, { LandedPerDay, WhereTimeGoes, flowNow } from '../web/pages/insights-flow.js';
+import InsightsFlow, { LandedPerDay, WhereTimeGoes, flowNow, readReplay } from '../web/pages/insights-flow.js';
+import { readStepRows } from '../web/step-moves.js';
+import { readFile } from 'node:fs/promises';
 import { groupOf } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -789,6 +791,55 @@ test('unit:flow-read-not-crowded-out — 25,000 check-run facts early in a 7-day
     `null>review@${new Date(asOf - 3 * 3600_000).toISOString()}`, `review>merge@${new Date(asOf - 2 * 3600_000).toISOString()}`, `merge>deploy@${new Date(asOf - 40 * 60_000).toISOString()}`], 'the merge moves it to Deploy when it is observed');
   assert.ok(report.window.kinds.every(entry => entry.toCovered === dataset.to), 'deliveries, merges and gate changes cover the whole window');
   assert.match(report.window.covered.statement, /read past that cutoff on bounds of their own/);
+});
+
+test('unit:steps-drilldown-reads-recent-moves — the steps drill-down reads only gate and merge facts from its instant on, so more than a scan bound of earlier facts never hides the last day\'s moves; a read that stops short says so and the page names it', async () => {
+  const slice = 'gy1119-recent';
+  const mover = await released(slice), noise = await released(slice);
+  const asOf = Math.floor(Date.now() / day) * day - 3600_000, from = asOf - 7 * day, instant = asOf - day;
+  for (const item of [mover, noise]) await seedFact(item, 'work.created', from - day, { type: 'feature' });
+  const gate = (stage: string, unmet: string[]) => ({ stage, unmet, hasCandidate: true, released: true, pr: 1119 });
+  // Before the replay instant: more than a scan bound of check runs, then more than a bound of gate
+  // facts that never move the noise item, so even the per-kind gate read past the shared scan stops early.
+  const seedMany = (item: Work, kind: string, start: number, details: object) => store.pool.query(`INSERT INTO flow_facts(work_id,work_key,kind,observed_at,recorded_at,source,source_event,stage,work_type,slices,details,dedupe)
+    SELECT $1::uuid,$2,$3::text,$4::timestamptz + g * interval '10 milliseconds',$4::timestamptz,'graphyard',0,'review','feature',$5,$6::jsonb,concat($3::text,':',$1::text,':',g)
+    FROM generate_series(1,$7::int) g`, [item.id, item.key, kind, new Date(start).toISOString(), workSlices(item).slices, JSON.stringify(details), flowLimits.scan + 1000]);
+  await seedMany(noise, 'check.observed', from + day, { name: 'test', result: 'success' });
+  await seedMany(noise, 'gates.changed', from + 2 * day, gate('review', ['review', 'acceptance', 'merge']));
+  await seedFact(mover, 'gates.changed', instant - 3600_000, gate('review', ['review', 'acceptance', 'merge']), 'review');
+  await seedFact(mover, 'gates.changed', asOf - 3 * 3600_000, gate('merge', ['merge']), 'merge');
+  // Two more observations at Merge: no move, but more gate facts than the short read below may take.
+  for (const at of [asOf - 2 * 3600_000, asOf - 90 * 60_000]) await seedFact(mover, 'gates.changed', at, gate('merge', ['merge']), 'merge');
+  await seedFact(mover, 'merged', asOf - 40 * 60_000, { pr: 1119, mergeSha: 'e'.repeat(40) }, 'done');
+
+  // The whole window's read is exhausted before the instant: the moves after it were never loaded.
+  const whole = await readFlow(store, { days: 7, slice, asOf: new Date(asOf).toISOString() });
+  assert.ok(Date.parse(coveredUntil(whole, 'gates.changed')!) < instant, 'the window read stops before the replay instant');
+
+  const key = new Date(instant).toISOString();
+  const response = await api(`/api/analytics/flow/drilldown?window=7&metric=steps&slice=${slice}&asOf=${encodeURIComponent(new Date(asOf).toISOString())}&key=${encodeURIComponent(key)}`);
+  assert.equal(response.status, 200, JSON.stringify(response.body));
+  assert.deepEqual(response.body.rows.filter((row: any) => row.workKey === mover.key).map((row: any) => `${row.detail}@${row.observedAt}`).sort((a: string, b: string) => a.split('@')[1].localeCompare(b.split('@')[1])), [
+    `review to merge@${new Date(asOf - 3 * 3600_000).toISOString()}`, `merge to deploy@${new Date(asOf - 40 * 60_000).toISOString()}`], 'every move after the instant is returned');
+  assert.equal(response.body.rows.filter((row: any) => row.workKey === noise.key).length, 0, 'the noise item never moved after the instant');
+  assert.deepEqual(response.body.coverage, { truncated: false, toCovered: new Date(asOf).toISOString(), statement: null });
+
+  // A bounded read that stops before the end of its window reports truncated, with the read's statement.
+  const short = await pooledFlowDrilldown(store, { days: 7, slice, asOf: new Date(asOf).toISOString(), limit: 1 }, { metric: 'steps', key });
+  assert.equal(short.coverage.truncated, true);
+  assert.equal(short.coverage.toCovered, new Date(asOf - 2 * 3600_000).toISOString(), 'covered to the last gate fact its own bound read');
+  assert.deepEqual(short.rows.map(row => row.detail), ['review to merge'], 'no move past where the read stopped');
+  assert.match(short.coverage.statement!, /1-row bound/);
+  // The page reads that coverage with the rows and names the truncation instead of "No item changed step".
+  const steps = await readStepRows(async () => ({ rows: [], truncated: false, next: null, coverage: short.coverage }), key);
+  assert.equal(steps.coverage, short.coverage.statement);
+  const replay = await readReplay(async () => ({ rows: [], truncated: false, next: null, coverage: short.coverage }), asOf);
+  assert.deepEqual([replay.frames.length, replay.truncated, replay.coverage], [0, true, short.coverage.statement]);
+  const full = await readReplay(async () => ({ rows: [], truncated: false, next: null, coverage: { truncated: false, statement: null } }), asOf);
+  assert.deepEqual([full.truncated, full.coverage], [false, null]);
+  const source = await readFile('web/pages/insights-flow.tsx', 'utf8');
+  assert.match(source, /\{coverage && <p className="notice" role="status" data-flow="replay-truncated">The recorded step changes were read only in part: \{coverage\}<\/p>\}/);
+  assert.match(source, /coverage \? 'No item changed step in the part of the last 24 hours that was read\.' : 'No item changed step in the last 24 hours\.'/);
 });
 
 test('unit:flow-now-includes-rework — an unowned rework item with an open candidate is shown at Build in the Now view and counted in the flow', async () => {
