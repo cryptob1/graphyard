@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
 import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
 import { runRecord, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
+import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 
 /**
  * A child-process spawner that puts the coordinator confinement (GY-888) before a spawned command:
@@ -217,10 +218,12 @@ export function piApproverPrompt(config: { repository: string; cliPath: string }
 }
 
 export function piProducerPrompt(config: { repository: string }, binding: { key: string; pr: number; sha: string; baseSha: string; policyRevision: number; group: string; proofs: string[] },
-  criteria: { id: string; text: string; proofs: string[] }[], checkout: { directory: string; worktree: string }, repository: string) {
+  criteria: { id: string; text: string; proofs: string[] }[], checkout: { directory: string; worktree: string }, repository: string, memory?: ProjectMemory | null) {
   const stripped = `${checkout.directory}/exercise`;
   const attached = criteria.filter(criterion => criterion.proofs.some(proof => binding.proofs.includes(proof)));
+  const memorySection = projectMemoryDigest(memory, 'producer', { baseSha: binding.baseSha });
   return `You are an independent Graphyard proof producer for ${config.repository}. Produce evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
+    + (memorySection || '')
     + `The criteria these proofs establish: ${attached.map(criterion => `${criterion.id} (${criterion.proofs.filter(proof => binding.proofs.includes(proof)).join(', ')}): ${criterion.text}`).join(' ')} `
     + `Work in a detached worktree of the exact head at ${checkout.worktree}: git -C ${repository} fetch origin ${binding.sha} && git -C ${repository} worktree add --detach ${checkout.worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests named for it (grep the proof name under tests/) — with every GRAPHYARD_* and HERDR_* variable unset and a free GRAPHYARD_TEST_PORT. A proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed — that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. For live install proofs, HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are available in your environment. `
     + 'Do not edit, commit, push, rebase or merge the candidate, and never weaken, skip or narrow a test to make a proof pass. '
