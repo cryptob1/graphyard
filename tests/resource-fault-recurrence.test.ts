@@ -191,7 +191,7 @@ test('manual:fault-class-resources — GY-1130: recurring resources faults from 
     outcome: {},
     requestedAt: iso(t0 - 30 * 60_000),
     expiresAt: iso(t0 + 30 * 60_000),
-    idleSince: iso(t0 - 15 * 60_000),
+    idleSince: iso(t0 - stuckSessionMs - 60_000),
   }));
 
   const reproducedConfig = {
@@ -223,15 +223,11 @@ test('manual:fault-class-resources — GY-1130: recurring resources faults from 
     'resource:session-slots:producer',
   ].sort());
 
-  // 2. BASE: In the base, reclaimResources never touched worker profiles (only reviewers and producers),
-  // and stuckSession only checked agent_status === 'blocked', ignoring 'idle' or 'done' producer agents.
-  // We demonstrate that with the base assumptions, all 5 faults recur:
-  const baseReclaimStuckProducer = (record: ProducerRecord, agents: HerdrAgent[]) => {
-    const a = agents.find(candidate => candidate.name === record.agentName);
-    return a && a.agent_status === 'blocked'; // Base only checked 'blocked'
-  };
-  assert.equal(pendingProducers.filter(p => baseReclaimStuckProducer(p, initialAgents)).length, 0,
-    'Base reclaim fails 0 producer sessions because producer agents finished at done/idle rather than blocked');
+  // 2. BASE: the base's reclaim pass reclaimed reviewer and producer panes only and failed a pending
+  // session only when Herdr reported it blocked, so none of these five states had a path back: the
+  // worker panes waited on the loop's close step alone, and the finished producers held their slots.
+  assert.ok(pendingProducers.every(record => initialAgents.find(candidate => candidate.name === record.agentName)?.agent_status !== 'blocked'),
+    'every producer finished idle or done, not blocked on a prompt');
 
   // 3. CANDIDATE: Run candidate reclaimResources with the candidate's implementation:
   await saveProducerLedger(directory, { version: 1, producers: pendingProducers });
