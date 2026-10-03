@@ -9,7 +9,7 @@ import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
 import { defaultOptimisticMerge, defaultOptimisticExclude } from '../optimistic-merge.js';
 import type { Work } from '../model/work.js';
-import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
+import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
@@ -293,6 +293,7 @@ export const masterRunSchema = z.object({
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
+  decomposition: decompositionSettingsSchema.optional(), // splitting broad items before first dispatch (GY-1126): size bounds and run time limit; it runs on run.research's account
   // The diagnostician (GY-439): the headless Pi session that turns each recurring-fault item into
   // its root cause and a fix item — its model, stronger fallback model, time limit, the bound an
   // invariant violation stands before it is diagnosed, and the commands that read its log excerpts.

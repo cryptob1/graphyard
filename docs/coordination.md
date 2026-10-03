@@ -19,15 +19,9 @@ A criterion states an outcome and its proofs:
 
 `plannedFiles` (paths, or directory prefixes ending `/`) is the change-scope contract, not a lock: the [merge queue](github.md#merge-queue) and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and candidates `git merge-tree` cannot merge. A root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
-### Decompose broad items before dispatch
+## Split broad items before dispatch
 
-Broad items (many criteria, wide directory-level `plannedFiles` such as `src/`, or large estimated changes) produce large pull requests that conflict in the merge queue and cause speculative merge ejections.
-
-Before an item is first dispatched:
-1. **Size bounds check:** The item is judged against size bounds (criteria count, planned-file breadth, estimated change size). An item within bounds is dispatched directly.
-2. **Decomposition into child items:** An item exceeding the bounds is split by an agent session into small child items (e.g. `GY-N.1`, `GY-N.2`), each with narrower `plannedFiles` (specific file paths, not repository roots), dependencies where ordering matters, and a subset of criteria. The children's criteria union must cover the parent's criteria exactly—none may be dropped or weakened.
-3. **Parent delivery:** The parent item is held until all its children are delivered. When all child items are delivered, the parent closes as `done` and is delivered. `master status` shows the parent-child relation in both `work` rows and the `parentChild` inventory.
-4. **Opt-out:** An operator can opt an item out of splitting by setting `"split": false` when creating the item or via requirements revision. Explicitly setting `"split": true` opts into splitting.
+Before an item's first dispatch the loop judges it against `run.decomposition` bounds (defaults: 4 criteria, 2 root-level planned directories, 12 planned paths, about 1,500 estimated changed lines). Over them, one read-only Pi session on the `run.research` account proposes 2 to 10 children; dispatch waits only for that run's time limit (`timeoutMinutes`, default 10). The control plane splits in one transaction: every parent criterion goes to exactly one child (text and proofs copied), each child's `plannedFiles` sits strictly inside the parent's, and `after` orders children as dependencies. Children are ordinary `GY-N` items keeping the parent's release, dependencies, `exclusiveResources`, policy and documentation criterion. The parent is never dispatched; delivering its last child delivers it (`decomposition.parent-delivered`). `master status` shows `split` on each row and `splits`. Within bounds, `"split": false` (create or requirements), already dispatched, a failed or refused run, or a keep-whole answer: dispatched unchanged. `"split": true` forces a split.
 
 ## Review gate: verdicts, not threads
 

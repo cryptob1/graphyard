@@ -3,6 +3,7 @@ import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { proofStep } from './action-proof-step.js';
 import { deliveryState } from './delivery.js';
+import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
 import type { Work } from './work.js';
@@ -142,16 +143,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
   }
 
-  if (work.children && work.children.length > 0) {
-    const unfinished = work.children.filter(k => !all.find(w => (w.key === k || w.id === k) && w.stage === 'done' && !w.closure));
-    if (unfinished.length > 0) {
-      return waits({
-        kind: 'dependency',
-        on: unfinished[0],
-        detail: `${key} was split into child items (${work.children.join(', ')}) and waits for ${unfinished.join(', ')} to be delivered`,
-      }, 'ready', `Child item ${unfinished[0]} is unfinished`);
-    }
-  }
+  // A split parent (GY-1126) waits on its children: it is delivered when the last of them is.
+  const children = (work.children ?? []).filter(child => !all.some(entry => entry.key === child && isDelivered(entry)));
+  if (children.length) return waits({ kind: 'dependency', on: children[0], detail: `${key} was split into ${work.children!.join(', ')} and is delivered when they are; ${children.join(', ')} not yet` }, 'ready', `Split into child items: ${children[0]} is not delivered`);
 
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
   // A containment quarantine outlives the attempt that raised it, and no executor step lowers one:

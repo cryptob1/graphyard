@@ -14,6 +14,7 @@ import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathSco
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
+import type { DecompositionRecord } from '../decomposition.js';
 import type { RepairAudit } from '../master/repair-lane.js';
 import type { Closure } from './closure.js';
 import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
@@ -57,14 +58,11 @@ export const createSchema = z.object({
   // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
   // created before the field existed carries none and is not system-driven.
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
-  // Research before build (GY-259): a feature item is researched unless this is false, and any
-  // other item only when it is true. See src/research.ts.
-  research: z.boolean().optional(),
+  // `research` (GY-259, src/research.ts): false skips a feature's research, true researches any item. `split` (GY-1126, src/decomposition.ts): false never splits it before first dispatch, true splits it even within the size bounds.
+  research: z.boolean().optional(), split: z.boolean().optional(),
   // A repair to Graphyard's own merge path (GY-406): allowed only when every plannedFiles entry is
   // inside the merge path, and it opens the audited repair lane (src/master/repair-lane.ts).
   repair: z.literal('merge-path').optional(),
-  // Decomposing broad items before dispatch (GY-1126): an item over size bounds is split into child items unless split is false (operator opt-out).
-  split: z.boolean().optional(), parent: z.string().trim().min(1).max(100).nullable().optional(), children: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
@@ -101,10 +99,12 @@ export interface Candidate { sha: string; baseSha: string; pr: number; branch: s
  */
 export interface ScopeFile {
   path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
-  previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean; baseSha?: string | null; previousBaseSha?: string | null;
+  previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
+  baseSha?: string | null; previousBaseSha?: string | null;
 }
 export interface Observation {
-  clockOffset?: { min: number; max: number }; reviewIds?: number[];
+  clockOffset?: { min: number; max: number };
+  reviewIds?: number[];
   /** Every review on the pull request GitHub reports as dismissed, whoever posted it and whatever they posted since; unset on observations recorded before GY-486. */
   dismissedReviewIds?: number[];
   agentReview?: AgentReview;
@@ -173,8 +173,8 @@ export interface Work extends Create {
    * are kept in `humanRequests` (see model/human-request.ts).
    */
   humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[];
-  /** What the research step found before build, and the product questions it asked (src/research.ts). */
-  researchBrief?: ResearchRecord | null;
+  /** What the research step found before build (src/research.ts); the decomposition run before first dispatch and the split relation it recorded, set only by the control plane (src/decomposition.ts). */
+  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[];
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it ships (GY-845), model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
@@ -226,7 +226,7 @@ export interface Work extends Create {
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
-  gates: Gate[]; violations: string[]; lane?: Lane; speedTarget?: number; split?: boolean; parent?: string | null; children?: string[];
+  gates: Gate[]; violations: string[]; lane?: Lane; speedTarget?: number; // risk lane and its speed target (GY-883, model/policy.ts), stamped by the last evaluation
 }
 // One scope rule for every scoped read and mutation, so a route cannot answer
 // with data its own authorization would have refused.
@@ -255,7 +255,8 @@ export function scopeExists(path: string, tree: ReadonlySet<string>) {
   const scope = pathScope(path);
   if (!scope.prefix && tree.has(scope.path)) return true;
   const directory = scope.path.endsWith('/') ? scope.path : `${scope.path}/`;
-  for (const file of tree) if (file.startsWith(directory)) return true; return false;
+  for (const file of tree) if (file.startsWith(directory)) return true;
+  return false;
 }
 /**
  * The criterion that describes creating `path`, or null: a sentence naming the path beside a

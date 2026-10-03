@@ -1,348 +1,305 @@
-import type { Criterion, Work } from './model.js';
-import { broadScope, scopeBreadth } from './coordination.js';
-import { pathScopeContains } from './model/scope.js';
+import { createHash, randomUUID } from 'node:crypto';
+import type pg from 'pg';
+import { z } from 'zod';
+import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
+import { broadScope } from './coordination.js';
 import { isDelivered } from './model/closure.js';
-import { decompositionPayloadSchema, type DecompositionPayload } from './runner/payloads.js';
-import type { Run, RunResult, Runner } from './runner/types.js';
+import { pathScopeContains } from './model/scope.js';
+import { settleDelivered } from './model/actions.js';
+import { decompositionPayloadSchema, decompositionSettingsSchema, type DecompositionPayload, type DecompositionSettings } from './runner/payloads.js';
+import { save } from './store.js';
+import type { Services } from './server/routes.js';
 
 // ---------------------------------------------------------------------------
-// Decomposition of broad work items before dispatch (GY-1126).
+// Splitting broad items before dispatch (GY-1126).
 //
-// In Graphyard many items are broad (many criteria, wide plannedFiles such as
-// src/ tests/ docs/), produce large PRs, conflict with each other in the merge
-// queue and get ejected, costing CI and review rounds.
-//
-// Before an item is first dispatched:
-// (1) A decomposition step judges it against size bounds (criteria count,
-//     planned-file breadth, estimated change size);
-// (2) An item over the bounds is split by an agent session into child items,
-//     each with its own criteria taken from the parent's, a narrow plannedFiles
-//     list and dependencies between children where order matters; the parent's
-//     criteria are covered by the union of its children's, never weakened;
-// (3) The parent closes as done / is delivered when all its children are delivered;
-// (4) An item within the bounds is dispatched as today;
-// (5) The operator can opt an item out of splitting (split: false).
+// A broad item (many criteria, root-level planned directories such as src/ tests/ docs/) builds
+// into a large pull request that collides with others in the merge queue and is ejected, costing
+// a CI and a review round each time. Before an item is first dispatched the loop judges it against
+// size bounds (`run.decomposition`: criteria count, planned-file breadth, an estimated change
+// size). An item over them gets one Pi session on the research account (src/decomposition-step.ts)
+// that proposes child items through the typed `graphyard_decompose` tool. The control plane, not
+// the session, makes the split in one transaction (`recordDecomposition`): it copies each named
+// criterion's text and proofs from the parent, refuses a split that drops a criterion, gives one
+// to two children or names a scope that does not shrink inside the parent's, and creates the
+// children as ordinary `GY-N` items that inherit the parent's release, dependencies, exclusive
+// resources, policy and documentation obligation. The parent is then never dispatched: it is
+// delivered, with a ledger event, in the transaction that delivers its last child
+// (`deliverSplitParent`). An item within the bounds, opted out with `"split": false`, already
+// dispatched, or whose run fails or keeps it whole, is dispatched unchanged.
 // ---------------------------------------------------------------------------
 
+/** The Graphyard Pi tool whose call is the decomposition session's answer (integrations/pi). */
 export const decompositionTool = 'graphyard_decompose';
+/** The role the Pi extension registers the decomposition tool for. */
 export const decompositionRole = 'decomposition';
+/** How long past its timeout a run recorded as running still holds dispatch, for its end to be recorded. */
+export const decompositionHoldGraceMs = 60_000;
 
-export interface DecompositionBounds {
-  maxCriteria: number;
-  maxPlannedFiles: number;
-  maxBreadth: number;
-  maxEstimatedChangeSize: number;
+/** The decomposition run the loop recorded on the item, and what it decided. */
+export interface DecompositionRecord {
+  state: 'running' | 'split' | 'kept' | 'failed';
+  startedAt: string; endedAt: string | null;
+  runtime: string; model: string; timeoutMs: number;
+  /** Why the item was judged over the size bounds. */
+  bounds: string[];
+  reason: string | null;
+  children: string[];
+  failure: { reason: string; detail: string } | null;
+  recordedBy: string;
 }
 
-export const defaultSizeBounds: DecompositionBounds = {
-  maxCriteria: 3,
-  maxPlannedFiles: 3,
-  maxBreadth: 0,
-  maxEstimatedChangeSize: 300,
-};
+/** The settings in force: `run.decomposition` over its defaults. */
+export const decompositionSettings = (run: { decomposition?: unknown } | undefined): DecompositionSettings => decompositionSettingsSchema.parse(run?.decomposition ?? {});
 
-/**
- * Estimate change size from criteria count and planned-file breadth.
- */
-export function estimateChangeSize(work: Pick<Work, 'criteria' | 'plannedFiles' | 'description'>): number {
-  let size = 0;
-  for (const _crit of work.criteria ?? []) size += 100;
-  for (const file of work.plannedFiles ?? []) {
-    if (broadScope(file)) size += 200;
-    else size += 50;
-  }
-  return size;
+/** A rough size of the change an item asks for, in lines: per criterion, per root-level directory, per narrower path. */
+export function estimatedLines(work: Pick<Work, 'criteria' | 'plannedFiles'>) {
+  const planned = work.plannedFiles ?? [];
+  return work.criteria.length * 150 + planned.reduce((sum, path) => sum + (broadScope(path) ? 400 : path.endsWith('/') ? 200 : 60), 0);
 }
 
-/**
- * Whether a work item exceeds size bounds and needs decomposition.
- * An item opted out (split: false) is never over size bounds.
- * An item explicitly opted in (split: true) is always considered over size bounds.
- */
-export function isOverSizeBounds(
-  work: Pick<Work, 'criteria' | 'plannedFiles' | 'description'> & { split?: boolean },
-  bounds: DecompositionBounds = defaultSizeBounds,
-): boolean {
-  if (work.split === false) return false;
-  if (work.split === true) return true;
-  if ((work.criteria?.length ?? 0) > bounds.maxCriteria) return true;
-  const breadth = scopeBreadth(work.plannedFiles ?? []);
-  if (breadth.broad.length > bounds.maxBreadth) return true;
-  if ((work.plannedFiles?.length ?? 0) > bounds.maxPlannedFiles) return true;
-  if (estimateChangeSize(work) > bounds.maxEstimatedChangeSize) return true;
-  return false;
+/** Every size bound the item exceeds, named; empty when it is within all of them. */
+export function sizeBoundsExceeded(work: Pick<Work, 'criteria' | 'plannedFiles'>, settings: DecompositionSettings): string[] {
+  const planned = work.plannedFiles ?? [], broad = planned.filter(broadScope), lines = estimatedLines(work);
+  return [
+    ...(work.criteria.length > settings.maxCriteria ? [`${work.criteria.length} criteria, over ${settings.maxCriteria}`] : []),
+    ...(broad.length > settings.maxBroadScopes ? [`${broad.length} root-level planned directories (${broad.join(', ')}), over ${settings.maxBroadScopes}`] : []),
+    ...(planned.length > settings.maxPlannedFiles ? [`${planned.length} planned paths, over ${settings.maxPlannedFiles}`] : []),
+    ...(lines > settings.maxEstimatedLines ? [`an estimated ${lines} changed lines, over ${settings.maxEstimatedLines}`] : []),
+  ];
 }
 
+/** Whether the item has never been handed to a worker: no attempt, lease, submission or implementer. */
+export const neverDispatched = (work: Work) => work.epoch === 0 && !work.lease && !work.submission && !work.candidate && !(work.implementers?.length);
+
 /**
- * Validates that child criteria together cover the parent's criteria exactly:
- * none dropped, none weakened, identical text and proofs.
+ * Why the item is split before dispatch, or null when it is dispatched unchanged: it must be open,
+ * never dispatched, not opted out, not itself a child or already decided, have at least two
+ * criteria to share out, and exceed a size bound (or opt in with `"split": true`).
  */
-export function validateSplitCriteria(
-  parent: Pick<Work, 'key' | 'criteria'>,
-  children: { criteria: Criterion[] }[],
-): void {
-  const parentMap = new Map((parent.criteria ?? []).map(c => [c.id, c]));
-  const seenIds = new Set<string>();
-
-  for (let i = 0; i < children.length; i++) {
-    const child = children[i];
-    if (!child.criteria || child.criteria.length === 0) {
-      throw new Error(`Child item ${i + 1} must have at least one criterion`);
-    }
-    for (const crit of child.criteria) {
-      const parentCrit = parentMap.get(crit.id);
-      if (!parentCrit) {
-        throw new Error(`Child criterion ${crit.id} is not present in parent ${parent.key}`);
-      }
-      if (crit.text !== parentCrit.text) {
-        throw new Error(`Criterion ${crit.id} text was modified or weakened: "${crit.text}" vs parent "${parentCrit.text}"`);
-      }
-      const childProofs = [...crit.proofs].sort();
-      const parentProofs = [...parentCrit.proofs].sort();
-      if (childProofs.length !== parentProofs.length || !childProofs.every((p, idx) => p === parentProofs[idx])) {
-        throw new Error(`Criterion ${crit.id} proofs were modified or weakened`);
-      }
-      seenIds.add(crit.id);
-    }
-  }
-
-  for (const parentCrit of parent.criteria ?? []) {
-    if (!seenIds.has(parentCrit.id)) {
-      throw new Error(`Parent criterion ${parentCrit.id} was dropped in split`);
-    }
-  }
+export function decompositionWanted(work: Work, settings: DecompositionSettings): string[] | null {
+  if (!settings.enabled || work.split === false || work.stage === 'done' || work.repair || work.parent || work.children?.length || work.decomposition) return null;
+  if (!neverDispatched(work) || work.criteria.length < 2) return null;
+  const exceeded = sizeBoundsExceeded(work, settings);
+  return exceeded.length ? exceeded : work.split === true ? ['opted in with "split": true'] : null;
 }
 
-/**
- * Validates that each child item has narrower plannedFiles than the parent,
- * and all child plannedFiles fall within the parent's planned scope.
- */
-export function validateNarrowerPlannedFiles(
-  parent: Pick<Work, 'plannedFiles'>,
-  children: { plannedFiles: string[] }[],
-): void {
-  const parentBreadth = scopeBreadth(parent.plannedFiles ?? []);
-  for (let i = 0; i < children.length; i++) {
-    const child = children[i];
-    if (!child.plannedFiles || child.plannedFiles.length === 0) {
-      throw new Error(`Child item ${i + 1} must specify plannedFiles`);
-    }
-    const childBreadth = scopeBreadth(child.plannedFiles);
-    if (childBreadth.broad.length > parentBreadth.broad.length) {
-      throw new Error(`Child item ${i + 1} plannedFiles has more broad scopes than parent`);
-    }
-    for (const childFile of child.plannedFiles) {
-      const covered = (parent.plannedFiles ?? []).some(parentScope => pathScopeContains(parentScope, childFile));
-      if (!covered && (parent.plannedFiles ?? []).length > 0) {
-        throw new Error(`Child planned file ${childFile} is outside parent's plannedFiles scope`);
-      }
-    }
-  }
+/** Whether dispatch waits for the item's decomposition: only while its run is recorded as running, within its time limit and the grace to record its end. */
+export function decompositionHold(work: Work, clock: number) {
+  const record = work.decomposition;
+  return !!record && record.state === 'running' && clock < Date.parse(record.startedAt) + record.timeoutMs + decompositionHoldGraceMs;
 }
 
+// ---- The split itself: validated against the parent, never weakening it ---------------------
+
 /**
- * Splits a broad parent work item into small, independently mergeable child items.
+ * The parent's criteria are covered exactly: every one is given to exactly one child, and a child
+ * names only the parent's criteria. Text and proofs are the parent's own, copied, so none can be
+ * weakened.
  */
-export function splitItem(
-  parent: Work,
-  payload: DecompositionPayload,
-  keyGenerator: (index: number) => { id: string; key: string } = (index) => ({
-    id: globalThis.crypto.randomUUID(),
-    key: `${parent.key}.${index + 1}`,
-  }),
-): { parent: Work; children: Work[] } {
-  if (parent.split === false) {
-    throw new Error(`${parent.key} is opted out of splitting (split: false)`);
-  }
-  if (!isOverSizeBounds(parent)) {
-    throw new Error(`${parent.key} is within size bounds and does not need splitting`);
-  }
-  validateSplitCriteria(parent, payload.children);
-  validateNarrowerPlannedFiles(parent, payload.children);
-
-  const generated = payload.children.map((_, i) => keyGenerator(i));
-  const childItems: Work[] = payload.children.map((child, i) => {
-    const { id, key } = generated[i];
-    const deps: string[] = (child.dependencies ?? []).map(dep => {
-      const depIndex = parseInt(dep, 10);
-      if (!Number.isNaN(depIndex) && depIndex >= 0 && depIndex < generated.length) {
-        return generated[depIndex].id;
-      }
-      const match = generated.find(g => g.key === dep || g.id === dep);
-      if (match) return match.id;
-      return dep;
-    });
-
-    return {
-      id,
-      key,
-      title: child.title,
-      description: child.description ?? '',
-      type: parent.type,
-      priority: parent.priority,
-      dependencies: deps,
-      criteria: child.criteria.map(c => ({ ...c, proofs: [...c.proofs] })),
-      policy: { ...parent.policy, checks: [...(parent.policy?.checks ?? [])] },
-      plannedFiles: [...child.plannedFiles],
-      stage: 'ready',
-      ready: true,
-      revision: 1,
-      policyRevision: parent.policyRevision,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      stageEnteredAt: new Date().toISOString(),
-      epoch: 0,
-      lease: null,
-      workspaces: [],
-      candidate: null,
-      submission: null,
-      reworkRequested: false,
-      scenarioRequirements: [],
-      evidence: [],
-      observation: null,
-      blocker: null,
-      gates: [],
-      violations: [],
-      parent: parent.key,
-      split: false,
-      systemDriven: parent.systemDriven,
-    } as unknown as Work;
+export function validateSplitCriteria(parent: Pick<Work, 'key' | 'criteria'>, children: DecompositionPayload['children']) {
+  const ids = new Set(parent.criteria.map(criterion => criterion.id)), given = new Map<string, number>();
+  children.forEach((child, index) => {
+    for (const id of child.criteria) {
+      demand(ids.has(id), `Child ${index + 1} names ${id}, which is not a criterion of ${parent.key}`, 422);
+      demand(!given.has(id), `${id} of ${parent.key} is given to child ${given.get(id)! + 1} and child ${index + 1}; each criterion goes to exactly one child`, 422);
+      given.set(id, index);
+    }
   });
-
-  parent.children = childItems.map(c => c.key);
-  parent.updatedAt = new Date().toISOString();
-  return { parent, children: childItems };
+  const dropped = parent.criteria.filter(criterion => !given.has(criterion.id)).map(criterion => criterion.id);
+  demand(!dropped.length, `The split drops ${dropped.join(', ')} of ${parent.key}; the children's criteria must cover the parent's exactly`, 422);
 }
 
 /**
- * Reconciles parent delivery status:
- * The parent is delivered when all its children are delivered.
- * When delivered, parent.stage becomes 'done' and parent.delivery is set.
+ * Each child's planned files lie inside the parent's and are strictly narrower: no child plans the
+ * parent's whole scope, so a child's change is smaller than the parent's would have been.
  */
-export function reconcileParentDelivery(
-  parent: Work,
-  all: readonly Work[],
-  now = new Date(),
-): boolean {
-  if (!parent.children || parent.children.length === 0 || isDelivered(parent)) {
-    return false;
+export function validateChildScopes(parent: Pick<Work, 'key' | 'plannedFiles'>, children: DecompositionPayload['children']) {
+  const planned = parent.plannedFiles ?? [];
+  children.forEach((child, index) => {
+    if (!planned.length) return;
+    const outside = child.plannedFiles.filter(path => !planned.some(scope => pathScopeContains(scope, path)));
+    demand(!outside.length, `Child ${index + 1} plans ${outside.join(', ')}, outside ${parent.key}'s planned files`, 422);
+    const whole = planned.every(scope => child.plannedFiles.some(path => pathScopeContains(path, scope)));
+    demand(!whole, `Child ${index + 1} plans all of ${parent.key}'s scope (${planned.join(', ')}); each child plans a strictly narrower part`, 422);
+  });
+}
+
+/** Ordering between children names only earlier siblings, so it can form no cycle. */
+export function validateChildOrder(children: DecompositionPayload['children']) {
+  children.forEach((child, index) => demand(child.after.every(position => position < index), `Child ${index + 1} must land after an earlier child only (after: ${child.after.join(', ')})`, 422));
+}
+
+/**
+ * The child items of a split, before the store numbers them: ordinary open items carrying the
+ * parent's release, policy, dependencies, exclusive resources and documentation obligation, and
+ * exactly the criteria (text and proofs copied) the payload gives each.
+ */
+export function childItems(parent: Work, payload: DecompositionPayload, now: Date): Work[] {
+  validateSplitCriteria(parent, payload.children);
+  validateChildScopes(parent, payload.children);
+  validateChildOrder(payload.children);
+  const at = now.toISOString(), ids = payload.children.map(() => randomUUID());
+  return payload.children.map((child, index) => {
+    const criteria = parent.criteria.filter(criterion => child.criteria.includes(criterion.id)).map(criterion => structuredClone(criterion));
+    const proofs = new Set(criteria.flatMap(criterion => criterion.proofs));
+    return {
+      id: ids[index], key: '', title: child.title,
+      description: `${child.description ? `${child.description}\n\n` : ''}Split from ${parent.key} (${parent.title}) before dispatch; ${parent.key} is delivered when all of its children are.`,
+      type: parent.type, priority: parent.priority, policy: structuredClone(parent.policy), criteria,
+      dependencies: [...parent.dependencies, ...child.after.map(position => ids[position])],
+      plannedFiles: [...child.plannedFiles],
+      ...(parent.exclusiveResources ? { exclusiveResources: [...parent.exclusiveResources] } : {}),
+      ...(parent.producerProofs ? { producerProofs: parent.producerProofs.filter(proof => proofs.has(proof)) } : {}),
+      ...(parent.slice ? { slice: parent.slice } : {}),
+      ...(parent.systemDriven !== undefined ? { systemDriven: parent.systemDriven } : {}),
+      ...(parent.research !== undefined ? { research: parent.research } : {}),
+      ...(parent.documentation ? { documentation: structuredClone(parent.documentation) } : {}),
+      proofGaps: (parent.proofGaps ?? []).filter(proof => proofs.has(proof)),
+      parent: parent.key,
+      stage: 'backlog', ready: parent.ready, revision: 0, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+      epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+      scenarioRequirements: parent.scenarioRequirements.filter(requirement => proofs.has(requirement.proof)).map(requirement => ({ ...requirement })),
+      evidence: [], observation: null, blocker: null, gates: [], violations: [],
+    } as Work;
+  });
+}
+
+// ---- What the loop records on the item -------------------------------------------------------
+
+const line = (max: number) => z.string().trim().min(1).max(max);
+export const decompositionEventSchema = z.discriminatedUnion('event', [
+  z.object({ event: z.literal('started'), runtime: line(40), model: line(200), timeoutMs: z.number().int().positive().max(3_600_000), bounds: z.array(line(300)).min(1).max(10) }).strict(),
+  z.object({ event: z.literal('decided'), payload: decompositionPayloadSchema }).strict(),
+  z.object({ event: z.literal('failed'), reason: line(40), detail: line(1000) }).strict(),
+]);
+export type DecompositionEvent = z.input<typeof decompositionEventSchema>;
+
+/**
+ * Apply one decomposition event to the parent: the server's transition, which the loop's tests
+ * replay. A run starts once per item, only before its first dispatch; only a running run records
+ * its end. A decision with children returns them for the caller to store; the parent then names them.
+ */
+export function applyDecompositionEvent(work: Work, input: DecompositionEvent, actor: string, now: Date): Work[] {
+  const event = decompositionEventSchema.parse(input), at = now.toISOString();
+  if (event.event === 'started') {
+    demand(!work.decomposition, `${work.key} was already put to decomposition (${work.decomposition?.state}); one run per item`);
+    demand(neverDispatched(work) && !work.parent && work.split !== false, `${work.key} is a child, opted out, or already dispatched; only an item before its first dispatch is split`);
+    work.decomposition = { state: 'running', startedAt: at, endedAt: null, runtime: event.runtime, model: event.model, timeoutMs: event.timeoutMs, bounds: event.bounds,
+      reason: null, children: [], failure: null, recordedBy: actor };
+    return [];
   }
-  const childItems = parent.children.map(key => all.find(w => w.key === key || w.id === key));
-  const allDelivered = childItems.length === parent.children.length && childItems.every(c => c && isDelivered(c));
-  if (!allDelivered) return false;
+  const record = work.decomposition;
+  demand(record?.state === 'running', `${work.key} has no decomposition run to record the end of`);
+  if (event.event === 'failed') {
+    work.decomposition = { ...record!, state: 'failed', endedAt: at, failure: { reason: event.reason, detail: event.detail } };
+    return [];
+  }
+  if (!event.payload.children.length) {
+    work.decomposition = { ...record!, state: 'kept', endedAt: at, reason: event.payload.reason };
+    return [];
+  }
+  // A worker may have claimed it since the run started: a split then would race the attempt.
+  demand(neverDispatched(work), `${work.key} was dispatched while it was being split; it is built whole`);
+  const children = childItems(work, event.payload, now);
+  work.decomposition = { ...record!, state: 'split', endedAt: at, reason: event.payload.reason };
+  return children;
+}
 
-  parent.stage = 'done';
-  delete parent.closure;
-  const lastChildWithDelivery = childItems
-    .filter((c): c is Work => !!c?.delivery)
-    .sort((a, b) => (b.delivery!.mergedAt ?? '').localeCompare(a.delivery!.mergedAt ?? ''))[0];
+/** Name the stored children on the parent: the split relation `master status` shows. */
+export function linkChildren(parent: Work, children: readonly Work[]) {
+  parent.children = children.map(child => child.key);
+  parent.decomposition = { ...parent.decomposition!, children: [...parent.children] };
+}
 
-  parent.delivery = lastChildWithDelivery?.delivery
-    ? { ...lastChildWithDelivery.delivery }
-    : { mergedAt: now.toISOString(), mergeSha: 'child-deliveries', authorizationRevision: 1 };
+// ---- The parent's delivery -------------------------------------------------------------------
 
-  if (parent.gates) {
-    for (const gate of parent.gates) {
-      gate.passed = true;
-      gate.reasons = [];
+/**
+ * The parent `child` completes, delivered: when the last of a split parent's children is
+ * delivered the parent is too, its delivery naming every child's merge and its own merge fields
+ * the last of them. Null when `child` has no parent or a sibling is not delivered yet.
+ */
+export function splitParentDelivery(child: Work, all: readonly Work[], now: Date): Work | null {
+  const parent = child.parent ? all.find(entry => entry.key === child.parent) : null;
+  if (!parent?.children?.length || parent.stage === 'done') return null;
+  const children = parent.children.map(key => all.find(entry => entry.key === key));
+  if (!children.every(entry => entry && isDelivered(entry) && entry.delivery)) return null;
+  const merges = (children as Work[]).map(entry => ({ key: entry.key, mergeSha: entry.delivery!.mergeSha, mergedAt: entry.delivery!.mergedAt }))
+    .sort((left, right) => Date.parse(left.mergedAt) - Date.parse(right.mergedAt));
+  const last = merges[merges.length - 1];
+  parent.stage = 'done'; parent.stageEnteredAt = now.toISOString();
+  parent.delivery = { mergedAt: last.mergedAt, mergeSha: last.mergeSha, authorizationRevision: parent.revision, children: merges };
+  return parent;
+}
+
+/**
+ * Deliver the split parent of a child delivered in this transaction, with its own ledger event
+ * (`decomposition.parent-delivered`). The delivery paths call it beside the child's own save.
+ */
+export async function deliverSplitParent(db: pg.PoolClient, child: Work, all: Work[], now: Date) {
+  const parent = splitParentDelivery(child, all, now);
+  if (!parent) return null;
+  await db.query('DELETE FROM jobs WHERE work_id=$1', [parent.id]);
+  settleDelivered(parent, all, now);
+  await save(db, parent, 'graphyard', 'decomposition.parent-delivered', now, { children: parent.delivery!.children, lastChild: child.key });
+  return parent;
+}
+
+// ---- The control plane's route -----------------------------------------------------------------
+
+type Db = pg.PoolClient;
+const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+type Evaluating = { evaluate(work: Work, all: Work[], now: Date): void; recordDispatch(db: Db, work: Work, now: Date): Promise<void> };
+
+/**
+ * `POST /api/work/ID/decomposition`: the loop records a run starting, its decision, or its
+ * failure, as the coordinator. A decision with children creates them as numbered items and links
+ * them to the parent in the same transaction; nothing a caller sends sets the relation directly.
+ */
+export async function recordDecomposition(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  const event = decompositionEventSchema.parse(body);
+  demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const engine = services.engine as unknown as Evaluating;
+  return services.engine.store.transaction(async (db, now) => {
+    const fingerprint = digest({ id, decomposition: event });
+    const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+    if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as Work; }
+    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const work = all.find(item => item.id === id || item.key === id);
+    demand(work, 'Work item not found', 404);
+    demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
+    demand(work!.stage !== 'done', 'Delivered work is immutable');
+    const children = applyDecompositionEvent(work!, event, actor.id, now);
+    for (const child of children) {
+      const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [child.id, JSON.stringify(child)]);
+      child.key = `GY-${inserted.rows[0].number}`;
+      all.push(child);
     }
-  }
-  parent.updatedAt = now.toISOString();
-  return true;
+    if (children.length) linkChildren(work!, children);
+    for (const child of children) {
+      engine.evaluate(child, all, now);
+      await save(db, child, actor.id, 'decomposition.child-created', now, { parent: work!.key, criteria: child.criteria.map(criterion => criterion.id), plannedFiles: child.plannedFiles });
+    }
+    engine.evaluate(work!, all, now);
+    await engine.recordDispatch(db, work!, now);
+    const record = work!.decomposition!;
+    await save(db, work!, actor.id, `decomposition.${record.state === 'running' ? 'started' : record.state}`, now,
+      { state: record.state, bounds: record.bounds, reason: record.reason, children: record.children, failure: record.failure });
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
+    return work!;
+  });
 }
 
-/** The prompt sent to the decomposition agent session. */
-export function decompositionPrompt(
-  config: { repository: string },
-  work: Work,
-  bounds: DecompositionBounds = defaultSizeBounds,
-): string {
-  return `You are the Graphyard task decomposition agent for ${config.repository}. `
-    + `The work item ${work.key}: "${work.title}" exceeds size bounds and needs to be decomposed before dispatch. `
-    + `Its description: ${work.description || 'none'}. `
-    + `Its criteria: ${JSON.stringify(work.criteria)}. `
-    + `Its plannedFiles: ${JSON.stringify(work.plannedFiles)}. `
-    + `Decompose this broad item into 2 to 10 small, independently mergeable child items. `
-    + `Rules: `
-    + `1. Every criterion in the parent must appear in at least one child item, with exact same ID, text, and proofs (never weakened or dropped). `
-    + `2. Each child item must have narrower plannedFiles (specific file paths, not repository roots). `
-    + `3. Specify dependencies between child items where order matters. `
-    + `Call ${decompositionTool} with children and reason, then stop.`;
+// ---- What `master status` shows ----------------------------------------------------------------
+
+/** An item's split relation as `master status` shows it on its row: its parent, or its children and the run that split it. Null for an item never put to decomposition. */
+export function splitRelation(work: Work) {
+  if (!work.parent && !work.children?.length && !work.decomposition) return null;
+  return { parent: work.parent ?? null, children: work.children ?? [], decomposition: work.decomposition ? { state: work.decomposition.state, bounds: work.decomposition.bounds, reason: work.decomposition.reason ?? work.decomposition.failure?.detail ?? null } : null };
 }
-
-export interface DecompositionStepAction {
-  work: string;
-  state: 'started' | 'done' | 'failed';
-  detail: string;
-}
-
-interface LiveDecomposition {
-  run: Run<DecompositionPayload>;
-  settled: Promise<void>;
-}
-
-const live = new Map<string, LiveDecomposition>();
-
-export function clearDecompositionRuns() {
-  for (const entry of live.values()) entry.run.cancel('runs cleared');
-  live.clear();
-}
-
-export async function decompositionSettled() {
-  await Promise.all([...live.values()].map(entry => entry.settled));
-}
-
-export interface DecompositionStepInput {
-  work: readonly Work[];
-  clock: number;
-  config: { repository: string };
-  cwd: string;
-  runner: Runner;
-  bounds?: DecompositionBounds;
-  record: (parent: Work, children: Work[]) => Promise<unknown>;
-}
-
-/**
- * Checks open work items before dispatch. Any item over size bounds that has not yet
- * been dispatched and has not yet been split is split by an agent session.
- */
-export function decompositionStep(input: DecompositionStepInput): DecompositionStepAction[] {
-  const actions: DecompositionStepAction[] = [];
-  const bounds = input.bounds ?? defaultSizeBounds;
-
-  const candidates = input.work.filter(item =>
-    !item.children?.length &&
-    item.epoch === 0 &&
-    !item.lease &&
-    (!item.implementers || item.implementers.length === 0) &&
-    !live.has(item.id) &&
-    isOverSizeBounds(item, bounds)
-  );
-
-  for (const work of candidates) {
-    const run = input.runner.start(decompositionPrompt(input.config, work, bounds), {
-      cwd: input.cwd,
-      env: { GRAPHYARD_PI_ROLE: decompositionRole },
-      tool: decompositionTool,
-      timeoutMs: 10 * 60_000,
-      validate: payload => decompositionPayloadSchema.parse(payload),
-    });
-
-    const settled = run.result().then(async result => {
-      if (!result.ok) return;
-      const splitResult = splitItem(work, result.payload);
-      await input.record(splitResult.parent, splitResult.children);
-    }).finally(() => {
-      if (live.get(work.id)?.run === run) live.delete(work.id);
-    });
-
-    live.set(work.id, { run, settled });
-    actions.push({
-      work: work.key,
-      state: 'started',
-      detail: `Splitting broad item ${work.key} over size bounds into small child items`,
-    });
-  }
-
-  return actions;
+/** Every split parent with each child's stage: the parent is delivered when every child is. */
+export function splitReport(all: readonly Work[]) {
+  return all.filter(work => work.children?.length).map(parent => ({ key: parent.key, title: parent.title, delivered: isDelivered(parent),
+    children: parent.children!.map(key => { const child = all.find(entry => entry.key === key); return { key, stage: child?.stage ?? null, delivered: !!child && isDelivered(child) }; }) }));
 }
