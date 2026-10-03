@@ -135,12 +135,8 @@ export interface ScopeImplication { scope: string; kind: 'criteria' | 'documenta
  * documentation the repository requires updating for the behaviour those criteria change.
  * GY-1116: also includes paths named in follow-up findings and description.
  */
-export function impliedScopes(
-  criteria: readonly ScopeCriterion[],
-  documentation: readonly string[] = documentationScopes,
-  origin?: WorkOrigin | null,
-  description?: string | null,
-): ScopeImplication[] {
+export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes,
+  origin?: WorkOrigin | null, description?: string | null): ScopeImplication[] {
   const followUps = origin?.reviewFollowUps ? followUpPaths(origin.reviewFollowUps.findings ?? [], description) : [];
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),

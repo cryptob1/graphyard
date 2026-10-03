@@ -3,7 +3,7 @@ import { demand, operatorCapability, type Principal, type Work } from '../model.
 import { followUpEntries, followUpShipSchema, mergeFollowUpEntries, openFollowUpItem, appendedDescription, type FollowUpEntry } from '../model/machine-backlog.js';
 import { followUpParentMigrationEvent, followUpShipReceiptKey, foldUnshippedFollowUps, shippedFollowUpsOwed } from '../model/followups-held.js';
 import { coalescedScope, plannedScope, shippedFollowUpItem } from '../review-threads.js';
-import { endAttempt } from '../pipeline-speed.js';
+import { endLapsedAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
@@ -109,7 +109,7 @@ export async function migrateToParents(services: Services, db: Db, actor: Princi
   const { folded, parents, dropped, deferred } = foldUnshippedFollowUps(all, actor.id, now);
   for (const { work, parent } of folded) {
     const settled = settleOpenRequests(work, work.closure!, now);
-    if (work.lease) { endAttempt(work, work.lease.epoch, 'released', now); work.lease = null; }
+    if (work.lease) { endLapsedAttempt(work, work.lease, now); work.lease = null; }
     services.engine.evaluate(work, all, now);
     Object.assign(work, { queue: null, mergeAuthorization: null });
     await recordDispatch(services, db, work, now);
