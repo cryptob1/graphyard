@@ -10,7 +10,7 @@ import { shellQuote } from './master/dispatch.js';
 import { sessionName } from './session-name.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, deriveAccountPlan, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 
 /**
  * The executor's side of the agent registry (GY-91).
@@ -170,7 +170,10 @@ export async function readFleet(config: FleetConfig, role: FleetRoleName, probe:
   return { managed: true, registry, client };
 }
 
-const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null => (environmentKinds as readonly string[]).includes(runtime.launch.kind) ? runtime.launch.kind as EnvironmentKind : null;
+const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null =>
+  runtime.launch.kind === 'pi' ? 'opencode'
+  : (environmentKinds as readonly string[]).includes(runtime.launch.kind) ? runtime.launch.kind as EnvironmentKind
+  : null;
 /**
  * What this host can see of one account's login: Graphyard's own probe for the runtimes it can
  * read a login and a quota from, the contract's login file for any other runtime, and nothing
@@ -180,7 +183,8 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   const home = account.credential.home, kind = builtinProbe(runtime);
   if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
   if (kind) {
-    const health = await checkAgentEnvironment({ name: account.name, kind, home }, probe);
+    const planInfo = deriveAccountPlan(account, [account]);
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, keyFile: account.credential.key?.file } as any, probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
     return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
       resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null } };

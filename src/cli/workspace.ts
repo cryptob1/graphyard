@@ -5,7 +5,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Work } from '../model.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
-import { supervise, systemdContainment } from '../supervisor.js';
+import { setupLine, supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, regenerateManagedBlocks } from '../sync.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
@@ -152,14 +152,14 @@ export const workspaceCommands = defineCommands([
   },
   {
     name: 'watch',
-    scope: 'work',
     help: ['  watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss'],
-    async run(context, work) {
-      const { args, api, base } = context;
-      const epoch = Number(args[0]); const separator = args.indexOf('--');
-      if (separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
-      const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
-      const hostId = context.individualHostId();
+    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup.
+    async run(context) {
+      const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
+      if (!id || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      console.error(setupLine(id, epoch));
+      const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
+      const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
       if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
       const workerStatus = await api('status');
       if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
