@@ -140,7 +140,8 @@ function createIncidentRunner(instance: Instance) {
     requests.push(`${command} ${args.join(' ')}`);
     if (command === 'git') {
       if (args.includes('fetch')) return '';
-      return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      if (args.includes('merge-base')) return '';
+      return '';
     }
     if (command === 'gh') {
       // Status read via GraphQL: gh api graphql -f query=...
@@ -258,7 +259,8 @@ for (const instance of instances) {
     const baseRun: ChildRun = async (command: string, args: string[]) => {
       if (command === 'git') {
         if (args.includes('fetch')) return '';
-        return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        if (args.includes('merge-base')) return '';
+        return '';
       }
       if (command === 'gh') {
         const target = args[1] ?? '';
