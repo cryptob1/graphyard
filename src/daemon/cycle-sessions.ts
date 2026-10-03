@@ -1,7 +1,7 @@
 // Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
-import { type CapacityRole } from '../model/capacity.js';
-import { sessionExhaustion } from '../master/environments.js';
+import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
+import { detectRuntimeExhaustion } from '../master/environments.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
@@ -16,6 +16,13 @@ import type { Cycle } from './cycle.js';
 export { idleLeaseMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
+/**
+ * A listed session's limit notice: a stopped one by its runtime's own notices, one its host still
+ * reports working only when its runtime is retrying on the notice (GY-973).
+ */
+export const sessionExhaustion = (output: string, stopped: boolean, runtime: string | null | undefined, now: number): ExhaustionSignal | null =>
+  stopped ? detectRuntimeExhaustion(output, runtime, now) : detectRetryingExhaustion(output, now);
+
 export async function closeStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
   // Whether a live lease of `principal` is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
