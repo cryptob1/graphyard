@@ -25,6 +25,7 @@ Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; needs `--domain` and `--ssh-key NAME`.
+  A coordinator that produces `manual:install-hetzner-live` also needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in the repository-root `.env` (mode `0600`, never committed); without them that launch is refused.
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host` and `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 

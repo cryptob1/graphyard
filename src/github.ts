@@ -16,9 +16,8 @@ import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
-export { CHECK_NAME };
-export { LANDABLE_CHECK };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
+export { CHECK_NAME, LANDABLE_CHECK };
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -634,6 +633,8 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /** Settled terminal commit statuses per head commit sha and context name (GY-1060). */
+  private terminalStatuses = new Map<string, { name: string; result: string; appId: 0; source: 'status' }>();
   /**
    * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
    * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
@@ -1241,6 +1242,52 @@ export class GitHub {
     } catch { return []; }
   }
   /**
+   * GY-1060. The commit statuses of required contexts no check run reports: a classic protection
+   * `contexts` entry or a ruleset check bound to no app is commonly a commit status, which the
+   * check-runs read never sees, so the gate would refuse it as not passed forever. They are read
+   * only when such a context exists that no configured CI app's run reports (another app's run
+   * never hides the status, which `requiredCheckRun` prefers to it), as entries of app 0 marked
+   * `status`, which no policy check's trusted CI apps include. Every page of the combined status is
+   * read, so a context past the first hundred is still seen. An error state is a failure; a settled
+   * terminal status per head is cached to save re-reading; a read error is not swallowed.
+   *
+   * External CI retries (finding 24): settled terminal statuses are cached per head commit SHA
+   * (bounded by ancestryEntries) to satisfy findings 21 & 22 and avoid polling /commits/{sha}/status
+   * on every cycle. While external CI can mutate status on an existing SHA upon manual retry,
+   * standard Graphyard workflow upon retry is pushing a new commit (or empty commit), which yields a
+   * fresh SHA and bypasses the cache; cache churn and process restarts also clear the entry.
+   */
+  private async requiredStatuses(sha: string, required: { name: string; appId: number | null }[], policy: readonly string[], runs: { name: string; app?: { id?: number } }[], ciAppIds: readonly number[]): Promise<Observation['checks']> {
+    const names = new Set(required.filter(check => check.appId === null && check.name !== CHECK_NAME && !policy.includes(check.name)
+      && !runs.some(run => run.name === check.name && ciAppIds.includes(run.app?.id as number))).map(check => check.name));
+    if (!names.size) return [];
+    const missing = [...names].filter(name => !this.terminalStatuses.has(`${sha}:${name}`));
+    if (!missing.length) return [...names].map(name => this.terminalStatuses.get(`${sha}:${name}`)!);
+    const statuses = await this.pages(`/commits/${sha}/status`, 'statuses');
+    const seen = new Set<string>();
+    for (const status of statuses) {
+      if (typeof status?.context === 'string' && names.has(status.context) && !seen.has(status.context)) {
+        seen.add(status.context);
+        if (['success', 'failure', 'error'].includes(status.state)) {
+          this.terminalStatuses.set(`${sha}:${status.context}`, {
+            name: status.context,
+            result: status.state === 'error' ? 'failure' : String(status.state),
+            appId: 0,
+            source: 'status' as const,
+          });
+          if (this.terminalStatuses.size > ancestryEntries) this.terminalStatuses.delete(this.terminalStatuses.keys().next().value!);
+        }
+      }
+    }
+    return [...names].flatMap(name => {
+      const cached = this.terminalStatuses.get(`${sha}:${name}`);
+      if (cached) return [cached];
+      const fresh = statuses.find((s: any) => s?.context === name);
+      if (!fresh) return [];
+      return [{ name, result: fresh.state === 'error' ? 'failure' : String(fresh.state), appId: 0, source: 'status' as const }];
+    });
+  }
+  /**
    * One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`,
    * which is refused here; a `RATE_LIMITED` error pauses the client as a REST rate limit does.
    */
@@ -1448,6 +1495,8 @@ export class GitHub {
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
     // only while protection still requires conversation resolution (drift, which GitHub enforces).
+    const requiredChecks = mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]);
+    const statuses = pr.state === 'open' && !pr.merged ? await this.requiredStatuses(pr.head.sha, requiredChecks, work.policy.checks, checks, ciAppIdsOf(work)) : [];
     const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
@@ -1504,7 +1553,7 @@ export class GitHub {
       // Canonical oldest-to-newest ordering makes legacy consumers deterministic;
       // gates also compare immutable run IDs rather than trusting response order.
       checks: checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
-        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
+        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })).concat(statuses),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
       // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
@@ -1515,7 +1564,7 @@ export class GitHub {
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
-      protected: protection.protected, requiredChecks: mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]), conversations, files: files.map(f => f.filename), at: startedAt,
+      protected: protection.protected, requiredChecks, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}), ...(docsBudget ? { docsBudget } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
