@@ -50,7 +50,7 @@ Before merging, a carried review missing from the PR re-posts the tip's reviewed
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`.github/workflows/ci.yml`: build, docs check, Node and browser suites), under ten minutes. Soak/timing-budget files, container acceptance/recovery and the Helm chart run only in `.github/workflows/release-candidate.yml`, on one pinned SHA (`sha` input or pushed `rc-*` tag).
+Required: `typecheck`, `test` (`.github/workflows/ci.yml`: build, docs check, Node and browser suites), under ten minutes. Soak/timing-budget files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance/recovery and the Helm chart run only in `.github/workflows/release-candidate.yml`, on one pinned SHA: each [release candidate](delivery.md#release-candidates), or a dispatched `sha`/`rc-*` tag.
 
 ### Proofs in CI
 

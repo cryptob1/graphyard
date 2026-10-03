@@ -15,23 +15,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
-
-- **Vanished**: missing from two consecutive listings.
-- **Ended**: agentless pane or terminal state; `idle`, `done` and
-  `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
-  way as any other. Implementation sessions are left to the lease.
-- **Duplicate**: the older of two sessions for one role and head.
-
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
-sessions only; a name is busy only while a live session has it. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) a session raises attention, never closure.
-
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
-another session's handle finished to free a slot.
+**The control plane closes sessions, not the master.** Each dispatch tick (`run.dispatchIntervalSeconds`, default 10, at most 30) sweeps handles: one missed by two consecutive sweeps closes (unobserved ones get 3 minutes; other hosts' handles are left to their loop). `dispatch.sessionReconcile` reports closures: **vanished**, **ended** (agentless or terminal; `idle`, `done`, `blocked` are not), **superseded** (a review or proof for an outdated head) and **duplicate**. A closure decides no gate, ends no lease and stops no process; `sessions.unseen` lists stale handles. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes`, 12h coordination) a session raises attention. For a finished or dead session do nothing (`graphyard master run --once` sweeps); never mark another session's handle finished to free a slot.
 
 ### System invariants
 

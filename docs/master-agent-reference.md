@@ -13,7 +13,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 **An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
 
-**A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`). Merge-base dismissals in motion are not review-convergence faults until they stand past 30 min (`mergeBaseDismissalWaitBoundMs`).
 
 **A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`: `restored` once GitHub shows it, else `unpublished` (`failure`); a second, candidate unchanged → `escalated` in `master status`). A tip behind an unlanded departed entry awaits its restored head (`Restoring after predecessor ejection`); another item's carried files (`Carried from another item's tip`) are neither rework nor ejection. Landed peers deliver at once (`landing.landed`).
 

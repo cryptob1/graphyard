@@ -39,7 +39,7 @@ GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). A launch command holding the foreground is starting: its supervisor prints `graphyard: establishing containment for GY-N epoch E` before any control-plane call. Refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. Exited back to shell after printing fails at once, quoting its last lines; retried as `Automatic producer launch for GY-N refused 1 time(s)`. Failure stops supervisor, closes pane, releases claim.
+Herdr reporting the runtime active with no prompt, or its banner on screen, is **ready**. Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); its supervisor prints `graphyard: establishing containment for GY-N epoch E` first. Otherwise the launch is refused quoting the pane's last line (`the claude runtime never started within 60 s (command still echoing)`), retried as `Automatic producer launch for GY-N refused 1 time(s)`, and its pane, supervisor and claim are released.
 
 OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)).
 
@@ -61,7 +61,4 @@ Ending a session closes its pane; each cycle closes ≤**6** more launched **on 
 
 ### The dispatcher's own state
 
-- **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A schema-failing cursor is repaired, not fatal**, logged once with the path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
-- **A session that exits at launch is classified from its pane.** One that exits **at launch** leaves `herdr agent get` only `agent_not_found`, so `herdr pane read` decides: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+The dispatcher bounds the state it composes (cuts end in an ellipsis) and repairs a schema-failing cursor, logging the path once. `dispatch.lastFailure` names a tick failure; three in a row raise one attention item, and `graphyard master restart` repairs the cursor. A session exiting at launch is classified by `herdr pane read`: a provider limit notice fails over like mid-session exhaustion; anything else is refused with the pane's last words and retried.
