@@ -317,9 +317,8 @@ test('integration:unconsented-session-releases-its-slot — the watch supervisor
     assert.equal(renewals, 3, 'no renewal after the hold outlived its bound');
     assert.equal(renewedAfterRelease, 0);
     assert.deepEqual(reads.every(pane => pane === 'w1V:pC1'), true, 'the supervisor reads its own pane');
-    assert.deepEqual(posted.map(entry => entry.path), ['work/GY-130/blocked', 'work/GY-130/blocked', 'work/GY-130/release']);
-    assert.match(posted[0].body.reason, /^Watch supervisor ended attempt 1: its session never took its request: it waited on a credential consent prompt outside the launcher's allow-list .* — "Sign in with ChatGPT/);
-    assert.equal(posted[1].body.reason, null, 'the cause is recorded, then withdrawn, so no standing blocker holds the freed item');
+    assert.deepEqual(posted.map(entry => entry.path), ['work/GY-130/release'], 'one release carries the cause, so no standing blocker holds the freed item');
+    assert.match(posted[0].body.cause, /^Watch supervisor ended attempt 1: its session never took its request: it waited on a credential consent prompt outside the launcher's allow-list .* — "Sign in with ChatGPT/);
 
     // The lease has ended and the item is dispatchable again, for this profile or another.
     assert.equal(item.lease, null); assert.equal(item.blocker, null);

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
 import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from './scope.js';
+import { containmentPhase } from './containment.js';
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
@@ -66,7 +67,7 @@ export const faultCatalogue = {
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
   'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
-  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
+  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless', 'action:blocker'],
   'unclassified': ['unclassified'],
 } as const satisfies Record<FaultClass, readonly string[]>;
 export type FaultKind = typeof faultCatalogue[FaultClass][number];
@@ -176,7 +177,7 @@ export function workFaults(work: Work, now: number, routes = true): FaultObserva
   const found: FaultObservation[] = [];
   const escalations = work.escalations ?? (work.escalation ? [work.escalation] : []);
   for (const escalation of escalations) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`));
-  if (work.containmentQuarantine && !(work.lease && Date.parse(work.lease.expiresAt) > now)) found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
+  if (work.containmentQuarantine && containmentPhase(work, now)?.state === 'lapsed') found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
   if (work.humanRequest && !work.humanRequest.answer) found.push(observe('human-request', work.key, `${work.key} is parked on a human-only decision: ${work.humanRequest.needed}`));
   if (work.scopeRequest && standingScopeRequest(work, now, routes)) found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));
