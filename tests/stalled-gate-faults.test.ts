@@ -352,14 +352,18 @@ function workerSlotWait(reason: string): boolean {
   const detail = match[1];
   if (detail.startsWith('every healthy profile is reserved by another dispatch')) return true;
   if (detail === 'no launch profile is configured') return false;
-  const entries = [...detail.matchAll(/([a-zA-Z0-9_-]+) \(([^)]+)\)/g)];
+  const entries = [...detail.matchAll(/([a-zA-Z0-9._-]+) \(([^)]+)\)/g)];
   if (!entries.length) return false;
+  let busyLaunchProfiles = 0;
   for (const [, , r] of entries) {
     if (r === 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process') continue;
-    if (/^Herdr agent \S+ is \S+$/.test(r)) continue;
+    if (/^(\S+ )?agent \S+ is \S+$/.test(r)) {
+      busyLaunchProfiles++;
+      continue;
+    }
     return false;
   }
-  return true;
+  return busyLaunchProfiles > 0;
 }
 
 /** The dispatch row as the ledger records it: requested, then each claim and its failure. */
@@ -430,5 +434,21 @@ test('manual:fault-class-stalled-gate — a dispatch where every healthy profile
   const at = '2026-10-02T09:03:24.638Z';
   const row = dispatchRow({ id: 'reserved', at, kind: 'stalled-action', subject: 'GY-1103', action: 'dispatch', reason: reservedReason, failures: [shift(at, -120_000), shift(at, -60_000), at], detected: 3 });
   assert.equal(actionStall(row), null, 'reserved profiles are a wait in progress');
+});
+
+test('manual:fault-class-stalled-gate — a dispatch failure with profile names ending in a dot is handled as a slot wait', () => {
+  const dotReason = 'no worker profile can take GY-999: claude. (Herdr agent graphyard-claude-1 is working)';
+  assert.equal(workerSlotWait(dotReason), true);
+  const at = '2026-10-02T08:59:06.536Z';
+  const row = dispatchRow({ id: 'dot-profile', at, kind: 'stalled-action', subject: 'GY-999', action: 'dispatch', reason: dotReason, failures: [shift(at, -120_000), shift(at, -60_000), at], detected: 3 });
+  assert.equal(actionStall(row), null, 'profile ending in a dot is recognized as a slot wait');
+});
+
+test('manual:fault-class-stalled-gate — a configuration with only existing profiles is a configuration failure, not a slot wait', () => {
+  const existingOnlyReason = 'no worker profile can take GY-999: bootstrap-existing (Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process)';
+  assert.equal(workerSlotWait(existingOnlyReason), false);
+  const at = '2026-10-02T08:59:06.536Z';
+  const row = dispatchRow({ id: 'existing-only', at, kind: 'stalled-action', subject: 'GY-999', action: 'dispatch', reason: existingOnlyReason, failures: [shift(at, -120_000), shift(at, -60_000), at], detected: 3 });
+  assert.ok(actionStall(row), 'configuration with only existing profiles stalls after 3 attempts');
 });
 

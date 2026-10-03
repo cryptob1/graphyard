@@ -130,7 +130,7 @@ export const observationWaitBoundMs = 30 * 60_000;
  * How long a dispatch may wait for an available worker profile before a `dispatch` waiting for a
  * slot is stalled rather than waiting (GY-1108).
  *
- * When all launch profiles are occupied by sessions in Herdr (working, done or idle awaiting
+ * When all launch profiles are occupied by active agent sessions (working, done or idle awaiting
  * teardown) or reserved by concurrent dispatches, the attempt has nowhere to place the work until
  * a running session finishes and its slot frees. The bound matches the liveness rule for any wait
  * on an external event (`livenessWaitBoundMs`, src/model/liveness.ts): a wait that outlasts it
@@ -141,9 +141,9 @@ export const workerSlotWaitBoundMs = 30 * 60_000;
 /**
  * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
  *
- * When every healthy profile is reserved by another dispatch, or every configured profile is busy
- * with an existing Herdr agent or dedicated to unsupervised observation, the refusal is a wait for
- * capacity. A configuration fault (no launch profiles configured), an unavailable credential, or a
+ * When every healthy profile is reserved by another dispatch, or configured launch profiles are busy
+ * with active agent sessions (alongside any profiles dedicated to unsupervised observation), the refusal is a wait for
+ * capacity. A configuration fault (no launch profiles configured or only existing profiles), an unavailable credential, or a
  * profile cooling off after a failed launch is not a wait and stalls on the standard threshold.
  */
 export function workerSlotWait(reason: string): boolean {
@@ -152,14 +152,18 @@ export function workerSlotWait(reason: string): boolean {
   const detail = match[1];
   if (detail.startsWith('every healthy profile is reserved by another dispatch')) return true;
   if (detail === 'no launch profile is configured') return false;
-  const entries = [...detail.matchAll(/([a-zA-Z0-9_-]+) \(([^)]+)\)/g)];
+  const entries = [...detail.matchAll(/([a-zA-Z0-9._-]+) \(([^)]+)\)/g)];
   if (!entries.length) return false;
+  let busyLaunchProfiles = 0;
   for (const [, , r] of entries) {
     if (r === 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process') continue;
-    if (/^Herdr agent \S+ is \S+$/.test(r)) continue;
+    if (/^(\S+ )?agent \S+ is \S+$/.test(r)) {
+      busyLaunchProfiles++;
+      continue;
+    }
     return false;
   }
-  return true;
+  return busyLaunchProfiles > 0;
 }
 
 /**
