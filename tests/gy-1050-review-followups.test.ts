@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GitHub, LANDABLE_CHECK, CHECK_NAME } from '../src/github.js';
+import { GitHub, LANDABLE_CHECK, CHECK_NAME, processJob } from '../src/github.js';
 import { applyProtection, protectionPlan, requiredStatusChecks, conversationPayload } from '../src/protection.js';
 import type { Evidence, Observation, Work } from '../src/model.js';
 
@@ -41,7 +41,7 @@ function item(extra: Partial<Work> = {}, candidateSha = head): Work {
 function createHarness() {
   const runs: any[] = [];
   const calls: { method: string; path: string; body?: any }[] = [];
-  const pr = { head, base };
+  const pr = { head, base, mainTip: main };
   const github = new GitHub({ repository: 'owner/repo', base: 'main', appId: APP, installationId: 1, privateKey: 'dummy' });
 
   github.request = async (path, method = 'GET', body) => {
@@ -61,7 +61,7 @@ function createHarness() {
       return { number: 10, head: { sha: pr.head, ref: 'graphyard/gy-1-1' }, base: { sha: pr.base, ref: 'main' }, state: 'open', draft: false };
     }
     if (path === '/git/ref/heads/main') {
-      return { ref: 'refs/heads/main', object: { type: 'commit', sha: main } };
+      return { ref: 'refs/heads/main', object: { type: 'commit', sha: pr.mainTip } };
     }
     if (path.startsWith('/commits/')) {
       return { sha: path.slice(9), commit: { tree: { sha: sha('e') } } };
@@ -112,18 +112,25 @@ test('manual:review-followups-triaged GY-1050.1: publishLandable checks cache an
   assert.equal(fresh.runs.length, 1, 'no new check run written');
 });
 
-test('manual:review-followups-triaged GY-1050.2: when PR head or base moves during publishLandable, skipOnMoved avoids throwing and fails no job (Findings 3, 4, 5, 11, 17)', async () => {
+test('manual:review-followups-triaged GY-1050.2: when PR head or base moves during publishLandable, skipOnMoved avoids throwing and returns { skipped: true } (Findings 3, 4, 5, 11, 17)', async () => {
   const { github, runs, pr } = createHarness();
   const work = item();
 
   // Head moved between observation and publication
   pr.head = sha('6');
 
-  // Calling with skipOnMoved = true (used in processJob) skips write and returns cleanly
-  await assert.doesNotReject(async () => {
-    await github.publishLandable(work, [work], async () => {}, true);
-  }, 'skipOnMoved skips publication without throwing when head moved');
+  // Calling with skipOnMoved = true (used in processJob) skips write and returns { skipped: true }
+  const resHead = await github.publishLandable(work, [work], async () => {}, true);
+  assert.deepEqual(resHead, { skipped: true }, 'skipOnMoved returns explicit skipped result when head moved');
   assert.equal(runs.length, 0, 'no check run written on moved head');
+
+  // Base moved between observation and publication
+  pr.head = head;
+  (github as any).sharedRef = null;
+  pr.mainTip = sha('1');
+  const resBase = await github.publishLandable(work, [work], async () => {}, true);
+  assert.deepEqual(resBase, { skipped: true }, 'skipOnMoved returns explicit skipped result when base moved');
+  assert.equal(runs.length, 0, 'no check run written on moved base');
 
   // Calling without skipOnMoved (default false) throws requireCurrent for strict callers
   await assert.rejects(async () => {
@@ -200,15 +207,15 @@ test('manual:review-followups-triaged GY-1050.4: each follow-up 1..25 from GY-88
     },
     {
       id: 3, path: 'src/github.ts:2761', description: 'Skip and re-observe instead of failing job when head moved',
-      status: 'addressed', reasonOrResolution: 'skipOnMoved in publishLandable returns cleanly without throwing requireCurrent when head moved.',
+      status: 'addressed', reasonOrResolution: 'skipOnMoved in publishLandable returns { skipped: true } and processJob finishes with retry and stops before calling gateMerge, cleanly skipping without failing the job.',
     },
     {
       id: 4, path: 'src/github.ts:2761', description: 'Head or base moved throws requireCurrent failing job',
-      status: 'addressed', reasonOrResolution: 'Addressed together with #3: returns cleanly instead of failing the job when head/base moved.',
+      status: 'addressed', reasonOrResolution: 'Addressed together with #3: returns { skipped: true } instead of failing the job when head/base moved.',
     },
     {
       id: 5, path: 'src/github.ts:2761', description: 'Head or base moved fails job instead of skipping and re-observing',
-      status: 'addressed', reasonOrResolution: 'Addressed together with #3 and #4 in publishLandable and processJob.',
+      status: 'addressed', reasonOrResolution: 'Addressed together with #3 and #4 in publishLandable and processJob via explicit skip and requeue.',
     },
     {
       id: 6, path: 'src/github.ts:2018', description: 'publishLandable reads PR and base before checking standing run',
@@ -232,7 +239,7 @@ test('manual:review-followups-triaged GY-1050.4: each follow-up 1..25 from GY-88
     },
     {
       id: 11, path: 'src/github.ts:2151', description: 'When head has moved, requireCurrent throws after Graphyard / merge published',
-      status: 'addressed', reasonOrResolution: 'Duplicate of #3, #4, #5: skipOnMoved skips publication without throwing.',
+      status: 'addressed', reasonOrResolution: 'Duplicate of #3, #4, #5: skipOnMoved skips publication without throwing and requeues job.',
     },
     {
       id: 12, path: 'docs/onboarding.md:117', description: 'Protection now also requires graphyard/landable',
@@ -256,15 +263,15 @@ test('manual:review-followups-triaged GY-1050.4: each follow-up 1..25 from GY-88
     },
     {
       id: 17, path: 'src/github.ts:151', description: 'requireCurrent aborts processJob when PR head moves; moved head should return instead',
-      status: 'addressed', reasonOrResolution: 'Addressed in publishLandable and processJob via skipOnMoved: true.',
+      status: 'addressed', reasonOrResolution: 'Addressed in publishLandable and processJob via skipOnMoved returning { skipped: true } and requeueing.',
     },
     {
       id: 18, path: 'src/github.ts:2905', description: 'publishLandable lists check runs every observation; cache last published body',
-      status: 'addressed', reasonOrResolution: 'Added landableBodies cache in GitHub class to skip check-runs list on unchanged heads.',
+      status: 'addressed', reasonOrResolution: 'Added landableBodies cache in GitHub class to skip check-runs list on unchanged heads, bounded by landableBodiesEntries.',
     },
     {
       id: 19, path: 'src/github.ts:3098', description: 'Per-head cache of last published body would save 1 request per observation',
-      status: 'addressed', reasonOrResolution: 'Duplicate of #18: landableBodies map caches last published LandableCheckRun per head.',
+      status: 'addressed', reasonOrResolution: 'Duplicate of #18: landableBodies map caches last published LandableCheckRun per head, bounded by landableBodiesEntries.',
     },
     {
       id: 20, path: 'src/github.ts:3126', description: 'advanceQueue returns early before publishLandable runs, adding 1 cycle latency',
@@ -272,7 +279,7 @@ test('manual:review-followups-triaged GY-1050.4: each follow-up 1..25 from GY-88
     },
     {
       id: 21, path: 'src/github.ts:2337', description: 'Caching last published body per head cuts steady request load',
-      status: 'addressed', reasonOrResolution: 'Duplicate of #18 and #19: landableBodies map caches last published body.',
+      status: 'addressed', reasonOrResolution: 'Duplicate of #18 and #19: landableBodies map caches last published body, bounded by landableBodiesEntries.',
     },
     {
       id: 22, path: 'src/github.ts:3130', description: 'advanceQueue returns early before publishLandable runs',
@@ -280,7 +287,7 @@ test('manual:review-followups-triaged GY-1050.4: each follow-up 1..25 from GY-88
     },
     {
       id: 23, path: 'src/github.ts:2337', description: 'Caching last published body reduces steady GitHub request load',
-      status: 'addressed', reasonOrResolution: 'Duplicate of #18, #19, #21: landableBodies map caches last published body.',
+      status: 'addressed', reasonOrResolution: 'Duplicate of #18, #19, #21: landableBodies map caches last published body, bounded by landableBodiesEntries.',
     },
     {
       id: 24, path: 'src/github.ts:2329', description: 'Checking landableCheckCurrent first would make steady state 1 request per head',
@@ -302,4 +309,79 @@ test('manual:review-followups-triaged GY-1050.4: each follow-up 1..25 from GY-88
   const declinedCount = triage.filter(e => e.status === 'declined').length;
   assert.equal(addressedCount, 16, '16 follow-ups addressed in code');
   assert.equal(declinedCount, 9, '9 follow-ups declined with recorded reasons');
+});
+
+test('manual:review-followups-triaged GY-1050.5: landableBodies cache is bounded and evicts oldest entries (Finding 18 / review follow-up)', async () => {
+  const { github, pr } = createHarness();
+  github.landableBodiesEntries = 2;
+
+  const w1 = item({}, sha('1'));
+  const w2 = item({}, sha('2'));
+  const w3 = item({}, sha('3'));
+
+  pr.head = sha('1');
+  await github.publishLandable(w1, [w1]);
+  pr.head = sha('2');
+  await github.publishLandable(w2, [w2]);
+  assert.equal((github as any).landableBodies.size, 2);
+  assert.ok((github as any).landableBodies.has(sha('1')));
+  assert.ok((github as any).landableBodies.has(sha('2')));
+
+  // Adding 3rd entry exceeds capacity 2: oldest entry (sha 1) is evicted
+  pr.head = sha('3');
+  await github.publishLandable(w3, [w3]);
+  assert.equal((github as any).landableBodies.size, 2);
+  assert.ok(!(github as any).landableBodies.has(sha('1')), 'oldest entry evicted');
+  assert.ok((github as any).landableBodies.has(sha('2')), 'second entry kept');
+  assert.ok((github as any).landableBodies.has(sha('3')), 'third entry kept');
+});
+
+test('manual:review-followups-triaged GY-1050.6: processJob stops and requeues without error when moved head skips landability publication', async () => {
+  const { github, pr } = createHarness();
+  const work = item();
+
+  // Mock observe to return work's observation
+  github.observe = async () => work.observation!;
+
+  // PR head moved on GitHub between observation and publication
+  pr.head = sha('6');
+
+  let finishedArgs: any = null;
+  let publishCalled = false;
+
+  const origPublish = github.publish.bind(github);
+  github.publish = async (...args: any[]) => {
+    publishCalled = true;
+    return (origPublish as any)(...args);
+  };
+
+  const engine = {
+    mergeBatchSize: 1,
+    parallelTips: 0,
+    ciAppIds: [],
+    optimisticMerge: false,
+    loadMergeBatchSize: async () => 1,
+    loadParallelTips: async () => 0,
+    loadRerunFailedChecks: async () => 0,
+    loadOptimisticExclude: async () => [],
+    store: {
+      list: async () => [work],
+      takeJob: async () => ({ work_id: work.id, token: 'tok', claimed_generation: 1 }),
+      finishJob: async (id: string, token: string, err?: string, retry?: boolean, avail?: number, obs?: boolean) => {
+        finishedArgs = { id, token, err, retry, obs };
+      },
+      pool: {
+        query: async () => ({ rows: [{ document: work, now: new Date() }] }),
+      },
+    },
+    observe: async () => work,
+    reconcileLanded: async () => {},
+  } as any;
+
+  const settled = await processJob(engine, github as any);
+  assert.equal(settled, true, 'processJob settled cleanly');
+  assert.ok(finishedArgs, 'finishJob was called');
+  assert.equal(finishedArgs.retry, true, 'job was requeued with retry=true');
+  assert.equal(finishedArgs.err, undefined, 'no error was recorded on job');
+  assert.equal(publishCalled, false, 'publish / gateMerge was NOT called after landable skipped');
 });

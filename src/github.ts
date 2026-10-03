@@ -635,8 +635,17 @@ export class GitHub {
   private histories = new Map<string, Set<string> | null>();
   /** Settled terminal commit statuses per head commit sha and context name (GY-1060). */
   private terminalStatuses = new Map<string, { name: string; result: string; appId: 0; source: 'status' }>();
-  /** Last published landability check run body per head commit sha (GY-1050). */
+  /** Last published landability check run body per head commit sha (GY-1050). Bounded by landableBodiesEntries. */
   private landableBodies = new Map<string, LandableCheckRun>();
+  /** Bound on how many published landability bodies the cache retains (GY-1050). */
+  landableBodiesEntries = ancestryEntries;
+  private cacheLandableBody(sha: string, body: LandableCheckRun) {
+    this.landableBodies.delete(sha);
+    this.landableBodies.set(sha, body);
+    if (this.landableBodies.size > this.landableBodiesEntries) {
+      this.landableBodies.delete(this.landableBodies.keys().next().value!);
+    }
+  }
   /**
    * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
    * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
@@ -2428,7 +2437,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * left alone when the published run already says the same. Success is written only while the pull
    * request still has that head on that base, as `publish` writes its own.
    */
-  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}, skipOnMoved = false) {
+  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}, skipOnMoved = false): Promise<{ skipped: boolean } | void> {
     const body = landableCheckRun(work, all, new Date());
     if (!body) return;
     const success = body.conclusion === 'success';
@@ -2437,20 +2446,20 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (landableCheckCurrent(cached, body)) return;
     const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
     if (landableCheckCurrent(existing, body)) {
-      this.landableBodies.set(body.head_sha, body);
+      this.cacheLandableBody(body.head_sha, body);
       return;
     }
     if (success) {
       const pr = await this.request(`/pulls/${work.candidate!.pr}`);
       const current = pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha;
       if (!current) {
-        if (skipOnMoved) return;
+        if (skipOnMoved) return { skipped: true };
         requireCurrent(false, 'PR changed before the landability check was published; retry');
       }
     }
     await beforeWrite(success);
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
-    this.landableBodies.set(body.head_sha, body);
+    this.cacheLandableBody(body.head_sha, body);
   }
   /** Creates or updates this App's `graphyard/landable` run on a head; an identical standing run is not rewritten. */
   async upsertLandable(body: LandableCheckRun, beforeWrite: () => Promise<void> = async () => {}) {
@@ -2458,12 +2467,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (landableCheckCurrent(cached, body)) return;
     const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
     if (landableCheckCurrent(existing, body)) {
-      this.landableBodies.set(body.head_sha, body);
+      this.cacheLandableBody(body.head_sha, body);
       return;
     }
     await beforeWrite();
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
-    this.landableBodies.set(body.head_sha, body);
+    this.cacheLandableBody(body.head_sha, body);
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
@@ -3262,8 +3271,12 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           // Recomputing with the live store snapshot covers peer changes since job start (GY-1050).
           if (typeof github.publishLandable === 'function') {
             const peers = await engine.store.list();
-            const observed = work;
-            await github.publishLandable(observed, peers.map(item => item.id === observed.id ? observed : item), success => guard(observed, success)(), true);
+            const target = work;
+            const landable = await github.publishLandable(target, peers.map(item => item.id === target.id ? target : item), success => guard(target, success)(), true);
+            if (landable?.skipped) {
+              await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed);
+              return true;
+            }
           }
           if (typeof github.mergeQueueState === 'function') {
             // The check and GitHub's queue move together (GY-258): an authorized, requested head is
