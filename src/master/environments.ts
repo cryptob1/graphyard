@@ -229,9 +229,14 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
       signal: AbortSignal.timeout(probe.timeoutMs ?? 5_000),
     });
     if (!response.ok) {
-      const text = await response.text();
-      const parsed = parseZaiUsage(text);
-      return { loggedIn: true, usage: parsed.windows, note: parsed.reason };
+      if (response.status === 429) {
+        const text = await response.text();
+        const parsed = parseZaiUsage(text);
+        if (parsed.reported && parsed.windows.length > 0) {
+          return { loggedIn: true, usage: parsed.windows, note: parsed.reason };
+        }
+      }
+      return { loggedIn: response.status !== 401 && response.status !== 403, usage: [], note: `provider returned ${response.status}` };
     }
     const body = await response.json();
     const parsed = parseZaiUsage(body);
@@ -253,17 +258,22 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
 
-  const cachedPlan = planId ? getCachedPlanUsage(planId, now, probe.cacheMs ?? 30_000) : null;
   const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } =
-    cachedPlan && cachedPlan.reported
-      ? { loggedIn: true, usage: cachedPlan.windows, note: cachedPlan.reason }
-      : environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
-      : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
-      : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe))
-      : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
+    environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
+    : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
+    : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe))
+    : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
 
-  if (planId && account.usage.length > 0) {
-    setCachedPlanUsage(planId, { reported: true, status: 'reported', windows: account.usage, resetsAt: account.usage.map(u => u.resetsAt).filter(Boolean).sort().at(-1) ?? null, reason: account.note }, now);
+  if (account.loggedIn && planId) {
+    if (account.usage.length === 0) {
+      const cachedPlan = getCachedPlanUsage(planId, now, probe.cacheMs ?? 30_000);
+      if (cachedPlan && cachedPlan.reported && cachedPlan.windows.length > 0) {
+        account.usage = cachedPlan.windows;
+        if (cachedPlan.reason) account.note = cachedPlan.reason;
+      }
+    } else {
+      setCachedPlanUsage(planId, { reported: true, status: 'reported', windows: account.usage, resetsAt: account.usage.map(u => u.resetsAt).filter(Boolean).sort().at(-1) ?? null, reason: account.note }, now);
+    }
   }
   const future = (usage: AccountUsage) => !usage.resetsAt || Date.parse(usage.resetsAt) > now;
   const spent = account.usage.filter(usage => usage.percent >= ceiling && future(usage));

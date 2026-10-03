@@ -184,6 +184,9 @@ export function parseCodexUsage(response: unknown): ProviderUsageResult {
 }
 
 function parseZaiMessage(message: string): ProviderUsageResult {
+  if (!/limit exhausted|quota.*exceeded|rate limit|reset(?:s)? at|1310/i.test(message)) {
+    return notReportedUsage('Z.AI');
+  }
   const resetMatch = /reset(?:s)? at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T\s][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?)/i.exec(message);
   let resetsAt: string | null = null;
   if (resetMatch) {
@@ -191,7 +194,7 @@ function parseZaiMessage(message: string): ProviderUsageResult {
     const parsed = Date.parse(raw.includes('Z') || /[+-]\d{2}/.test(raw) ? raw : raw + 'Z');
     if (!Number.isNaN(parsed)) resetsAt = new Date(parsed).toISOString();
   }
-  const is5h = /5-?hour|hourly|prompt/i.test(message);
+  const is5h = /5-?hour|hourly|prompt|tokens?/i.test(message);
   const window = is5h ? '5h' : '7d';
   return {
     reported: true,
@@ -343,18 +346,9 @@ export function deriveAccountPlan(
     return { planId: raw.toLowerCase().replace(/\s+/g, '-'), planName: raw, planKind: kind };
   }
 
-  // 2. Shared key file or shared login home
-  const keyFile = account.credential?.key?.file;
+  // 2. Shared login home on the same host
   const host = account.credential?.host ?? '';
   const home = account.credential?.home ?? '';
-
-  if (keyFile) {
-    const sharesKey = allAccounts.find(o => o.name !== account.name && o.credential?.key?.file === keyFile);
-    if (sharesKey) {
-      const kind = detectPlanKind(keyFile, account.runtime, account.model);
-      return { planId: `key:${keyFile}`, planName: `${providerPlanLabels[kind]} (${keyFile})`, planKind: kind };
-    }
-  }
 
   if (home && host) {
     const sharesHome = allAccounts.find(o => o.name !== account.name && (o.credential?.host ?? '') === host && (o.credential?.home ?? '') === home);
@@ -369,7 +363,7 @@ export function deriveAccountPlan(
   if (match) {
     const suffix = match[1];
     const sharesSuffix = allAccounts.find(o => o.name !== account.name && new RegExp(`^(?:pi|opencode)[-_]${suffix}$`, 'i').test(o.name));
-    if (sharesSuffix || account.credential?.key?.variable === 'ZAI_API_KEY') {
+    if (sharesSuffix) {
       return { planId: `zai-${suffix.toLowerCase()}`, planName: `Z.AI (${suffix})`, planKind: 'zai' };
     }
   }
@@ -377,7 +371,9 @@ export function deriveAccountPlan(
   // 4. Default by runtime/provider
   const kind = detectPlanKind('', account.runtime, account.model);
   const providerLabel = providerPlanLabels[kind];
-  return { planId: `${kind}:${account.name}`, planName: providerLabel, planKind: kind };
+  const othersOfKind = allAccounts.filter(o => o.name !== account.name && !o.plan && detectPlanKind('', o.runtime, o.model) === kind);
+  const planName = othersOfKind.length > 0 ? `${providerLabel} (${account.name})` : providerLabel;
+  return { planId: `${kind}:${account.name}`, planName, planKind: kind };
 }
 
 export interface FleetPlanView {
@@ -406,20 +402,13 @@ export function groupAccountsByPlan(
   fleet: { accounts: readonly AccountForPlanGrouping[] },
   now = Date.now()
 ): FleetPlanView[] {
-  // We group accounts primarily under their provider plan (Claude, Codex, Z.AI, Cursor, Muse, Antigravity)
-  // If accounts declare explicit plans or distinct shared plans, they group under those plans.
+  // Accounts are grouped by their derived planId (preserving distinct default plans)
   const map = new Map<string, { id: string; name: string; kind: ProviderPlanKind; accounts: string[]; usageWindows: UsageWindow[]; resetsAt: string | null }>();
 
   for (const account of fleet.accounts) {
     const { planId, planName, planKind } = deriveAccountPlan(account, fleet.accounts);
-    // If account has explicit plan or shared key/suffix, use that planId;
-    // Otherwise group under provider plan (e.g. 'Claude', 'Codex', 'Cursor', etc.)
-    const groupKey = account.plan || planId.startsWith('zai-') || planId.startsWith('key:') || planId.startsWith('home:')
-      ? planId
-      : planKind;
-    const groupName = account.plan || planId.startsWith('zai-') || planId.startsWith('key:') || planId.startsWith('home:')
-      ? planName
-      : providerPlanLabels[planKind];
+    const groupKey = planId;
+    const groupName = planName;
 
     let group = map.get(groupKey);
     if (!group) {

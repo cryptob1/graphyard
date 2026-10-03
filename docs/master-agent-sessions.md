@@ -25,8 +25,6 @@ Every launch runs with the checkout unwritable to shell commands (GY-888). A cod
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-Usage belongs to the provider plan, not the CLI: accounts sharing a plan (such as `pi-X` and `opencode-X` drawing on the same Z.AI coding-plan key, or accounts sharing a login home or declared `--plan`) share one budget. Dispatch failover and ineligibility read plan-level usage and quotas, so when one account's quota is exhausted or reaches the ceiling, failover avoids all accounts sharing that plan rather than double counting. Usage readings are cached on a bounded cadence (never on every page load) and never expose provider keys.
-
 On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), relaunches on the next account or awaits reset.
 
 ## The loop's own master session

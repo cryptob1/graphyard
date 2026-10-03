@@ -179,10 +179,9 @@ const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null => (environ
 export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const home = account.credential.home, kind = builtinProbe(runtime);
   if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
-  const planInfo = deriveAccountPlan(account, [account]);
-  const effectiveKind = kind ?? (runtime.launch.kind === 'pi' || planInfo.planKind === 'zai' ? 'opencode' : null);
-  if (effectiveKind) {
-    const health = await checkAgentEnvironment({ name: account.name, kind: effectiveKind, home, plan: account.plan ?? planInfo.planId } as any, probe);
+  if (kind) {
+    const planInfo = deriveAccountPlan(account, [account]);
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: account.plan ?? planInfo.planId } as any, probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
     return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
       resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null } };
