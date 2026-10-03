@@ -19,7 +19,7 @@ Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Co
 
 ## Settings › Agents
 
-**Can launch now?**: per role, yes, or why not and until when. **Accounts**: first applicable chip (Disabled, No role, Spent, Launch failing: failed smoke test, role hold or start failure within the hour; Unavailable, Working, Idle). **Account details**: **old probe** past an hour; **probe failed** after a failed smoke test. Operator identity ids sit behind **Identifiers**.
+**Can launch now?**: per role, yes, or why and when. **Accounts**: grouped under provider plans; first applicable chip: Disabled, No role, Spent, Launch failing (failed smoke test, role hold, start failure within the hour), Unavailable, Working, Idle. **Account details**: **old probe** past an hour; **probe failed** after a failed smoke test. Operator identity ids sit behind **Identifiers**.
 
 ## The status sentence
 

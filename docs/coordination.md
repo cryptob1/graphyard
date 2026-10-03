@@ -11,6 +11,8 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 `plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue), `sync` integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
+Before `worktree GY-N EPOCH` adds the worktree it frees the branch: rework checkouts detach; abandoned session checkouts under `.graphyard/worktrees` abort operations and get removed (`reclaimed`). Leased, dirty, unreadable, or external checkouts are kept. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
+
 ## Review gate: verdicts, not threads
 
 Reviewer approval of the exact head plus required CI gates landing; threads are inputs. Approvals mark each listed thread resolved, follow-up (held until ship, then filed) or overridden by thread or comment ID; missed threads withdraw approval, relaunching by thread ID. Retries stop after 10 identical 4xx failures. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.

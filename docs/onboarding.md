@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key exported per run. Registry writes (CLI, dashboard, API) refuse a field that looks like a pasted key (known prefix, PEM, JWT, z.ai key, long random token); word-and-version model ids are exempt.
+`--plan NAME` groups accounts under one shared provider quota (`none` clears; inferred when omitted). `--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run. Registry writes (CLI, dashboard, API) refuse pasted keys (known prefix, PEM, JWT, z.ai key, random token); word-and-version model ids are exempt.
 
 ### Add a role
 
