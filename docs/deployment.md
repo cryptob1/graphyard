@@ -17,7 +17,7 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports ve
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string |
 | `HOST` / `PORT` | `0.0.0.0` / `4310` |
-| `GRAPHYARD_PRINCIPALS` | JSON array of principals, each with `role` and `sessionKind`; an AI `admin` judging retro artefacts must declare `sessionKind: "ai"` (undeclared is refused) |
+| `GRAPHYARD_PRINCIPALS` | JSON array of `role`+`sessionKind` principals; the operator is declared `human`, rotation refuses the rest; an AI `admin` judging retro artefacts must declare `sessionKind: "ai"` (undeclared is refused) |
 | `GITHUB_REPOSITORY` / `GITHUB_BASE_BRANCH` | `owner/repo` / `main` |
 | `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY` (or `_FILE`), `GITHUB_WEBHOOK_SECRET` | The control-plane App |
 | `GITHUB_CI_APP_IDS` | Trusted CI App IDs |
