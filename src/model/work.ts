@@ -22,7 +22,7 @@ import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema } from './interventions.js';
 import { demand } from './refusal.js';
 
-export const CHECK_NAME = 'Graphyard / merge';
+export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
@@ -109,7 +109,7 @@ export interface Observation {
   dismissedReviewIds?: number[];
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
-  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
+  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;

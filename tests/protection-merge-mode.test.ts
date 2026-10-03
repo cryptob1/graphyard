@@ -16,8 +16,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
 const agent = { id: 'w1', key: 'GY-1', stage: 'build', policy: { checks: ['test'], review: true, reviewProvider: 'agent' } } as unknown as Work;
 const branch = () => ({ required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true },
-  required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
-const queueRules = [{ type: 'merge_queue', parameters: {} }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'Graphyard / merge', integration_id: 1234 }] } }];
+  required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+const queueRules = [{ type: 'merge_queue', parameters: {} }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'Graphyard / merge', integration_id: 1234 }, { context: 'graphyard/landable', integration_id: 1234 }] } }];
 
 /** A fake `gh` for the master's protection: one repository, its branch rules, and every write it receives. */
 function github(owner: 'User' | 'Organization', options: { allowAutoMerge?: boolean; refuseQueue?: boolean } = {}) {
