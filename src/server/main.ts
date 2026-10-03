@@ -1,3 +1,6 @@
+import { once } from 'node:events';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Store } from '../store.js';
 import { Engine } from '../engine.js';
 import { demand, parseReviewerApps } from '../model.js';
@@ -19,11 +22,8 @@ import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 
-export interface MainOptions {
-  port?: number;
-  host?: string;
-  tickIntervalMs?: number;
-}
+/** Overrides for tests that start the process entry in-process; the deployment reads PORT and HOST. */
+export interface MainOptions { port?: number; host?: string }
 
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main(options: MainOptions = {}) {
@@ -69,96 +69,72 @@ export async function main(options: MainOptions = {}) {
   console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared; the regression guard exempts nothing'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); production observation ${provider ? `via ${provider.description}` : build.commit ? 'from the build identity only; set RAILWAY_API_TOKEN or RAILWAY_TOKEN to read the deployment list' : 'unavailable: set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA'}`);
 
-  (http.services as any).readiness = false;
-  let startupValidationComplete = false;
-  let readinessResolvers: Array<() => void> = [];
-  const waitForReadiness = () => startupValidationComplete ? Promise.resolve() : new Promise<void>(resolve => readinessResolvers.push(resolve));
-  const resolveReadiness = () => {
-    startupValidationComplete = true;
-    (http.services as any).readiness = true;
-    for (const r of readinessResolvers) r();
-    readinessResolvers = [];
-  };
-
-  const [appHandler] = http.listeners('request') as ((req: any, res: any) => void)[];
-  http.removeAllListeners('request');
-  http.on('request', async (req, res) => {
-    if (!startupValidationComplete) {
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      if (req.method === 'POST' && url.pathname.startsWith('/api/') && url.pathname !== '/api/github/webhook') {
-        if (req.headers['x-wait-for-readiness'] === 'true' || url.searchParams.get('wait') === 'true') {
-          await waitForReadiness();
-        } else {
-          res.setHeader('Content-Type', 'application/json');
-          res.setHeader('Retry-After', '1');
-          res.writeHead(503);
-          res.end(JSON.stringify({ error: 'startup validation in progress; please retry shortly', retryable: true }));
-          return;
-        }
-      }
-    }
-    appHandler(req, res);
-  });
-
-  const host = options.host ?? process.env.HOST ?? '127.0.0.1';
-  const port = options.port !== undefined ? options.port : Number(process.env.PORT ?? 4310);
-  await new Promise<void>((resolve, reject) => {
-    http.once('error', reject);
-    http.listen(port, host, () => {
-      http.removeListener('error', reject);
-      console.log(`Graphyard listening on port ${(http.address() as any)?.port ?? port}; GitHub ${github ? 'connected' : 'not configured'}`);
-      resolve();
-    });
-  });
-
-  mark('production.load'); await production.load().catch(error => console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'));
-  // One-time materialization of the deployment allowlist. Operators manage proof authority
-  // inside Graphyard from here on; a later environment edit no longer changes authority.
-  mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
-  if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
-  mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
 
-  let startupValidationRunning = false;
+  // Startup validation (GY-1127): artifact expiry and the full validation reconcile took minutes
+  // against a busy database and held http.listen past the deploy's 120 s healthcheck. The port now
+  // opens first; until startup validation completes, /healthz reports `readiness: false`, every
+  // mutation that could act on unvalidated state is refused with a retryable 503, and the
+  // observation workers and production watch are not started. A failed attempt is logged and the
+  // reconciliation tick retries it.
+  let ready = false, validating = false, prepared = false;
+  let watching: ReturnType<typeof startProductionWatch> | null = null;
+  let observing: ReturnType<typeof startObservationWorkers> | null = null;
+  const services: typeof http.services & { readiness?: boolean } = http.services;
+  services.readiness = false;
   const runStartupValidation = async () => {
-    if (startupValidationComplete || startupValidationRunning) return;
-    startupValidationRunning = true;
+    if (ready || validating) return;
+    validating = true;
     try {
+      if (!prepared) {
+        mark('production.load'); await production.load().catch(error => console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'));
+        // One-time materialization of the deployment allowlist. Operators manage proof authority
+        // inside Graphyard from here on; a later environment edit no longer changes authority.
+        mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
+        if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
+        mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
+        prepared = true;
+      }
       mark('validation.expireArtifacts'); await validation.expireArtifacts();
       mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
-      resolveReadiness();
+      ready = true; services.readiness = true;
+      startBackground();
     } catch (error) {
-      console.error('startup validation failed', error instanceof Error ? error.message : 'unknown');
-    } finally {
-      startupValidationRunning = false;
-    }
+      console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
+    } finally { validating = false; }
   };
-
-  void runStartupValidation();
-
-  // The production watch runs beside the tick, never in it: a deploy used to hold the tick for
-  // minutes while it re-compared every delivery (GY-186), and observations and merges stalled behind it.
-  // Incidents it raises land in the ledger and in /api/status, and are announced here once each.
-  const watching = startProductionWatch(production, {
-    announce: incident => console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`),
-    failed: error => console.error('production watch failed', error instanceof Error ? error.message : 'unknown'),
+  const startBackground = () => {
+    // The production watch runs beside the tick, never in it: a deploy used to hold the tick for
+    // minutes while it re-compared every delivery (GY-186), and observations and merges stalled behind it.
+    // Incidents it raises land in the ledger and in /api/status, and are announced here once each.
+    watching = startProductionWatch(production, {
+      announce: incident => console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`),
+      failed: error => console.error('production watch failed', error instanceof Error ? error.message : 'unknown'),
+    });
+    // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
+    // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
+    observing = github ? startObservationWorkers(engine, github) : null;
+    console.log(`Observation workers: ${observing?.concurrency ?? 0}`);
+  };
+  const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
+  http.removeAllListeners('request');
+  http.on('request', (req: IncomingMessage, res: ServerResponse) => {
+    if (!ready && refusedBeforeReady(req.method, req.url)) {
+      res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '5' });
+      res.end(JSON.stringify({ error: 'Startup validation has not completed; retry shortly', retryable: true }));
+      return;
+    }
+    handle(req, res);
   });
+
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
   let patternsAt = 0, receiptsPrunedAt = 0, ledgerCompactedAt = 0;
-  // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
-  // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
-  const observing = github ? startObservationWorkers(engine, github) : null;
-  console.log(`Observation workers: ${observing?.concurrency ?? 0}`);
-  const tickIntervalMs = options.tickIntervalMs ?? 2000;
   const reconciliation = startReconciliation(async step => {
-    if (!startupValidationComplete) {
-      await step('validation.startup', () => runStartupValidation());
-      if (!startupValidationComplete) return;
-    }
+    if (!ready) { await step('validation.startup', () => runStartupValidation()); if (!ready) return; }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
     await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
@@ -180,18 +156,33 @@ export async function main(options: MainOptions = {}) {
       const preflight = await step('github.preflight', () => github.preflightIfDue());
       if (preflight) await announcePreflight(preflight);
     }
-  }, tickIntervalMs);
+  }, 2000);
+  http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}; GitHub ${github ? 'connected' : 'not configured'}`));
+  await once(http, 'listening');
+  void runStartupValidation();
 
   const close = async () => {
-    reconciliation.stop(); watching.stop(); observing?.stop();
+    reconciliation.stop(); watching?.stop(); await observing?.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
     await Promise.resolve(githubCache?.close());
     await store.close();
   };
-  const shutdown = () => { close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
+  const shutdown = () => { void close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
-  return { http, store, engine, validation, reconciliation, watching, observing, runStartupValidation, isReady: () => startupValidationComplete, close };
+  return { http, store, validation, runStartupValidation, isReady: () => ready, close };
+}
+
+/**
+ * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
+ * except a GitHub webhook delivery, which only wakes durable jobs, and a work lease heartbeat,
+ * which reads no validation state and would otherwise lapse leases for the whole startup window.
+ * Reads stay open, and /healthz answers liveness throughout.
+ */
+export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
+  const path = new URL(url, 'http://localhost').pathname;
+  return path.startsWith('/api/') && path !== '/api/github/webhook' && !/^\/api\/work\/[^/]+\/heartbeat$/.test(path);
 }
 
 export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;

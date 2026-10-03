@@ -1,6 +1,6 @@
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { planeVerdict, probeWrites, readDatabaseCapacity, readGitHubBudget } from '../../master-resources.js';
-import { defineRoutes } from '../routes.js';
+import { defineRoutes, type Services } from '../routes.js';
 
 /**
  * The plane's own health; no token required. Health names the release, schema generation and
@@ -79,19 +79,23 @@ export const healthRoutes = defineRoutes('health', [
     const reachable = await Promise.race([probe.answered, new Promise<false>(resolve => setTimeout(() => resolve(false), healthCheckWaitMs).unref())]);
     const cause = reachable ? null : unanswered(probe, Date.now());
     if (cause) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms and ${cause}; the database is unreachable`);
-    const readiness = (services as any).readiness === undefined ? true : Boolean((services as any).readiness);
-    if (!reachable) return { ok: true, healthy: true, readiness, ready: readiness, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
+    // Startup readiness (GY-1127): false until the process's startup validation completes; a server
+    // not started through main() has none to wait for. `?ready` answers 503 until then, for a
+    // readiness probe that must keep traffic off a replica refusing mutations.
+    const readiness = (services as Services & { readiness?: boolean }).readiness ?? true;
+    if (!readiness && url.searchParams.has('ready')) return send(503, { ok: true, healthy: true, readiness, causes: ['startup validation has not completed'], ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol });
+    if (!reachable) return { ok: true, healthy: true, readiness, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued
     // behind them failed every deployment's health check (2026-09-23). The resource checks get a
     // bounded wait; past it the plane answers alive and names the checks it could not finish.
     const checks = Promise.all([probeWrites(pool), readDatabaseCapacity(pool), readGitHubBudget(services.github)]);
     const settled = await Promise.race([checks, new Promise<null>(resolve => setTimeout(() => resolve(null), healthCheckWaitMs).unref())]);
-    if (!settled) return { ok: true, healthy: true, readiness, ready: readiness, writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null,
+    if (!settled) return { ok: true, healthy: true, readiness, writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null,
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     const [writeError, database, github] = settled;
     const verdict = planeVerdict(writeError, { database, github });
-    const body = { ok: verdict.healthy, healthy: verdict.healthy, readiness, ready: readiness, writable: verdict.writable, causes: verdict.causes, resources: { database, github },
+    const body = { ok: verdict.healthy, healthy: verdict.healthy, readiness, writable: verdict.writable, causes: verdict.causes, resources: { database, github },
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     return verdict.healthy || !url.searchParams.has('strict') ? body : send(503, body);
   } },

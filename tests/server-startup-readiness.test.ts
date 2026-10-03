@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { main } from '../src/server/main.js';
+import { main, refusedBeforeReady } from '../src/server/main.js';
 import { Validation } from '../src/validation.js';
 
 const port = Number(process.env.GRAPHYARD_STARTUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1127);
@@ -59,7 +59,7 @@ test('unit:server-listens-before-startup-validation — with startup artifact ex
     });
 
     const startedAt = Date.now();
-    const instance = await main({ port: 0, tickIntervalMs: 60_000 });
+    const instance = await main({ port: 0 });
     try {
       const serverPort = (instance.http.address() as any).port;
       const res = await fetch(`http://127.0.0.1:${serverPort}/healthz`);
@@ -94,7 +94,7 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
       return origReconcile.call(this, includeCompleted);
     };
 
-    const instance = await main({ port: 0, tickIntervalMs: 60_000 });
+    const instance = await main({ port: 0 });
     try {
       const serverPort = (instance.http.address() as any).port;
       const baseUrl = `http://127.0.0.1:${serverPort}`;
@@ -103,6 +103,14 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
       const healthBefore = await fetch(`${baseUrl}/healthz`).then(r => r.json()) as any;
       assert.equal(healthBefore.ok, true);
       assert.equal(healthBefore.readiness, false);
+      // A readiness probe asking ?ready is kept off this replica until startup validation completes.
+      assert.equal((await fetch(`${baseUrl}/healthz?ready`)).status, 503);
+      // Only mutations are refused: a webhook delivery and a lease heartbeat pass, and so do reads.
+      assert.equal(refusedBeforeReady('POST', '/api/github/webhook'), false);
+      assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/heartbeat'), false);
+      assert.equal(refusedBeforeReady('GET', '/api/work/GY-1'), false);
+      assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/complete'), true);
+      assert.equal(refusedBeforeReady('POST', '/api/actions/0123456789abcdef0123456789abcdef/renew'), true);
 
       // 2. Coordination mutation is refused with retryable 503 naming startup validation
       const mutationRes = await fetch(`${baseUrl}/api/work`, {
@@ -114,7 +122,7 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
         body: JSON.stringify({ title: 'Coordination test', plannedFiles: [], criteria: [] }),
       });
       assert.equal(mutationRes.status, 503);
-      assert.equal(mutationRes.headers.get('retry-after'), '1');
+      assert.equal(mutationRes.headers.get('retry-after'), '5');
       const mutationBody = await mutationRes.json() as any;
       assert.equal(mutationBody.retryable, true);
       assert.match(mutationBody.error, /startup validation/i);
@@ -129,7 +137,7 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
         body: JSON.stringify({}),
       });
       assert.equal(deliveryRes.status, 503);
-      assert.equal(deliveryRes.headers.get('retry-after'), '1');
+      assert.equal(deliveryRes.headers.get('retry-after'), '5');
       const deliveryBody = await deliveryRes.json() as any;
       assert.equal(deliveryBody.retryable, true);
       assert.match(deliveryBody.error, /startup validation/i);
@@ -149,6 +157,7 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
       const healthAfter = await fetch(`${baseUrl}/healthz`).then(r => r.json()) as any;
       assert.equal(healthAfter.ok, true);
       assert.equal(healthAfter.readiness, true);
+      assert.equal((await fetch(`${baseUrl}/healthz?ready`)).status, 200);
 
       // 6. Mutation is no longer refused with 503
       const mutationAfter = await fetch(`${baseUrl}/api/work`, {
@@ -192,7 +201,7 @@ test('unit:startup-validation-failure-retried — a startup validation failure i
       return origReconcile.call(this, includeCompleted);
     };
 
-    const instance = await main({ port: 0, tickIntervalMs: 50 });
+    const instance = await main({ port: 0 });
     try {
       const serverPort = (instance.http.address() as any).port;
       const baseUrl = `http://127.0.0.1:${serverPort}`;
@@ -209,7 +218,7 @@ test('unit:startup-validation-failure-retried — a startup validation failure i
 
       // 3. Reconciliation tick retried and readiness turned true
       const retryStart = Date.now();
-      while (!instance.isReady() && Date.now() - retryStart < 3000) {
+      while (!instance.isReady() && Date.now() - retryStart < 10_000) {
         await new Promise(r => setTimeout(r, 20));
       }
       assert.ok(reconcileAttempts >= 2, `startup validation was retried (attempts: ${reconcileAttempts})`);
