@@ -22,9 +22,7 @@ const isAbsolute = (value: string) => /^(\/|[A-Za-z]:[\\/])/.test(value);
 const secretName = /(TOKEN|SECRET|PASSWORD|PRIVATE|API_KEY|CREDENTIAL)/;
 
 const launchEnvironment = z.record(
-  z.string().regex(/^[A-Z_][A-Z0-9_]*$/)
-    .refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher')
-    .refine(name => !secretName.test(name), 'A launch contract never carries a secret; the credential lives in the runtime login the account references'),
+  z.string().regex(/^[A-Z_][A-Z0-9_]*$/).refine(name => !name.startsWith('GRAPHYARD_'), 'GRAPHYARD_ variables are owned by the launcher').refine(name => !secretName.test(name), 'A launch contract never carries a secret; the credential lives in the runtime login the account references'),
   z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Environment values cannot contain control characters').refine(notSecret, 'That value looks like a credential; the registry stores references, never secrets'),
 ).default({});
 
@@ -99,8 +97,8 @@ export const accountSchema = z.object({
     key: accountKeySchema.optional(),
   }).strict(),
   enabled: z.boolean().default(true),
-  /** How many sessions may run on this account at once, across every role; null is unbounded. */
   maxSessions: z.number().int().min(1).max(100).nullable().default(null),
+  plan: text(100).optional(),
   note: text(300).optional(),
 }).strict();
 export type FleetAccountInput = z.infer<typeof accountSchema>;
@@ -317,3 +315,4 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
 export * from './registry-keys.js';
 export * from './registry-sessions.js';
 export * from './registry-proposal.js';
+export * from '../provider-usage.js';
