@@ -103,7 +103,7 @@ test('unit:ci-cancels-superseded-runs — every pull_request-triggered workflow 
 });
 
 const openWork = (checks: string[], overrides: Partial<Work> = {}) => ({ id: 'work-id', key: 'GY-42', stage: 'review', policy: { checks, review: true }, ...overrides } as unknown as Work);
-const protection = { required_pull_request_reviews: { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true } };
+const protection = { required_pull_request_reviews: { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true } };
 // A CI limit covering the parallel-tip window, so only the cancel-in-progress advisories are planned.
 const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, mergeQueue: { ciConcurrency: 100 } };
 
