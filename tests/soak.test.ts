@@ -49,6 +49,7 @@ import { expandTypedCommand } from './helpers/launch-shell.js';
 import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
@@ -132,7 +133,9 @@ const basePlan = {
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, slowObservationMs: 10 * minute,
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour },
+  // GY-866: a session outside the loop checks out another commit in the coordinator checkout, and it is put back.
+  headMove: { from: 3 * hour + 20 * minute, to: 3 * hour + 40 * minute }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, slowObservationMs: 10 * minute,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -1308,8 +1311,20 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
 
   // ---- The day. ----
   let state = emptyDaemonState(config);
+  // GY-866: the checkout guard `runDaemon` runs after every cycle, against the simulated checkout:
+  // it reads the tree and HEAD each cycle, raises the refusal naming the paths, the HEAD and the
+  // panes pointing at the checkout, and lets the self-upgrade run only on a clean checkout at the
+  // commit the loop runs. Its Herdr inventory reads are counted, to bound them.
+  const guardReads = { agents: 0, refused: 0, transitions: 0, details: new Set<string>(), headMoves: 0, foreignHead: sha('foreign-head', 1) };
+  const guard = coordinatorCheckoutGuard({
+    state: () => state, snapshot, persist: async () => {}, now: clock.now, log: () => {}, applies: () => true,
+    read: async () => ({ root: '/soak/coordinator', commit: checkout.head, modified: checkout.dirty ? ['src/master.ts'] : [], untracked: [] }),
+    agents: () => { guardReads.agents++; return herdr.list(); },
+  });
+  await guard.start(checkout.head);
+  let movedFrom: string | null = null, lastRefusal: string | null = null;
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
-  const refusalSamples: { keys: number; attempts: number }[] = [];
+  const refusalSamples: { keys: number; attempts: number; head: boolean }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
   // cycles, the way `runDaemon` does, and a launch settles in the interval after the cycle that
   // handed it over — here, before the simulated clock moves on.
@@ -1732,12 +1747,26 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       const running = (await store.list()).flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.state === 'running' && handle.host === config.hostId)).length;
       exitedRowsSeen += exitedRows.length;
       if (exitedRows.length > running) violations.push(`${new Date(now).toISOString()} (+${Math.round(elapsed / minute)} min) ${exitedRows.length} exited-session sighting(s) for ${running} running implementation handle(s)`);
-      // Between cycles, as runDaemon runs it: the self-upgrade against the simulated checkout.
+      // Between cycles, as runDaemon runs it: the checkout guard, then the self-upgrade against the
+      // simulated checkout. GY-866: inside the head-move window HEAD stands at a commit the loop
+      // never aligned to, and is put back where it was when the window closes.
       checkout.dirty = elapsed >= plan.dirtyCheckout.from && elapsed < plan.dirtyCheckout.to;
-      const upgraded = await selfUpgrade(state);
-      upgrades.outcomes.push(upgraded.outcome);
-      if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
-      if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
+      const moved = elapsed >= plan.headMove.from && elapsed < plan.headMove.to;
+      if (moved && movedFrom === null) { movedFrom = checkout.head; checkout.head = guardReads.foreignHead; guardReads.headMoves++; }
+      if (!moved && movedFrom !== null) { checkout.head = movedFrom; movedFrom = null; }
+      const readsBefore = guardReads.agents;
+      const { refusal, upgraded } = await guard.betweenCycles(selfUpgrade);
+      const lastSeen = lastRefusal;
+      if (refusal && refusal !== lastRefusal) guardReads.transitions++;
+      lastRefusal = refusal;
+      if (refusal) {
+        guardReads.refused++; guardReads.details.add(refusal);
+        assert.ok(guardReads.agents <= readsBefore + 1, 'a refused cycle reads the Herdr inventory at most once');
+        if (refusal !== lastSeen) assert.equal(guardReads.agents, readsBefore + 1, 'a refusal that changed reads the Herdr inventory afresh');
+        refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:') || key.startsWith('escalation:dirty-checkout')).length, attempts: state.actions['escalation:dirty-checkout']?.attempts ?? 0, head: moved });
+      } else assert.equal(guardReads.agents, readsBefore, 'a clean checkout costs no Herdr inventory read');
+      if (upgraded) upgrades.outcomes.push(upgraded.outcome);
+      if (upgraded?.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
       // The loop restarts after every other cycle a run is live, once its launches have settled as
       // `runDaemon` lets them: it signals none, and the next cycle adopts them.
       if (headless && cycles % 2 && headless.pi.live()) { detachRuns(); headless.settling.clear(); headless.restarts++; }
@@ -1796,7 +1825,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
+  return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
@@ -1834,7 +1863,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const hours = Number(process.env.SOAK_HOURS ?? 24);
   const day = await simulateDay({ hours, github806: true, plan: { blockedMerge: blockedMergeItem } });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
+  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
@@ -2084,14 +2113,34 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // dirty checkout across the second deploy was refused, untouched, without growing the cursor,
   // and aligned once it was clean again.
   const summary = `${upgrades.checkouts.map(entry => `+${Math.round((entry.at - dayStart) / minute)} min ${entry.from.slice(0, 7)}..${entry.to.slice(0, 7)}`).join(', ')}`;
-  assert.equal(upgrades.outcomes.length, cycles, 'the self-upgrade ran between every cycle');
+  assert.equal(upgrades.outcomes.length + guardReads.refused, cycles, 'the checkout guard ran after every cycle, and the self-upgrade after every one it did not refuse');
   assert.equal(upgrades.checkouts.length, production.deploys.length, `one alignment per deploy: ${summary}`);
   assert.equal(upgrades.executors.length, production.deploys.length, 'one fleet restart per deploy');
   assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy');
   assert.deepEqual(upgrades.executors, upgrades.checkouts.map(entry => entry.to), 'the fleet restarts against the tip the checkout moved to');
   assert.ok(upgrades.checkouts[1].at >= dayStart + basePlan.dirtyCheckout.to, `the second deploy aligned only once the checkout was clean: ${summary}`);
-  assert.ok(refusalSamples.length >= 3, `the dirty checkout stood refused across the second deploy (${refusalSamples.length} cycles)`);
-  assert.deepEqual(new Set(refusalSamples.map(sample => JSON.stringify(sample))).size, 1, `a standing refusal does not grow the cursor's actions: ${JSON.stringify(refusalSamples.slice(0, 3))}`);
+  const dirtySamples = refusalSamples.filter(sample => !sample.head), headSamples = refusalSamples.filter(sample => sample.head);
+  assert.ok(dirtySamples.length >= 3, `the dirty checkout stood refused across the second deploy (${dirtySamples.length} cycles)`);
+  assert.deepEqual(new Set(dirtySamples.map(sample => JSON.stringify(sample))).size, 1, `a standing refusal does not grow the cursor's actions: ${JSON.stringify(dirtySamples.slice(0, 3))}`);
+  // GY-866: the per-cycle guard over the day. The HEAD moved by a session outside the loop stood
+  // refused for the whole window — named with the commit the loop runs and the one it found —
+  // without an alignment or a restart from it, and the loop's own alignments at each deploy never
+  // read as drift. The guard reads Herdr only on a refused cycle, raises the one escalation row,
+  // and grows its attempts only when what it names changes; clean and back at the commit it runs,
+  // the attention is settled.
+  assert.equal(guardReads.headMoves, 1, 'the day moved the HEAD once');
+  assert.ok(headSamples.length >= 3, `the moved HEAD stood refused across its window (${headSamples.length} cycles)`);
+  assert.equal(new Set(headSamples.map(sample => JSON.stringify(sample))).size, 1, `a standing HEAD refusal does not grow the cursor's actions: ${JSON.stringify(headSamples.slice(0, 3))}`);
+  assert.ok([...guardReads.details].some(detail => detail.includes(`moved from `) && detail.includes(`to ${guardReads.foreignHead.slice(0, 12)}`)), 'the HEAD refusal names the commit the loop runs and the HEAD it found');
+  assert.ok(!upgrades.checkouts.some(entry => entry.from === guardReads.foreignHead || entry.to === guardReads.foreignHead), 'nothing aligned from or to the moved HEAD');
+  assert.equal(guardReads.refused, refusalSamples.length, 'every refused cycle is sampled');
+  // A standing refusal reuses what it named: the plane and the Herdr inventory are read on each
+  // change and at most every ten minutes while it stands, never once per refused cycle.
+  assert.ok(guardReads.agents >= guardReads.transitions && guardReads.agents < guardReads.refused / 3, `the guard read the Herdr inventory on each change and seldom while a refusal stood (${guardReads.agents} read(s), ${guardReads.transitions} change(s), ${guardReads.refused} refused cycle(s))`);
+  const guardEscalation = state.actions['escalation:dirty-checkout'];
+  assert.ok(guardEscalation && guardEscalation.attempts >= 2 && guardEscalation.attempts <= guardReads.transitions, `the escalation's attempts grow only when what it names changes (${guardEscalation?.attempts} over ${guardReads.transitions} change(s), ${guardReads.refused} refused cycle(s))`);
+  assert.equal(guardEscalation.state, 'done', 'the clean checkout back at the commit the loop runs settles the attention');
+  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:dirty-checkout')).length, 1, 'the guard keeps one escalation row');
   assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');

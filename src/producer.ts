@@ -11,7 +11,8 @@ import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
-import { assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
+import { anchorSessionCheckout, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
+import { escalationSessionMs, readApproverLaunches, readEscalationSessions } from './master/autonomy.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
@@ -376,7 +377,7 @@ export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + (memorySection || '')
     + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. For live install proofs, HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are available in your environment. `
-    + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in this checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key}. Run the project's tests through its own runners — node ${config.cliPath} verify ${binding.key} in that worktree, or npm test — which withhold every GRAPHYARD_* and HERDR_* variable from the tests and reserve free test ports themselves; a proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed with --test-name-pattern, and that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
+    + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in the repository's own checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key}. Run the project's tests through its own runners — node ${config.cliPath} verify ${binding.key} in that worktree, or npm test — which withhold every GRAPHYARD_* and HERDR_* variable from the tests and reserve free test ports themselves; a proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed with --test-name-pattern, and that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
     + `A proof that passes against an unchanged tree proves nothing, so for each proof that passes also show it exercises its criterion: in a second detached worktree of the same head at ${stripped} (git worktree add --detach ${stripped} ${binding.sha}), remove the behaviour the criterion the proof is attached to describes — revert or stub exactly the lines of the change that implement it — and run the same proof there. `
     + `For each proof write a JSON file such as ${evidenceFile(binding.proofs[0])} of the form {"proof":"${binding.proofs[0]}","sha":"${binding.sha}","baseSha":"${binding.baseSha}","policyRevision":${binding.policyRevision},"result":"pass"|"fail","executed":N,"skipped":0,"environment":"<runtime and how it was produced>","scopeFiles":["<paths the proof depends on>"],"exercise":{"criterion":"<the criterion id, such as AC-1>","behaviour":"<the behaviour you removed, in words a worker can find in the diff>","result":"pass"|"fail","executed":N}} — exactly this sha, baseSha and policyRevision, executed as the number of cases actually run, a failing or incomplete run submitted as result fail rather than omitted, and exercise as the stripped run's true outcome: a proof that still passes there is recorded as not exercising its criterion rather than as passing, which is the finding, not something to hide — and submit it with node ${config.cliPath} evidence ${binding.key} FILE. `
@@ -466,6 +467,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     // session directory is allocated under the managed worktree root — durable storage with room
     // left, outside every worktree — and is the only place beside the Git directory it may write.
     const checkout = await allocateManagedCheckout(root, config, 'proof', binding.key, binding.sha, id, dependencies.filesystem);
+    await anchorSessionCheckout(root, checkout.directory);
     const launch = accountLaunch(profile, selected.account, { writable: [checkout.directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
     // The producer loads its own role rules, never the master's. The harness follows the account's
     // runtime, so a cross-runtime failover keeps its role rules.
@@ -476,13 +478,13 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       const environment = { ...launch.environment, GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
         GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
       const prefix = await producerSecretsPrefix(checkout.directory, producerEnv);
-      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+      const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
         '--label', `${binding.key} ${binding.group} proofs · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
       pane = created.pane; tabId = created.tab;
       const memory = await readProjectMemory(root).catch(() => null);
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, prefix, role: harness.role, contract: launch.contract }));
+      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, prefix, role: harness.role, contract: launch.contract }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
@@ -737,15 +739,27 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
   return { producers: ledger.producers, changed };
 }
 
+/** GY-866: managed directories this process holds outside every ledger — the loop's scratch checkout. */
+const heldCheckouts = new Set<string>();
+/** Hold `directory` against the reclaim pass until the returned release is called. */
+export function holdCheckout(directory: string) {
+  const held = resolve(directory); heldCheckouts.add(held);
+  return () => { heldCheckouts.delete(held); };
+}
+
 /**
  * The reclaim pass over the managed worktree root: every session directory no pending producer or
  * reviewer record owns is removed. Settlement removes a session's own checkout, so what this finds
  * was left by a session whose master died before it could settle.
  */
 export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
-  const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
+  const now = options.now ?? Date.now();
+  const [producers, reviews, approvers, escalations] = await Promise.all([readProducerLedger(root), readReviewLedger(root), readApproverLaunches(root), readEscalationSessions(root)]);
   // A live headless approver's directory is owned by its run, not by a ledger record (GY-391).
-  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts()];
+  // GY-866: an interactive approver's or escalation handler's directory is owned by its launch
+  // record for as long as that record is kept, and the loop's scratch checkout by the loop holding it.
+  const recorded = [...approvers, ...escalations].filter(record => record.checkout && now - Date.parse(record.launchedAt) < escalationSessionMs).map(record => record.checkout!);
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...recorded, ...heldCheckouts];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 

@@ -39,6 +39,7 @@ Never attest a stop you have not confirmed. Merged work changes only through a f
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
 - Only guarded or audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
+- Only the master session starts in the coordinator checkout. Every other session starts, pane and process, in its own checkout under `run.worktreeRoot`: reviewers, producers, approvers and escalation handlers in repository worktrees (approver and handler tabs set `GRAPHYARD_REPOSITORY_ROOT` for `master` commands), the loop's research, triage and diagnostician in one scratch checkout. Reclaim spares an approver or handler checkout while its launch record lasts, the scratch while the loop runs (GY-866).
 - History is append-only; only routine rows past their retention window are [compacted](operations-reference.md#storage-retention), each batch audited.
 
 ## Deeper references

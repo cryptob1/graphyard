@@ -19,7 +19,7 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; the session bus is a keyring-only proxy), only the session's worktree or checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (no bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. The loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names the paths and their leases.
+Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; session bus: keyring-only proxy), only the session's own checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout) is refused. The master session is exempt. Every other session starts in its own checkout, never this one; the loop and executors never start, self-upgrade or restart on a dirty or moved checkout (checked each cycle; `escalation:dirty-checkout` names paths, leases, HEAD, panes; [reference](master-agent-reference.md#resources-and-disk), GY-866).
 
 ## Accounts and failover
 
@@ -27,7 +27,7 @@ A profile's `accounts` lists [agent environments](onboarding.md#agent-environmen
 
 A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise one attention item until a start.
 
-On a runtime's own limit notice (never agent text) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset.
+On a runtime's limit notice (never agent text) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset.
 
 ## The loop's own master session
 
@@ -65,7 +65,7 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
+When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt.
 
 Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
 
@@ -73,7 +73,7 @@ Every paste goes to the **pane on the attempt's own session handle**, never the 
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session has ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
+Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
 
 ### The dispatcher's own state
 
