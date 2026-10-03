@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## Shared project memory
 
-Workers, reviewers and producers start with a role-scoped memory digest (<=500 words): approved decisions, answered requests, recurring fault classes with remedies, merges to main since base (or 24h) with files. Updated from applied decisions, human answers, fault classes, merges (never agent claims), kept in cursor and `.graphyard/project-memory.json`. `master status` reports `projectMemory`; on Workers page.
+Workers, reviewers and producers start with a role-scoped memory digest (≤500 words): decisions, answers, recurring fault classes with remedies, and recent main merges with files. Updated from applied records (never agent claims), kept in cursor and `.graphyard/project-memory.json`; `master status` reports `projectMemory`.
 
 ## Risk lanes
 
@@ -30,20 +30,20 @@ All lanes require `e2e:` proofs; low/medium reworks need no approver.
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker; later the master dispatches many, each own credential, worktree.
+Text equivalent: in bootstrap the operator supervises one worker; later the master dispatches many, each with own credential and worktree.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: operator makes human-only decisions; Herdr hosts master (`coordinator`), slice lead, worker (epoch, worktree); reviewer, producer hold own credentials; merges only via the guarded path. Colours: [legend](glossary.md#diagram-legend).
+Text equivalent: operator makes human-only decisions; Herdr hosts master (`coordinator`), slice lead, worker (epoch, worktree); reviewer, producer hold credentials; guarded path merges. Colours: [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub, publishes the required check, merges; webhooks wake jobs.
+Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub and merges; webhooks wake jobs.
 
-- Gates deterministically check `(PR, head SHA, base SHA)` under current policy; changes invalidate evidence.
+- Gates check `(PR, head SHA, base SHA)` under current policy; changes invalidate evidence.
 - Claims bump the epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; latest trusted record per proof/candidate wins.
 - Append-only history; retries replay 24h.
-- Graphyard merges only the authorized candidate; merge is not [delivery](delivery.md).
+- Merges only the authorized candidate; merge is not [delivery](delivery.md).

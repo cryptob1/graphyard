@@ -13,16 +13,14 @@ When delivered (and merge passes required suite), held findings are filed as `Fo
 
 ## Retrieving a batch
 
-    graphyard followups GY-N      # GET /api/work/GY-N/followups
+    graphyard followups GY-N      # GET /api/work/GY-N/followups (indexed from 1)
     graphyard followups --pr N    # every batch for PR N: GET /api/followups?pr=N
-
-Numbered from 1.
 
 ## Promoting a finding
 
     graphyard promote-followup GY-N INDEX
 
-An operator (`intent:create`) promotes finding `INDEX` (`POST /api/work/GY-N/promote`) to a backlog item: finding as criterion, file planned, depending on approved item, requiring `manual:review-followup-addressed`. Repeating answers that item (`"duplicate": true`). A promoted finding no longer waits on ship.
+An operator (`intent:create`) promotes finding `INDEX` (`POST /api/work/GY-N/promote`) to a backlog item: finding as criterion, file planned, requiring `manual:review-followup-addressed`. Repeating answers that item (`"duplicate": true`). A promoted finding no longer waits on ship.
 
 ## Past the review-round cap
 

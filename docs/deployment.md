@@ -17,8 +17,6 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (default 1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (default 2)
 
-Installers derive the four limits from deployed principals.
-
 ### CI producer
 
 [CI proofs](github.md#proofs-in-ci) publish via one principal (refused `manual:*`, `e2e:*`):
@@ -43,4 +41,4 @@ Unsupported or existing deployments: set the variables table by hand, `node "$GR
 
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
-- Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`; `preserve()` hand-set ones in `.railway/railway.ts`.
+- Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`.

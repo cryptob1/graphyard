@@ -102,6 +102,6 @@ Run as an OS user whose GitHub credentials workers cannot read. `--browser-profi
 
 `graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-CI workflows should cancel superseded PR runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled; `graphyard master protection` lists required checks lacking cancel-in-progress under `advisories`.
+CI workflows should cancel superseded pull-request runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled; `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 
 Humans only: logins, App confirmation, plan approval, *Confirm access*, producer grants, [human-only decisions](glossary.md#who-decides).

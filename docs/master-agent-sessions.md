@@ -39,7 +39,7 @@ GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo
 
 #### The start bound reads the pane
 
-Ready (Herdr active, no prompt; or banner: `the claude runtime is on screen while Herdr reports it unknown`) within **60 seconds** (`run.launchStartSeconds`) starts; still starting → **120 seconds** (`started.extended`); else refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. Back at its shell after printing → fails at once quoting its last lines (`the cursor runtime exited back to the shell … it last printed: "Error: No Cursor IDE installation found. …"`), retried as `Automatic producer launch for GY-N refused 1 time(s)`. Failure stops supervisor, closes pane, releases claim.
+The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). A launch command holding the foreground is starting: its supervisor prints `graphyard: establishing containment for GY-N epoch E` before any control-plane call. Refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. Exited back to shell after printing fails at once, quoting its last lines; retried as `Automatic producer launch for GY-N refused 1 time(s)`. Failure stops supervisor, closes pane, releases claim.
 
 OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)).
 
@@ -57,7 +57,7 @@ Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts; lost one
 
 ### Panes are closed and reclaimed
 
-Ending a session closes its pane; each cycle closes ≤**6** more launched **on this host** with session or worktree gone, agentless past **120 s**, never one with an agent or live-leased worktree. Count: `daemon.actions`; over **20** agentless → attention (`daemon.escalations`).
+Ending a session closes its pane; each cycle closes ≤**6** more launched **on this host** with session or worktree gone, agentless past **120 s**, never one with an agent or live-leased worktree; over **20** agentless → attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 
