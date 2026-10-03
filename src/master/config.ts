@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions, onboardingMergeQueue
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitName, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, mergeParallelTips, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults } from './profiles.js';
+import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, mergeParallelTips, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { managedMasterInstructions } from './instructions.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
@@ -85,12 +85,13 @@ export async function loadStoredMasterConfig(root: string): Promise<MasterConfig
   return config;
 }
 /**
- * The master config as every reader counts it (GY-1075): the stored config with the reviewer
- * defaults applied once, here, so no reader of `config.reviewers` can count the automatic
- * profile at one session while the launchers count it at `automaticReviewerConcurrency`.
+ * The master config as every reader counts it (GY-1075, GY-1113): the stored config with the reviewer
+ * and producer defaults applied once, here, so no reader of `config.reviewers` or `config.producers`
+ * can count profiles without explicit concurrency at one session while the launchers count them at
+ * `automaticReviewerConcurrency` or `automaticProducerConcurrency`.
  */
 export async function loadMasterConfig(root: string): Promise<MasterConfig> {
-  return withReviewerDefaults(await loadStoredMasterConfig(root));
+  return withRoleDefaults(await loadStoredMasterConfig(root));
 }
 
 export async function readWorkerCredential(root: string, file: string) {
