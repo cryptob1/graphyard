@@ -84,18 +84,13 @@ export interface Classified { kind: FaultKind; faultClass: FaultClass }
 export const classified = (kind: FaultKind): Classified => ({ kind, faultClass: faultClassOf(kind) });
 
 /**
- * GY-1171: the kind of a review launch wait (launchWaitAttention, GY-710), by the reason it names.
- * The wait's line carried no kind and no signature matched it, so every review waiting past fifteen
- * minutes was unclassified — four in one day, for two causes the catalogue already has classes for:
- * every reviewer profile at its concurrency limit, or a reviewer at the provider's quota, is a role
- * starved of slots (capacity); a request a reviewer session already answered, waiting on the control
- * plane to read that verdict (GY-1083), is a review that does not settle. Any other reason is a
- * launch that did not happen, as a refused review launch is.
+ * GY-1171: a review launch wait's kind (launchWaitAttention, GY-710), by the reason it names: a full or
+ * quota-exhausted reviewer pool is capacity; a request already answered and awaiting settlement (GY-1083)
+ * is a review that does not settle; anything else is a launch that did not happen.
  */
 export function launchWaitKind(reason: string): 'reviewer-busy' | 'review-settlement' | 'launch-review' {
   if (/^every reviewer profile is busy|^reviewer capacity is exhausted/.test(reason)) return 'reviewer-busy';
-  if (/^reviewer session \S+ already answered with /.test(reason)) return 'review-settlement';
-  return 'launch-review';
+  return /^reviewer session \S+ already answered with /.test(reason) ? 'review-settlement' : 'launch-review';
 }
 const launchWait = /^\S+'s review request \S+ on \S+ has waited .+? without a reviewer launch: /;
 
@@ -105,8 +100,7 @@ const launchWait = /^\S+'s review request \S+ on \S+ has waited .+? without a re
  * could both match; the first wins.
  */
 const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
-  ['reviewer-busy', (_, text) => launchWait.test(text) && launchWaitKind(text.replace(launchWait, '')) === 'reviewer-busy'],
-  ['review-settlement', (_, text) => launchWait.test(text) && launchWaitKind(text.replace(launchWait, '')) === 'review-settlement'],
+  ...(['reviewer-busy', 'review-settlement'] as const).map((kind): [FaultKind, (subject: string, text: string) => boolean] => [kind, (_, text) => launchWait.test(text) && launchWaitKind(text.replace(launchWait, '')) === kind]),
   ['launch-review', (_, text) => launchWait.test(text)],
   ['resource-bound', (subject, text) => subject.startsWith('resource:') || /is held by a registered resource at its bound/.test(text)],
   ['ledger-refusal', (_, text) => /cannot be requested because the .+ refused the write/.test(text)],
