@@ -24,6 +24,8 @@ import { dispatchFailureBlockAfter } from '../src/daemon/dispatch-failures.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
+import type { HostMemoryReading } from '../src/master-resources.js';
 import { adoptHeadlessRuns } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
@@ -156,6 +158,8 @@ const basePlan = {
   // one: a pull request merged by hand a minute after it is opened lands before producer runs
   // could fail, and the spent request would never be.
   spentProducer: 1, lostRuns: 2,
+  // GY-612: the host's memory dip; only the main day carries one (memoryDay below).
+  memoryDip: null as { from: number; until: number } | null,
   // GY-756: a pull request somebody merges on GitHub by hand, a minute after it is opened, inside
   // a direct-merge window the operator opened for exactly that minute. The item is the last
   // released one, whose pull request stands unheard while it waits its turn: the minute it lands,
@@ -630,7 +634,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked'; syncs: number; syncedFor?: string; refusedSince?: number;
     scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; settlementToken?: string }
-  const sessions: Session[] = [], lost: string[] = [];
+  const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-888: every session launch the day makes carries the coordinator confinement through the
   // launcher's own logic, and the same launch where the mount namespace cannot be built is
   // refused with the reason named — never started unconfined. The fixture worktree each launch
@@ -673,6 +677,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // An earlier day's item still open in the shared store goes the simulated way: the day's own
     // five are what the real launch path and its ledger are judged on.
     if (!items.some(item => item.id === work.id)) return simulatedDispatch(work, profile, free, snapshot);
+    launches.push(clock.now());
     // The real dispatch path (GY-417): the launcher claims through the engine, launches through
     // the world's Herdr, and falls forward to the profile's next account when the preferred
     // account's runtime never comes up. The day's fourth dispatch finds the account healthy, so
@@ -701,6 +706,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
   } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
   async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
+    launches.push(clock.now());
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
@@ -1037,6 +1043,19 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     try { return await engine.requestEnqueue(principals.coordinator, match[1], data, key); }
     catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
   };
+  // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
+  const dip = plan.memoryDip;
+  const GiB = 2 ** 30;
+  let memoryReads = 0;
+  const memoryReading = (): HostMemoryReading => {
+    const elapsed = clock.now() - dayStart;
+    if (!dip || elapsed < dip.from || elapsed >= dip.until) return { totalBytes: 62 * GiB, availableBytes: 20 * GiB };
+    // The same two consumers with their ranking reversed every other read: the host's `ps` ranking
+    // moves while a dip stands, and a fault keyed on that wording would churn instances (GY-612).
+    const consumers = [{ command: 'node', processes: 3, rssBytes: 6 * GiB }, { command: 'claude', processes: 2, rssBytes: 5 * GiB }];
+    if (memoryReads++ % 2 === 1) consumers.reverse();
+    return { totalBytes: 62 * GiB, availableBytes: 2 * GiB, consumers };
+  };
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
@@ -1099,6 +1118,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    hostMemory: async () => memoryReading(),
     // A rework refused on a stale observation wakes the item's observation job (GY-710) through
     // the server's own resync endpoint, as `master run` wires it.
     wakeObservation: work => { wakes.push({ key: work.key, at: clock.now() }); return api(principals.coordinator, 'POST', `work/${work.id}/resync`, {}); },
@@ -1796,7 +1816,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
+  return { reconciled, outside, items, final, github, sessions, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
@@ -1829,12 +1849,18 @@ function assertLaunchesConfined(day: { confined: { role: string; key: string; di
     `the same launches are refused where the confinement cannot be built: ${day.unconfinedRefusals[0] ?? 'none'}`);
 }
 
+// GY-612: the main day starts below the host's memory floor — the way the day that item records
+// began — and recovers a quarter hour in, so the only launch it holds back is the first item's.
+// The deferred morning moves the candidates' landing heads, so the blind window moves with it to
+// where they are open under it; every other day keeps the undipped choreography.
+const memoryDay = { memoryDip: { from: 0, until: 15 * minute }, blind: { from: 150 * minute, to: 152 * minute }, notice: 150 * minute };
+
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, github806: true, plan: { blockedMerge: blockedMergeItem } });
+  const day = await simulateDay({ hours, github806: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay } });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
+  const { reconciled, outside, items, final, github, sessions, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
@@ -2002,13 +2028,24 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.ancestorCompares > 0, `candidates bound behind the tip were compared from their merge base (${github.ancestorCompares} ancestor compares)`);
   assert.ok(github.blindCompares > 0, `the fault window answered compares without a usable merge base (${github.blindCompares} blind compares)`);
   assert.ok(landingRefusals.length >= 2, `the fault window caught every candidate bound behind it (${JSON.stringify(landingRefusals)})`);
-  assert.ok(landingRefusals.every(entry => entry.elapsed >= basePlan.blind.from - minute && entry.elapsed <= basePlan.blind.to + minute),
+  assert.ok(landingRefusals.every(entry => entry.elapsed >= memoryDay.blind.from - minute && entry.elapsed <= memoryDay.blind.to + minute),
     `a false landing refusal stood only inside the fault window: ${JSON.stringify(landingRefusals)}`);
   for (const entry of landingRefusals) {
     const landed = github.merges.find(merge => merge.key === entry.key);
     assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
   }
   assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
+  // GY-612: the host's memory dipped below its floor mid-morning and recovered. No worker launched
+  // while it stood, the crossing is recorded once each way, and one memory-pressure fault stands
+  // for the whole dip even though the consumers' ranking moved between cycles.
+  const memory = state.actions[memoryActionKey];
+  assert.ok(memory, 'the memory crossing was recorded');
+  assert.equal(memory.attempts, 2, 'one record on the way down, one on the way back up');
+  assert.match(memory.detail, /^Launches resumed: /, 'the last crossing recorded is the resumption');
+  const during = (at: number) => { const elapsed = at - dayStart; return elapsed >= memoryDay.memoryDip.from && elapsed < memoryDay.memoryDip.until; };
+  assert.deepEqual(launches.filter(during).map(at => new Date(at).toISOString()), [], 'no worker launched while the host was below its floor');
+  assert.ok(launches.some(at => at - dayStart >= memoryDay.memoryDip.until), 'launching resumed once memory recovered');
+  assert.equal(state.faults.instances.filter(instance => instance.kind === 'memory-pressure').length, 1, 'one memory-pressure fault stands for the whole dip');
   // GY-887: the landability verdict rode every observation as the one `graphyard/landable` run per
   // head, written only when the verdict changed, at a bounded request cost, and every head GitHub
   // merged carried its success.

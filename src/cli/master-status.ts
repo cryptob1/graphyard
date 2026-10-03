@@ -29,6 +29,7 @@ import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
 import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
+import { loopMemoryAttention } from '../master-resources.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { contextOverflows } from '../model/escalation-context.js';
 import { interventionSummary, interventionSummaryRoute } from './intervention-status.js';
@@ -43,15 +44,14 @@ import { slowReportReader } from '../master/report-cache.js';
 import { coordinationStep } from './coordination-snapshot.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget daemon metric, read from here as it always was.
+// The cycle-budget daemon metric, read from here.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module, read from here as it always was.
+// `master scope` lives in its own module, read from here.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they read;
-// the report reads them from here, as do the tests.
+// Observation throughput and queue-head lag live beside their schedule; read here and by tests.
 export { observationThroughputStatus };
-// The attention builders live in `status-attention.ts`; the report reads them from here.
+// Attention builders live in `status-attention.ts`, read from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
@@ -109,6 +109,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
+  diskAttention.push(...loopMemoryAttention(cycling));
   // The loop's own health comes first: a stalled coordinator is why nothing else moves.
   const loopItems: AttentionItem[] = cycling
     ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]

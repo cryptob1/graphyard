@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
+Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failures log route and SQL.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up). Without `--deployment-url` it reads `productionEnvironment` deployments only; the newest, if successful, counts even when inactive.
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up). Without `--deployment-url` it reads `productionEnvironment` deployments; the newest, if successful, counts even when inactive.
 
 ## Lost worker before submission
 
@@ -19,11 +19,11 @@ On the worker, `graphyard master settle-containment GY-N "reason"` verifies noth
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643 (2026-09-26): 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643: 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's pattern scan groups refusal and rework interventions by cause: a declared refusal shape (`build/out-of-scope-count`), a loop refusal trigger, or a normalised rework reason. A cause reaching the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed as work: a standards or criteria wording update, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent holding `decision:approve` (not a human session, the drafter, or an instance's recorder) approves one, applying it at its registry's next revision (`requirements`, `checks`, `catalogue`) and recording the cause, fingerprint and instances it closes, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on every submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) and counts recurrences against itself. Instances in any draft never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rework interventions by cause (declared refusal shape `build/out-of-scope-count`; loop refusal trigger; normalised rework reason). A cause at the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed: standards/criteria wording, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent with `decision:approve` (not a human session, the drafter or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording cause, fingerprint, instances closed, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals), counting recurrences. Drafted instances never recount; a recurrence after application is redrafted, naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 
@@ -79,8 +79,14 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 ## Storage retention
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
-- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a row a delta extends, an item's newest save, a delivery event or the revision a delivery cites, a row of an item merged but not done, or a row the flow projection has not read. Each batch appends a `ledger.compacted` event with counts per kind. Postgres reuses the space; only `VACUUM FULL` returns it to the volume.
+- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed unless they move the stage or delivery.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, ≤2,000 rows per phase batch, never a row a delta extends, an item's newest save, a delivery event or its cited revision, an item merged but not done, or one the flow projection has not read; each batch appends `ledger.compacted`. Only `VACUUM FULL` returns space to the volume.
+
+### Host memory
+
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB / 8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`), naming waits; CI, shells unbounded.
+
+Below max(10% RAM, 4 GB) available, launches defer (`Launches deferred`, `escalation:dispatch:memory`; one `memory` item, class `resources`, naming top consumers; one `memory-pressure` fault per dip) until 1 GB above; running ones continue.
 
 ## Bootstrap mode for a self-proving change
 
