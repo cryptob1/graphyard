@@ -375,7 +375,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const adapter = github.adapter();
   // GY-883: the low-lane item's observation lists its changed files as scope files, the way the
   // real adapter reports them; every other item keeps the empty list, an unknown change, so it
-  // rides high and keeps the full path.
+  const items: Work[] = [];
   const observeAll = adapter.observe.bind(adapter);
   adapter.observe = async (work, peers) => {
     const observation = await observeAll(work, peers);
@@ -433,7 +433,6 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
 
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
-  const items: Work[] = [];
   for (let n = 1; n <= plan.items + (options.scope ? 3 : 0); n++) {
     // The scope scenarios carry their own intake: item wideRule plans twenty files under the
     // directory its criterion names; item unrepresentable plans plannedFilesMax entries outside
