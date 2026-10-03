@@ -81,6 +81,10 @@ test('unit:stall-remedy-binding — every stall reason the registry recognises b
   const suspended = stallRemedy('The control plane could not read App 1\'s installation: App graphyard-x\'s installation 91011 is suspended; restore it at https://github.com/settings/installations/91011');
   assert.equal(suspended?.kind, 'installation-suspended');
   assert.equal(suspended?.owner, 'human');
+  const suspendedDirect = stallRemedy('App graphyard-x installation is suspended; restore it at https://github.com/settings/installations/91011');
+  assert.equal(suspendedDirect?.kind, 'installation-suspended');
+  const workerPushHold = stallRemedy('App graphyard-worker installation lacks Workflows: write (installed with read), worker-push-shortfall; they are minted without it until it is granted, so a worker push that needs it is refused. Run graphyard master browser app-permissions, then graphyard master browser installation-accept, or accept the pending permission request at https://github.com/settings/installations/91011');
+  assert.equal(workerPushHold?.kind, 'installation-accept');
   assert.equal(stallRemedy('reviewer agent reviewer-a is busy in Herdr'), null, 'a reason no entry recognises binds to nothing');
 
   const at = '2026-09-29T05:41:27.620Z';

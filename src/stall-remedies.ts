@@ -59,15 +59,15 @@ const installationAccept = (app: string, permission: string, url: string): Bound
 export const stallRemedyRegistry: readonly { kind: StallRemedyKind; bind: (reason: string) => BoundRemedy | null }[] = [
   {
     kind: 'installation-suspended',
-    bind: reason => /\binstallation \S+ is suspended\b/i.test(reason) ? { kind: 'installation-suspended', applies: 'decision', owner: 'human',
+    bind: reason => /\binstallation(?:\s+\S+)?\s+is suspended\b/i.test(reason) ? { kind: 'installation-suspended', applies: 'decision', owner: 'human',
       remedy: 'reinstate the suspended GitHub App installation from the account that owns it',
       next: 'Reinstate the suspended GitHub App installation from the account that owns it; nothing the loop runs can, and the row\'s recheck picks the reinstated installation up' } : null,
   },
   {
     kind: 'installation-accept',
-    // describeShortfall (src/github-permissions.ts) words every permission hold this way.
+    // describeShortfall (src/github-permissions.ts) and pushShortfall (src/worker-credential.ts) word every permission hold this way.
     bind: reason => {
-      const hold = /\bApp (\S+) lacks ([A-Za-z ]+: (?:read|write|admin))\b.*?\baccept the pending permission request at (\S+?)[;,]?(?:\s|$)/.exec(reason);
+      const hold = /\bApp (\S+)(?:\s+installation)?\s+lacks ([A-Za-z ]+: (?:read|write|admin))\b.*?\baccept the pending permission request at (\S+?)[;,]?(?:\s|$)/.exec(reason);
       return hold ? installationAccept(hold[1], hold[2], hold[3]) : null;
     },
   },
