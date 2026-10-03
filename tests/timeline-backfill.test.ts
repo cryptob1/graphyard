@@ -72,17 +72,20 @@ async function claimed(title: string) {
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   return engine.execute(worker, 'claim', work.id, {}, randomUUID());
 }
-/** Two attempts, a hand-off and a rework round, exactly as the engine records them today. */
+/** Three attempts (the first ended by its blocker), a hand-off and a rework round, exactly as the engine records them today. */
 async function fullLifecycle(title: string) {
   let work = await claimed(title);
   const pr = ++pullRequest;
   work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}-1`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
   work = await engine.execute(worker, 'blocked', work.id, { epoch: work.epoch, reason: 'Waiting on a decision' }, randomUUID());
   work = await engine.execute(operator, 'unblock', work.id, { reason: 'Decided' }, randomUUID());
+  // The blocker ended attempt 1 (GY-1008): attempt 2 submits.
+  work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}-2`, branch: `graphyard/${work.key.toLowerCase()}-2` }, randomUUID());
   work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr }, randomUUID());
   work = await engine.execute(operator, 'rework', work.id, { reason: 'Reviewer finding', previousWorkerStopped: true }, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}-2`, branch: work.workspaces[0].branch }, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}-3`, branch: work.workspaces.at(-1)!.branch }, randomUUID());
   return engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr }, randomUUID());
 }
 
@@ -103,7 +106,7 @@ test('integration:timeline-backfill — items delivered before the timeline exis
   await deliver(legacy.id, mergedAt);
   await deliver(live.id, mergedAt);
   const written = { legacy: (await reload(legacy.id)).pipeline!, lapsed: (await reload(lapsedItem.id)).pipeline!, live: (await reload(live.id)).pipeline! };
-  assert.equal(written.legacy.attempts.length, 2);
+  assert.equal(written.legacy.attempts.length, 3);
   assert.deepEqual(written.lapsed.attempts.map(attempt => [attempt.end, attempt.endedAt]), [['expired', deadline]]);
 
   // An item whose ledger starts mid-life: the document exists, its creation and lifecycle rows do not.
@@ -175,7 +178,7 @@ test('integration:timeline-backfill — items delivered before the timeline exis
   assert.equal(restored.legacy.revision, untouched.revision + 1, 'and recorded itself as one write');
   const recorded = (await store.pool.query("SELECT payload->'details' AS details FROM events WHERE work_id=$1 AND kind='pipeline.backfilled'", [legacy.id])).rows;
   assert.equal(recorded.length, 1);
-  assert.equal(recorded[0].details.attempts, 2);
+  assert.equal(recorded[0].details.attempts, 3);
   assert.equal(recorded[0].details.retained, true);
 
   // What the measurement now reports: every delivered item whose events are retained is measured,
