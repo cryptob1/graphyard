@@ -14,7 +14,7 @@ import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadStoredMa
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
-import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
+import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, detectRetryingExhaustion, type ExhaustionSignal } from '../model/capacity.js';
 import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage } from '../provider-usage.js';
 export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './connect-accounts.js';
 
@@ -75,6 +75,14 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
   }
   return null;
+}
+
+/**
+ * A listed session's limit notice: a stopped one by its runtime's own notices, one its host still
+ * reports working only when its runtime is retrying on the notice (GY-973).
+ */
+export function sessionExhaustion(output: string, stopped: boolean, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
+  return stopped ? detectRuntimeExhaustion(output, runtime, now) : detectRetryingExhaustion(output, now);
 }
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */

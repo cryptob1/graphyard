@@ -1,7 +1,7 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
-import { detectRuntimeExhaustion } from '../master/environments.js';
+import { sessionExhaustion } from '../master/environments.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
@@ -11,7 +11,6 @@ import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
-import { detectRetryingExhaustion } from '../model/capacity.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
@@ -225,8 +224,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // Judged against the approver's own runtime's provider messages: free prose about a quota is
     // not a provider limit notice, whatever it mentions (GY-421). A working approver counts only
     // when its runtime is retrying on the notice (GY-973).
-    const isStopped = stoppedStates.includes(agent.agent_status ?? '');
-    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => !output ? null : isStopped ? detectRuntimeExhaustion(output, watch.runtime ?? approverRuntime(config), clock) : detectRetryingExhaustion(output, clock), () => null);
+    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null);
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
     const key = failoverKey('approver', item, session), previous = state.actions[key];

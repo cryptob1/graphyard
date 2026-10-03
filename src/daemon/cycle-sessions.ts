@@ -1,7 +1,7 @@
 // Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
-import { detectRetryingExhaustion, type CapacityRole } from '../model/capacity.js';
-import { detectRuntimeExhaustion } from '../master/environments.js';
+import { type CapacityRole } from '../model/capacity.js';
+import { sessionExhaustion } from '../master/environments.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
@@ -73,7 +73,7 @@ export async function closeStep(cycle: Cycle) {
     // quota wording: a worker's prose about a quota (a disk's) is not its provider's notice (GY-421).
     // A session Herdr still reports working counts only when its runtime prints its retry marker
     // beside the notice (GY-973): OpenCode retries a spent account forever and never stops.
-    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => { try { const output = await effects.sessionOutput!(agent); return !output ? null : stoppedStates.includes(agent.agent_status ?? '') ? detectRuntimeExhaustion(output, runtime, clock) : detectRetryingExhaustion(output, clock); } catch { return null; } };
+    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => { try { const output = await effects.sessionOutput!(agent); return output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), runtime, clock) : null; } catch { return null; } };
     const onNotice = (agent: HerdrAgent) => stoppedStates.includes(agent.agent_status ?? '') ? 'stopped on' : 'is retrying on';
     /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
     const profileRuntime = (role: string, profile: string) =>
