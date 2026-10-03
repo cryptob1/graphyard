@@ -48,7 +48,7 @@ Text equivalent: the operator sends human-only decisions; Herdr hosts master, sl
 
 Text equivalent: callers use the API; the engine applies each mutation in one locked Postgres transaction; the reconciliation worker syncs GitHub, publishes the check and merges; webhooks only wake jobs.
 
-- Gates deterministically check `(PR, head SHA, base SHA)` under current policy; pushes or base changes void evidence.
+- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
 - Claims bump epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; latest trusted record per proof and candidate wins.
 - History is append-only; retries replay.
