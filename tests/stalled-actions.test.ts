@@ -260,6 +260,32 @@ test('integration:stall-raises-attention — a stalled row is raised as an atten
   assert.ok(actionStallLatencyMs < actionIdleMs);
 });
 
+test('unit:stall-remedy-recorded-once — the control plane records the loop\'s remedy on the stalled row once per unchanged run, refuses a second record and a non-coordinator, and master status names what the remedy did (GY-949)', async () => {
+  const item = await release(await created());
+  const hold = `${item.key}: no observation newer than the claim was saved; its observation job is held: App graphyard-owner-project lacks Actions: write, which failed CI reruns needs to rerun failed workflow jobs on the unchanged candidate; accept the pending permission request at https://github.com/settings/installations/91011; the claim woke it and leaves the row waiting for the observation`;
+  let last: ActionRow | undefined;
+  for (let failure = 0; failure < actionStallThreshold; failure++) {
+    last = await attempt(item, async () => hold);
+    if (failure < actionStallThreshold - 1) await elapse(item, actionRetryMaxMs);
+  }
+  const body = { remedy: 'installation-accept', reason: hold, outcome: 'refused', detail: 'Confirm access was not approved within 300s; approve the GitHub Mobile prompt (code 42)', flows: ['installation-accept'] };
+  await assert.rejects(engine.recordActionRemedy(worker, last!.id, body), /Coordinator permission required/);
+  const recorded = await engine.recordActionRemedy(coordinator, last!.id, body);
+  assert.equal(recorded.action.remedy?.outcome, 'refused');
+  assert.equal(recorded.action.remedy?.by, coordinator.id);
+  // The record is evaluated with the item: the refusal's escalation is queued at once and retires
+  // the stalled row, so a second record finds no open row to write to — one record, the first.
+  const escalated = await reload(item);
+  assert.equal(escalated.nextAction?.kind, 'escalate', 'the refused remedy is escalated in the same transaction');
+  assert.match(escalated.nextAction!.binding, new RegExp(`^stalled:${last!.id}:remedy:`));
+  await assert.rejects(engine.recordActionRemedy(coordinator, last!.id, { ...body, outcome: 'applied' }), /Action is not open on any work item/);
+  const stored = [...escalated.actionQueue!.actions, ...escalated.actionQueue!.history].find(row => row.id === last!.id)!;
+  assert.equal(stored.remedy?.outcome, 'refused', 'one record, the first');
+  // The escalation now owns the stall and names what the remedy did; no generic stalled line is left.
+  assert.match(escalated.nextAction!.reason, /installation-accept remedy \(installation-accept\) was refused at .*Confirm access was not approved/);
+  assert.deepEqual(stalledActionAttention(await snapshotOf()).filter(entry => entry.subject === item.key), []);
+});
+
 // ---- AC-4: backoff does not outlive the condition it was earned against ----------------------
 
 test('integration:cleared-condition-retries-promptly — a row starved against a busy exclusive resource is claimed a recheck after the resource is freed, not at the ceiling its attempts against the impossibility had earned', async () => {

@@ -52,3 +52,5 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 ## Explain stalls
 
 `graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
+
+A [stalled row](master-agent-reference.md#typed-actions-and-executors)'s attention and escalation name its reason's bound remedy (`src/stall-remedies.ts`); an unrecognised reason keeps the generic line. On an App permission hold the loop itself runs `master browser installation-accept` (`app-permissions` first when the App does not yet request the permission) once per unchanged run, recording attempt and outcome on the row (`POST /api/actions/:id/remedy`); a refusal escalates once, naming it, and is never retried. A role at its concurrency limit names its capacity lever, a master decision: raise it (`master registry role set ROLE ACCOUNT… --concurrency N`) or let a live session end.
