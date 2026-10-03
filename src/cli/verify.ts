@@ -128,7 +128,7 @@ function changedFiles(root: string, base: string) {
  * there when it checks something the change adds; it passes when what it checks predates the
  * change (GY-1132), when it bypasses the changed path with hand-built inputs (GY-1131), or when it
  * measures an aggregate that one change cannot move (GY-1142). A change with no non-test file has
- * nothing to revert, and none is recorded.
+ * nothing to revert, and neither it nor a base that cannot be extracted here records one.
  */
 export async function baseExercise(root: string, base: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<BaseExercise | null> {
   const changes = changedFiles(root, base);
@@ -137,21 +137,19 @@ export async function baseExercise(root: string, base: string, proof: string, fi
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-verify-base-'));
   const tree = join(scratch, 'tree');
   try {
-    git(root, ['worktree', 'add', '--detach', '--force', tree, base]);
-    try {
-      for (const change of changes.filter(change => testSide(change.path))) {
-        if (change.status === 'D') { await rm(join(tree, change.path), { force: true }); continue; }
-        await mkdir(dirname(join(tree, change.path)), { recursive: true });
-        await copyFile(join(root, change.path), join(tree, change.path));
-      }
-      try { await symlink(await realpath(join(root, 'node_modules')), join(tree, 'node_modules')); } catch { /* no dependencies installed */ }
-      const run = await runProof(tree, proof, files, ports);
-      return { base, result: run.result, executed: run.executed, reverted };
-    } finally { try { git(root, ['worktree', 'remove', '--force', tree]); } catch { /* removed with the scratch directory below */ } }
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
-    try { git(root, ['worktree', 'prune']); } catch { /* best effort */ }
-  }
+    // An archive of the base, not a git worktree: a sandboxed worker's .git may be read-only.
+    await mkdir(tree);
+    const extract = spawnSync('sh', ['-c', 'git archive --format=tar "$1" | tar -x -C "$2"', 'sh', base, tree], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
+    if (extract.status !== 0) return null;
+    for (const change of changes.filter(change => testSide(change.path))) {
+      if (change.status === 'D') { await rm(join(tree, change.path), { force: true }); continue; }
+      await mkdir(dirname(join(tree, change.path)), { recursive: true });
+      await copyFile(join(root, change.path), join(tree, change.path));
+    }
+    try { await symlink(await realpath(join(root, 'node_modules')), join(tree, 'node_modules')); } catch { /* no dependencies installed */ }
+    const run = await runProof(tree, proof, files, ports);
+    return { base, result: run.result, executed: run.executed, reverted };
+  } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 
 export async function verifyWorkingTree(work: { key: string; criteria: Criterion[] }, root: string, now = () => new Date(), options: { baseBranch?: string } = {}): Promise<VerifyRecord> {
