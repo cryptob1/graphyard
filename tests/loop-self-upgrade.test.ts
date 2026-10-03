@@ -7,11 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { describeSelfUpgrade, performSelfUpgrade } from '../src/daemon/upgrade.js';
+import { describeSelfUpgrade, performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { releaseLag, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention } from '../src/master/release-lag.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { readRelease, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { releaseGuardedEffects, staleReleaseReason, type ReleaseGuard } from '../src/executor.js';
+import type { ActionRow } from '../src/model/actions.js';
+import type { ExecutorEffects } from '../src/auto-dispatch.js';
 
 /**
  * GY-437: the loop and the executors upgrade themselves to the merged release. After every merge
@@ -403,21 +406,73 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
     fake.diffPaths = ['src/daemon/run.ts'];
 
     // Fixture: executors that each hold a claimed action at every check before the checkout moves.
-    // On a moved checkout they stop new claims, settle held claims between checks (a different
-    // action each time), and are never interrupted.
-    interface TestExecutor {
+    // On a moved checkout they stop new claims through the real executor transition (releaseGuardedEffects),
+    // settle held claims between checks (a different action each time), and are never interrupted.
+    const mockAction = (id: string, key: string, kind: 'dispatch' = 'dispatch'): ActionRow => ({
+      id, kind, work: `work-${key}`, key, inputs: { kind: 'dispatch', epoch: 0, target: 'implementation', priority: 1, plannedFiles: [] } as any,
+      gate: 'build', refusal: null, reason: 'test', binding: `${kind}:0`, requestedBy: 'test', requestedAt: iso(0),
+      state: 'claimed', claim: { executor: 'exec', host: master.hostId, claimedAt: iso(0), expiresAt: iso(60_000), principal: 'master', attempt: 1 }, attempts: 0, history: [],
+    });
+
+    interface LoadExecutor {
       name: string;
-      loaded: string;
-      inFlight: { id: string; key: string; kind: string } | null;
-      standingDown: boolean;
+      loaded: { commit: string; dirty: boolean };
+      inFlight: ActionRow | null;
       interrupted: boolean;
       settled: string[];
+      standingReasons: string[];
+      guarded: ReturnType<typeof releaseGuardedEffects>;
     }
 
-    const executors: TestExecutor[] = [
-      { name: 'exec-1', loaded, inFlight: { id: 'act-1', key: 'GY-1052', kind: 'dispatch' }, standingDown: false, interrupted: false, settled: [] },
-      { name: 'exec-2', loaded, inFlight: null, standingDown: false, interrupted: false, settled: [] },
-    ];
+    const createExecutor = (name: string, initialAction: ActionRow | null): LoadExecutor => {
+      const exec: Partial<LoadExecutor> = {
+        name,
+        loaded: { commit: loaded, dirty: false },
+        inFlight: null,
+        interrupted: false,
+        settled: [],
+        standingReasons: [],
+      };
+      let availableAction = initialAction;
+      const baseEffects: ExecutorEffects = {
+        claim: async () => {
+          const action = availableAction;
+          availableAction = null;
+          return { action, open: action ? 0 : 1 };
+        },
+        settle: async (action, result, reason) => ({ action, result, reason }),
+        handlers: {},
+      };
+      const guard: ReleaseGuard = {
+        loaded: exec.loaded!,
+        current: () => fake.head,
+        standDown: (detail) => { exec.standingReasons!.push(detail.reason); },
+        claimed: (action) => { exec.inFlight = action; },
+        settled: (action) => {
+          exec.inFlight = null;
+          exec.settled!.push(action.id);
+        },
+      };
+      exec.guarded = releaseGuardedEffects(baseEffects, guard);
+      return exec as LoadExecutor;
+    };
+
+    const action1 = mockAction('act-1', 'GY-1052', 'dispatch');
+    const action2 = mockAction('act-2', 'GY-528', 'dispatch');
+    const exec1 = createExecutor('exec-1', action1);
+    const exec2 = createExecutor('exec-2', action2);
+    const executors = [exec1, exec2];
+
+    // Before self-upgrade runs, while checkout is at `loaded`, both executors claim their actions:
+    const claimed1 = await exec1.guarded.claim({ host: master.hostId, executor: 'exec-1', kinds: ['dispatch'] });
+    assert.equal(claimed1.action?.id, 'act-1');
+    assert.equal(exec1.inFlight?.id, 'act-1');
+    assert.equal(exec1.guarded.standingDown(), false);
+
+    const claimed2 = await exec2.guarded.claim({ host: master.hostId, executor: 'exec-2', kinds: ['dispatch'] });
+    assert.equal(claimed2.action?.id, 'act-2');
+    assert.equal(exec2.inFlight?.id, 'act-2');
+    assert.equal(exec2.guarded.standingDown(), false);
 
     let selfRestarts = 0;
     const restartedTipExecutors: string[] = [];
@@ -444,8 +499,7 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
         }
         for (const exec of executors) {
           if (exec.inFlight !== null) exec.interrupted = true;
-          exec.loaded = to;
-          exec.standingDown = false;
+          exec.loaded.commit = to;
         }
         restartedTipExecutors.push(to);
         return {
@@ -453,7 +507,11 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
           reason: null,
           coordinator: { commit: to },
           held: [],
-          restarted: executors.map(e => ({ name: e.name, unit: `${e.name}.service`, pid: { before: 1, after: 2 }, release: { before: { commit: loaded, dirty: false }, after: { commit: to, dirty: false } }, registered: true, waitedMs: 10 })),
+          restarted: executors.map(e => ({
+            name: e.name, unit: `${e.name}.service`, pid: { before: 1, after: 2 },
+            release: { before: { commit: loaded, dirty: false }, after: { commit: to, dirty: false } },
+            registered: true, waitedMs: 10,
+          })),
           unsupervised: [],
           forgotten: [],
         };
@@ -468,28 +526,32 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
     state.release = { commit: loaded, dirty: false };
 
     // Cycle 1: performSelfUpgrade moves the checkout to tip.
-    // Check 1: exec-1 holds act-1 (GY-1052). Check 1 refuses restart.
+    // Check 1: both exec-1 and exec-2 hold actions claimed under steady load. Check 1 refuses restart.
     const cycle1 = await performSelfUpgrade(master, state, deps);
     assert.equal(cycle1.outcome, 'failed');
     assert.match(cycle1.outcome === 'failed' ? cycle1.reason : '', /exec-1 holds dispatch for GY-1052/);
     assert.equal(fake.checkoutTo, tip, 'checkout moved to base tip');
     assert.deepEqual(state.upgrade.pending, { from: loaded, to: tip, code: true });
-    assert.equal(executors[0].interrupted, false, 'act-1 was not interrupted');
-    assert.equal(executors[1].interrupted, false, 'act-2 was not interrupted');
+    assert.equal(exec1.interrupted, false, 'act-1 was not interrupted');
+    assert.equal(exec2.interrupted, false, 'act-2 was not interrupted');
 
     // Between Check 1 and Check 2:
     // exec-1 settles act-1 cleanly.
-    executors[0].settled.push(executors[0].inFlight!.id);
-    executors[0].inFlight = null;
-    // exec-1 sees checkout moved to tip -> stops new claims on moved checkout!
-    if (fake.head !== executors[0].loaded) {
-      executors[0].standingDown = true;
-    }
-    assert.equal(executors[0].standingDown, true);
-    assert.equal(executors[0].inFlight, null);
+    await exec1.guarded.settle(claimed1.action!, 'done', 'settled');
+    assert.equal(exec1.inFlight, null);
+    assert.deepEqual(exec1.settled, ['act-1']);
 
-    // exec-2 was in-flight with a different action (GY-528):
-    executors[1].inFlight = { id: 'act-2', key: 'GY-528', kind: 'dispatch' };
+    // exec-1 asks for next claim, but checkout has moved to tip:
+    // exercises real executor transition through releaseGuardedEffects (stands down, claims nothing).
+    const next1 = await exec1.guarded.claim({ host: master.hostId, executor: 'exec-1', kinds: ['dispatch'] });
+    assert.equal(next1.action, null, 'no new action claimed on moved checkout');
+    assert.equal(exec1.guarded.standingDown(), true, 'exec-1 stands down on moved checkout');
+    assert.equal(exec1.standingReasons.length, 1);
+    assert.equal(exec1.standingReasons[0], staleReleaseReason({ commit: loaded, dirty: false }, tip));
+
+    // exec-2 is STILL running act-2 (different action holding check 2):
+    assert.equal(exec2.inFlight?.id, 'act-2');
+    assert.equal(exec2.guarded.standingDown(), false);
 
     // Cycle 2: performSelfUpgrade retries finish(pending) on moved checkout.
     // Check 2: exec-2 holds act-2 (GY-528) - a different action each time. Check 2 refuses restart.
@@ -497,19 +559,21 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
     assert.equal(cycle2.outcome, 'failed');
     assert.match(cycle2.outcome === 'failed' ? cycle2.reason : '', /exec-2 holds dispatch for GY-528/);
     assert.deepEqual(state.upgrade.pending, { from: loaded, to: tip, code: true });
-    assert.equal(executors[0].interrupted, false);
-    assert.equal(executors[1].interrupted, false);
+    assert.equal(exec1.interrupted, false);
+    assert.equal(exec2.interrupted, false);
 
     // Between Check 2 and Check 3:
     // exec-2 settles act-2 cleanly.
-    executors[1].settled.push(executors[1].inFlight!.id);
-    executors[1].inFlight = null;
-    // exec-2 sees checkout moved to tip -> stops new claims on moved checkout!
-    if (fake.head !== executors[1].loaded) {
-      executors[1].standingDown = true;
-    }
-    assert.equal(executors[1].standingDown, true);
-    assert.equal(executors[1].inFlight, null);
+    await exec2.guarded.settle(claimed2.action!, 'done', 'settled');
+    assert.equal(exec2.inFlight, null);
+    assert.deepEqual(exec2.settled, ['act-2']);
+
+    // exec-2 asks for next claim, exercises real executor transition on moved checkout:
+    const next2 = await exec2.guarded.claim({ host: master.hostId, executor: 'exec-2', kinds: ['dispatch'] });
+    assert.equal(next2.action, null, 'no new action claimed on moved checkout');
+    assert.equal(exec2.guarded.standingDown(), true, 'exec-2 stands down on moved checkout');
+    assert.equal(exec2.standingReasons.length, 1);
+    assert.equal(exec2.standingReasons[0], staleReleaseReason({ commit: loaded, dirty: false }, tip));
 
     // Cycle 3: performSelfUpgrade retries finish(pending).
     // Check 3: held claims have settled, both executors stand down on moved checkout.
@@ -522,24 +586,77 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
     assert.equal(state.upgrade.alignedRelease, tip);
     assert.deepEqual(restartedTipExecutors, [tip]);
     assert.equal(selfRestarts, 1);
-    assert.deepEqual(executors[0].settled, ['act-1']);
-    assert.deepEqual(executors[1].settled, ['act-2']);
-    assert.equal(executors[0].interrupted, false, 'no claimed action was interrupted');
-    assert.equal(executors[1].interrupted, false, 'no claimed action was interrupted');
-    assert.equal(executors[0].loaded, tip, 'exec-1 restarted on tip');
-    assert.equal(executors[1].loaded, tip, 'exec-2 restarted on tip');
+    assert.deepEqual(exec1.settled, ['act-1']);
+    assert.deepEqual(exec2.settled, ['act-2']);
+    assert.equal(exec1.interrupted, false, 'no claimed action was interrupted');
+    assert.equal(exec2.interrupted, false, 'no claimed action was interrupted');
+    assert.equal(exec1.loaded.commit, tip, 'exec-1 restarted on tip');
+    assert.equal(exec2.loaded.commit, tip, 'exec-2 restarted on tip');
 
     // Also drive automated loop over the fixture asserting completion within bounded cycles:
-    const autoFleet = [
-      { name: 'fleet-1', loaded, inFlight: { id: 'f-1', key: 'GY-1001', kind: 'dispatch' } as { id: string; key: string; kind: string } | null, interrupted: false, settled: [] as string[] },
-      { name: 'fleet-2', loaded, inFlight: { id: 'f-2', key: 'GY-1002', kind: 'dispatch' } as { id: string; key: string; kind: string } | null, interrupted: false, settled: [] as string[] },
-    ];
     const autoFake = new FakeGit(loaded, tip);
     autoFake.nextTip = tip;
     autoFake.diffPaths = ['src/daemon/run.ts'];
     const autoState = emptyDaemonState(master);
     autoState.deployment = verified(tip);
     autoState.release = { commit: loaded, dirty: false };
+
+    const autoActions = [
+      mockAction('f-1', 'GY-1001', 'dispatch'),
+      mockAction('f-2', 'GY-1002', 'dispatch'),
+      mockAction('f-3', 'GY-1003', 'dispatch'),
+    ];
+
+    interface AutoFleetMember {
+      name: string;
+      loaded: { commit: string; dirty: boolean };
+      inFlight: ActionRow | null;
+      interrupted: boolean;
+      settled: string[];
+      guarded: ReturnType<typeof releaseGuardedEffects>;
+    }
+
+    const autoFleet: AutoFleetMember[] = autoActions.map((act, i) => {
+      const name = `fleet-${i + 1}`;
+      const loadedRelease = { commit: loaded, dirty: false };
+      const member: Partial<AutoFleetMember> = {
+        name,
+        loaded: loadedRelease,
+        inFlight: null,
+        interrupted: false,
+        settled: [],
+      };
+      let available: ActionRow | null = act;
+      const baseEffects: ExecutorEffects = {
+        claim: async () => {
+          const a = available;
+          available = null;
+          return { action: a, open: a ? 0 : 1 };
+        },
+        settle: async (a, res, r) => ({ a, res, r }),
+        handlers: {},
+      };
+      const guard: ReleaseGuard = {
+        loaded: loadedRelease,
+        current: () => autoFake.head,
+        standDown: () => {},
+        claimed: (a) => { member.inFlight = a; },
+        settled: (a) => {
+          member.inFlight = null;
+          member.settled!.push(a.id);
+        },
+      };
+      member.guarded = releaseGuardedEffects(baseEffects, guard);
+      return member as AutoFleetMember;
+    });
+
+    // All executors in fleet claim an action before upgrade starts:
+    for (const member of autoFleet) {
+      const claimResult = await member.guarded.claim({ host: master.hostId, executor: member.name, kinds: ['dispatch'] });
+      assert.ok(claimResult.action);
+      assert.ok(member.inFlight);
+      assert.equal(member.guarded.standingDown(), false);
+    }
 
     let autoSelfRestarts = 0;
     const autoDeps = {
@@ -552,7 +669,7 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
         }
         for (const e of autoFleet) {
           if (e.inFlight !== null) e.interrupted = true;
-          e.loaded = to;
+          e.loaded.commit = to;
         }
         return { result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
       },
@@ -562,7 +679,7 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
     };
 
     let cycles = 0;
-    let finalOutcome: any = null;
+    let finalOutcome: SelfUpgradeOutcome | null = null;
     const boundedCycleBound = 5;
 
     while (cycles < boundedCycleBound) {
@@ -573,11 +690,14 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
         break;
       }
       // Between checks: held claims settle one by one (different action each time),
-      // and stop new claims because checkout moved:
+      // and exercise the real executor transition on the moved checkout:
       for (const e of autoFleet) {
-        if (e.inFlight && autoFake.head !== e.loaded) {
-          e.settled.push(e.inFlight.id);
-          e.inFlight = null;
+        if (e.inFlight) {
+          const action = e.inFlight;
+          await e.guarded.settle(action, 'done', 'settled');
+          const next = await e.guarded.claim({ host: master.hostId, executor: e.name, kinds: ['dispatch'] });
+          assert.equal(next.action, null, 'stale executor claims nothing on moved checkout');
+          assert.ok(e.guarded.standingDown(), 'executor stands down on moved checkout');
           break;
         }
       }
@@ -586,7 +706,7 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
     assert.equal(finalOutcome?.outcome, 'upgraded', 'self-upgrade completed');
     assert.ok(cycles <= boundedCycleBound, `completed within a bounded number of cycles: took ${cycles}`);
     assert.ok(autoFleet.every(e => !e.interrupted), 'no claimed action was interrupted in automated driver');
-    assert.deepEqual(autoFleet.flatMap(e => e.settled).sort(), ['f-1', 'f-2']);
+    assert.deepEqual(autoFleet.flatMap(e => e.settled).sort(), ['f-1', 'f-2', 'f-3']);
     assert.equal(autoSelfRestarts, 1);
   } finally { await dispose(); await rm(checkout, { recursive: true, force: true }); }
 });
