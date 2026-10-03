@@ -539,6 +539,7 @@
     "tests/worker-sandbox.test.ts": 4037,
     "tests/workers-tab.test.ts": 961,
     "tests/workflow-lint.test.ts": 566,
+    "tests/worktree-branch-lock.test.ts": 1600,
     "tests/worktree-reclaim.test.ts": 3560,
     "tests/agents-page-status.test.ts": 488,
     "tests/approver-capacity.test.ts": 878,

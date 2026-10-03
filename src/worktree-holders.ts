@@ -80,6 +80,35 @@ export function sessionOf(path: string): { key: string | null; epoch: number | n
 }
 
 /**
+ * Why each of `holders` may not be touched: an operation in progress outside a session worktree
+ * of `work`, an epoch holding a live lease on `now`, or — with `dirty` — uncommitted changes.
+ * GY-860's release of an earlier attempt's hold records the uncommitted diff on the item's
+ * ledger before it ends the operation, so it asks without `dirty`.
+ */
+export function holderRefusals(root: string, holders: BranchHolder[], work: Pick<Work, 'key' | 'lease'>, now: number, options: { dirty: boolean }): string[] {
+  const sessions = resolve(root, '.graphyard/worktrees');
+  const refusals: string[] = [];
+  const live = (holder: BranchHolder) => !!work.lease && work.lease.epoch === holder.epoch && Date.parse(work.lease.expiresAt) > now;
+  for (const holder of holders) {
+    const name = `${holder.path} (${holder.via === 'checkout' ? 'checked out' : `${holder.via} in progress`})`;
+    if (holder.via !== 'checkout' && resolve(dirname(holder.path)) !== sessions) refusals.push(`${name} is not a session worktree under ${sessions}`);
+    else if (holder.via !== 'checkout' && holder.key !== work.key) refusals.push(`${name} belongs to ${holder.key ?? 'no Graphyard item'}, not ${work.key}`);
+    else if (live(holder)) refusals.push(`${name} belongs to ${work.key} epoch ${holder.epoch}, which holds a live lease`);
+    else if (holder.via !== 'checkout' && options.dirty) {
+      // An unreadable status is not a clean one: the worktree is left alone and named.
+      const status = git(['status', '--porcelain'], holder.path);
+      if (status.status !== 0) refusals.push(`${name} could not be checked for uncommitted changes (${gitFailure(['status', '--porcelain'], status)})`);
+      else if (status.stdout.trim()) refusals.push(`${name} has uncommitted changes`);
+    }
+  }
+  return refusals;
+}
+
+/** The refusal `holderRefusals` names, as the error the worktree command reports. */
+export const heldBranchRefusal = (branch: string, refusals: string[]) =>
+  `Branch ${branch} is held by another worktree that was not reclaimed: ${refusals.join('; ')}. Finish or abort its operation, or remove that worktree, before retrying.`;
+
+/**
  * Frees `branch` for the worktree about to be created at `target`, returning what was reclaimed,
  * or throws naming every holder it may not touch. A holder is reclaimed only when it is a session
  * worktree directly under `<root>/.graphyard/worktrees` belonging to `work`, its epoch holds no
@@ -88,23 +117,9 @@ export function sessionOf(path: string): { key: string | null; epoch: number | n
  * detached, as the rework path always did, keeping whatever it holds.
  */
 export function reclaimBranchHolders(root: string, branch: string, target: string, work: Pick<Work, 'key' | 'lease'>, now: number, options: { checkouts: boolean }): ReclaimedHolder[] {
-  const sessions = resolve(root, '.graphyard/worktrees');
   const holders = branchHolders(root, branch, target).filter(holder => holder.via !== 'checkout' || options.checkouts);
-  const refusals: string[] = [];
-  const live = (holder: BranchHolder) => !!work.lease && work.lease.epoch === holder.epoch && Date.parse(work.lease.expiresAt) > now;
-  for (const holder of holders) {
-    const name = `${holder.path} (${holder.via === 'checkout' ? 'checked out' : `${holder.via} in progress`})`;
-    if (holder.via !== 'checkout' && resolve(dirname(holder.path)) !== sessions) refusals.push(`${name} is not a session worktree under ${sessions}`);
-    else if (holder.via !== 'checkout' && holder.key !== work.key) refusals.push(`${name} belongs to ${holder.key ?? 'no Graphyard item'}, not ${work.key}`);
-    else if (live(holder)) refusals.push(`${name} belongs to ${work.key} epoch ${holder.epoch}, which holds a live lease`);
-    else if (holder.via !== 'checkout') {
-      // An unreadable status is not a clean one: the worktree is left alone and named.
-      const status = git(['status', '--porcelain'], holder.path);
-      if (status.status !== 0) refusals.push(`${name} could not be checked for uncommitted changes (${gitFailure(['status', '--porcelain'], status)})`);
-      else if (status.stdout.trim()) refusals.push(`${name} has uncommitted changes`);
-    }
-  }
-  if (refusals.length) throw new Error(`Branch ${branch} is held by another worktree that was not reclaimed: ${refusals.join('; ')}. Finish or abort its operation, or remove that worktree, before retrying.`);
+  const refusals = holderRefusals(root, holders, work, now, { dirty: true });
+  if (refusals.length) throw new Error(heldBranchRefusal(branch, refusals));
   const reclaimed: ReclaimedHolder[] = [];
   for (const holder of holders) {
     if (holder.via === 'checkout') {

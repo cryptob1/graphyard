@@ -59,7 +59,7 @@ async function controlPlane(item: Record<string, unknown>) {
 const item = (lease: { epoch: number; live: boolean }) => ({ id: 'item-7', key: 'GY-7', epoch: 3, submission: null, candidate: null, workspaces: [],
   lease: { owner: 'worker-a', epoch: lease.epoch, expiresAt: new Date(Date.now() + (lease.live ? 600_000 : -600_000)).toISOString() } });
 
-test('unit:worktree-reclaims-rebasing-holder — an abandoned session worktree stuck mid-rebase of the branch is reclaimed and the new worktree created; a dirty one or one under a live lease is named and left alone', async () => {
+test('unit:worktree-reclaims-rebasing-holder — an abandoned session worktree stuck mid-rebase of the branch is released and the new worktree created; one under a live lease is named and left alone', async () => {
   const branch = 'graphyard/gy-7-3';
   const root = await repository(branch);
   const sessions = join(root, '.graphyard', 'worktrees'), holder = join(sessions, 'GY-7-2'), target = join(sessions, 'GY-7-3');
@@ -67,37 +67,31 @@ test('unit:worktree-reclaims-rebasing-holder — an abandoned session worktree s
   try {
     await rebasingHolder(root, holder, branch);
     assert.deepEqual(branchHolders(root, branch, target).map(entry => [entry.path, entry.via, entry.key, entry.epoch]), [[holder, 'rebase', 'GY-7', 2]], 'the holder is found from its admin directory');
+    const tip = git(root, 'rev-parse', branch);
 
-    // Uncommitted changes in the holder: never touched, and the refusal names it.
-    await writeFile(join(holder, 'scratch.txt'), 'unsaved\n');
-    let plane = await controlPlane(item({ epoch: 3, live: true }));
+    // The holder's own epoch holds a live lease: never touched, and named.
+    let plane = await controlPlane(item({ epoch: 2, live: true }));
     try {
       const refused = await run(process.execPath, [launcher, 'worktree', 'GY-7', '3'], { cwd: root, env: plane.env }).then(() => null, error => error as { stderr: string });
       assert.ok(refused, 'the command fails');
-      assert.match(refused!.stderr, new RegExp(`Branch ${branch} is held by another worktree that was not reclaimed: ${holder} \\(rebase in progress\\) has uncommitted changes`));
-      assert.ok(existsSync(join(holder, 'scratch.txt')) && existsSync(join(git(holder, 'rev-parse', '--absolute-git-dir'), 'rebase-merge')), 'the dirty holder is left exactly as it was');
-      assert.ok(!existsSync(target));
-    } finally { await plane.close(); }
-    await rm(join(holder, 'scratch.txt'));
-
-    // The holder's own epoch holds a live lease: never touched, and named.
-    plane = await controlPlane(item({ epoch: 2, live: true }));
-    try {
-      const refused = await run(process.execPath, [launcher, 'worktree', 'GY-7', '3'], { cwd: root, env: plane.env }).then(() => null, error => error as { stderr: string });
       assert.match(refused!.stderr, new RegExp(`${holder} \\(rebase in progress\\) belongs to GY-7 epoch 2, which holds a live lease`));
       assert.ok(existsSync(join(git(holder, 'rev-parse', '--absolute-git-dir'), 'rebase-merge')), 'the live attempt keeps its rebase');
+      assert.ok(!existsSync(target));
+      assert.ok(plane.posted.some(path => path.endsWith('/release')) && !plane.posted.some(path => path.endsWith('/workspace')), 'the claim is released as a workspace failure before anything is reserved');
     } finally { await plane.close(); }
 
-    // Abandoned and clean: the rebase is aborted, the worktree removed, and the new one created on the branch.
+    // Abandoned, with uncommitted work beside it: GY-860 records that work with the reservation,
+    // ends the rebase and detaches the holder, and the new worktree is created on the branch.
+    await writeFile(join(holder, 'scratch.txt'), 'unsaved\n');
     plane = await controlPlane(item({ epoch: 3, live: true }));
     try {
-      const { stdout, stderr } = await run(process.execPath, [launcher, 'worktree', 'GY-7', '3'], { cwd: root, env: plane.env });
+      const { stdout } = await run(process.execPath, [launcher, 'worktree', 'GY-7', '3'], { cwd: root, env: plane.env });
       const printed = JSON.parse(stdout);
       assert.equal(printed.path, target); assert.equal(printed.branch, branch);
-      assert.deepEqual(printed.reclaimed.map((entry: { path: string; via: string; epoch: number; action: string }) => [entry.path, entry.via, entry.epoch, entry.action]), [[holder, 'rebase', 2, 'aborted the rebase and removed the worktree']]);
-      assert.match(stderr, new RegExp(`Reclaimed ${holder}, which held ${branch} for GY-7 epoch 2: aborted the rebase and removed the worktree`));
-      assert.ok(!existsSync(holder), 'the abandoned worktree is gone');
+      assert.ok(existsSync(join(holder, 'scratch.txt')), 'the uncommitted work stays where it was');
+      assert.ok(!existsSync(join(git(holder, 'rev-parse', '--absolute-git-dir'), 'rebase-merge')), 'the rebase is over');
       assert.equal(git(target, 'symbolic-ref', '--short', 'HEAD'), branch, 'the new worktree is on the item branch');
+      assert.equal(git(root, 'rev-parse', branch), tip, 'the branch ref never moved');
       assert.equal(git(target, 'log', '-1', '--format=%s'), 'two', 'the branch keeps the commit the abandoned session made');
       assert.ok(plane.posted.some(path => path.endsWith('/workspace')), 'the workspace was reserved');
     } finally { await plane.close(); }
