@@ -2,7 +2,7 @@
 import type { Work } from '../model.js';
 import { type CapacityRole } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
-import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
+import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
 import { capacityRecheckMs } from '../auto-dispatch.js';
 import { message, orphanObservationSchema } from './state.js';
@@ -30,29 +30,31 @@ export async function closeStep(cycle: Cycle) {
   const heldPanes = new Set(open.flatMap(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
     ? (item.sessions ?? []).filter(s => s.kind === 'implementation' && s.pane).map(s => s.pane!) : []));
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('close', null, profile.name, async () => {
-    const agent = agents.find(candidate => candidate.name === profile.agentName);
-    if (!agent?.pane_id || heldPanes.has(agent.pane_id)) return;
-    // A runtime that left its pane (Herdr detects no agent in it: a bare shell, status unknown) never
-    // reports idle, yet its agent name keeps the profile from every dispatch (2026-09-26: six of ten
-    // profiles held for hours). Such a pane is closed unless a live lease of its principal is worked
-    // in the worktree it stands in, and only once it has stood so for launchAppearanceMs, so a launch
-    // whose runtime has not yet started is never taken for one that exited.
-    const exited = !agent.agent && agent.agent_status === 'unknown';
-    if (exited && agent.cwd ? workedHere(profile.principal, agent.cwd) : owns(profile.principal)) return;
-    if (!exited && !['idle', 'done', 'blocked'].includes(agent.agent_status ?? '')) return;
-    const key = closeKey(profile, agent.pane_id);
-    if (state.actions[key]?.state === 'done') return;
-    if (exited) {
-      const seenKey = `exited:${profile.name}:${agent.pane_id}`, seen = state.actions[seenKey];
-      if (!seen) { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `${profile.agentName}'s runtime has left pane ${agent.pane_id}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); return; }
-      if (now() - Date.parse(seen.at) < launchAppearanceMs) return;
-    }
-    await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `Closing ${profile.agentName}: no active Graphyard assignment`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-    try {
-      await effects.closeSession(agent.pane_id);
-      performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${profile.agentName} (${exited ? 'its runtime exited' : agent.agent_status ?? 'unknown'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${profile.agentName}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+    const matchingAgents = agents.filter(candidate => candidate.name && isProfileSession(profile, candidate.name));
+    for (const agent of matchingAgents) {
+      if (!agent.pane_id || heldPanes.has(agent.pane_id)) continue;
+      // A runtime that left its pane (Herdr detects no agent in it: a bare shell, status unknown) never
+      // reports idle, yet its agent name keeps the profile from every dispatch (2026-09-26: six of ten
+      // profiles held for hours). Such a pane is closed unless a live lease of its principal is worked
+      // in the worktree it stands in, and only once it has stood so for launchAppearanceMs, so a launch
+      // whose runtime has not yet started is never taken for one that exited.
+      const exited = !agent.agent && agent.agent_status === 'unknown';
+      if (exited && agent.cwd ? workedHere(profile.principal, agent.cwd) : owns(profile.principal)) continue;
+      if (!exited && !['idle', 'done', 'blocked'].includes(agent.agent_status ?? '')) continue;
+      const key = closeKey(profile, agent.pane_id);
+      if (state.actions[key]?.state === 'done') continue;
+      if (exited) {
+        const seenKey = `exited:${profile.name}:${agent.pane_id}`, seen = state.actions[seenKey];
+        if (!seen) { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `${agent.name}'s runtime has left pane ${agent.pane_id}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
+        if (now() - Date.parse(seen.at) < launchAppearanceMs) continue;
+      }
+      await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `Closing ${agent.name}: no active Graphyard assignment`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+      try {
+        await effects.closeSession(agent.pane_id);
+        performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${agent.name} (${exited ? 'its runtime exited' : agent.agent_status ?? 'unknown'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${agent.name}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+      }
     }
   });
 
@@ -477,17 +479,21 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
     else if (runtime?.available && handle.pane && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
-      // A pane absent from a listing that holds nothing of its workspace says nothing about the pane.
-      const workspace = handle.workspace ?? (handle.pane.includes(':') ? handle.pane.split(':')[0] : null);
-      const read = !!listed || !workspace || runtime.agents.some(agent => agent.pane_id?.startsWith(`${workspace}:`));
-      const exited = read && (!listed || listed.agent === null || listed.agent === '')
-        ? `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited` : null;
-      const seen = state.actions[seenKey];
-      if (exited) {
-        sighted.add(seenKey);
-        if (!seen) { await record(state, seenKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: `${exited}; implementation session ${handle.id} is closed if that still stands on a later cycle, ${launchAppearanceMs / 1000}s from now`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
-        if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) continue;
-        reason = `${exited} (first seen at ${seen.at})`;
+      if (!leased && listed && ['idle', 'done', 'blocked'].includes(listed.agent_status ?? '')) {
+        reason = `${handle.runtime} session in pane ${handle.pane} is ${listed.agent_status} and ${item.key} has no live lease`;
+      } else {
+        // A pane absent from a listing that holds nothing of its workspace says nothing about the pane.
+        const workspace = handle.workspace ?? (handle.pane.includes(':') ? handle.pane.split(':')[0] : null);
+        const read = !!listed || !workspace || runtime.agents.some(agent => agent.pane_id?.startsWith(`${workspace}:`));
+        const exited = read && (!listed || listed.agent === null || listed.agent === '')
+          ? `the ${handle.runtime} runtime is no longer the foreground process of pane ${handle.pane}: Herdr ${listed ? 'detects no agent in it' : 'lists no agent in it'}, so the agent has exited` : null;
+        const seen = state.actions[seenKey];
+        if (exited) {
+          sighted.add(seenKey);
+          if (!seen) { await record(state, seenKey, { kind: 'close', work: item.key, principal: handle.principal, state: 'waiting', detail: `${exited}; implementation session ${handle.id} is closed if that still stands on a later cycle, ${launchAppearanceMs / 1000}s from now`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
+          if (seen.cycle === state.cycle || now() - Date.parse(seen.at) < launchAppearanceMs) continue;
+          reason = `${exited} (first seen at ${seen.at})`;
+        }
       }
     }
     if (!reason) continue;
