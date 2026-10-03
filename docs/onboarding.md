@@ -81,7 +81,7 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Candidates need one review and one producer session per proof group; `"concurrency"` caps sessions without restart. A worker count `W` and `G` proof groups need `⌈W/2⌉` review and `G×⌈W/2⌉` producer slots over ≥2 producer principals; watch `longestWaitMs`.
+Candidates need one review and one producer session per proof group; a profile's `"concurrency"` caps its sessions without a restart. Adding workers? A worker count `W` and `G` proof groups need `⌈W/2⌉` review and `G×⌈W/2⌉` producer slots over ≥2 producer principals; watch `longestWaitMs`.
 
 ## 3. Start the master
 
