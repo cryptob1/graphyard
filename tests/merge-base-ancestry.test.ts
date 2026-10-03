@@ -71,7 +71,7 @@ test('unit:tree-identical-base-still-refreshed — a queue head bound to a base 
   const speculation = await refresh.github.publishSpeculativeTip(item, placement);
   assert.deepEqual([speculation.tip, speculation.base, speculation.baseTree, speculation.carriedBase ?? null], [MERGED, M, TREE, null]);
   // The branch goes back to the reviewed head, M is merged onto it, and the tip is published.
-  assert.deepEqual(refresh.writes, ['PATCH /git/refs/heads/graphyard/gy-100-1', 'POST /merges', `PATCH /git/${queueRef('GY-100')}`]);
+  assert.deepEqual(refresh.writes, ['PATCH /git/refs/heads/graphyard-merge-check/gy-100', 'POST /merges', 'DELETE /git/refs/heads/graphyard-merge-check/gy-100', 'PATCH /git/refs/heads/graphyard/gy-100-1', `PATCH /git/${queueRef('GY-100')}`]);
   assert.deepEqual(speculation.merge?.parents, [H, M], 'the new tip has the base tip commit itself as a parent');
   // The merge broker refuses the head, before any approval is re-posted, naming the missing ancestry.
   const master = await readFile(new URL('../src/master/merge.ts', import.meta.url), 'utf8');
