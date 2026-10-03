@@ -19,6 +19,8 @@ import { heldFollowUps, shippedFollowUpsOwed } from './model/followups-held.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, misclassificationAttempts, misclassificationSignal, observeGitHubCommit, planMechanicalFix, readReview, type FreshReadRecord } from './mechanical-findings.js';
 import type { InterventionRecordInput } from './model/interventions.js';
+import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
+import { readProjectMemory } from './project-memory.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
@@ -448,12 +450,12 @@ export async function reviewerBindingHealth(config: Pick<MasterConfig, 'credenti
   return { registered: app, bound: config.reviewer ? { appId: config.reviewer.appId, slug: config.reviewer.slug } : null, attention };
 }
 
-/** How old the observation of the exact requested head may be when a reviewer is launched for it (GY-710). */
-export const reviewLaunchObservationMaxAgeMs = 30 * 60_000;
-
 // A launched reviewer reads one exact candidate. Everything a verdict is bound to is verified
-// here, before a token exists: a stale or unobserved candidate never reaches a reviewer session.
-export function assertReviewCandidate(work: Work, observedAt: string) {
+// here, before a token exists: a superseded or unobserved candidate never reaches a reviewer session.
+// The launch binds the head, not the observation's age (GY-710): the item's latest observation must
+// be of this exact head and base, and a head or base that moved since supersedes the request. The
+// reviewer judges the head it is given, so the two-minute bound protects merges, not review launches.
+export function assertReviewCandidate(work: Work, observedAt: string, request?: { sha: string; baseSha: string; policyRevision: number }) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A reviewer launch requires a valid Graphyard snapshot clock');
   if (!work.policy.review) throw new Error(`${work.key} does not require independent review`);
@@ -463,12 +465,8 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
   if (!work.submission || !candidate) throw new Error(`${work.key} has no independently observed pull-request candidate to review`);
   if (work.reworkRequested) throw new Error(`${work.key} is awaiting rework; review the next submitted candidate`);
   if (!observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) throw new Error(`${work.key} GitHub observation does not match the current candidate`);
-  // The launch binds the exact head, base and policy revision the observation names, and the reviewer
-  // judges that head itself; the observation only has to be recent enough that the head has not moved
-  // unseen. Two minutes, the merge gate's bound, starved launches: with ~250 items a given item is read
-  // every several minutes, so review requests waited hours (2026-09-26, GY-710). Merges keep two minutes.
-  const age = now - Date.parse(observation.at);
-  if (!(age >= 0 && age < reviewLaunchObservationMaxAgeMs)) throw new Error(`${work.key} GitHub observation is missing or older than ${reviewLaunchObservationMaxAgeMs / 60_000} minutes`);
+  if (!Number.isFinite(Date.parse(observation.at))) throw new Error(`${work.key} GitHub observation has no valid time`);
+  if (request && (request.sha !== candidate.sha || request.baseSha !== candidate.baseSha || request.policyRevision !== work.policyRevision)) throw new Error(`${work.key} review request for ${request.sha.slice(0, 12)} on base ${request.baseSha.slice(0, 12)} is superseded: the latest observation is of head ${candidate.sha.slice(0, 12)} on base ${candidate.baseSha.slice(0, 12)}`);
   if (observation.prState === 'closed') throw new Error(`${work.key} pull request is closed`);
   if (observation.draft) throw new Error(`${work.key} pull request is still a draft`);
   // A head behind the base branch is reviewed as it stands when it merges cleanly: the merge queue
@@ -544,10 +542,33 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  */
 /** `research` is the item's recorded research brief (GY-259): the change is checked against its recommended approach and answered questions. */
 /** `fresh` is the fresh read of a mechanical-fix bot round's head (GY-971): the bot commit the reviewer checks and may reject, and the findings it judges again. */
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, fresh?: FreshReadRecord) {
+export function reviewPrompt(
+  config: Pick<MasterConfig, 'repository'>,
+  binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>,
+  checkout?: SessionCheckout,
+  threads?: { unresolved: LaunchThread[]; failure?: string; total?: number },
+  criteria?: { id: string; text: string }[],
+  history?: ReviewHistory,
+  documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null },
+  research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null,
+  freshOrMemory?: FreshReadRecord | ProjectMemory | null,
+  memoryOpt?: ProjectMemory | null,
+) {
+  let fresh: FreshReadRecord | undefined = undefined;
+  let memory: ProjectMemory | null = null;
+  if (freshOrMemory && typeof freshOrMemory === 'object' && ('approvedHead' in freshOrMemory || 'botCommit' in freshOrMemory || 'carried' in freshOrMemory)) {
+    fresh = freshOrMemory as FreshReadRecord;
+    memory = memoryOpt ?? null;
+  } else if (freshOrMemory && typeof freshOrMemory === 'object' && ('decisions' in freshOrMemory || 'pitfalls' in freshOrMemory || 'changes' in freshOrMemory)) {
+    memory = freshOrMemory as ProjectMemory;
+  } else {
+    memory = memoryOpt ?? null;
+  }
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
+  const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
+    + (memorySection || '')
     + reviewRoundSection(binding.sha, history)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + findingClassificationSection()
@@ -640,6 +661,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   now?: () => Date;
   /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
   requestId?: string;
+  /** The head, base and policy revision that request binds (GY-710): a launch for anything else is superseded. */
+  request?: { sha: string; baseSha: string; policyRevision: number };
   /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
   probe?: FleetProbe;
   prompt?: PromptDelivery;
@@ -660,7 +683,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   const reviewerApp = config.reviewer;
   const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
   if (!profile) throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
-  const binding = assertReviewCandidate(work, observedAt);
+  const binding = assertReviewCandidate(work, observedAt, dependencies.request);
   if (binding.author.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
   // One request, one session (GY-124). Under the ledger lock, as one step: records for a superseded
   // head are closed, the launch is refused when the request or the candidate already has a pending
@@ -768,9 +791,10 @@ export async function launchReview(root: string, work: Work, profileName: string
         const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
         pane = created.pane; tabId = created.tab;
+        const memory = await readProjectMemory(root).catch(() => null);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reservation.record.freshRead), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reservation.record.freshRead, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
