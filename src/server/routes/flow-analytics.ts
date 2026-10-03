@@ -105,7 +105,7 @@ export const flowAnalyticsRoutes = defineRoutes('flow-analytics', [
     method: 'GET', path: '/api/deployments',
     async handle({ actor, services: { engine } }) {
       demand(auditRoles.includes(actor.role), 'An audit role is required to read deployment identifiers', 403);
-      const rows = (await engine.store.pool.query(`SELECT d.provider,d.external_id,d.environment,d.sha,d.state,d.started_at,d.finished_at,d.recorded_at,
+      const rows = (await engine.store.reportPool.query(`SELECT d.provider,d.external_id,d.environment,d.sha,d.state,d.started_at,d.finished_at,d.recorded_at,
         COALESCE(array_agg(dm.merge_sha ORDER BY dm.merge_sha) FILTER (WHERE dm.merge_sha IS NOT NULL), '{}') AS contained_merge_shas
         FROM deployment_observations d LEFT JOIN deployment_merge_observations dm ON dm.deployment_id=d.id
         GROUP BY d.id ORDER BY d.started_at DESC,d.id DESC LIMIT 200`)).rows;

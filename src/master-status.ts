@@ -138,7 +138,8 @@ export function resourceReport(readings: ResourceReading[], lastReclaim: unknown
   const pressed = readings.filter(reading => reading.state === 'low' || reading.state === 'exhausted');
   return {
     summary: `${readings.length} resource reading(s): ${pressed.length ? pressed.map(reading => `${reading.id} ${reading.state}`).join(', ') : 'all within their warning lines'}${readings.some(reading => reading.state === 'unknown') ? `; unread: ${readings.filter(reading => reading.state === 'unknown').map(reading => reading.id).join(', ')}` : ''}`,
-    readings: readings.map(({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, waiting }) => ({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, ...(waiting === undefined ? {} : { waiting }) })),
+    readings: readings.map(({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, waiting, overdue, advisory }) => ({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable,
+      ...(waiting === undefined ? {} : { waiting }), ...(overdue === undefined ? {} : { overdue }), ...(advisory ? { advisory } : {}) })),
     lastReclaim,
   };
 }
@@ -212,7 +213,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const host: AttentionItem[] = [];
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
-    const dispatch = 'error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000);
+    const dispatch = 'error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000, [], snapshot.work, Date.parse(snapshot.now) || now);
     host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master)).attention);
     // A starved reviewer or producer role (GY-107), which the report's own buildMasterStatus raises from the role profiles.
     const sessions = { producers: summarizeProducers(observed.producers), failures: 'error' in dispatch ? [] : dispatch.failures, retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] };

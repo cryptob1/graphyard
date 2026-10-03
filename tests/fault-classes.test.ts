@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -9,8 +9,9 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { attentionKind, classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Work } from '../src/model.js';
-import { agentOwner, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects } from '../src/master-daemon.js';
+import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
+import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 import { retryStopAttention } from '../src/retry-stop.js';
@@ -18,7 +19,16 @@ import { stoppedFollowUpAttention, type ReviewRecord } from '../src/reviewer.js'
 import type { ResourceReading } from '../src/master-resources.js';
 import { predictQueue } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
-import { describeUnserved } from '../src/model/executor-presence.js';
+import { ExecutorRegistry, describeUnserved, executorLiveMs, executorReport } from '../src/model/executor-presence.js';
+import type { ActionRow } from '../src/model/actions.js';
+import { executorRunnableKinds, type NextActionKind } from '../src/model/action-kinds.js';
+import { detailChanged } from '../src/daemon/decisions.js';
+import { performSelfUpgrade } from '../src/daemon/upgrade.js';
+import { executorFleet } from '../src/cli/executor-report.js';
+import { loopMergerExecutorKinds, writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
+import { loopSupervision, loopSupervisionAttention } from '../src/supervisor.js';
+import { fleetStatus } from '../src/master/attention.js';
+import type { FleetView } from '../src/model/registry.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import OverviewPage from '../web/pages/overview.js';
@@ -69,7 +79,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
-      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'actorless',
+      'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
       'nonexercising-proof', 'retry-stopped']],
     ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
@@ -523,12 +533,21 @@ test('unit:recurring-class-item — a failing run ends when its action is retire
   fail('refresh:running', -hour, 'failed'); fail('refresh:retrying', -2 * hour, 'started');
   endFailingRuns(state, policy, clock);
   assert.deepEqual(Object.keys(state.faults.failing).sort(), ['refresh:retrying', 'refresh:running']);
-  // Pruning a retired row drops its run with it.
+  // The cursor bound never retires a row whose run still stands (GY-1086): that row is the fault's
+  // only record, and retiring it reopened a standing refusal as a new instance every hour. Once the
+  // window has ended the run, pruning retires the row, and a run whose row is gone ends with it.
   for (let index = 0; index <= retainedActions; index += 1) state.actions[`old:${index}`] = { kind: 'refresh', work: null, principal: null, state: 'done', detail: 'x', attempts: 1, cycle: 1, epoch: null, at: iso(-48 * hour + index) } as any;
   state.actions['refresh:running'].at = iso(-72 * hour);
   pruneDaemonState(state);
+  assert.equal(state.actions['refresh:running']?.state, 'failed', 'the oldest row stays while its run stands');
+  assert.deepEqual(Object.keys(state.faults.failing).sort(), ['refresh:retrying', 'refresh:running']);
+  endFailingRuns(state, policy, clock);
+  pruneDaemonState(state);
   assert.equal(state.actions['refresh:running'], undefined);
   assert.deepEqual(Object.keys(state.faults.failing), ['refresh:retrying']);
+  delete state.actions['refresh:retrying'];
+  pruneDaemonState(state);
+  assert.deepEqual(Object.keys(state.faults.failing), [], 'a run whose row is retired has ended');
 });
 
 test('unit:recurring-class-item — the loop reads status-level faults with coordinator visibility, so held jobs and production recur', async () => {
@@ -900,6 +919,273 @@ test('unit:recurring-class-item — daemonSummary reports faults under the polic
   finally {
     for (const [name, value] of [['GRAPHYARD_FAULT_CLASS_THRESHOLD', previous.threshold], ['GRAPHYARD_FAULT_CLASS_WINDOW_HOURS', previous.windowHours]] as const)
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
+});
+// GY-1086's proof, manual:fault-class-configuration, is the tests below. The master loop filed 18
+// configuration faults in 24 hours on 1 October 2026 — "a permission, variable, setup step, executor
+// or sandbox rule the installation lacks". The installation lacked none of them. The shared cause:
+// the loop read a state the product is in by design, or on its way through, as a configuration gap,
+// and counted one standing refusal again every time its own cursor bound forgot it.
+//
+//   - executor (4): a pending merge row "no executor serves" — on an installation where the master
+//     loop is the one merger (GY-245) and the executors are declared without merge on purpose;
+//   - executor (1): "no executor is alive" read off a control plane's in-memory presence that had
+//     heard from nobody yet;
+//   - setup (2), executor slots (2): systemd units read while `deactivating`, the state every restart
+//     passes through — the loop's own self-upgrade hand-off, an operator's restart;
+//   - fleet (2): a role at its concurrency limit (capacity working), and the opt-in master role not
+//     yet named, which the loop's own master step already records as a wait and not a fault;
+//   - action:config (6 + 1): upgrade:refused and escalation:dirty-checkout are written once while
+//     they stand; the row went oldest, the 500-row cursor bound retired it, and the next cycle
+//     refused afresh as a new instance — six for one operator hold on the coordinator checkout.
+//
+// Each instance is replayed against the shipped code. Against the base each test fails on its first
+// assertion, the instance recurring; against the candidate it does not.
+
+const instances = {
+  merge: ['executor|GY-1063|2026-10-01T13:27:57.751Z', 'executor|GY-980|2026-10-01T13:36:37.333Z', 'executor|GY-1063|2026-10-01T14:32:06.820Z', 'executor|GY-566|2026-10-01T22:16:21.164Z'],
+  presence: ['executor|GY-859|2026-10-01T17:23:33.080Z'],
+  stopping: ['setup|setup|2026-10-01T15:49:12.364Z', 'setup|setup|2026-10-01T22:14:48.524Z', 'executor|executors|2026-10-01T22:14:48.524Z', 'executor|executors|2026-10-01T22:14:48.524Z#1'],
+  fleet: ['fleet|fleet|2026-10-01T14:36:57.269Z', 'fleet|fleet|2026-10-01T17:23:33.080Z'],
+  refusal: ['action:config|upgrade:refused|2026-10-01T14:25:15.429Z', 'action:config|upgrade:refused|2026-10-01T15:33:29.852Z', 'action:config|upgrade:refused|2026-10-01T18:11:52.788Z',
+    'action:config|upgrade:refused|2026-10-01T19:33:20.278Z', 'action:config|upgrade:refused|2026-10-01T20:52:08.903Z', 'action:config|upgrade:refused|2026-10-01T21:59:36.232Z'],
+  dirty: ['action:config|escalation:dirty-checkout|2026-10-01T15:46:00.796Z'],
+};
+
+test('manual:fault-class-configuration — the item lists 18 instances, and every one is replayed below', () => {
+  const all = Object.values(instances).flat();
+  assert.equal(all.length, 18);
+  assert.equal(new Set(all).size, 18);
+  for (const id of all) assert.equal(faultClassOf(id.split('|')[0]), 'configuration', id);
+});
+
+const pendingRow = (key: string, kind: NextActionKind, requestedAt: string): Work => ({
+  id: `work-${key}`, key, stage: 'build',
+  actionQueue: { history: [], actions: [{ id: `${kind}-${key}`, kind, work: `work-${key}`, key, inputs: { kind } as ActionRow['inputs'], gate: null, refusal: null, reason: `${key} needs ${kind}`,
+    binding: `${kind}:1`, requestedBy: 'graphyard', requestedAt, state: 'pending', claim: null, attempts: 0, history: [] } as ActionRow] },
+} as unknown as Work);
+
+/** A coordinator host that declared two slots without merge, as `--install` writes them beside a merging loop. */
+async function declaredHost(slot: string) {
+  const root = await temporaryDirectory('config-faults');
+  execFileSync('git', ['init', '-q', root]);
+  await mkdir(join(root, '.graphyard'), { recursive: true, mode: 0o700 });
+  await writeExecutorDeclaration(root, { version: 1, count: 2, kinds: [...loopMergerExecutorKinds], intervalSeconds: 5 });
+  const run: SystemctlRunner = args => {
+    if (args[0] === 'is-active') { if (slot === 'active') return 'active'; throw Object.assign(new Error(slot), { stdout: `${slot}\n` }); }
+    return '';
+  };
+  return { root, run };
+}
+
+for (const id of instances.merge) {
+  const [, key, at] = id.split('|');
+  test(`manual:fault-class-configuration — ${id}: a merge row is the merging loop's, never an executor the fleet lacks`, async () => {
+    const now = new Date(Date.parse(at));
+    const registry = new ExecutorRegistry(new Date(now.getTime() - 3_600_000));
+    for (const slot of [1, 2]) registry.observe({ executor: `graphyard-master@vishrog/${slot}`, host: 'vishrog', principal: 'graphyard-master', kinds: [...loopMergerExecutorKinds] }, now);
+    const work = [pendingRow(key, 'merge', new Date(now.getTime() - 7 * 60_000).toISOString())];
+    const report = executorReport(work, registry, now);
+    const { root, run } = await declaredHost('active');
+    try {
+      const loop = async () => ({ name: 'the master loop (graphyard-master.service, automatic merging on)' });
+      const fleet = await executorFleet(root, async () => ({ executors: report }), { work, now: now.toISOString() }, run, loop);
+      assert.deepEqual(fleet.attention.map(item => item.text).filter(text => /^Nothing can run merge/.test(text)), [], 'no executor is asked for merge beside a merging loop');
+      // Without a merging loop the same row is a real gap, named as before.
+      const alone = await executorFleet(root, async () => ({ executors: report }), { work, now: now.toISOString() }, run, async () => null);
+      assert.match(alone.attention[0].text, new RegExp(`^Nothing can run merge: ${key} has waited 7m`));
+      assert.equal(attentionKind({ subject: key, text: alone.attention[0].text }), 'executor');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test(`manual:fault-class-configuration — ${instances.presence[0]}: a control plane that has heard from nobody yet does not report the fleet dead`, () => {
+  const now = new Date('2026-10-01T17:23:33.080Z');
+  const work = [pendingRow('GY-859', 'resync', '2026-10-01T17:06:00.000Z'), pendingRow('GY-860', 'resync', '2026-10-01T17:10:00.000Z')];
+  const listening = executorReport(work, new ExecutorRegistry(new Date(now.getTime() - 10_000)), now);
+  assert.deepEqual(listening.unserved, [], 'ten seconds after a restart, no executor has had its turn to poll');
+  // A full liveness window later, an empty registry is a dead fleet, and says so.
+  const silent = executorReport(work, new ExecutorRegistry(new Date(now.getTime() - executorLiveMs - 1)), now);
+  assert.deepEqual(silent.unserved.map(entry => entry.key), ['GY-859', 'GY-860']);
+  // One executor heard inside the first window is judged at once: the warm-up never hides a kind nobody serves.
+  const early = new ExecutorRegistry(new Date(now.getTime() - 10_000));
+  early.observe({ executor: 'e/1', host: 'h', principal: 'p', kinds: executorRunnableKinds.filter(kind => kind !== 'resync') }, now);
+  assert.deepEqual(executorReport(work, early, now).unserved.map(entry => entry.kind), ['resync', 'resync']);
+});
+
+for (const id of instances.stopping) {
+  const [kind] = id.split('|');
+  test(`manual:fault-class-configuration — ${id}: a unit systemd is stopping is a restart in passage, not a supervisor or slot that is down`, async () => {
+    if (kind === 'setup') {
+      const home = await temporaryDirectory('config-faults-home');
+      try {
+        const host = (active: string) => ({ platform: 'linux' as const, home, temporaryDirectories: [], run: (command: string, args: string[]) => {
+          if (command === 'loginctl') return 'yes';
+          if (args.includes('is-active')) { if (active === 'active') return 'active'; throw Object.assign(new Error(active), { stdout: `${active}\n` }); }
+          if (args.includes('is-enabled')) return 'enabled';
+          return '';
+        } });
+        const stopping = loopSupervisionAttention(await loopSupervision({ root: home, cliPath: launcher }, host('deactivating'))).map(item => item.text);
+        assert.deepEqual(stopping.filter(text => /installed but not running/.test(text)), [], 'the loop reading its own unit mid-restart');
+        const stopped = loopSupervisionAttention(await loopSupervision({ root: home, cliPath: launcher }, host('inactive'))).map(item => item.text);
+        assert.ok(stopped.some(text => /installed but not running/.test(text)), 'a unit that stays stopped is still named');
+      } finally { await rm(home, { recursive: true, force: true }); }
+      return;
+    }
+    const now = new Date('2026-10-01T22:14:48.524Z');
+    const registry = new ExecutorRegistry(new Date(now.getTime() - 3_600_000));
+    registry.observe({ executor: 'graphyard-master@vishrog/1', host: 'vishrog', principal: 'graphyard-master', kinds: [...loopMergerExecutorKinds] }, now);
+    const report = executorReport([], registry, now);
+    for (const [state, named] of [['deactivating', false], ['failed', true]] as const) {
+      const { root, run } = await declaredHost(state);
+      try {
+        const fleet = await executorFleet(root, async () => ({ executors: report }), { work: [], now: now.toISOString() }, run, async () => null);
+        const lines = fleet.attention.map(item => item.text).filter(text => /^Executor slot \d is /.test(text));
+        assert.equal(lines.length, named ? 2 : 0, `slots ${state}: ${lines.join(' | ')}`);
+      } finally { await rm(root, { recursive: true, force: true }); }
+    }
+  });
+}
+
+const fleet = (attention: string[]) => ({ revision: 1, updatedAt: null, configured: true, host: 'vishrog', runtimes: [], models: [], accounts: [], roles: [], sessions: [], refusals: [], lastMutation: null, attention }) as unknown as FleetView;
+for (const [id, line] of [[instances.fleet[0], 'role reviewer is at its concurrency limit (6 of 6 live)'],
+  [instances.fleet[1], 'role master is not configured; the durable loop launches no master session until graphyard master registry role set master ACCOUNT[,ACCOUNT…] --reason REASON names its accounts']] as const) {
+  test(`manual:fault-class-configuration — ${id}: "${line.slice(0, 40)}…" is the fleet as configured, not a configuration it lacks`, () => {
+    const control = 'role producer is not configured; its sessions launch from local profiles until it is';
+    const items = fleetStatus(fleet([line, control])).attentionItems;
+    assert.deepEqual(items.map(item => item.text), [control], 'only the line naming a gap is raised');
+    assert.equal(items[0].kind, 'fleet');
+  });
+}
+
+// The loop's refusals, replayed over the cycles of the day: each cycle the refusal is observed again,
+// the loop's other work resolves enough actions to pass the cursor bound, and the cursor is pruned.
+const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/coordinator.token', cliPath: launcher,
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+function churn(state: DaemonState, at: number, cycle: number) {
+  for (let index = 0; index <= retainedActions; index += 1)
+    state.actions[`merge:churn-${cycle}-${index}`] = { kind: 'merge', work: `GY-${index}`, principal: null, state: 'done', detail: 'merged', attempts: 1, epoch: null, cycle, at: new Date(at + index).toISOString() } as DaemonState['actions'][string];
+  pruneDaemonState(state);
+  endFailingRuns(state, policy, at + retainedActions + 1);
+}
+const opened = (state: DaemonState, subject: string) => state.faults.instances.filter(entry => entry.kind === 'action:config' && entry.subject === subject);
+
+test(`manual:fault-class-configuration — ${instances.refusal.join(', ')}: one hold on the coordinator checkout is one instance for as long as it stands`, async () => {
+  const start = Date.parse('2026-10-01T14:25:15.429Z'), step = 80 * 60_000;
+  const tip = 'b'.repeat(40);
+  let head = '2a2d311349c4'.padEnd(40, '0'), now = start;
+  const run = async (_command: string, args: string[]) => {
+    const op = args[2];
+    if (op === 'rev-parse') return `${args[3] === 'HEAD' ? head : tip}\n`;
+    if (op === 'symbolic-ref') return 'refs/heads/coordinator/hold-until-gy-1005';
+    if (op === 'status' || op === 'fetch') return '';
+    throw new Error(`fake git cannot answer: git ${args.slice(2).join(' ')}`);
+  };
+  const state = emptyDaemonState(master);
+  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: tip, at: new Date(start).toISOString(), reason: null, deployed: ['GY-1'], pending: [] });
+  // A day and a half of cycles; the operator commits on the hold branch at 18:11, as on the day.
+  for (let cycle = 0; cycle < 27; cycle += 1) {
+    if (now >= Date.parse('2026-10-01T18:11:52.788Z')) head = 'f0de7bd665ac'.padEnd(40, '0');
+    const outcome = await performSelfUpgrade(master, state, { root: '/coordinator', run, now: () => now });
+    assert.equal(outcome.outcome, 'refused');
+    churn(state, now + 1, cycle);
+    now += step;
+  }
+  assert.equal(opened(state, 'upgrade:refused').length, 1, `the hold opened ${opened(state, 'upgrade:refused').length} instances`);
+  assert.match(state.actions['upgrade:refused']!.detail, /at f0de7bd665ac untouched: HEAD holds refs\/heads\/coordinator\/hold-until-gy-1005/);
+  // The hold ends: the checkout is detached at the tip, the refusal clears, and a later hold is a new instance.
+  head = tip;
+  await performSelfUpgrade(master, state, { root: '/coordinator', run: async (command, args) => args[2] === 'symbolic-ref' ? Promise.reject(Object.assign(new Error('not a symbolic ref'), { status: 1 })) : run(command, args), now: () => now });
+  assert.equal(state.upgrade.refused, null);
+});
+
+test(`manual:fault-class-configuration — ${instances.dirty[0]}: a dirty checkout refused between cycles is one instance while it stands`, () => {
+  // The loop's checkout guard (daemon/run.ts) writes the escalation only when its detail changes,
+  // exactly as here; the row then has to outlive the cursor bound for the refusal to stay one fault.
+  const key = 'escalation:dirty-checkout';
+  const detail = 'the master loop refuses to start, self-upgrade or restart from the coordinator checkout at /home/vish/code/graphyard: it holds uncommitted work at 2a2d311349c4 — 2 modified and 0 untracked source dirty path(s): src/daemon/cycle-delivery.ts, tests/master-daemon.test.ts';
+  const state = emptyDaemonState(master);
+  let now = Date.parse('2026-10-01T15:46:00.796Z');
+  for (let cycle = 0; cycle < 12; cycle += 1) {
+    if (detailChanged(state.actions[key], detail))
+      storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle, at: new Date(now).toISOString() }, 'action:config');
+    churn(state, now + 1, cycle);
+    now += 30 * 60_000;
+  }
+  assert.equal(opened(state, key).length, 1, `the dirty checkout opened ${opened(state, key).length} instances`);
+  assert.equal(Object.keys(state.actions).length <= retainedActions + 1, true, 'the cursor bound still holds');
+});
+
+// GY-950: a worker role at its concurrency limit was filed under the configuration class, though the
+// product itself treats the same refusal as a wait for a slot. GY-947's tripping instance was a
+// saturated, healthy fleet: 8 of 8 worker sessions live, every one on work.
+function saturatedFleet(idle = 0): AgentRegistry {
+  const at = iso(-hour);
+  let registry = emptyRegistry();
+  const change = (kind: Parameters<typeof applyRegistryMutation>[1], input: unknown) => { registry = applyRegistryMutation(registry, kind, input, { actor: 'operator', at }).registry; };
+  change('apply', { runtimes: [proposedRuntimes.find(runtime => runtime.name === 'claude')!], models: [{ name: 'opus', id: 'claude-opus-5' }],
+    accounts: [{ name: 'claude-primary', runtime: 'claude', model: 'opus', credential: { host: 'machine-a', home: '/agents/claude-primary' } }],
+    roles: fleetRoles.map(name => ({ name, accounts: ['claude-primary'], concurrency: name === 'worker' ? 8 : 2 })), reason: 'fixture' });
+  const session = (index: number): FleetSession => ({ id: `worker-session-${index}`, role: 'worker', account: 'claude-primary', runtime: 'claude', model: 'opus', host: 'machine-a',
+    work: index < 8 - idle ? `GY-${500 + index}` : null, principal: `graphyard-worker-${index}`, selectedAt: at, selectedBy: 'master', reason: 'fixture', skipped: [], endedAt: null, endReason: null });
+  registry.sessions.push(...Array.from({ length: 8 }, (_, index) => session(index)));
+  return registry;
+}
+const fleetFaults = (registry: AgentRegistry, host: string | null) => {
+  const state = emptyDaemonState(config());
+  trackFaults(state.faults, cycleFaults(state, [], clock, { config: config(), status: { github: true, fleet: fleetView(registry, clock, host) } as never }), iso(0));
+  return state.faults.instances;
+};
+
+test('unit:full-role-on-work-raises-no-configuration-fault — a worker role at its limit with every session on work raises no fleet attention and no configuration instance', () => {
+  for (const host of [null, 'machine-a']) {
+    const view = fleetView(saturatedFleet(), clock, host), worker = view.roles.find(role => role.role === 'worker')!;
+    assert.match(worker.blocked!, /role worker is at its concurrency limit \(8 of 8 live/, 'the role still says why it cannot launch');
+    assert.deepEqual(view.attention, [], `a full role whose sessions all carry work is a wait for a slot (host ${host})`);
+    assert.deepEqual(fleetStatus(view).attentionItems, []);
+    const status = buildMasterStatus({ work: [], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', { fleet: view });
+    assert.deepEqual(status.attentionItems.filter(entry => entry.subject === 'fleet'), []);
+    const instances = fleetFaults(saturatedFleet(), host);
+    assert.deepEqual(instances.filter(entry => entry.faultClass === 'configuration'), [], `the configuration detector records nothing: ${JSON.stringify(instances)}`);
+    assert.deepEqual(instances.filter(entry => entry.subject === 'fleet'), []);
+  }
+});
+
+test('unit:unaccounted-role-sessions-raise-capacity-not-configuration — a full role holding sessions with no work raises one line naming them, classified as capacity', () => {
+  for (const host of [null, 'machine-a']) {
+    const view = fleetView(saturatedFleet(2), clock, host);
+    assert.deepEqual(view.attention, ['role worker is at its concurrency limit (8 of 8 live) with 2 sessions carrying no work: worker-session-6 (claude-primary), worker-session-7 (claude-primary)']);
+    const [raised, ...rest] = fleetStatus(view).attentionItems;
+    assert.deepEqual(rest, []);
+    assert.deepEqual([raised.subject, raised.kind, raised.faultClass, raised.role, raised.human], ['fleet', 'fleet-capacity', 'capacity', 'master', false]);
+    assert.match(raised.next, /master registry session end ID --reason REASON/);
+    const instances = fleetFaults(saturatedFleet(2), host);
+    assert.deepEqual(instances.map(entry => [entry.kind, entry.faultClass, entry.subject]), [['fleet-capacity', 'capacity', 'fleet']], JSON.stringify(instances));
+  }
+  // A role at its limit by a master session (which never carries work) is accounted for.
+  let registry = saturatedFleet();
+  registry = applyRegistryMutation(registry, 'role.set', { role: { name: 'master', accounts: ['claude-primary'], concurrency: 1 }, reason: 'fixture' }, { actor: 'operator', at: iso(-hour) }).registry;
+  registry.sessions.push({ ...registry.sessions[0], id: 'master-session', role: 'master', work: null });
+  assert.deepEqual(fleetView(registry, clock).attention.filter(line => /role master/.test(line)), []);
+});
+
+test('unit:fault-classes — the fleet at-limit line is capacity; the genuine registry-configuration lines stay configuration', () => {
+  assert.deepEqual(faultClasses.filter(faultClass => (faultCatalogue[faultClass] as readonly string[]).includes('fleet-capacity')), ['capacity']);
+  assert.equal(faultClassOf('fleet'), 'configuration');
+  const view = { ...fleetView(saturatedFleet(1), clock), attention: ['role worker is at its concurrency limit (8 of 8 live) with 1 session carrying no work: s (a)', 'role approver is not configured; its sessions launch from local profiles until it is', 'idle serves no role; name it in a role or remove it'] };
+  assert.deepEqual(fleetStatus(view).attentionItems.map(entry => [entry.kind, entry.faultClass]), [['fleet-capacity', 'capacity'], ['fleet', 'configuration'], ['fleet', 'configuration']]);
+  // A paused role is the operator's own setting, still raised as before.
+  const paused = applyRegistryMutation(saturatedFleet(), 'role.set', { role: { name: 'producer', accounts: ['claude-primary'], concurrency: 0 }, reason: 'fixture' }, { actor: 'operator', at: iso(-hour) }).registry;
+  assert.ok(fleetView(paused, clock, 'machine-a').attention.includes('role producer is paused (concurrency 0)'));
+});
+
+test('manual:fault-class-configuration — GY-947\'s fleet instance (role worker at its limit, 8 of 8 live) recurs on the candidate as a capacity instance or none, never configuration', () => {
+  // The instance as GY-947 recorded it: fleet on fleet, "role worker is at its concurrency limit (8 of 8 live)", every session on work.
+  for (const idle of [0, 3]) for (const host of [null, 'machine-a']) {
+    const instances = fleetFaults(saturatedFleet(idle), host).filter(entry => entry.subject === 'fleet');
+    assert.deepEqual(instances.filter(entry => entry.faultClass === 'configuration'), [], `no configuration instance (idle ${idle}, host ${host}): ${JSON.stringify(instances)}`);
+    assert.ok(instances.every(entry => entry.faultClass === 'capacity'), JSON.stringify(instances));
+    assert.equal(instances.length, idle ? 1 : 0);
   }
 });
 
