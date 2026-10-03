@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { followUpCreateKey } from '../src/review-threads.js';
-import { bindReviewer, followUpExhaustedRetryMs, launchReview, reconcileReviews, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
+import { bindReviewer, followUpExhaustedRetryMs, keyReuseRefused, launchReview, reconcileReviews, saveReviewerProfile, stoppedFollowUpAttention } from '../src/reviewer.js';
 import { repeatedClientErrorLimit, retryStopAttention } from '../src/retry-stop.js';
 import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 import { classifyAttention, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
@@ -28,6 +28,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 //   while the second record's kept append named "at 23f92d8bbe37" and was refused on every retry
 //   until the retry stopped. The create path already resolved such a refusal (GY-598); the append did
 //   not. The stop line itself also carried no kind.
+// GY-1085 landed first and already classifies the non-exercising-proof and stopped-retry lines, so
+// their two tests are regression guards on that base; only the append test fails there (GY-1168).
 // The test is named for the proof it produces: manual:fault-class-unclassified.
 
 const nonExercising = [
@@ -125,7 +127,7 @@ test('manual:fault-class-unclassified — GY-73, GY-957: an append refused as a 
     const append = async (item: string, findings: { path: string | null; text: string }[], reason: string, key: string, parent?: boolean) => {
       sent.push(key);
       const fingerprint = digest({ id: item, followups: { findings, reason, ...(parent ? { parent: true } : {}) } }), receipt = receipts.get(key);
-      if (receipt) { if (receipt.fingerprint !== fingerprint) throw new Error(`Graphyard refused the follow-ups for ${item} (409): Idempotency key reused with different input`); return receipt.result; }
+      if (receipt) { if (receipt.fingerprint !== fingerprint) throw Object.assign(new Error(`Graphyard refused the follow-ups for ${item} (409): Idempotency key reused with different input`), { keyReuse: true }); return receipt.result; }
       const added = findings.filter(finding => !held.has(finding.text));
       for (const finding of added) held.add(finding.text);
       const result = { key: parent ? 'GY-1071' : item, added: added.length };
@@ -152,4 +154,13 @@ test('manual:fault-class-unclassified — GY-73, GY-957: an append refused as a 
     assert.ok(sent[1]!.startsWith(`${followUpCreateKey('owner/project', 501, reviewId)}:`) && sent[1] !== appendKey && sent[1]!.length <= 200, sent[1]);
     assert.equal(receipts.get(sent[1]!)!.result.added, 0, 'the findings the first append added are not added twice');
   } finally { await cleanup(); }
+});
+
+test('manual:fault-class-unclassified — a reused-key refusal is read from the response status and error field, not the composed message (GY-1168)', () => {
+  const error = 'Idempotency key reused with different input';
+  assert.equal(keyReuseRefused(409, { error }), true);
+  assert.equal(keyReuseRefused(400, { error }), false, 'another status');
+  assert.equal(keyReuseRefused(409, { error: 'GY-1071 is not an open follow-up item' }), false, 'another 409');
+  assert.equal(keyReuseRefused(409, { error: `${error}; retry` }), false, 'the error field, exactly');
+  assert.equal(keyReuseRefused(409, null), false, 'an unreadable body');
 });
