@@ -6,7 +6,7 @@
 // The reviewer's minted token never touches GraphQL: on 2026-09-23 its thread read failed, the
 // failure was swallowed, and the reviewer approved without judging or resolving any thread.
 import type { ChildRun } from './child-runner.js';
-import type { FollowUpEntry } from './model/machine-backlog.js';
+import { appendedDescription, followUpEntriesMax, type FollowUpEntry } from './model/machine-backlog.js';
 import { plannedFilesMax } from './model/scope.js';
 
 /** An unresolved review thread as the reviewer's launch prompt names it: an input to the verdict, not a merge blocker. */
@@ -286,7 +286,12 @@ export type CreateFollowUpItem = (item: FollowUpItem, key: string) => Promise<{ 
  * Appends one approval's findings to the parent's open follow-up item (GY-402), idempotent on `key`:
  * the control plane keeps only those the item does not already hold, by path and finding text.
  */
-export type AppendFollowUpFindings = (item: string, findings: FollowUpEntry[], reason: string, key: string) => Promise<{ key: string; added: number }>;
+/**
+ * Appends one approval's findings to `item`. With `parent`, `item` is the approved item itself and the
+ * control plane places them (GY-845): on its open follow-up item, else held on it until it ships; the
+ * key returned is the item that took them, the parent's own key when it holds them.
+ */
+export type AppendFollowUpFindings = (item: string, findings: FollowUpEntry[], reason: string, key: string, parent?: boolean) => Promise<{ key: string; added: number }>;
 /**
  * The findings one approval files, as the parent's follow-up item holds them: each thread's path and
  * excerpt (its URL kept as where it was raised), then each finding with no thread.
@@ -425,6 +430,25 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
 }
 
 /**
+ * The one follow-up item a delivered parent's held findings become (GY-845): every finding its
+ * approvals named while it had not shipped, depending on nothing, since the parent has landed.
+ */
+export function shippedFollowUpItem(parent: { key: string; pr?: number | null; mergeSha?: string | null }, findings: FollowUpEntry[]): FollowUpItem {
+  const scopes = coalescedScope(findings.map(finding => finding.path).filter((path): path is string => !!path).map(plannedScope).filter((path): path is string => !!path));
+  const intro = `The independent reviewer approved ${parent.key} with every acceptance criterion met and judged these ${findings.length} finding${findings.length === 1 ? '' : 's'} FOLLOW-UP: beyond the item's criteria. They were held on ${parent.key} until it shipped${parent.mergeSha ? ` (merge ${parent.mergeSha.slice(0, 12)})` : ''}, and filed here then.`;
+  return {
+    title: `Follow-ups from the approved review of ${parent.key}${parent.pr ? ` (PR #${parent.pr})` : ''}`.slice(0, 200),
+    description: appendedDescription(intro, findings, 'Findings:'),
+    type: 'chore', priority: 2, dependencies: [],
+    criteria: [{ id: 'AC-1', text: `Each follow-up listed in the description is addressed in code, or declined with a recorded reason.`, proofs: [followUpTriageProof] }],
+    producerProofs: [followUpTriageProof],
+    plannedFiles: scopes.slice(0, plannedFilesMax),
+    reason: `Follow-ups held on ${parent.key} until it shipped`,
+    origin: { reviewFollowUps: { parent: parent.key, findings: findings.slice(0, followUpEntriesMax) } },
+  };
+}
+
+/**
  * File the threads an approval named as follow-up, with the findings it wrote on `Follow-up finding:`
  * lines: one backlog item for all of them, then a reply
  * naming the item on each thread and its resolution. Only named threads are touched, and only those
@@ -435,7 +459,8 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * the create is idempotent on the approval, and the payload of an attempted create is kept in `store` before it
  * is sent and repeated verbatim) and replies to no thread twice: before replying, the thread
  * is read for a reply already naming the item, so a reply whose record was lost is not posted again. Runs outside every
- * coordination transaction.
+ * coordination transaction. `existing` may be the approved item's own key (GY-845): the control plane
+ * then places the findings on its open follow-up item, or holds them on it until it ships.
  */
 export async function fileFollowUpThreads(input: { repository: string; key: string; workId: string; pr: number; sha: string; reviewId: number; reviewer: string; previous?: FollowUpFiling; listed?: string[]; aliases?: ThreadAliases; store?: FollowUpCreateStore; existing?: string; append?: AppendFollowUpFindings }, run: ChildRun, create: CreateFollowUpItem, now: Date): Promise<FollowUpFiling> {
   const previous = input.previous;
@@ -499,7 +524,7 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
     }
     if (appendTo) {
       if (!input.append) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the findings of review ${input.reviewId} are owed to ${appendTo}, and this pass cannot append to it` };
-      try { item = (await input.append(appendTo, followUpEntriesOf(threads, findings), payload.reason, `${createKey.slice(0, 193)}:append`)).key; }
+      try { item = (await input.append(appendTo, followUpEntriesOf(threads, findings), payload.reason, `${createKey.slice(0, 193)}:append`, appendTo === input.key)).key; }
       catch (error) {
         // The item was closed or delivered since it was chosen: the findings are filed as the parent's new follow-up item.
         if (!(error as { notOpen?: boolean })?.notOpen) return { ...base, named, threads, findings, replied: [], resolved: [], refused, classified: true, failure: `the follow-ups could not be appended to ${appendTo}: ${firstLine(error)}` };
@@ -519,7 +544,9 @@ export async function fileFollowUpThreads(input: { repository: string; key: stri
       // A reply posted by an attempt whose record was lost is recognised on the thread, never repeated.
       if (!replied.includes(thread.id) && await hasFollowUpReply(thread.id, item, run)) replied.push(thread.id);
       if (!replied.includes(thread.id)) {
-        const body = `${followUpReplyPrefix(item)} the independent review approved ${input.key} at ${input.sha.slice(0, 12)} with every acceptance criterion met and judged this finding beyond them. Graphyard resolves this thread; the finding is tracked in ${item}.`;
+        // Held on the parent (GY-845): the finding waits on it and becomes its follow-up item once it ships.
+        const tracked = item === input.key ? `the finding is held on ${item} and filed as its follow-up item once ${item} ships` : `the finding is tracked in ${item}`;
+        const body = `${followUpReplyPrefix(item)} the independent review approved ${input.key} at ${input.sha.slice(0, 12)} with every acceptance criterion met and judged this finding beyond them. Graphyard resolves this thread; ${tracked}.`;
         const reply = JSON.parse(String(await run('gh', ['api', 'graphql', '-f', `query=${replyMutation}`, '-f', `thread=${thread.id}`, '-f', `body=${body}`])));
         if (!reply?.data?.addPullRequestReviewThreadReply?.comment?.id) throw new Error('GitHub did not report the reply as posted');
         replied.push(thread.id);
