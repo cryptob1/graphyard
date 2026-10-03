@@ -20,6 +20,7 @@ import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
 import { decompositionHold, decompositionSettings } from '../decomposition.js';
 import { decompositionStep } from '../decomposition-step.js';
+import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from './dispatch-failures.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -198,6 +199,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
+    // GY-1078: an item whose dispatches keep failing for one cause is not dispatched again; the
+    // cause is recorded as its blocker, and a block the control plane refused is asked for again.
+    const failing = state.dispatchFailures[item.id];
+    if (failing && failing.count >= dispatchFailureBlockAfter) { performed.push(...await blockRepeatedFailure(item)); return; }
     const free = await effects.agents();
     // After an attempt ended as reblocked (GY-867), a profile on another runtime is tried first.
     const order = preferOtherRuntime(health, runtimeToAvoid(item));
@@ -221,6 +226,27 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const beside = hotBeside(item, hot);
     cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside));
   }) === 'stop') break; });
+
+  /**
+   * GY-1078: the item's dispatches failed `dispatchFailureBlockAfter` times in a row for one cause.
+   * The cause becomes the item's blocker, so neither this loop nor an executor dispatches it again
+   * until an operator clears it; the run is then forgotten, and a later failure starts a new one.
+   * Without the effect, or when the control plane refuses, the run stands and holds the item here;
+   * a refused block is asked for again only after `dispatchBlockRetryMs`, never every cycle. The
+   * run keeps one escalation record, whose attempts count the refusals.
+   */
+  async function blockRepeatedFailure(item: Work): Promise<DaemonAction[]> {
+    const run = state.dispatchFailures[item.id]!, reason = dispatchFailureBlocker(run), key = `escalation:dispatch-failures:${item.id}:${run.firstAt}`;
+    const previous = state.actions[key];
+    const note = async (outcome: 'done' | 'failed' | 'waiting', detail: string, always = false) => always || detailChanged(previous, detail)
+      ? [await record(state, key, { kind: 'escalation', work: item.key, principal: null, epoch: item.epoch, state: outcome, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)] : [];
+    if (!effects.blockDispatch) return note('waiting', `${reason}. This loop cannot record a blocker, so it holds ${item.key} itself until it restarts`);
+    if (previous?.state === 'failed' && now() - Date.parse(previous.at) < dispatchBlockRetryMs(previous.attempts)) return [];
+    try { await effects.blockDispatch(item, reason); }
+    catch (error) { return note('failed', `Could not record the blocker on ${item.key}, so the loop holds it and asks again after ${dispatchBlockRetryMs((previous?.attempts ?? 0) + 1) / 60_000} minutes: ${message(error)}. ${reason}`, true); }
+    delete state.dispatchFailures[item.id];
+    return note('done', `Recorded the blocker on ${item.key}: ${reason}. It is dispatched again once the blocker is cleared (graphyard unblock ${item.key} REASON)`);
+  }
 
   /** What a dispatch that starts on a hot file adds to its record, so master status can show the contention (GY-882). */
   function hotspotNote(beside: Pick<Hotspot, 'file'> & { beside: string[] } | null) {
@@ -246,16 +272,17 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         // The session is registered before its runtime starts (GY-172), where every Graphyard reader
         // looks, and its pane written once it has: watching this specific agent never means asking
         // this loop to relay its pane id, and the session report observes it from its first tick.
-        await registeredLaunch(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
+        const launched = await registeredLaunch(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
           id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
           ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
           subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string } | undefined,
+        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[] } | undefined,
         launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
         clearProfileFailure(state, current.profile);
+        delete state.dispatchFailures[item.id];
         // The file comes before the claimant keys, so the 2000-character detail bound trims a long
         // key list and never the file it contends on; a cold dispatch records nothing new here.
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       } catch (error) {
         // Another dispatcher — an executor, or a hand dispatch — holds the profile or the item
@@ -271,7 +298,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           return;
         }
         recordProfileFailure(state, current.profile, message(error), now());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)} (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        if (run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }
     }

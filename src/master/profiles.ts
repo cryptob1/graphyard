@@ -282,8 +282,7 @@ export const masterRunSchema = z.object({
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
-  // An account whose provider usage reached this percentage of any window is skipped at launch:
-  // a session started just below a hard limit would stall mid-task.
+  // An account whose usage reached this percentage of any window is skipped at launch: a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
   // The runtime of each narrow role (GY-169): `herdr`, a terminal session (what an absent setting
   // means), or `pi`, the headless runner (src/runner) — the approver, and the producer for the
