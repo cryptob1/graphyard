@@ -77,7 +77,7 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
   const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
   const body = review ? review.body : observation.agentReview?.reason;
   const reviewId = review ? review.id ?? null : observation.agentReview?.verdictId ?? null;
-  const blocking = blockingFindings(body), round = reviewRound(work);
+  const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
   const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
   const findings = followUpFindingsOf(body);
   const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };

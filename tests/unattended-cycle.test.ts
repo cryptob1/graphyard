@@ -14,6 +14,7 @@ import type { Work } from '../src/model.js';
 import { decideScopeRequest } from '../src/model/scope.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { cappedEscalationKey, cappedFilingKey } from '../src/daemon/cycle-review-cap.js';
+import { observedReviewBody } from '../src/review-cap.js';
 
 /**
  * GY-84: the loop drives every routine decision unattended.
@@ -1032,13 +1033,13 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
   assert.equal(master.reviewRoundCap, undefined, 'an installation that sets no cap gets the default of three rounds');
 
   /** An item already three rework rounds in, whose next head draws the reviewer App's change request with this body. */
-  const third = (key: string, body: string, options: Parameters<typeof plane>[1] = {}) => {
+  const third = (key: string, body: string, options: Parameters<typeof plane>[1] = {}, rereview?: string) => {
     const scripts: Script[] = [{ key, rounds: ['changes'] }];
     const simulation = plane(scripts, { host, ...options });
     const item = simulation.work[0];
     item.pipeline = { attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: 3, interventions: { blocked: 0, requirements: 0 } };
     // GitHub reports the review with its id and body, which the observation keeps for a change request.
-    const observe = () => { for (const review of item.observation?.reviews ?? []) if (review.state === 'CHANGES_REQUESTED' && review.id === undefined) Object.assign(review, { id: 9001, body }); };
+    const observe = () => { for (const review of item.observation?.reviews ?? []) if (review.state === 'CHANGES_REQUESTED' && review.id === undefined) Object.assign(review, { id: 9001, ...observedReviewBody(body) }); };
     const filed: { work: string; findings: { path: string | null; text: string }[]; reason: string; key: string }[] = [], withdrawn: { work: string; reviewId: number; message: string }[] = [];
     const effects = simulation.effects({
       fileReviewFollowUps: async (work, findings, reason, idempotency) => { filed.push({ work: work.key, findings, reason, key: idempotency }); return { key: work.key, added: findings.length }; },
@@ -1046,9 +1047,11 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
         withdrawn.push({ work: work.key, reviewId, message });
         // GitHub dismisses it, the review request is answered afresh on the same head, and the
         // reviewer approves it, its findings now follow-ups; CI has passed on the head meanwhile.
+        // A `rereview` body is instead the re-review requesting changes again on the same head.
         scripts[0].rounds = ['pass'];
         const target = simulation.find(work.id);
-        target.observation = { ...target.observation!, at: simulation.iso(), reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: target.candidate!.sha, state: 'APPROVED', submittedAt: simulation.iso() }],
+        const again = rereview === undefined ? { state: 'APPROVED' } : { state: 'CHANGES_REQUESTED', id: reviewId + 1, ...observedReviewBody(rereview) };
+        target.observation = { ...target.observation!, at: simulation.iso(), reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: target.candidate!.sha, submittedAt: simulation.iso(), ...again }],
           checks: target.policy.checks.map(name => ({ name, result: 'success', appId: 1234 })) };
         simulation.recompute(target);
       },
@@ -1087,6 +1090,22 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
   assert.equal(escalated.state.actions[cappedEscalationKey(blocking.item, blocking.item.candidate!.sha)]?.detail, raised[0].detail);
   assert.match(raised[0].detail, /GY-1202 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding on [0-9a-f]{12}: AC-1 is not met — the widget skips the last frob\./);
   assert.match(raised[0].detail, /requests no further rework for GY-1202: an independent approver decides .*graphyard master decide GY-1202 rework REASON/);
+
+  // A BLOCKING: line past the observation's body bound — after a long verdict — still escalates, never filed or withdrawn.
+  const late = third('GY-1204', `${'The judgement of each criterion, at length. '.repeat(60)}\n\nBLOCKING: AC-2 is not met — the escalation never fires.`);
+  const lateRun = await drive(late, master, 8);
+  assert.deepEqual([late.filed, late.withdrawn, late.simulation.decisions.get(late.item.id) ?? []], [[], [], []]);
+  assert.match(lateRun.state.actions[cappedEscalationKey(late.item, late.item.candidate!.sha)]?.detail ?? '', /names a blocking finding on [0-9a-f]{12}: AC-2 is not met — the escalation never fires\./);
+
+  // A head is withdrawn once: when its re-review requests changes again, the second request is escalated, not filed and withdrawn again.
+  const repeat = third('GY-1205', 'The helper could be named more clearly.', {}, 'The helper could still be named more clearly.');
+  const repeated = await drive(repeat, master, 12);
+  assert.deepEqual([repeat.filed.length, repeat.withdrawn.map(entry => entry.reviewId)], [1, [9001]], 'filed and withdrawn once only');
+  assert.equal(repeat.item.epoch, 1);
+  assert.deepEqual(repeat.simulation.decisions.get(repeat.item.id) ?? [], [], 'and no rework requested');
+  const again = repeated.performed.filter(action => action.kind === 'escalation' && action.work === 'GY-1205');
+  assert.equal(again.length, 1, steps(repeated.performed).join(', '));
+  assert.match(again[0].detail, /change request 9002 on [0-9a-f]{12} names no BLOCKING: finding, after change request 9001 on the same head was already filed as follow-ups and withdrawn/);
 
   // The cap is configuration: at reviewRoundCap 4, round 4 is an ordinary round and the change request is reworked as before.
   const widened: MasterConfig = { ...master, reviewRoundCap: 4 };

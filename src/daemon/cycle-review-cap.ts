@@ -8,7 +8,8 @@ import type { Work } from '../model.js';
 /** How many times the step tries to file and withdraw one change request before it escalates instead. */
 export const maxCappedFilingAttempts = 5;
 /** The cursor key of one capped change request's filing: per head and review, so a later request on the same head is its own. */
-export const cappedFilingKey = (work: Pick<Work, 'id'>, capped: Pick<CappedReview, 'sha' | 'reviewId'>) => `review-cap:${work.id}:${capped.sha}:${capped.reviewId}`;
+export const cappedFilingKey = (work: Pick<Work, 'id'>, capped: Pick<CappedReview, 'sha' | 'reviewId'>) => `${cappedHeadKey(work, capped.sha)}${capped.reviewId}`;
+const cappedHeadKey = (work: Pick<Work, 'id'>, sha: string) => `review-cap:${work.id}:${sha}:`;
 /** The cursor key of the escalation a blocking finding past the cap raises: one per head, re-recorded only when its findings change. */
 export const cappedEscalationKey = (work: Pick<Work, 'id'>, sha: string) => `escalation:review-cap:${work.id}:${sha}`;
 
@@ -27,7 +28,9 @@ export function cappedEscalation(work: Pick<Work, 'key'>, capped: CappedReview, 
  * or that Graphyard cannot withdraw, is escalated for an independent approver's decision. The
  * routine decisions request no rework for either (`neededDecision`). Each request is filed once,
  * keyed on its head and review id; a failed filing is retried with backoff and escalated after
- * `maxCappedFilingAttempts`.
+ * `maxCappedFilingAttempts`. A head is withdrawn at most once: a later change request on the same
+ * head, from its re-review, is escalated instead, so a reviewer that keeps requesting changes
+ * cannot keep the head re-reviewing.
  */
 export async function reviewCapStep(cycle: Cycle) {
   const { config, state, effects, performed, isolate, now } = cycle;
@@ -42,6 +45,10 @@ export async function reviewCapStep(cycle: Cycle) {
     if (capped.kind === 'escalate') return escalate();
     const key = cappedFilingKey(item, capped), previous = state.actions[key];
     if (previous?.state === 'done') return;
+    // A head is withdrawn once: its re-review requesting changes again escalates rather than repeating the filing (GY-1118 review).
+    const head = cappedHeadKey(item, capped.sha);
+    const earlier = Object.keys(state.actions).find(other => other !== key && other.startsWith(head) && state.actions[other]?.state === 'done');
+    if (earlier) return escalate(`${capped.reason}, after change request ${earlier.slice(head.length)} on the same head was already filed as follow-ups and withdrawn; its re-review requested changes again, so it is not withdrawn a second time`);
     if (!effects.fileReviewFollowUps || !effects.withdrawReview)
       return escalate(`${capped.reason}, and this loop runs without the operator-agent identity or reviewer App it needs to file the findings and withdraw the request`);
     if (previous && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; filing its findings and withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);

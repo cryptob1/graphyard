@@ -10,7 +10,7 @@ import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-s
 import { bindReviewer, launchReview, readReviewLedger, reviewHistory, reviewPrompt, reviewRetryPrompt, reviewRoundCap, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
+import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, observedReviewBody, reviewBodyMax, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
 import { cappedReview, neededDecision } from '../src/daemon/decisions.js';
 import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
 import { routedScopeStatus } from '../src/cli/owed-report.js';
@@ -167,6 +167,18 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   assert.deepEqual(blockingFindings('Nothing here is BLOCKING: it is all follow-up material.'), [], 'the word in prose names no finding');
   assert.deepEqual(followUpFindingsOf('BLOCKING: AC-1 is not met\n\nRename the helper.\n- Add a table test.\n- Trim the comment.'), ['Rename the helper.', '- Add a table test.', '- Trim the comment.']);
 
+  // The verdict's own scaffolding — preamble, headings, per-criterion judgements, the classification and thread-summary lines — is no finding.
+  const verdict = 'Review of #597 at head abc for GY-64.\n\n## Acceptance criteria\n\n- **[AC-1] MET.** The widget counts.\n- **[DOCS] MET.** Documented.\n\nRename the helper.\n\n- BLOCKING findings: none\n\nResolved threads: none\nFollow-up threads: none\nOverridden threads: none';
+  assert.deepEqual(followUpFindingsOf(verdict), ['Rename the helper.']);
+  // Follow-up finding: lines, when the reviewer names them, are the findings and nothing else is.
+  assert.deepEqual(followUpFindingsOf(`${verdict}\n\nFollow-up finding: src/a.ts:1 — trim the comment.\n- **Follow-up finding:** add a table test.`), ['src/a.ts:1 — trim the comment.', 'add a table test.']);
+  // A long verdict keeps its BLOCKING: and Follow-up finding: lines however late they come, and the blocking ones are read from the whole body.
+  const long = `${'Judgement prose. '.repeat(200)}\n\nFollow-up finding: trim the comment.\nBLOCKING: AC-1 is not met past character ${reviewBodyMax}`;
+  const kept = observedReviewBody(long);
+  assert.ok(long.length > reviewBodyMax && kept.body.length <= reviewBodyMax);
+  assert.deepEqual([kept.blocking, blockingFindings(kept.body), followUpFindingsOf(kept.body)], [[`AC-1 is not met past character ${reviewBodyMax}`], [`AC-1 is not met past character ${reviewBodyMax}`], ['trim the comment.']]);
+  assert.deepEqual(observedReviewBody('Rename the helper.'), { body: 'Rename the helper.' }, 'a short body is kept whole, with no blocking field when it names none');
+
   assert.equal(defaultReviewRoundCap, 3);
   assert.deepEqual([0, 1, 2, 3].map(rounds => reviewRoundStatus({ pipeline: pipeline(rounds) }, 3)), [{ round: 1, cap: 3, capped: false }, { round: 2, cap: 3, capped: false }, { round: 3, cap: 3, capped: false }, { round: 4, cap: 3, capped: true }]);
   const row = { key: 'GY-64', attention: null, attentionOwner: null };
@@ -193,6 +205,10 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   assert.match(blocking.reason, /GY-64 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding/);
   assert.equal(neededDecision(changed(3, 'BLOCKING: AC-1 is not met'), config), null);
   assert.match(cappedEscalation({ key: 'GY-64' }, blocking), /an independent approver decides whether the finding is blocking — graphyard master decide GY-64 rework REASON/);
+  // A blocking finding the observation read from the whole body escalates even when the kept body no longer shows it.
+  const cut = changed(3, 'Rename the helper.');
+  cut.observation!.reviews[0].blocking = ['AC-1 is not met'];
+  assert.deepEqual([cappedReview(cut, config)!.kind, cappedReview(cut, config)!.blocking], ['escalate', ['AC-1 is not met']]);
   // A request Graphyard cannot withdraw as its reviewer App — a person's — escalates rather than being filed.
   assert.equal(cappedReview(changed(3, 'Rename the helper.', 'a-person'), config)!.kind, 'escalate');
   assert.equal(cappedReview(changed(3, 'Rename the helper.'), { ...config, reviewer: undefined })!.kind, 'escalate');

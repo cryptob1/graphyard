@@ -30,8 +30,15 @@ export function withReviewRounds<R extends { key: string }>(rows: R[], work: rea
 /** How much of a change request's body an observation keeps: enough to file its findings, bounded like a decision reason. */
 export const reviewBodyMax = 2000;
 /** The line that names one blocking finding in a change request: `BLOCKING: <finding>`, optionally as a list item. */
-const blockingLine = /^\s*(?:[-*]\s*)?\**BLOCKING\**\s*(?:finding)?\s*[:\-–—]\s*(.+)$/i;
+const blockingLine = /^\s*(?:[-*]\s*)?\**BLOCKING\**\s*(?:finding)?\s*[:\-–—]\**\s*(.+)$/i;
+/** The line that names one non-blocking finding: `Follow-up finding: <finding>`, as the reviewer prompt asks for it. */
+const followUpLine = /^\s*(?:[-*]\s*)?\**FOLLOW-?UP\**\s*(?:finding)?\**\s*[:\-–—]\**\s*(.+)$/i;
 const noneNamed = /^(none|n\/a|no blocking findings?)\.?$/i;
+/**
+ * The verdict's own scaffolding, which is no finding: headings, the per-criterion judgements, the
+ * "Review of #N" preamble, the findings-classification lines and the closing thread summary.
+ */
+const scaffold = /^(?:#{1,6}\s|(?:[-*]\s*)?\**\[(?:AC-\d+|DOCS)\]|(?:[-*]\s*)?\**(?:Judgement|BLOCKING findings?|Open review threads|Resolved threads|Follow-up threads|Overridden threads)\**\s*:|Review of (?:pull request )?#\d+)/i;
 /**
  * The blocking findings a change request names, one per `BLOCKING:` line; a line naming none ("BLOCKING: none")
  * names nothing. Prose that merely mentions the word is not a finding: the reviewer is told the form at the cap.
@@ -41,11 +48,29 @@ export function blockingFindings(body: unknown): string[] {
   return body.split('\n').map(line => blockingLine.exec(line)?.[1]?.trim() ?? '').filter(text => text && !noneNamed.test(text)).map(text => text.slice(0, 300)).slice(0, 10);
 }
 /**
- * The non-blocking findings of a change request, as the follow-up batch records them: each list
- * item or paragraph that is not a `BLOCKING:` line, bounded; the whole body when it has no structure.
+ * The non-blocking findings of a change request, as the follow-up batch records them: its
+ * `Follow-up finding:` lines when it has any; otherwise each list item or paragraph that is neither
+ * a `BLOCKING:` line nor the verdict's scaffolding, bounded; the whole body when it has no structure.
  */
 export function followUpFindingsOf(body: unknown, limit = 20): string[] {
   if (typeof body !== 'string' || !body.trim()) return [];
-  const blocks = body.split(/\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)/).map(block => block.trim()).filter(block => block && !blockingLine.test(block.split('\n')[0]!));
+  const named = body.split('\n').map(line => followUpLine.exec(line)?.[1]?.trim() ?? '').filter(text => text && !noneNamed.test(text));
+  if (named.length) return named.map(text => text.slice(0, 2000)).slice(0, limit);
+  const blocks = body.split(/\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)/).map(block => block.trim()).filter(block => block && !blockingLine.test(block.split('\n')[0]!) && !scaffold.test(block));
   return blocks.map(block => block.slice(0, 2000)).slice(0, limit);
+}
+/**
+ * What an observation keeps of a change request's body (github.ts): the whole body when it fits
+ * `reviewBodyMax`; otherwise its `BLOCKING:` and `Follow-up finding:` lines first, then the rest,
+ * cut to the bound, so a finding named late in a long verdict is never cut off. `blocking` is
+ * read from the whole body before any cut (GY-1118 review: a BLOCKING: line past character 2000
+ * was classed a follow-up).
+ */
+export function observedReviewBody(body: string): { body: string; blocking?: string[] } {
+  const blocking = blockingFindings(body);
+  const kept = body.length <= reviewBodyMax ? body : (() => {
+    const lines = body.split('\n'), named = lines.filter(line => blockingLine.test(line) || followUpLine.test(line));
+    return [...named, '', ...lines.filter(line => !named.includes(line))].join('\n').slice(0, reviewBodyMax);
+  })();
+  return { body: kept, ...(blocking.length ? { blocking } : {}) };
 }
