@@ -47,6 +47,8 @@ class Repository {
   get main() { return this.mainTip; }
   set main(tip: string) { this.mainTip = tip; for (const adapter of this.adapters) adapter.noteWebhook('push', { ref: 'refs/heads/main' }); }
   requests: string[] = [];
+  /** Scratch branches the control plane merges a tip on before moving the pull request's branch (GY-1087). */
+  scratch = new Map<string, string>();
   commit(message: string, tree: Tree, parents: string[]) {
     const sha = hash(`commit:${message}:${JSON.stringify(tree)}:${parents.join(',')}`);
     this.commits.set(sha, { tree, parents, message });
@@ -123,11 +125,17 @@ class Repository {
     github.request = async (path: string, method = 'GET', body?: any) => {
       this.requests.push(`${method} ${path}`);
       if (path === '/merges' && method === 'POST') {
-        const pr = [...this.pulls.values()].find(entry => entry.head.ref === body.base)!;
-        if (this.contains(body.head, pr.head.sha)) return null;
-        const merged = this.merge(body.commit_message, pr.head.sha, body.head);
+        const pr = [...this.pulls.values()].find(entry => entry.head.ref === body.base), at = pr ? pr.head.sha : this.scratch.get(body.base)!;
+        if (this.contains(body.head, at)) return null;
+        const merged = this.merge(body.commit_message, at, body.head);
         if (merged === 'conflict') throw new Refusal('GitHub POST /merges failed (409)', 502);
-        pr.head.sha = merged; return { sha: merged };
+        if (pr) pr.head.sha = merged; else this.scratch.set(body.base, merged);
+        return { sha: merged };
+      }
+      if (method === 'PATCH' && path.startsWith('/git/refs/heads/')) {
+        const name = decodeURIComponent(path.slice('/git/refs/heads/'.length)), pr = [...this.pulls.values()].find(entry => entry.head.ref === name);
+        if (pr) pr.head.sha = body.sha; else this.scratch.set(name, body.sha);
+        return { object: { sha: body.sha } };
       }
       if (method !== 'GET') return { id: 12 };
       const [route, query = ''] = path.split('?'), params = new URLSearchParams(query);
