@@ -1,4 +1,5 @@
 import { documentationGlobMatches } from './documentation-glob.js';
+import type { WorkOrigin } from './interventions.js';
 import { companionGround } from './scope-companions.js';
 export { companionGround, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
@@ -127,12 +128,12 @@ export interface ScopeImplication { scope: string; kind: 'criteria' | 'documenta
 export function impliedScopes(
   criteria: readonly ScopeCriterion[],
   documentation: readonly string[] = documentationScopes,
-  origin?: any,
+  origin?: WorkOrigin | null,
   description?: string | null,
 ): ScopeImplication[] {
   const isFollowUp = !!origin?.reviewFollowUps;
   const followUpPaths = isFollowUp ? [
-    ...(origin?.reviewFollowUps?.findings ?? []).flatMap((finding: any) => [
+    ...(origin?.reviewFollowUps?.findings ?? []).flatMap(finding => [
       ...(finding.path ? [finding.path] : []),
       ...namedPaths(finding.text),
     ]),
@@ -176,7 +177,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null; origin?: any; description?: string | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null; origin?: WorkOrigin | null; description?: string | null },
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {

@@ -19,7 +19,7 @@ import type { Closure } from './closure.js';
 import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
-import { workOriginSchema } from './interventions.js';
+import { workOriginSchema, type WorkOrigin } from './interventions.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
@@ -279,7 +279,7 @@ export interface PlannedFilesDerivation {
  * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
 export function derivePlannedFiles(
-  item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: any; description?: string | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
   tree: ReadonlySet<string>,
 ): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];

@@ -2,12 +2,11 @@ import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
 import { followUpEntries, followUpShipSchema, mergeFollowUpEntries, openFollowUpItem, appendedDescription, type FollowUpEntry } from '../model/machine-backlog.js';
 import { followUpParentMigrationEvent, followUpShipReceiptKey, foldUnshippedFollowUps, shippedFollowUpsOwed } from '../model/followups-held.js';
-import { shippedFollowUpItem } from '../review-threads.js';
+import { coalescedScope, plannedScope, shippedFollowUpItem } from '../review-threads.js';
 import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
-import { impliedModuleCluster } from '../model/scope-companions.js';
 import { namedPaths, plannedFilesMax } from '../model/scope.js';
 import type { Services } from './routes.js';
 
@@ -30,9 +29,8 @@ export async function appendToItem(services: Services, db: Db, actor: Principal,
   if (added.length) {
     work.origin = { ...work.origin, reviewFollowUps: { parent, findings } };
     work.description = appendedDescription(work.description ?? '', added, heading);
-    const addedPaths = incoming.flatMap(f => [...(f.path ? [f.path] : []), ...namedPaths(f.text)]);
-    const cluster = impliedModuleCluster(addedPaths, incoming.map(f => f.text).join(' '));
-    work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...addedPaths, ...cluster])].slice(0, plannedFilesMax);
+    const addedPaths = incoming.flatMap(f => [...(f.path ? [f.path] : []), ...namedPaths(f.text)]).map(plannedScope).filter((p): p is string => !!p);
+    work.plannedFiles = coalescedScope([...(work.plannedFiles ?? []), ...addedPaths]).slice(0, plannedFilesMax);
     services.engine.evaluate(work, all, now);
     await recordDispatch(services, db, work, now);
     await save(db, work, actor.id, 'followups.appended', now, { parent, added: added.length, ...details });

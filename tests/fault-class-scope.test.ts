@@ -1,13 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { Work } from '../src/model.js';
+import type { WorkOrigin } from '../src/model/interventions.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { decideScopeRequest, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
-import { impliedModuleCluster } from '../src/model/scope-companions.js';
+import { peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
+import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
 import { derivePlannedFiles } from '../src/model/work.js';
+import { coalescedScope, plannedScope } from '../src/review-threads.js';
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -36,6 +41,15 @@ const config = (): MasterConfig => masterConfigSchema.parse({ version: 1, url: '
 const baseline = 'tests/helpers/timing-baseline.json';
 const minute = 60_000;
 
+const root = fileURLToPath(new URL('..', import.meta.url));
+const readFile = async (filePath: string): Promise<string | null> => {
+  try {
+    return await fs.readFile(path.join(root, filePath), 'utf8');
+  } catch {
+    return null;
+  }
+};
+
 interface Instance {
   id: string; subject: string; observedAt: string; epoch: number; requestedAt: string; paths: string[]; plannedFiles: string[];
   /** When the rule had refused the ask before the loop observed it: the instant of that refusal. */
@@ -43,7 +57,7 @@ interface Instance {
   /** How the product settled it afterwards, from the ledger. */
   settled: string;
   criteria?: { id: string; text: string; proofs: string[] }[];
-  origin?: any;
+  origin?: WorkOrigin;
   description?: string;
   reason?: string;
 }
@@ -159,35 +173,73 @@ test('manual:fault-class-scope — a request the product does not settle still s
   assert.deepEqual(scopeFaults(narrowing, instances[8].observedAt).map(fault => fault.kind), ['scope-request']);
 });
 
-test('manual:fault-class-scope — GY-1116: peer modules, server wiring and importing tests are granted with no approver', () => {
-  const gy1116Asks = instances.filter(entry => ['GY-1115', 'GY-1048', 'GY-794'].includes(entry.subject));
-  assert.equal(gy1116Asks.length, 3);
-  for (const entry of gy1116Asks) {
-    const verdict = decideScopeRequest(standing(entry), { paths: entry.paths });
-    assert.equal(verdict.state, 'approved', `${entry.id}: ${verdict.reason}`);
-  }
+test('manual:fault-class-scope — GY-1116: follow-up items with finding text paths are approved by decideScopeRequest', () => {
+  const gy1048 = instances.find(entry => entry.subject === 'GY-1048')!;
+  const verdict1048 = decideScopeRequest(standing(gy1048), { paths: gy1048.paths });
+  assert.equal(verdict1048.state, 'approved', `GY-1048: ${verdict1048.reason}`);
+
+  const gy794 = instances.find(entry => entry.subject === 'GY-794')!;
+  const verdict794 = decideScopeRequest(standing(gy794), { paths: gy794.paths });
+  assert.equal(verdict794.state, 'approved', `GY-794: ${verdict794.reason}`);
 });
 
-test('manual:fault-class-scope — GY-1116: promoteFollowUp and derivePlannedFiles plan the implied module cluster up front', () => {
-  // Test promoteFollowUp / impliedModuleCluster:
-  const finding1048 = {
-    path: 'src/store/tables/work.ts',
-    text: 'events_retro_id must not be built by plain CREATE INDEX inside the boot migration transaction (write-blocking on a ~1.26M-row events table). The index moves to a CREATE INDEX CONCURRENTLY run outside the transaction after store.init, started from the server entry src/server/main.ts; two replicas are kept from building it at once by a new id in the advisory-lock registry src/store/locks.ts.'
-  };
-  const findingPaths1048 = [finding1048.path, ...namedPaths(finding1048.text)];
-  const cluster1048 = impliedModuleCluster(findingPaths1048, finding1048.text);
-  assert.ok(cluster1048.includes('src/server/main.ts'), 'cluster includes server/main.ts');
-  assert.ok(cluster1048.includes('src/store/locks.ts'), 'cluster includes store/locks.ts');
+test('manual:fault-class-scope — GY-1116: peer modules are granted by automaticScopeGrounds via peerModuleGround', async () => {
+  const gy1115 = instances.find(entry => entry.subject === 'GY-1115')!;
+  const work = standing(gy1115);
+  const result = await automaticScopeGrounds(work, work.scopeRequest!, gy1115.paths, [], () => true, readFile);
+  assert.ok('grounds' in result, 'automaticScopeGrounds grants grounds');
+  assert.equal(result.grounds?.length, 2, 'both paths granted');
 
-  const finding794 = {
-    path: 'src/backup.ts',
-    text: 'Review finding 2 of GY-443 (PR #345) explicitly asks to add the five-attempt 40P01 restore case to tests/store-locks.test.ts'
-  };
-  const findingPaths794 = [finding794.path, ...namedPaths(finding794.text)];
-  const cluster794 = impliedModuleCluster(findingPaths794, finding794.text);
-  assert.ok(cluster794.includes('tests/store-locks.test.ts'), 'cluster includes tests/store-locks.test.ts');
+  // Verify peerModuleGround directly:
+  const groundCoord = await peerModuleGround('src/store/coordination-sql.ts', null, ['src/engine.ts'], readFile);
+  assert.ok(groundCoord?.includes('is imported by src/engine.ts'));
 
-  // Test derivePlannedFiles planning the cluster:
+  const groundDirect = await peerModuleGround('src/direct-merge.ts', null, ['src/engine.ts'], readFile);
+  assert.ok(groundDirect?.includes('is imported by src/engine.ts'));
+});
+
+test('manual:fault-class-scope — GY-1116: importing tests are granted by automaticScopeGrounds via importingTestGround', async () => {
+  const gy794 = instances.find(entry => entry.subject === 'GY-794')!;
+  const testContent = await readFile('tests/store-locks.test.ts');
+  assert.ok(testContent, 'tests/store-locks.test.ts exists');
+  const ground = await importingTestGround('tests/store-locks.test.ts', testContent, ['src/backup.ts'], readFile);
+  assert.ok(ground?.includes('imports src/backup.ts'));
+
+  const work = standing(gy794);
+  const result = await automaticScopeGrounds(work, work.scopeRequest!, gy794.paths, [], () => true, readFile);
+  assert.ok('grounds' in result);
+  assert.deepEqual(result.grounds?.map(g => g.path), ['tests/store-locks.test.ts']);
+});
+
+test('manual:fault-class-scope — GY-1116: unrelated items asking for peer modules or tests are refused by both decideScopeRequest and automaticScopeGrounds', async () => {
+  const unrelatedPaths = ['src/store/coordination-sql.ts', 'src/direct-merge.ts', 'src/server/main.ts', 'src/store/locks.ts', 'tests/store-locks.test.ts'];
+  const unrelated: Work = {
+    ...standing(instances[0]),
+    key: 'GY-9999',
+    plannedFiles: ['src/daemon/decisions.ts'],
+    criteria: [{ id: 'AC-1', text: 'Unrelated decisions feature', proofs: ['unit:decisions'] }],
+    origin: undefined,
+    description: 'Unrelated task',
+    scopeRequest: {
+      epoch: 1,
+      paths: unrelatedPaths,
+      reason: 'unrelated request',
+      requestedBy: 'worker-unrelated',
+      at: new Date().toISOString(),
+    },
+  };
+
+  // 1. decideScopeRequest must refuse:
+  const ruleVerdict = decideScopeRequest(unrelated, { paths: unrelatedPaths });
+  assert.equal(ruleVerdict.state, 'refused', 'decideScopeRequest refuses unrelated request');
+
+  // 2. automaticScopeGrounds must refuse:
+  const autoResult = await automaticScopeGrounds(unrelated, unrelated.scopeRequest!, unrelatedPaths, [], () => true, readFile);
+  assert.ok('refusal' in autoResult, 'automaticScopeGrounds returns refusal');
+  assert.equal(autoResult.grounds, undefined, 'no grounds granted for unrelated request');
+});
+
+test('manual:fault-class-scope — GY-1116: follow-up promotion and derivePlannedFiles plan finding paths up front', () => {
   const tree = new Set([
     'src/backup.ts', 'tests/store-locks.test.ts', 'src/server/main.ts', 'src/store/locks.ts',
     'src/store/tables/work.ts', 'src/store/store.ts', 'src/store/coordination-sql.ts', 'src/direct-merge.ts', 'docs/deployment.md'
@@ -201,18 +253,7 @@ test('manual:fault-class-scope — GY-1116: promoteFollowUp and derivePlannedFil
   assert.ok(derived1048.plannedFiles.includes('src/server/main.ts'), 'derived plannedFiles includes src/server/main.ts');
   assert.ok(derived1048.plannedFiles.includes('src/store/locks.ts'), 'derived plannedFiles includes src/store/locks.ts');
 
-  const gy1115 = instances.find(e => e.subject === 'GY-1115')!;
-  const derived1115 = derivePlannedFiles(standing(gy1115), tree);
-  assert.ok(derived1115.plannedFiles.includes('src/store/coordination-sql.ts'), 'derived plannedFiles includes src/store/coordination-sql.ts');
-  assert.ok(derived1115.plannedFiles.includes('src/direct-merge.ts'), 'derived plannedFiles includes src/direct-merge.ts');
-
-  // Hardening tests from review findings:
-  // 1. Routine table schema change without migration evidence does not pull in server/main.ts or store/locks.ts:
-  const routineCluster = impliedModuleCluster(['src/store/tables/users.ts'], 'Add column email to users table');
-  assert.equal(routineCluster.includes('src/server/main.ts'), false, 'routine table schema does not include server/main.ts');
-  assert.equal(routineCluster.includes('src/store/locks.ts'), false, 'routine table schema does not include store/locks.ts');
-
-  // 2. Ordinary items do not treat description paths as criteria-backed implications:
+  // Ordinary items do not treat description paths as criteria-backed implications:
   const ordinaryImplied = impliedScopes([{ id: 'AC-1', text: 'Work item updates' }], [], undefined, 'See src/internal-helper.ts for details');
   assert.equal(ordinaryImplied.some(i => i.scope === 'src/internal-helper.ts'), false, 'ordinary item description does not imply scope');
 
@@ -220,11 +261,26 @@ test('manual:fault-class-scope — GY-1116: promoteFollowUp and derivePlannedFil
   const followupImplied = impliedScopes([{ id: 'AC-1', text: 'Work item updates' }], [], { reviewFollowUps: { parent: 'GY-1', findings: [] } }, 'See src/internal-helper.ts for details');
   assert.equal(followupImplied.some(i => i.scope === 'src/internal-helper.ts'), true, 'follow-up item description does imply scope');
 
-  // 3. plannedCompanions derives tokens from follow-up description and findings:
+  // plannedCompanions derives tokens from follow-up description and findings:
   const companionsWithFollowup = plannedCompanions(
-    { plannedFiles: ['src/store/store.ts'], criteria: [{ id: 'AC-1', text: 'Base criteria' }], origin: { reviewFollowUps: { parent: 'GY-1', findings: [] } }, description: 'Needs wakeJob delivery' },
+    { plannedFiles: ['src/store/store.ts'], criteria: [{ id: 'AC-1', text: 'Base criteria' }], origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/store/store.ts', text: 'Refer to src/direct-merge.ts' }] } } },
     new Set(['src/store/store.ts', 'src/direct-merge.ts']),
     []
   );
-  assert.ok(companionsWithFollowup.some(c => c.path === 'src/direct-merge.ts'), 'plannedCompanions derives peer cluster from follow-up description');
+  assert.ok(companionsWithFollowup.some(c => c.path === 'src/direct-merge.ts'), 'plannedCompanions derives peer cluster from follow-up findings');
+});
+
+test('manual:fault-class-scope — GY-1116: follow-up paths are bounded by plannedScope and coalescedScope', () => {
+  // 1. plannedScope truncates paths longer than 500 characters to a containing directory:
+  const longPath = 'src/' + 'a'.repeat(510) + '/file.ts';
+  const bounded = plannedScope(longPath);
+  assert.ok(bounded !== null);
+  assert.ok(bounded.length <= 500);
+  assert.ok(bounded.endsWith('/'));
+
+  // 2. coalescedScope lifts entries to parent directory when count exceeds 100:
+  const manyPaths = Array.from({ length: 120 }, (_, i) => `src/sub${i % 5}/module${i}.ts`);
+  const coalesced = coalescedScope(manyPaths);
+  assert.ok(coalesced.length <= 100, `coalesced entries (${coalesced.length}) within 100`);
+  assert.ok(coalesced.some(p => p.endsWith('/')), 'coalesced into directory scopes');
 });

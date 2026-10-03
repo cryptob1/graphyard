@@ -6,7 +6,7 @@ import { save } from '../store.js';
 import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
 import { appendToItem, masterOnly, migrateToParents, readAll, recordDispatch, shipFollowUps, type Db } from './followups-ship.js';
-import { impliedModuleCluster } from '../model/scope-companions.js';
+import { coalescedScope, plannedScope } from '../review-threads.js';
 import { namedPaths, plannedFilesMax } from '../model/scope.js';
 import type { Services } from './routes.js';
 
@@ -128,11 +128,10 @@ export async function promoteFollowUp(services: Services, caller: Principal, id:
     if (finding!.promoted) return { promoted, item: all.find(item => item.key === finding!.promoted) ?? { key: finding!.promoted }, duplicate: true };
     const title = `Promoted follow-up of ${parent!.key} (${work.key} finding ${index}): ${finding!.text}`.slice(0, 200);
     const findingPaths = [...new Set([
-      ...(finding!.path ? [finding!.path.slice(0, 500)] : []),
+      ...(finding!.path ? [finding!.path] : []),
       ...namedPaths(finding!.text),
-    ])];
-    const cluster = impliedModuleCluster(findingPaths, finding!.text);
-    const plannedFiles = [...new Set([...findingPaths, ...cluster])].slice(0, plannedFilesMax);
+    ])].map(plannedScope).filter((path): path is string => !!path);
+    const plannedFiles = coalescedScope(findingPaths).slice(0, plannedFilesMax);
     const input = {
       title,
       description: `Promoted from finding ${index} of ${work.key}'s follow-up batch${parentKey ? `, filed for ${parent!.key}` : ''}${finding!.pr ? ` (PR #${finding!.pr})` : ''}${finding!.ref ? `; raised at ${finding!.ref}` : ''}.\n\nFinding${finding!.path ? ` (${finding!.path})` : ''}: ${finding!.text}`.slice(0, 20000),
