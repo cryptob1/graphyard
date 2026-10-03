@@ -33,7 +33,7 @@ Unproduced `manual:` proofs are the loop's: one `attest` decision per proof and 
 
 **The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
+that host's loop. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
@@ -64,7 +64,7 @@ Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then 
 
 ## Automatic dispatch at submit
 
-A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once those pass (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that posted a usage-limit notice until it next reviews (`dispatch.botReviewers`).
+A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once those pass (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 **Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request above one. `run.reviewerProfile`'s profile defaults to 4 sessions; pending sessions count before Herdr shows them. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
