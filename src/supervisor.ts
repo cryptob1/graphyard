@@ -273,6 +273,11 @@ export function renewalGraceMs(error: unknown): number | null {
   return Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
+/**
+ * The one line the watch supervisor prints before its first control-plane call, naming the item and
+ * epoch from its argv; the launcher quotes it as the starting detail of a supervisor still setting up (GY-1033).
+ */
+export const setupLine = (subject: string, epoch: number) => `graphyard: establishing containment for ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
 export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0, granted = 0;
