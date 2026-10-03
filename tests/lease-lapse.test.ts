@@ -125,36 +125,28 @@ test('unit:lease-lapse-classification: a lapse is expected under a submission, a
 });
 
 test('integration:lease-lapse-no-escalation: a lapse after a blocked report or a stopped-worker attestation is recorded as lease.expired with its cause, and a silent lapse still escalates', async () => {
-  // GY-40 epoch 8: the worker reports blocked, its session ends, the lease lapses meanwhile.
+  // GY-40 epoch 8: the worker reports blocked. Since GY-1008 the report ends its attempt and
+  // releases the lease in the same transaction, so nothing is left to lapse and nothing escalates.
   let blocked = await claimed('lapse-after-blocked');
   const blockedEpoch = blocked.epoch;
   blocked = await engine.execute(worker, 'blocked', blocked.id, { epoch: blockedEpoch, reason: 'plannedFiles cannot cover src/server/index.ts' }, id());
   assert.equal(blocked.blocker, 'plannedFiles cannot cover src/server/index.ts');
+  assert.equal(blocked.lease, null, 'the blocked report released the lease');
   assert.deepEqual((await readAttestations(store.pool, blocked.id)).map(item => [item.kind, item.epoch, item.actor, item.reason]), [['blocked', blockedEpoch, worker.id, 'plannedFiles cannot cover src/server/index.ts']]);
-  await lapse(blocked, blockedEpoch);
   await engine.reconcile();
   blocked = await reload(blocked);
-  assert.equal(blocked.lease, null, 'the lapsed lease is cleared');
-  assert.deepEqual(standingEscalations(blocked), [], 'a lapse the blocked report explains raises nothing');
+  assert.deepEqual(standingEscalations(blocked), [], 'an attempt its blocker ended raises nothing');
   assert.equal(merge(blocked).reasons.some(reason => /lease-loss/.test(reason)), false);
-  const expired = await events(blocked, 'lease.expired');
-  assert.equal(expired.length, 1);
-  assert.equal(expired[0].actor, 'graphyard');
-  assert.deepEqual({ owner: expired[0].payload.details.owner, epoch: expired[0].payload.details.epoch, cause: expired[0].payload.details.cause, submission: expired[0].payload.details.submission },
-    { owner: worker.id, epoch: blockedEpoch, cause: 'blocked-awaiting-operator', submission: null });
-  assert.deepEqual({ kind: expired[0].payload.details.attestation.kind, source: expired[0].payload.details.attestation.source, actor: expired[0].payload.details.attestation.actor, epoch: expired[0].payload.details.attestation.epoch },
-    { kind: 'blocked', source: 'blocked', actor: worker.id, epoch: blockedEpoch }, 'the history entry names the attestation it rests on');
-  assert.deepEqual((await events(blocked, 'reconciled')).at(-1)!.payload.details, { ledger: ['lease.expired'] });
+  assert.equal((await events(blocked, 'lease.expired')).length, 0, 'no lapse: the attempt ended on the record');
   assert.equal(blocked.lastAssignment!.owner, worker.id, 'the attempt stays attributable');
-  // The operator clears the blocker afterwards; the classification already happened and stands.
   blocked = await engine.execute(human, 'unblock', blocked.id, { reason: 'Widened plannedFiles', expectedRevision: blocked.revision }, id());
   await engine.reconcile();
   assert.deepEqual(standingEscalations(await reload(blocked)), []);
 
-  // A blocked report the worker withdrew explains nothing: that lapse is a loss.
+  // A worker's null report while it holds the lease records no blocker and explains nothing:
+  // that lapse is a loss.
   let withdrawn = await claimed('lapse-after-withdrawn-block');
   const withdrawnEpoch = withdrawn.epoch;
-  await engine.execute(worker, 'blocked', withdrawn.id, { epoch: withdrawnEpoch, reason: 'Need the grant' }, id());
   await engine.execute(worker, 'blocked', withdrawn.id, { epoch: withdrawnEpoch, reason: null }, id());
   await lapse(withdrawn, withdrawnEpoch);
   await engine.reconcile();
