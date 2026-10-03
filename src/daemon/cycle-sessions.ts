@@ -100,12 +100,14 @@ export async function closeStep(cycle: Cycle) {
         const { account, runtime } = await held('worker', profile.name, item, signal);
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
         // The lease is over on the record; the supervisor is stopped through the containment scope
-        // it recorded, which is the path that settles its quarantine, so the item is claimable again.
+        // it recorded, and the fence it leaves is settled in this action once the host verifies it
+        // gone (GY-1155), so the item is claimable again.
         const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
         let stop = 'its supervisor stops on the ended lease';
         try {
           if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
         } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+        if (scope && await settleEndedAttemptFence(cycle, item, { epoch, owner: profile.principal, preserved: signal.reason })) stop += ', its containment fence was settled';
         clearProfileFailure(state, profile);
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'done',
           detail: `${item.key} epoch ${epoch} exhausted ${account ?? `${profile.name}'s own account`} mid-session (${signal.reason}; ${resets}). Partial work ${partialWork.state}${partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}` : ''}; the attempt ended as released, ${stop}, and ${item.key} is re-queued for another account`,

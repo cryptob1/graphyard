@@ -287,6 +287,12 @@ export const setupLine = (subject: string, epoch: number) => `graphyard: establi
  * it leaves standing is never silent, and the loop that observes the ended attempt settles it.
  */
 export interface ContainmentShutdownFailure { reason: string; boundMs?: number; held?: string; refusal?: string }
+/**
+ * The record a supervisor's failure to lower its fence is put on the item as: a note, which needs
+ * no lease — the one this attempt held may already have ended — and names the quarantined epoch.
+ */
+export const containmentFailureNote = (epoch: number, failure: ContainmentShutdownFailure) =>
+  ({ type: 'note' as const, reason: `Containment fence of epoch ${epoch} was left standing by its supervisor: ${failure.reason}`.slice(0, 2000) });
 /** The durable containment fence a foreground supervisor raises, acknowledges, lowers, and reports a failure to lower. */
 export interface SupervisedQuarantine {
   establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown>;
