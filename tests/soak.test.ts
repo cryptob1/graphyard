@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { open, mkdir, readFile, utimes, writeFile, type FileHandle } from 'node:fs/promises';
+import { open, mkdir, readFile, rm, utimes, writeFile, type FileHandle } from 'node:fs/promises';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,7 +23,7 @@ import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { dispatchFailureBlockAfter } from '../src/daemon/dispatch-failures.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
-import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { answeringWidening, daemonEffects, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { adoptHeadlessRuns } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
@@ -33,9 +33,7 @@ import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import type { RunOptions, RunRecord, RunResult, Runner } from '../src/runner/types.js';
 import type { DiagnosticianEffects } from '../src/daemon/diagnosis.js';
-import { Launcher, type Cycle } from '../src/daemon/cycle.js';
-import { decisionStep, resetDecisionCache } from '../src/daemon/cycle-decisions.js';
-import { Timings } from '../src/master/timings.js';
+import { Launcher } from '../src/daemon/cycle.js';
 import { branchReport, buildMasterStatus } from '../src/master/status.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAttention } from '../src/daemon/faults.js';
 import { docsTrimTitle } from '../src/model/documentation.js';
@@ -544,7 +542,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // planned scope, and its policy requires the project's docs budget check (GY-574).
     const docsIntake = docs && n <= 4 ? {
       plannedFiles: [...files(n), docs.page(n)],
-      policy: { checks: ['test', 'typecheck', ['unit', 'docs-word-budget'].join(':')], review: true },
+      policy: { checks: ['test', 'typecheck', 'unit:docs-word-budget'], review: true },
     } : {};
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake, ...docsIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
@@ -2188,7 +2186,7 @@ test('unit:soak-invariants-hold — the documentation budget under the real loop
     for (const [number, pr] of github.prs) console.error('PR', number, pr.key, [...pr.pushed.keys()].map(head => { const commit = github.commits.get(head)!; const docs = [...commit.contents].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path)).map(([path, text]) => `${path}=${text.split(/\s+/).filter(Boolean).length}`); return `${head.slice(0, 8)}: ${docs.join(' ')}`; }));
   }
   const ejected = [items[1], items[2], items[3]].map(item => final.find(entry => entry.key === item.key)!);
-  const reasons = ejected.map(item => (item.queueHistory ?? []).map(entry => entry.reason ?? '').filter(reason => new RegExp(['unit', 'docs-word-budget failed: its docs change takes the budgeted documentation'].join(':')).test(reason)));
+  const reasons = ejected.map(item => (item.queueHistory ?? []).map(entry => entry.reason ?? '').filter(reason => /unit:docs-word-budget failed: its docs change takes the budgeted documentation/.test(reason)));
   assert.ok(reasons[0]!.length >= 1, `the crossing entry was ejected with the attributed reason: ${JSON.stringify((crossing.queueHistory ?? []).map(entry => [entry.event, entry.reason]))}`);
   assert.match(reasons[0]![0], /to 12005 words, 5 over the 12000-word budget; pages that grew: docs\/grown-2\.md \(0 → 10\)/);
   // Entries 3 and 4 fill the window behind them: while the base was over its budget their
@@ -2920,133 +2918,107 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   }
 });
 
-test('unit:decisions-step-bounded — with 90 open items and hundreds of recorded decisions, the decisions step completes within 10 seconds per cycle and makes no per-decision network calls when inputs are unchanged', async () => {
-  resetDecisionCache();
-  const items: Work[] = Array.from({ length: 90 }, (_, index) => {
-    const n = index + 1;
-    const key = `GY-${1000 + n}`;
-    const id = `item-${n}`;
-    return {
-      id,
-      key,
-      title: `Open item ${key}`,
-      description: `Description for ${key}`,
-      type: 'feature',
-      priority: 0,
-      stage: 'implementation',
-      epoch: 1,
-      dependencies: [],
-      criteria: [],
-      plannedFiles: [],
-      triage: {
-        state: 'proposed',
-        at: '2026-10-03T00:00:00.000Z',
-        judgement: { kind: 'obsolete', ref: null, reason: `triage obsolete ${key}` },
-      },
-      actionQueue: { actions: [], history: [] },
-    } as unknown as Work;
+test('unit:decisions-step-bounded — at the 2026-10-03 load (90 open items, 360 recorded decisions) the decisions step stays within 10 s a cycle and reads no history whose decision ledger did not move', { timeout: 120_000 }, async () => {
+  // GY-1142. On 2026-10-03 the decisions step took 178 s of a 246 s cycle: every cycle it read each
+  // item's decision history from the control plane, serially, once for every place it looked. Here
+  // each history read costs real time, so a step that read them all one at a time would show it.
+  const at = Date.parse('2031-06-02T08:00:00Z'), latencyMs = 40, open = 90, needing = 30;
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
+    hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+  const iso = (offset: number) => new Date(at + offset).toISOString();
+  const uuid = (n: number, kind: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(kind).padStart(12, '0')}`;
+  // A third of the items carry a lease-loss a newer attempt superseded, which the loop resolves
+  // through an approver; the rest need no decision. Every item has four decisions on record.
+  const items = Array.from({ length: open }, (_, index) => {
+    const n = index + 1, lost = { at: iso(-10 * minute), actor: 'graphyard', trigger: 'lease-loss', reason: 'Worker graphyard-claude-2 lost lease epoch 1' };
+    return { id: uuid(n, 0), key: `GY-${n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [],
+      policy: { checks: ['test'], review: true }, plannedFiles: [`src/item-${n}.ts`], stage: 'build', revision: 51, policyRevision: 3,
+      createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-5 * minute), ready: true, epoch: 2,
+      lease: { owner: 'graphyard-opencode-1', epoch: 2, expiresAt: iso(hour) }, workspaces: [], candidate: null, submission: null,
+      reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
+      containmentQuarantine: { owner: 'graphyard-opencode-1', epoch: 2, at: iso(-5 * minute), settlementHash: 'a'.repeat(64) },
+      escalation: n <= needing ? lost : null, escalations: n <= needing ? [lost] : [] } as unknown as Work;
   });
-
-  const itemDecisions = new Map<string, any[]>();
-  let totalDecisions = 0;
-  for (const item of items) {
-    const history = [
-      { id: `dec-${item.id}-1`, action: 'rework', state: 'refused', input: { reason: 'older head' }, reason: 'rejected' },
-      { id: `dec-${item.id}-2`, action: 'requirements', state: 'applied', input: { plannedFiles: ['src/a.ts'] }, reason: 'approved' },
-      { id: `dec-${item.id}-3`, action: 'close', state: 'refused', input: { kind: 'duplicate' }, reason: 'not duplicate' },
-      { id: `dec-${item.id}-4`, action: 'close', state: 'requested', input: { kind: 'obsolete', ref: null, reason: `triage obsolete ${item.key}`, triageAt: '2026-10-03T00:00:00.000Z' }, reason: `decision for ${item.key}` },
-    ];
-    itemDecisions.set(item.id, history);
-    totalDecisions += history.length;
-  }
-  assert.equal(items.length, 90, '90 open items in fixture');
-  assert.ok(totalDecisions >= 300, `hundreds of recorded decisions: ${totalDecisions}`);
-
-  let decisionsCalls = 0;
-  const config = {
-    url: 'http://127.0.0.1:4000',
-    repository: 'owner/repo',
-    workers: [],
-    autoMerge: true,
-    run: { launchConcurrency: 3 },
-  } as unknown as MasterConfig;
-
-  const state = emptyDaemonState(config);
-  const herdrAgents: any[] = [];
-
+  const histories = new Map(items.map((item, index) => [item.id, [1, 2, 3, 4].map(kind => ({ id: uuid(index + 1, kind), action: 'release', state: kind % 2 ? 'applied' : 'refused', input: {}, approvedBy: null }))]));
+  const calls = { decisions: 0, changes: 0 }, closed: string[] = [], agents: { name: string; pane_id: string; agent_status: string }[] = [];
+  let seq = 1000, moved: string[] = [];
   const effects = {
-    decisions: async (item: Work) => {
-      decisionsCalls++;
-      return { decisions: itemDecisions.get(item.id) ?? [] };
+    agents: () => agents, herdr: () => ({ agents, available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: items, now: iso(cycleNo * minute), jobs: [] }),
+    closeSession: (pane: string) => { closed.push(pane); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    decide: async (work: Work, action: string) => {
+      const id = uuid(Number(work.key.slice(3)), 9);
+      histories.get(work.id)!.push({ id, action, state: 'requested', input: { trigger: 'lease-loss', expectedRevision: 51 }, approvedBy: null });
+      seq += 1; moved.push(work.id);
+      return { id };
     },
-    persist: async () => {},
-    agents: async () => herdrAgents,
-    herdr: async () => ({ agents: herdrAgents, available: true }),
-    decide: async () => ({ id: 'new-dec', action: 'close' }),
-    approver: async (item: Work, decisionId: string) => {
-      const name = approverSessionName(item, decisionId);
-      const pane = `pane-${decisionId}`;
-      herdrAgents.push({ name, pane_id: pane, agent_status: 'running' });
-      return { agentName: name, pane, account: 'acc-1' };
-    },
-    closeSession: async () => true,
-  } as any;
+    decisions: async (work: Work) => { calls.decisions += 1; await new Promise(resolve => setTimeout(resolve, latencyMs)); return { decisions: structuredClone(histories.get(work.id)!) }; },
+    decisionChanges: async (after: string | null) => { calls.changes += 1; const work = [...new Set(moved)]; moved = []; return { seq: String(seq), work, complete: after !== null }; },
+    approver: async (work: Work, decision: string) => { const name = approverSessionName(work, decision); agents.push({ name, pane_id: `pane-${work.key}`, agent_status: 'working' }); return { agentName: name, pane: `pane-${work.key}` }; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config);
+  let cycleNo = 0;
+  const cycle = async () => {
+    cycleNo += 1; calls.decisions = 0; calls.changes = 0;
+    const result = await runCycle(config, state, effects, Date.now);
+    return { ms: result.metrics.steps!.decisions.ms, reads: calls.decisions, changes: calls.changes, actions: result.actions };
+  };
 
-  let currentTime = Date.parse('2026-10-03T07:45:00.000Z');
-  const now = () => currentTime;
-
-  const makeCycle = (): Cycle => ({
-    config,
-    state,
-    effects,
-    now,
-    snapshot: { now: new Date(currentTime).toISOString(), work: items } as any,
-    clock: currentTime,
-    clockOffset: { min: 0, max: 0 },
-    performed: [],
-    isolate: async (_kind, _item, _name, body) => body(),
-    agents: herdrAgents,
-    credentials: {},
-    open: items,
-    owns: () => false,
-    heldBy: () => null,
-    timings: new Timings(now),
-    launcher: new Launcher(10),
-    launch: (_kind, _item, _key, _holds, body) => { void body([]); return true; },
-    detached: false,
-    exhaustedProofs: async () => [],
-  });
-
-  const settled = new Map<string, Work>();
-  const assessments = {};
-  const capacity = { capacities: [], approversSpent: false };
-
-  // Cycle 1: initial cycle with open items and recorded decisions
-  const t1 = performance.now();
-  await decisionStep(makeCycle(), settled, assessments, capacity);
-  const dur1 = performance.now() - t1;
-  assert.ok(dur1 < 10_000, `Cycle 1 completes within 10s: ${dur1}ms`);
-
-  // Ensure all adopted decisions have running approvers in Herdr inventory
-  for (const [key, watch] of Object.entries(state.approvals)) {
-    const item = items.find(i => i.key === watch.work)!;
-    const name = approverSessionName(item, watch.decision);
-    if (!herdrAgents.some(a => a.name === name)) {
-      herdrAgents.push({ name, pane_id: `pane-${watch.decision}`, agent_status: 'running' });
-      watch.agentName = name;
-      watch.pane = `pane-${watch.decision}`;
-    }
+  // Cycle one requests each resolve and launches its approver: one history read per request.
+  const first = await cycle();
+  assert.equal(agents.length, needing, `every superseded lease-loss went to an approver: ${JSON.stringify(first.actions.slice(0, 4).map(action => action.detail))}`);
+  assert.ok(first.reads <= needing, `one read per item that needed a decision, none for the rest: ${first.reads}`);
+  assert.ok(first.ms < 10_000, `cycle one's decisions step took ${first.ms} ms`);
+  // Cycle two: the ledger moved for each request, so each is read once more, eight at a time.
+  const second = await cycle();
+  assert.equal(second.reads, needing, `each item whose decision ledger moved is read once, however many places look at it: ${second.reads}`);
+  assert.ok(second.ms < needing * latencyMs, `the reads run side by side, not one after another: ${second.ms} ms`);
+  // Steady state: nothing moved, so no history is read at all, whatever the number of decisions.
+  for (let round = 0; round < 3; round += 1) {
+    const steady = await cycle();
+    assert.equal(steady.reads, 0, `no per-decision call for a decision whose inputs have not changed (round ${round + 1})`);
+    assert.equal(steady.changes, 1, 'one ledger read a cycle');
+    assert.ok(steady.ms < 10_000, `steady decisions step took ${steady.ms} ms`);
   }
+  assert.equal(Object.values(state.approvals).filter(watch => !watch.settledAt).length, needing, 'every request is still supervised');
 
-  // Cycle 2: inputs have not changed since last cycle
-  currentTime += 60_000;
-  state.cycle += 1;
-  decisionsCalls = 0;
+  // One approver refuses: the ledger names that item alone, it is read, and the refusal acted on in the same cycle.
+  const refused = items[4], decision = histories.get(refused.id)!.at(-1)!;
+  Object.assign(decision, { state: 'refused', refusal: { approver: 'graphyard-approver-project', reason: 'not superseded' } });
+  moved.push(refused.id);
+  const judged = await cycle();
+  assert.equal(judged.reads, 1, 'only the item whose ledger moved is read');
+  assert.ok(judged.actions.some(action => action.work === refused.key && /was refused by graphyard-approver-project/.test(action.detail)), 'the refusal is acted on the cycle it is recorded');
+  assert.deepEqual(closed, [`pane-${refused.key}`], 'and its approver closed');
 
-  const t2 = performance.now();
-  await decisionStep(makeCycle(), settled, assessments, capacity);
-  const dur2 = performance.now() - t2;
-  assert.ok(dur2 < 10_000, `Cycle 2 completes within 10s: ${dur2}ms`);
-  assert.equal(decisionsCalls, 0, `no per-decision network call is made for a decision whose inputs have not changed (calls: ${decisionsCalls})`);
+  // Without the ledger read the loop keeps nothing across cycles, and reads each history at most once a cycle.
+  const blind = { ...effects, decisionChanges: undefined } as DaemonEffects;
+  calls.decisions = 0;
+  await runCycle(config, state, blind, Date.now);
+  assert.ok(calls.decisions > 0 && calls.decisions <= needing, `every watched history is read again, once each: ${calls.decisions}`);
+
+  // The loop's own effect asks the control plane once, as the coordinator, for the decision
+  // kinds after the seq it last saw; the first read only finds where the ledger stands.
+  const root = await temporaryDirectory('decision-changes'), secrets = await temporaryDirectory('decision-changes-secrets');
+  try {
+    const coordinator = join(secrets, 'coordinator.token'), operator = join(secrets, 'operator.token');
+    await writeFile(coordinator, 'coordinator-token-'.padEnd(48, 'x'), { mode: 0o600 });
+    await writeFile(operator, 'operator-token-'.padEnd(48, 'x'), { mode: 0o600 });
+    const asked: URL[] = [];
+    const fetcher = (async (url: string) => {
+      const query = new URL(url); asked.push(query);
+      const events = query.searchParams.get('cursor') ? [{ seq: '1201', work_id: items[1].id }, { seq: '1207', work_id: items[2].id }, { seq: '1209', work_id: items[1].id }] : [{ seq: '1200', work_id: items[0].id }];
+      return new Response(JSON.stringify({ events, page: { hasMore: false } }), { status: 200 });
+    }) as typeof fetch;
+    const live = daemonEffects(root, { ...config, credentialFile: coordinator, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operator } } as MasterConfig,
+      { snapshot: async () => ({ work: items, now: iso(0) }), mutate: async () => ({}), executor: { principal: 'coordinator', instance: 'decision-changes' }, fetcher });
+    assert.deepEqual(await live.decisionChanges!(null), { seq: '1200', work: [items[0].id], complete: false }, 'the first read keeps nothing: it only finds where the ledger stands');
+    assert.deepEqual(await live.decisionChanges!('1200'), { seq: '1209', work: [items[1].id, items[2].id], complete: true });
+    assert.deepEqual(asked.map(url => [url.pathname, url.searchParams.get('order'), url.searchParams.get('cursor'), url.searchParams.get('payload')]), [['/api/events', 'desc', null, 'none'], ['/api/events', 'asc', '1200', 'none']]);
+    assert.deepEqual(asked[1].searchParams.get('kind')!.split(','), ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn'].map(kind => `decision.${kind}`));
+    assert.equal(daemonEffects(root, { ...config, credentialFile: coordinator } as MasterConfig, { snapshot: async () => ({ work: items, now: iso(0) }), mutate: async () => ({}), executor: { principal: 'coordinator', instance: 'decision-changes' }, fetcher }).decisionChanges,
+      undefined, 'without the operator-agent identity there are no decision reads to keep');
+  } finally { await Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]); }
 });
-
