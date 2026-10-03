@@ -12,7 +12,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason":…}` (null clears); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.
 - `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
-- `followups` `{findings,reason}` (master): approval findings onto the item (or open legacy follow-up; `409` once closed); read `GET /api/work/KEY/followups`, `GET /api/followups?pr=N`. `promote` `{index}` (operator): finding → item, once ([follow-ups](../followups.md)); `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
+- `followups` `{findings,reason}` (master): findings onto item (or open follow-up), held until ship ({ship:true}); read `GET /api/work/KEY/followups`, `GET /api/followups?pr=N`. `promote` `{index}` (operator): finding → item, once ([follow-ups](../followups.md)); `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
 - `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` by its rules (`403`; `409` once judged).
 
 No endpoint sets lifecycle state.

@@ -9,7 +9,7 @@ Control-plane App (`src/github-permissions.ts`):
 | --- | --- | --- |
 | Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
-| Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` on the exact candidate commit (the required check) |
+| Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit (the required checks) |
 | Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
@@ -28,7 +28,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Require the check
 
-Require `Graphyard / merge` from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master browser protection` reconciles). Needs: green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted evidence, mergeable non-draft PR, queue head or [optimistic lane](#optimistic-merges). GitHub merges only heads it passed; restrict other merge identities (lease-less workers still push).
+Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection` reconcile). Needs: green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, mergeable non-draft PR, queue head or [optimistic lane](#optimistic-merges). GitHub merges only heads it passed; restrict other merge identities (lease-less workers still push).
 
 ## Merge queue
 
@@ -36,13 +36,15 @@ A failed required check reruns once on the unchanged head (newest configured-CI-
 
 Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
-`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order once all tips through theirs pass; a failing tip ejects its entry once those ahead pass; later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
-
 ### Bindings and carry
 
 Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. On republication, the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch; never a person's, a moved head or changed patch.
 
-Before merging, the reviewer App re-posts a carried approval missing from the PR. None usable: `mergerefused`; the carried approval is cleared and a fresh review requested at once. A refusal repeating past 10 minutes raises attention; the loop clears a carried approval or requests a rework decision, each once per recovery phase.
+Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the latest approval of the tip's reviewed head (`review.carry-refreshed`). With none usable, the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`) and requests a fresh review at once. Repeated refusals past 10 minutes raise attention; the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), judged in the high risk lane and applied in low/medium.
+
+### Parallel tips
+
+`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order once all tips through theirs pass; a failing tip ejects its entry once those ahead pass; later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
 
 ### Optimistic merges
 

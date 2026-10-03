@@ -15,7 +15,7 @@ Leases expire 120 s after last heartbeat (one further lease period after a recor
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies only an idle pane shell (childless, parent `herdr server`) survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes).
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle's [clock bound](protocol/leases.md#watch).
 
 ## Submitted implementation needs rework
 
@@ -23,7 +23,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Retro synthesis
 
-`GRAPHYARD_INTERVENTION_PATTERNS=1`: a per-minute scan groups refusal/rework interventions by cause; at the window threshold → unapplied, unfiled drafts (`retro.drafted`): standards/criteria wording, mechanical check, producer-method correction, fault-catalogue entry. An AI admin/operator agent with `decision:approve` (not human, drafter, recorder) [approves](protocol/work-commands.md)/refuses each; applied at its registry's next revision. Requirements → [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks run on each observed submission, refusing failing `complete` (`409`); catalogue entries file and count later instances under their fault class. Drafted instances never recount; recurrence after application redrafts (`recurredAfter`).
+`GRAPHYARD_INTERVENTION_PATTERNS=1`: scans group refusal/rework interventions by cause; at the threshold → unapplied drafts (`retro.drafted`): wording, mechanical check, producer-method correction, fault-catalogue entry. An AI operator agent with `decision:approve` (not human, drafter, recorder) [approves](protocol/work-commands.md)/refuses each, applied at registry revision. Requirements → [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete` (`409`); catalogue entries count under fault classes. Recurrence after application redrafts (`recurredAfter`).
 
 ## Flaky CI check
 
@@ -72,11 +72,11 @@ Hour without deliveries: `master status` points to `https://github.com/settings/
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (filesystem-wide; warns under 25%); the loop removes 2h-idle Graphyard temporary directories.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB or volume size). `tmp-inodes`: free `/tmp` inodes (warns under 25%) and 2h-idle temp cleanup. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 
-Receipts answer retries for a day; routine ledger rows store only the change unless moving stage or delivery; every 10 minutes, compaction deletes them past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1), each batch appending `ledger.compacted` (per-kind counts).
+Receipts answer retries for a day; ledger rows store only changes unless moving stage or delivery; every 10 minutes, compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1), appending `ledger.compacted`.
 
 ## Bootstrap mode for a self-proving change
 
@@ -113,8 +113,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): reconcile batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤half the pool) share one pace per token (above-reserve budget minus others' spend, until reset), claiming webhook-woken jobs, then the merge path, then the rest. `observationThroughput`: budget, pace, head lag, oldest unobserved submission (`github` past two minutes). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures (raised past 5 s).
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤half pool) pace per token (above-reserve budget until reset), claiming webhook jobs, merge path, then remainder. `observationThroughput`: budget, pace, head lag, oldest submission (`github` past two minutes). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s.
 
 ### Concurrent reconciliation
 
-Reconcile reads each live item once per pass and locks only its batch rows; contended batches back off, then defer to the next tick (warnings past 5 s). A stale snapshot retries after two seconds.
+Reconcile reads each live item once per pass and locks its batch rows; contended batches back off, deferring to the next tick (warnings past 5 s). Stale snapshots retry after two seconds.

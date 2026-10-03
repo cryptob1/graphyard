@@ -50,7 +50,7 @@ Human installs the App at the printed `http://127.0.0.1:4311`; **Verify** *App r
 
 ## Step 5: first pull request
 
-Dispatch a [small item](onboarding.md#4-prove-the-first-pr); after `Graphyard / merge` appears, rerun `--apply`; **Verify** the base branch requires it. `--plan`/`--apply` are idempotent; tokens never rotate.
+Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun `--apply`, requiring it and `graphyard/landable` (bound to the App). **Verify** both checks required on the base branch. `--plan`/`--apply` are idempotent; tokens never rotate.
 
 ## Upgrading an existing installation
 

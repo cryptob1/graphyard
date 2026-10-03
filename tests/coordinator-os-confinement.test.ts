@@ -337,6 +337,18 @@ test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer
       assert.throws(() => headlessConfinementWrapper(root, worktree, 'bwrap'), /the Git directory it writes through cannot be resolved/, 'a headless run is refused too');
       assert.throws(() => prepareConfinedGitPaths(root), new RegExp(named), 'the launcher prepares nothing under the pointer file');
     }
+    // GY-1054: a linked-worktree admin with no readable `commondir` refuses rather than standing in for
+    // the whole Git directory, which would leave the real common directory writable.
+    const { main, root: missingRoot } = linkedWorktreeCoordinatorFixture(join(base, 'no-commondir'));
+    const admin = checkoutWorktreeAdminDirectory(missingRoot);
+    assert.equal(admin, join(main, '.git', 'worktrees', 'coordinator'));
+    rmSync(join(admin!, 'commondir'));
+    assert.throws(() => checkoutGitDirectory(missingRoot), /has no readable commondir/, 'checkoutGitDirectory refuses an admin without commondir');
+    const refusal = await coordinatorConfinementRefusal({ ...input, coordinatorRoot: missingRoot });
+    assert.match(refusal ?? '', /the Git directory it writes through cannot be resolved/, 'a launch is refused, never confined around the admin alone');
+    // A pointer to a whole Git directory (`--separate-git-dir`) still resolves to that directory.
+    writeFileSync(join(missingRoot, '.git'), `gitdir: ${join(main, '.git')}\n`);
+    assert.equal(checkoutGitDirectory(missingRoot), join(main, '.git'), 'a pointer to a whole Git directory resolves to it');
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

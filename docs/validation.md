@@ -9,8 +9,8 @@ An `e2e:` proof passes only from a pinned candidate, bundle and separate [collec
 
 ## Candidates, requests, reports
 
-Define environment, runner registration, `kind: bundle` pinning `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Builders attest source and artifacts; operators create candidates from a build attestation.
+`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Builders attest source/artifacts; operators create candidates from build attestations.
 
-Requests (candidate, runner, collector, `deadline`, `maxAttempts`) bind the observed target; a new manifest supersedes. Runners `ack` within 30 s, heartbeat every 20 s until `collection-authority`. Pass: whole-run `matched` target, verified artifacts, settled execution. Recover: `cancel`, `settle` (stop evidence), `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+Requests bind the observed target; a new manifest supersedes. Runners `ack` within 30 s, heartbeat every 20 s until `collection-authority`. Pass: whole-run `matched` target, verified artifacts, settled execution. Recover: `cancel`, `settle` (stop evidence), `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
 
-`reportFormat`: `graphyard-playwright-v1` (default; each offline-enumerated test passed once) or `junit-xml-v1` (each inventory identity passed once). Skips, retries, timeouts, miscounts fail; preview: `graphyard runner verify-report junit-xml-v1 inventory.json report.xml`.
+`reportFormat`: `graphyard-playwright-v1` (default; each test passed once) or `junit-xml-v1` (each inventory identity passed once). Skips, retries, timeouts, miscounts fail; preview: `graphyard runner verify-report junit-xml-v1 inventory.json report.xml`.

@@ -16,11 +16,11 @@ Cards stop at the first refusing gate, naming what's missing.
 
 ## Risk lanes
 
-`src/model/policy.ts` assigns a **risk lane** (`low`, `medium`, `high`) by changed paths; the landability verdict requires facts by lane.
+`src/model/policy.ts` sets a **risk lane** (`low`, `medium`, `high`) by paths; landability requires facts by lane.
 
-- **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential-loading bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework decisions.
-- **Medium** (60 min): the rest; adds producer-run `unit:`/`integration:`.
-- **Low** (30 min): test-only, docs-only, single-module (shared leading segments). Required CI, one approval; no producer proofs or `manual:` attestations.
+- **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
+- **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
+- **Low** (30 min): test-only, docs-only, single-module. Required CI, one approval; no producer proofs or `manual:` attestations.
 
 All lanes require `e2e:` proofs; low/medium reworks need no approver.
 
@@ -40,8 +40,8 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: callers use the API; the engine applies each mutation, with an event, in one locked Postgres transaction; reconciliation syncs GitHub, publishes the required check, merges; webhooks only wake jobs.
 
-- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; pushes, base changes invalidate evidence.
+- Gates deterministically check candidate `(PR, head SHA, base SHA)` under current policy; pushes or base changes invalidate evidence.
 - Claims bump the epoch; old-epoch or expired-lease commands refuse.
-- Evidence is its authenticated producer's; latest trusted record per proof and candidate wins, even failing.
-- Append-only history; retries within a day replay.
-- Graphyard merges only the exact authorized candidate, once (else a permanent violation); merge isn't [delivery](delivery.md).
+- Evidence belongs to its authenticated producer; latest trusted record per proof and candidate wins.
+- Append-only history; retries replay for a day.
+- Graphyard merges only the authorized candidate, once; merge is not [delivery](delivery.md).

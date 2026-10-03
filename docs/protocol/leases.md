@@ -5,7 +5,7 @@ Claims last 120 s, renewed every ≤30 s; owner mutations carry the epoch; expir
 
 ## `watch`
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss → SIGTERM, then SIGKILL, to the process group (no sandbox). Contained launches first record a **quarantine** naming their systemd scope unit. A dead supervisor fences the item until an operator attests the stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago, with no supervisor, workspace process, scope member alive.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss sends SIGTERM, then SIGKILL, to the process group (no sandbox). Contained launches record a **quarantine** naming their systemd scope unit. A dead supervisor fences the item until an operator attests the stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago with no supervisor, workspace process, or scope member alive. Host verification records processes up to 200 per scope (`truncated: true` judged live); hosts over 50 scopes refuse settlement. Settlement excuses only the recorded pane's idle, childless shell. The loop bounds host clock against the plane with a timed `HEAD /` each cycle while a quarantine is past grace; bounds wider than 5 s tolerance are refused.
 
 ### Push credential
 

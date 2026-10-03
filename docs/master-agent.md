@@ -39,7 +39,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Machine-filed backlog
 
-With `run.research`, a feature (or `"research": true`) gets one read-only Pi brief per revision for build to follow; failure never blocks. Pi triages machine-filed items (legacy follow-ups, faults), 2 at once: release, approved close, or merge; untriaged past 24h raises attention. Approvals' [follow-ups](followups.md) stay unfiled on the approved item until `graphyard promote-followup`.
+Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then form or join its one follow-up item; closing it unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 `Recurring <class> faults` and `invariant:` faults get a read-only diagnostician (`run.diagnostician`): approved, its fix releases or the fault closes as duplicate. A branch restore owed under 30 minutes and a restart-resumed merge are self-handled, not `merge` faults.
 

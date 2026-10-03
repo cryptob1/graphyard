@@ -19,12 +19,12 @@ Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Co
 
 ## The status sentence
 
-Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once production serves it (counted this week).
+Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served.
 
 ## An item page
 
-Below the summary: **What is left**; **Requirements** (✓/○ per criterion); **Pull request** with **Merge danger** (low/medium/high; schema, deployment, workflow files are one-way doors); **Test cases**; **Activity**; **Technical details** (gates, sessions, evidence, overlaps: `Shares files with GY-166, GY-167 (tests/)`).
+Below the summary: **What is left**; **Requirements** (✓/○); **Pull request** with **Merge danger** (low/medium/high); **Test cases**; **Activity**; **Technical details** (gates, sessions, evidence, overlaps).
 
 ## Insights
 
-**Flow**, landed/day, merges/hour, median queue wait, time spent, [optimistic merges](github.md#optimistic-merges). **Show details**: shipping pulse (PR-to-production via `POST /api/production-observations` or `master verify-deployment`), 24-hour to 90-day flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**.
+**Flow**, landed/day, merges/hour, median wait, time spent, [optimistic merges](github.md#optimistic-merges). **Show details**: shipping pulse (`POST /api/production-observations` or `master verify-deployment`), flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**.

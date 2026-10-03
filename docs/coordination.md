@@ -13,21 +13,21 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Review gate: verdicts, not threads
 
-Gate: reviewer approval of the exact head plus required CI; threads are inputs. Approvals mark each listed thread resolved, follow-up (backlog) or overridden by thread ID or a comment ID the prompt shows, else are withdrawn and the relaunch names missed threads; the loop resolves them by thread ID. After two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
+Gate: reviewer approval of the exact head plus required CI; threads are inputs. Approvals mark each listed thread resolved, follow-up (held until ship, then filed) or overridden by thread or comment ID; missed threads withdraw approval, relaunching to resolve by thread ID. After two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds changes: at `complete`, each new head and landing, other non-new files must match the bound base byte-for-byte, else refused naming files, shipping items. Carried files (another item's unlanded commits) never eject; only scope requests or audited revisions widen `plannedFiles`.
+`plannedFiles` bounds changes: at `complete`, each new head and landing, non-new files must match the base byte-for-byte, else refused. Carried files (unlanded commits) never eject; only scope requests or audited revisions widen `plannedFiles`.
 
-`evaluateLandability` (`src/model/landability.ts`), computed live, is the single authority on landing: build/acceptance gates and queue ejections are its refusals.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals. Published to GitHub as check `graphyard/landable` (`success` when landable, `failure` with refusal reasons), it is required by protection and never an input to the verdict.
 
-Out-of-scope files are judged by three-way merging the head onto the landing commit (live or predicted base): changes it extended or only the base made pass; restoring merge-base versions, deleting, rewriting refuse.
+Out-of-scope files are judged by three-way merging onto the landing commit: extended or base-only changes pass; restoring merge-base versions, deleting, or rewriting refuse.
 
-Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits, prints the classification; `graphyard sync GY-N --restore` also restores out-of-scope files to the base tip in one commit naming them (plain push, never force).
+Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `graphyard sync GY-N --restore` also restores out-of-scope files to the base tip in one commit (plain push, never force).
 
 ### Submit when your own criteria pass
 
-The full suite is CI's gate (GY-853): workers run the build and `graphyard verify GY-N` (own criteria's proofs), submit on pass, and name in the PR any sandbox-only full-suite failure outside `plannedFiles`, without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all its cases executed and passed but the run ended abnormally (hook, crash, signal from other suites); a failed, skipped or unexecuted case always blocks.
+The full suite is CI's gate (GY-853): workers run the build and `graphyard verify GY-N` (own proofs), submit on pass, and name any sandbox full-suite failure outside `plannedFiles` in the PR without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all cases passed but the run ended abnormally (hook, crash, signal); failed, skipped or unexecuted cases always block.
 
 ### Generated files never conflict
 
