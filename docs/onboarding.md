@@ -1,49 +1,47 @@
-<!-- page: Start here | 3 | machines, accounts, master, first PR. -->
+<!-- page: Start here | 3 | machines, accounts, first PR. -->
 # Onboard a repository
 
 ## 1. Install the control plane
 
-Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after reviewing `--plan`.
+[Install](install.md): `node "$GRAPHYARD_CLI" install --provider railway --repo OWNER/REPO --workers 1 --apply` after `--plan`.
 
 ## 2. Add machines
 
-Each concurrent session needs a worker identity and host ID; raise `install --workers` or connect:
+Per concurrent session: a worker identity and host ID (`install --workers`), or:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker, stopped on lease loss.
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`. Masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
 
 ### Documentation policy
 
-`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged. An optional `"wordBudget":{"total":N,"perPage":N}` (`paths` narrows the counted Markdown pages) is checked against those paths: near the total, `master status` raises `docs` and the loop files a trim item; a queue overflow ejects the entry that crossed it. Without one, nothing is counted.
+`init --scan --apply` records `docs/`, `site/`, `README*`, `CHANGELOG*` in `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`); deploy the printed `GRAPHYARD_DOCUMENTATION`; a differing one is `doctor`'s `documentation.drift`. Features and bugs owe *Documentation reflects this change* (docs diff or `complete --no-docs "WHY"`). Optional `"wordBudget":{"total":N,"perPage":N}` ([counted](development.md#documentation)).
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, the reviewer's reminder, or its event wake of the master session) comes from the same launcher and is acted on without confirmation.
-
-Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
-
-### Connect an account
-
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests provider and model; the card shows the result. A subscription login shows its URL and code — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). **Retry** on a failed card is admins-only: it re-enters the credential. The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** on its command line (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
-Each account's `~/.coding_agents` login home is selected by `CLAUDE_CONFIG_DIR` (Claude Code), `CODEX_HOME` (Codex), `XDG_DATA_HOME` (OpenCode) or `CURSOR_CONFIG_DIR` (Cursor, whose login is `CURSOR_CONFIG_DIR=HOME agent login`). Tokens go in `~/.config/graphyard/workers/` and `producers/` (mode 0600). Then:
+Login homes (`~/.coding_agents`): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode), `CURSOR_CONFIG_DIR`.
 
 ```sh
-node "$GRAPHYARD_CLI" master environments --create claude,codex --apply  # new login homes
-CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude                       # /login once
-node "$GRAPHYARD_CLI" master environments --apply                        # report quota, write profiles
+node "$GRAPHYARD_CLI" master environments --create claude,codex --apply
+CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude            # /login once
+node "$GRAPHYARD_CLI" master environments --apply
 ```
 
-Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch.
+Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended); `"prompt"` is refused at launch.
+
+### Connect an account
+
+Settings › **Agents** › **Connect an account** (key or login): the executor writes and smoke-tests a 0600 auth file.
 
 ### Configure the fleet
 
-The **agent registry** (Settings › **Agents**) records runtimes, accounts, roles and policies, proposed from `~/.coding_agents`:
+**Agent registry** (runtimes, accounts, roles, policies; Settings › **Agents**), proposed from login homes:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -52,7 +50,7 @@ node "$GRAPHYARD_CLI" master registry propose --apply
 
 ### Add a runtime
 
-Advanced, or the CLI (dash-led values join their flag with `=`):
+**Advanced**, or CLI (dash-led values join their flag with `=`):
 
 ```sh
 node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes-always \
@@ -62,64 +60,48 @@ node "$GRAPHYARD_CLI" master registry runtime set aider --kind aider --arg=--yes
 
 ### Add an account
 
-Connect it in the UI, or record one login each:
-
 ```sh
 node "$GRAPHYARD_CLI" master registry model set opus --provider Anthropic --id claude-opus-5 \
-  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Model pricing"
+  --input-cost 15 --output-cost 75 --tier frontier --context 1000000 --reason "Pricing"
 node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --model opus \
-  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second subscription"
-node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
+  --home ~/.coding_agents/claude-b --max-sessions 2 --reason "Second plan"
+node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--plan NAME` names the provider plan an account draws on (`none` clears). Otherwise it is inferred: one host and home share a plan, `pi-X` and `opencode-X` share a Z.AI plan, others stand alone. A plan's accounts group on the Accounts page and share one failover budget: one exhausted bars the rest.
-
-`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Any registry write (CLI, dashboard or API) is refused when a field looks like a pasted key: a known prefix, a PEM block, a JWT, a z.ai key, or a long random letter-and-digit token. A model id built of words, numbers and short version parts is exempt.
+`--plan NAME` groups accounts under one shared provider quota (`none` clears; inferred when omitted). `--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run. Registry writes refuse pasted keys.
 
 ### Add a role
 
-Preferred account first; applies next launch:
+Preferred account first. `--concurrency` counts settled sessions (`sessions-settled` in `master registry history`):
 
 ```sh
-node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Codex overflow"
+node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Overflow"
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
-`--concurrency` counts settled sessions: any registry read ends those whose lease or request lapsed (`sessions-settled`, with reasons, in `master registry history`).
-
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions without a restart:
-
-```json
-"reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
-```
-
-Adding workers? For worker count `W` and `G` proof groups: `⌈W / 2⌉` review slots and `G × ⌈W / 2⌉` producer slots over ≥ 2 producer principals. Watch `longestWaitMs`.
+Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots (profile `"concurrency"`, applied without a restart); watch `longestWaitMs`.
 
 ## 3. Start the master
 
 ```sh
 node "$GRAPHYARD_CLI" master init --url https://YOUR-GRAPHYARD-HOST --herdr-workspace HERDR_WORKSPACE_ID \
   --browser-profile Default --token-stdin < ~/.config/graphyard/INSTALL/tokens/INSTALL-master.token
-node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # now installs the executors
-node "$GRAPHYARD_CLI" master start codex     # or: master start claude
+node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # executors
+node "$GRAPHYARD_CLI" master start codex     # or claude
 ```
 
-Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
-
-Onboarding writes and explains `mergeQueue` in `.graphyard/master.json`: `parallelTips` (default 4) queue positions validated at once, needing parallelTips × pull-request jobs concurrent Actions jobs — declare your limit as `ciConcurrency` and `master protection` flags a lower one — and the [shared-infrastructure](github.md#optimistic-merges) `optimisticExclude` globs never merged optimistically over. Tune both there; re-runs keep them; `mergeQueue.optimistic: false` turns the lane off.
+Run as an OS user whose GitHub credentials workers cannot read. `--browser-profile`: Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)). Setup writes `mergeQueue` in `.graphyard/master.json`: `parallelTips` (default 4; needs parallelTips × pull-request jobs concurrent Actions jobs — declare `ciConcurrency`, `master protection` flags a lower one) and [`optimisticExclude`](github.md#optimistic-merges) globs.
 
 ### The loop must be supervised
 
-`master init` from the coordinator checkout writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now` and `loginctl enable-linger`, restarting on crash, reboot and hang; never a side effect: worker checkouts and temp directories are refused. Move it with `master init --token-stdin --replace-supervisor` from the new checkout; `master status` reports `setup.supervisor` and the merger.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names every missing piece. `master run` dispatches a small item; the loop merges once branch protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-CI workflows should cancel superseded pull-request runs: group each by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
+CI workflows should cancel superseded pull-request runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled; `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 
-## What stays manual
-
-Logins (provider, GitHub, agent environments, browser profile), the App confirmation, plan approval, *Confirm access*, producer grants and the [human-only decisions](glossary.md#who-decides).
+Humans only: logins, App confirmation, plan approval, *Confirm access*, producer grants, [human-only decisions](glossary.md#who-decides).
