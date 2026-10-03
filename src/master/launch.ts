@@ -63,6 +63,7 @@ export async function preservePartialWork(path: string, label: string, run: Chil
 export const launchRequestContracts: Record<string, (reference: string) => string> = {
   claude: reference => reference, codex: reference => reference, cursor: reference => reference, opencode: reference => `--prompt ${reference}`,
   pi: reference => reference, muse: reference => reference, gemini: reference => `--prompt-interactive ${reference}`, qwen: reference => `--prompt-interactive ${reference}`, copilot: reference => `--interactive ${reference}`,
+  agy: reference => `--prompt-interactive ${reference}`,
 };
 /** How a runtime loads the launch authorization from a file; only Claude Code, which leaves AGENTS.md out under a role file, needs one. */
 export const launchRoleContracts: Record<string, (reference: string) => string> = { claude: reference => `--append-system-prompt-file ${reference}` };
