@@ -4,7 +4,8 @@ import { trackedPool } from './pools.js';
 
 /**
  * The report pool (GY-491): the read-only reports — interventions, flow analytics, the shipping
- * pulse — run on their own few connections under a shorter statement timeout, so a slow report
+ * pulse, and (GY-634) the attribution analytics, manifests and histories and the deployment audit
+ * read — run on their own few connections under a shorter statement timeout, so a slow report
  * waits for its own connections and fails on its own clock, and never takes a connection an
  * observation job, a lease renewal or a merge needs.
  */
