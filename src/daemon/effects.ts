@@ -28,6 +28,7 @@ import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
+import { writeProjectMemory } from '../project-memory.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
@@ -75,12 +76,12 @@ export interface DaemonEffects {
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
   /**
-   * Asks the control plane to decide the item's open scope request and returns the decided
-   * document. The loop carries no verdict of its own: it asks, and Graphyard decides from the
-   * item's own criteria. A loop wired without it simply never decides one, and every request
-   * waits for the operator exactly as it did before.
+   * Asks the control plane to decide the item's open scope request and returns the decided document.
+   * The loop carries no verdict: Graphyard decides from the item's own criteria. A loop wired
+   * without it never decides one, and every request waits for the operator as before.
    */
   decideScope?: (work: Work) => Promise<Work>;
+  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: `resync` now, for a step refused on a stale observation
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
@@ -550,7 +551,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     };
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
-  const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
+  // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
+  let writtenMemory: string | null = null;
+  const persistLoop = async (state: DaemonState) => {
+    const memory = state.projectMemory ? JSON.stringify(state.projectMemory) : null;
+    if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
+    return writeDaemonState(current(), state);
+  };
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
@@ -643,7 +650,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, {}),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
