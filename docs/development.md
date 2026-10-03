@@ -33,7 +33,7 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 ### Documentation that rarely conflicts
 
-Write self-contained paragraphs; reword shared sentences only when wrong. A docs-only conflict is docs-synced, not reworked: base merges in, both sides kept in budget, approval kept while the diff outside docs/ stands unchanged; five a day on one path raises one.
+Add a self-contained paragraph or section rather than rewording shared sentences. A candidate whose conflicts with the base are confined to docs/**/*.md is refreshed by docs-sync, not reworked: the base merges in, both sides kept in budget, and approval is kept when the non-docs diff is unchanged; five or more conflicts in 24 hours on one path raises an attention item.
 
 ## Trusted contracts
 
