@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 3 | leases, workspaces, `watch`. -->
+<!-- page: Agent protocol | 3 | leases, workspaces, `watch`, blockers. -->
 # Leases, workspaces and supervision
 
 Claims last 120 seconds, renewed at least every 30. Every owner mutation carries the epoch; an expired epoch is refused and cannot be revived.
@@ -17,13 +17,27 @@ A worker never pushes with the host's `gh` login: its session bus is masked, so 
 
 **Limitation (GY-1066):** no token is minted (409) while a merge queue on the base lets the App bypass it, or its bypass list is hidden from the App, because that token could merge past the queue. An organization repository whose managed ruleset makes the control-plane App its bypass actor therefore launches no worker until workers push as a separate App the queue does not exempt, which Graphyard does not provide yet; the launch failure names this. A ruleset GitHub fails to answer transiently is a retryable 502.
 
-An attempt blocked by a GitHub credential failure (git's or `gh`'s own refusal, or a 401 naming GitHub) is ended in the next cycle, keeping its work on its branch, and relaunched with a fresh credential. Each such ending counts as a failed attempt, as one that outruns its time box does: relaunches wait 5, then 15 minutes, and a third in a row holds the item for an approver's decision.
+An attempt blocked by a GitHub credential failure (git's or `gh`'s own refusal, or a 401 naming GitHub) ends with its `blocked` report, keeping its work on its branch; the loop closes its pane, and once the `github-credential` blocker clears the item is relaunched with a fresh credential. Each such ending counts as a failed attempt, as one that outruns its time box does: relaunches wait 5, then 15 minutes, and a third in a row holds the item for an approver's decision.
 
 ## How a lease ends
 
 - `submit` (CLI `complete`) ends it; later heartbeats are refused with `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
-- `park` records a human-only request and releases it.
+- `park` records a human-only request and releases it; `blocked` with a reason records the blocker and releases it, keeping the attempt's partial work.
 - A coordinator `capacity` report (`event: "exhausted"`) releases it for another account.
-- Otherwise it expires, classified from the unsubmitted epoch's ledger: an unwithdrawn `blocked` report is `lease.expired` with cause `blocked-awaiting-operator`; an admin `--previous-worker-stopped` attestation is `stopped-by-attestation`; `capacity.exhausted` is `exhausted-capacity`; nothing is a `lease-loss` escalation, auto-settled if a record later explains it ([settling](../delegation.md#who-may-settle-what)).
+- Otherwise it expires, classified from the unsubmitted epoch's ledger: an unwithdrawn `blocked` report (only rows from before a blocked report released the lease itself) is `lease.expired` with cause `blocked-awaiting-operator`; an admin `--previous-worker-stopped` attestation is `stopped-by-attestation`; `capacity.exhausted` is `exhausted-capacity`; nothing is a `lease-loss` escalation, auto-settled if a record later explains it ([settling](../delegation.md#who-may-settle-what)).
 
+## Blocked work unblocks itself
 
+`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`) and, in the blocker's transaction, releases the lease; the capacity record carries `blocked on epoch N: REASON` (`credential-blocked attempt on epoch N` for a GitHub credential failure) for the next attempt. Each cycle (`blockers` step) the loop classes every standing blocker (`src/model/blocker-class.ts`). Credential and path probes run in the confinement the next worker gets: its runtime sandbox, inside the read-only coordinator mount every non-sandboxed runtime starts in; a probe that cannot be confined fails.
+
+| Class | Probe, every cycle | Cleared when |
+| --- | --- | --- |
+| `github-credential` | `gh auth status`, `git ls-remote`, `git push --dry-run` under the attempt's own launch | all pass |
+| `control-plane-error` | server health | healthy |
+| `sandbox-path` | write the path (`.git/` via `git rev-parse --git-path`) in that sandbox | it succeeds |
+| `worktree-mismatch` | the attempt's lease | ended |
+| `outside-scope-test-failure` | base branch tip | moved |
+| `planned-file-scope` | additive `requirements` widening for the approver | files covered |
+| `needs-decision` | approver launched and supervised | none requested |
+
+Probes are recorded (`POST /api/work/KEY/blocker-probe`) on change or every five minutes; a pass clears the blocker (`blocker.cleared`, naming the probe). The plane refuses to clear a `genuine` or `human-only` blocker, or a fourth clear without a submission; only those, and scope no fold fits under the plannedFiles cap, need someone in `master status` and the board (class, last and next probe).

@@ -9,7 +9,8 @@ Create with `POST /api/work` ([example](../../examples/work.json)): `title` and 
 - `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`). `graphyard master unblock` rereads and retries a stale-revision refusal, at most three writes, while the same blocker stands; a cleared or changed blocker is reported instead.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; a human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` for an explained `lease-loss`.
 - `rework`, `recover`: `{"reason":…, "previousWorkerStopped":true}`; `admin` (`recover` for a delivered quarantine).
-- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `blocked` `{"epoch":1,"reason":…}` (null clears). `release` `"failure":{"message":…}` records `workspace.failed`; an untouched claim keeps its epoch.
+- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}` (`release` may carry `"cause"`, kept on its event: a watch supervisor whose session is gone releases this way, leaving no blocker; `"failure":{"message":…}` records `workspace.failed`, and an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}`: a reason ends the attempt and releases the lease; null clears while leased.
+- `blocker-probe` `{blocker,class,probe,result,detail,nextAt}`: coordinator; a `pass` clears a routine blocker ([classes](leases.md#blocked-work-unblocks-itself)).
 - `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`; optional `preserved` (`path`, `head`, `branchTip`, `op`, `refs`, `diff`, `at`) records a detached earlier holder as `workspace.preserved`.
 - `submit`: `{"epoch":1,"pr":123}`, refused (`409`) when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator or admin, delivered work, once.
