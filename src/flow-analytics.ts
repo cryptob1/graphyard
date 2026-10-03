@@ -461,6 +461,11 @@ export const reportKinds: FlowKind[] = flowKinds.filter(kind => !['work.created'
  * The kinds each drill-down reads from the window, for those that read a subset: the steps
  * drill-down derives from gate facts and the merge (`stepMoves`); bottleneck and work in progress
  * read only latest state. A metric not named here (phase) reads the flow report's own dataset.
+ * When the shared scan bound is exhausted, narrowed drill-downs spend their bound only on their
+ * own kinds, so their reach can extend beyond the report's shared scan cutoff. Metrics whose
+ * kinds are carried in `separateKinds` (`throughput`, `lead-time`, `merge-ready`) align with report
+ * figures, while narrow reads for other metrics (`stage-dwell`, `evidence`, `review`, `blockers`)
+ * can reach further than the truncated report aggregate, stating their own reach in `coverage`.
  */
 export const drilldownKinds: Partial<Record<string, readonly FlowKind[]>> = {
   steps: ['gates.changed', 'merged'], 'merge-ready': ['gates.changed'], 'stage-dwell': ['stage.changed'],
@@ -649,8 +654,12 @@ export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<
  * One drill-down, answered from the narrowest read that holds its rows: a metric that reads a
  * subset of kinds (`drilldownKinds`) reads only those, the steps drill-down from its key's instant
  * on, so facts of other kinds or from earlier in the window never spend the bound its rows need;
- * any other metric answers from the pooled flow report's dataset. These reads are pooled apart
- * from the reports, on the same freshness rules, keyed by their kinds and start.
+ * any other metric answers from the pooled flow report's dataset. Under a truncated shared scan,
+ * drill-down metrics whose kinds are in `separateKinds` (`throughput`, `lead-time`, `merge-ready`)
+ * count the same delivered/merged/gate facts as the report, while metrics that read other subsets
+ * (`stage-dwell`, `evidence`, `review`, `blockers`) can read facts past the report's shared scan
+ * cutoff and state that reach in their own `coverage`. These reads are pooled apart from the
+ * reports, on the same freshness rules, keyed by their kinds and start.
  */
 export async function pooledFlowDrilldown(store: Store, query: FlowQuery, request: DrilldownRequest) {
   const kinds = drilldownKinds[request.metric];
