@@ -22,7 +22,7 @@ import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema } from './interventions.js';
 import { demand } from './refusal.js';
 
-export const CHECK_NAME = 'Graphyard / merge';
+export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
