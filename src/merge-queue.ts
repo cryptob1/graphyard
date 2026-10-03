@@ -1,5 +1,5 @@
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
-import { CHECK_NAME } from './model/work.js';
+import { CHECK_NAME, LANDABLE_CHECK } from './model/work.js';
 import { carriedApproval, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
@@ -975,13 +975,14 @@ export interface RequiredCheck { name: string; policy: boolean; appId: number | 
 /**
  * GY-430. The checks a candidate must pass: the policy's, then every check the base branch's
  * protection or active rulesets require that the policy does not name (the observation records
- * them, never `Graphyard / merge`). GitHub refuses the merge while any of them has not passed, so a
+ * them, never `Graphyard / merge` or `graphyard/landable`: Graphyard publishes both, and a verdict
+ * waiting on its own check would refuse forever, GY-887). GitHub refuses the merge while any of them has not passed, so a
  * failing protection-only check — PR #221's `secrets` scan — is judged exactly as a policy check is.
  */
 export function requiredChecksOf(work: Pick<Work, 'policy' | 'observation'>): RequiredCheck[] {
   const names = work.policy?.checks ?? [];
   const policy = names.map(name => ({ name, policy: true, appId: null }));
-  const extra = (work.observation?.requiredChecks ?? []).filter(check => check.name !== CHECK_NAME && !names.includes(check.name))
+  const extra = (work.observation?.requiredChecks ?? []).filter(check => check.name !== CHECK_NAME && check.name !== LANDABLE_CHECK && !names.includes(check.name))
     .map(check => ({ name: check.name, policy: false, appId: check.appId }));
   return [...policy, ...extra];
 }
