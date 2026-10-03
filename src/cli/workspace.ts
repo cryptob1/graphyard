@@ -17,6 +17,7 @@ import { releaseUnderFailure, reserveReleasingHold, submittedBranchRefusal } fro
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
+import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import { restoreAndReport } from './sync-restore.js';
 import { defineCommands, workMutation } from './registry.js';
 
@@ -228,13 +229,21 @@ export const workspaceCommands = defineCommands([
       const released = await reserveReleasingHold(root, branch, path, runChild, mutate, epoch, hostId);
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
+      // GY-1078: an abandoned session worktree of this item still holding the branch — checked out
+      // on a rework, or stopped mid-rebase, mid-am or mid-bisect of it, which git lists as detached —
+      // is reclaimed first; one with a live lease or uncommitted changes is named and left alone.
+      // Every failure carries git's own stderr, so the loop's record says why.
+      let reclaimed: ReclaimedHolder[] = [];
       try {
-        if (!released?.reused) execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
-        if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
+        // GY-1078: a holder the GY-860 release above leaves — an `am` or a bisect — is reclaimed here.
+        if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, Date.parse(status.now ?? '') || Date.now(), { checkouts: !!work.submission });
+        for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
+        if (!released?.reused) gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
+        if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
       }
       catch (error) {
         // GY-860: the host's git state failed, not the attempt; releasing with the message undoes the epoch.
-        const detail = error instanceof Error ? error.message : 'git worktree failed';
+        const detail = error instanceof Error ? error.message : String(error);
         await releaseUnderFailure(mutate, epoch, detail);
         throw new Error(`Git worktree creation failed: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; inspect the event and repair the host before it redispatches.`);
       }
@@ -244,7 +253,7 @@ export const workspaceCommands = defineCommands([
       // heartbeat means this epoch is no longer held: npm is stopped there and the command fails
       // rather than reporting a worktree ready for work nobody may do.
       const dependencies = await installUnderLease(path, () => mutate('heartbeat', { epoch }), `${work.key} epoch ${epoch}`);
-      return print({ path, branch, epoch, dependencies });
+      return print({ path, branch, epoch, dependencies, ...(reclaimed.length ? { reclaimed } : {}) });
     },
   },
   {
