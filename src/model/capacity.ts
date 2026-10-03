@@ -164,6 +164,8 @@ export const partialWorkSchema = z.object({
   detail: z.string().max(500).optional(),
 }).strict();
 export type PartialWork = z.infer<typeof partialWorkSchema>;
+/** The marker an attempt ended by its own blocker carries in its capacity record (GY-1008). */
+export const blockedAttemptMarker = 'blocked on epoch ';
 
 const instant = z.iso.datetime();
 /**
