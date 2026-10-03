@@ -562,15 +562,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const held = capacityRank.get(watch.work);
     if (held === undefined || age < held) capacityRank.set(watch.work, age);
   }
-  const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
-  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => {
-    const aRank = waitingRank(a), bRank = waitingRank(b);
-    return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
-  }) : snapshot.work;
-  // A producer request whose attempts are used up calls for a rework once its escalation has stood
-  // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
+  const rank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
+  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => rank(a) - rank(b)) : snapshot.work;
+  // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
-  // A needed decision with no watch is requested once its failed attempt may retry, or escalated with the commands that request it by hand.
+  // A needed decision with no watch is requested once ready to retry, or escalated.
   const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
     const previous = state.actions[key];
     if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
@@ -606,21 +602,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
-      // The refusal wakes the item's observation job at once (GY-710), and the rework is decided
-      // on the first cycle after that observation lands, not whenever the cadence reaches it. The
-      // wake is stamped on the snapshot's clock, the one the observation's time is on.
+      // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
       await wakeObservationJob(cycle, item, 'rework');
       return;
     }
-    // A settled watch is supervised no more, but a registry session its close could not end still
-    // holds the role's slot: ending it is tried again each cycle until the registry is told.
+    // A settled watch is supervised no more; an unclosed registry session is retried.
     if (watch) {
       if (!watch.settledAt) await supervise(item, decision, key, watch);
       else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
       return;
     }
-    // A `done` entry with no watch is a cursor written before requests were supervised; the
-    // request path adopts the decision it left standing and launches an approver for it.
+    // A done entry with no watch adopts the standing decision and launches an approver.
     await requestNeeded(item, decision, key);
   });
   // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
@@ -635,9 +627,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
     if (next) await requestNeeded(item, next, decisionKey(item, next));
   });
-  // A watch whose item no longer needs its decision — applied and moved on, or overtaken by a new
-  // head — has nothing left to judge. Its session is closed rather than left holding a provider
-  // seat, and the watch goes with it; one Herdr cannot be read for stays until it can.
+  // A watch whose item no longer needs its decision is closed rather than left holding a provider seat.
   for (const [key, watch] of Object.entries(state.approvals)) await isolate('decision', snapshot.work.find(candidate => candidate.key === watch.work) ?? null, watch.work, async () => {
     // A watch the loop made for a session it did not launch has no request of the loop's to take back (below).
     if (needed.has(key) || key.startsWith(handWatchPrefix)) return;
