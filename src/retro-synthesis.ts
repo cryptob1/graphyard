@@ -63,6 +63,72 @@ export async function ensureRetroIndex(pool: pg.Pool): Promise<'present' | 'buil
     return 'built';
   } finally { db.release(true); }
 }
+
+export const retroIndexRetryIntervalMs = 60_000;
+
+export interface RetroIndexWatchOptions {
+  intervalMs?: number;
+  periodic?: boolean;
+  announce?: (outcome: 'present' | 'built' | 'building elsewhere') => void;
+  failed?: (error: unknown) => void;
+}
+
+/**
+ * Start the retro-index build beside startup and re-check periodically if another replica is
+ * building or an error occurs, until the index is present or built (GY-1048 follow-up 26).
+ */
+export function startRetroIndexWatch(pool: pg.Pool, options: RetroIndexWatchOptions = {}) {
+  let stopped = false;
+  let timer: NodeJS.Timeout | null = null;
+  let inFlight = false;
+  let resolveReady: (outcome: 'present' | 'built') => void;
+  const ready = new Promise<'present' | 'built'>(resolve => { resolveReady = resolve; });
+  const interval = options.intervalMs ?? retroIndexRetryIntervalMs;
+
+  const attempt = async () => {
+    if (stopped || inFlight) return;
+    inFlight = true;
+    try {
+      const outcome = await ensureRetroIndex(pool);
+      options.announce?.(outcome);
+      if (outcome === 'present' || outcome === 'built') {
+        resolveReady(outcome);
+        if (!options.periodic && timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+        return;
+      }
+      schedule();
+    } catch (error) {
+      options.failed?.(error);
+      schedule();
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const schedule = () => {
+    if (stopped || timer) return;
+    timer = setInterval(() => { void attempt(); }, interval);
+    timer.unref?.();
+  };
+
+  void attempt();
+  if (options.periodic) schedule();
+
+  return {
+    ready,
+    stop: () => {
+      stopped = true;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+  };
+}
+
 const foldRows = (rows: any[]) => foldRetroArtefacts(rows.map((row): RetroLedgerRow => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), payload: row.payload })));
 
 /**

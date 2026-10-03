@@ -8,7 +8,7 @@ import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
 import { openPatternItems } from '../interventions.js';
-import { ensureRetroIndex, synthesizeRetro } from '../retro-synthesis.js';
+import { ensureRetroIndex, startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
@@ -31,8 +31,11 @@ export async function main() {
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
   // Built CONCURRENTLY beside startup, never awaited: a plain build in the migration would hold the ledger's writes (GY-1048).
-  void ensureRetroIndex(store.pool).then(outcome => console.log(`Retro index events_retro_id: ${outcome}`),
-    error => console.error('Retro index events_retro_id was not built; retro reads scan until the next start:', error instanceof Error ? error.message : 'unknown'));
+  // When another replica is building or on error, re-checks periodically until present (follow-up 26).
+  const retroIndex = startRetroIndexWatch(store.pool, {
+    announce: outcome => console.log(`Retro index events_retro_id: ${outcome}`),
+    failed: error => console.error('Retro index events_retro_id was not built; will retry:', error instanceof Error ? error.message : 'unknown'),
+  });
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
@@ -115,7 +118,7 @@ export async function main() {
     }
   }, 2000);
   http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
-  const shutdown = () => { reconciliation.stop(); watching.stop(); observing?.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
+  const shutdown = () => { reconciliation.stop(); watching.stop(); observing?.stop(); retroIndex.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }
 

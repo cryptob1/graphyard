@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { Intervention, InterventionPolicy } from '../src/model/interventions.js';
 import { cataloguedCause, classifyGateRefusals, detectRecurringCauses, draftPrevention, retroApprovalConflict, retroCause, retroCheckRefusals, retroStanding, runRetroCheck, type RetroArtefact } from '../src/model/retro-synthesis.js';
-import { ensureRetroIndex, judgeRetroArtefact, readAppliedRetroChecks, readRetroArtefacts, retroLedgerLimit, retroReads, synthesizeRetro } from '../src/retro-synthesis.js';
+import { ensureRetroIndex, judgeRetroArtefact, readAppliedRetroChecks, readRetroArtefacts, retroLedgerLimit, retroReads, startRetroIndexWatch, synthesizeRetro } from '../src/retro-synthesis.js';
 import { withRetroStanding } from '../src/cli/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { advisoryLocks } from '../src/store/locks.js';
@@ -327,6 +327,42 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
   await store.pool.query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'events_retro_id'::regclass");
   assert.equal(await ensureRetroIndex(store.pool), 'built');
   assert.equal((await store.pool.query("SELECT indisvalid FROM pg_index WHERE indexrelid = 'events_retro_id'::regclass")).rows[0].indisvalid, true);
+
+  // When another replica holds the lock, the watch observes 'building elsewhere' and retries deferred
+  // until the lock is released and the index is built/present (follow-up 26).
+  await store.pool.query('DROP INDEX IF EXISTS events_retro_id');
+  const otherReplica = await store.pool.connect();
+  const watchOutcomes: string[] = [];
+  let watch: ReturnType<typeof startRetroIndexWatch> | null = null;
+  try {
+    await otherReplica.query('SELECT pg_advisory_lock($1)', [advisoryLocks.retroIndex]);
+    watch = startRetroIndexWatch(store.pool, {
+      intervalMs: 20,
+      announce: outcome => { watchOutcomes.push(outcome); },
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(watchOutcomes.includes('building elsewhere'));
+  } finally {
+    await otherReplica.query('SELECT pg_advisory_unlock($1)', [advisoryLocks.retroIndex]);
+    otherReplica.release();
+  }
+  const built = await watch!.ready;
+  assert.equal(built, 'built');
+  assert.ok(watchOutcomes.includes('built'));
+  watch!.stop();
+  assert.equal((await store.pool.query("SELECT indisvalid FROM pg_index WHERE indexrelid = 'events_retro_id'::regclass")).rows[0]?.indisvalid, true);
+
+  // A failed attempt reports the error and continues retrying until stopped.
+  const errors: unknown[] = [];
+  const failingWatch = startRetroIndexWatch({
+    connect: async () => { throw new Error('simulated connection failure'); },
+  } as any, {
+    intervalMs: 15,
+    failed: err => errors.push(err),
+  });
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.ok(errors.length >= 1);
+  failingWatch.stop();
 
   // Over thousands of judged retro rows, the applied-check read and the unjudged-draft probe go by
   // payload id through events_retro_id, never a scan of every retro row (follow-ups 18, 19, 22, 23).
