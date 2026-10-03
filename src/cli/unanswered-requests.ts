@@ -35,8 +35,9 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     const verdict = request.verdict ? `with verdict ${request.verdict}` : 'without a verdict';
     const settled = `its session ${request.state} ${verdict} after attempt ${request.attempts} — ${request.resolution ?? 'no reason recorded'}`;
     const next = request.next;
-    // The decision its evidence calls for is the named answer, not an unanswered request.
-    if (next?.kind === 'decision') return { subject: row.key, requestId: request.requestId, ...classified('request-remedy'),
+    // Once the reader knows how long ago the session settled — so the grace has been measured —
+    // the decision its evidence calls for is the named answer, not an unanswered request.
+    if (next?.kind === 'decision' && request.settledMs !== null) return { subject: row.key, requestId: request.requestId, ...classified('request-remedy'),
       text: `${subject} for ${row.key} awaits the ${next.decision} decision its evidence calls for, ${elapsed(request.sinceMs)} after it was requested: ${settled}; ${next.proofs.join(', ')} ${next.proofs.length === 1 ? 'was' : 'were'} recorded as not exercising ${next.proofs.length === 1 ? 'its criterion' : 'their criteria'} on this head, so no producer is launched for it again and the loop raises the ${next.decision} decision instead`,
       ...requestRemedyOwner(row.key, next) };
     // A producer that recorded its proofs as not exercising their criterion answered the request
