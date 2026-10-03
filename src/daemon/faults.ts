@@ -110,16 +110,16 @@ export function restoreInMotion(work: Work | undefined, now: number): boolean {
 }
 /**
  * GY-1129. Whether a base refresh conflict is still in motion or in rework: the candidate has a confirmed
- * conflict with the base branch, and rework has been requested or the item has entered stage build, or
- * the conflict was reported within `restoreWaitBoundMs`. The control plane requests and approves rework
- * on its own, so a base conflict actively being handled is self-handled, not a merge fault
- * (GY-501, GY-1073, GY-417 on 3 October 2026: each counted while in rework or within minutes of the conflict).
+ * conflict with the base branch, and rework has been requested for it or the conflict was reported within
+ * `restoreWaitBoundMs` (the time the loop takes to return the item and decide its rework). The control
+ * plane requests and approves rework on its own, so a base conflict actively being handled is self-handled,
+ * not a merge fault (GY-501, GY-1073, GY-417 on 3 October 2026: each counted while in rework or within minutes of the conflict).
  * A conflict left unhandled past the bound counts as a merge fault.
  */
 export function baseConflictInMotion(work: Work | undefined, now: number): boolean {
   if (!work?.candidate) return false;
   if (!baseRefreshConflict(work)) return false;
-  if (work.reworkRequested || work.stage === 'build') return true;
+  if (work.reworkRequested) return true;
   const since = work.baseRefresh?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }

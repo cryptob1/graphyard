@@ -214,5 +214,6 @@ for (const entry of gy1129Instances) {
     assert.deepEqual(faults(conflicting(entry.at)), [], `at recorded time (${entry.at}), the base conflict is in rework or motion and not counted as a merge fault`);
     // Not weakened: the same conflict unhandled after two hours with no rework requested is a merge fault.
     assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), false, 'merge'), now).length, 1, 'a base conflict unhandled for two hours still counts as a merge fault');
+    assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), false, 'build'), now).length, 1, 'returned to build with no rework decided for two hours, it still counts as a merge fault');
   });
 }

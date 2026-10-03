@@ -203,7 +203,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const conflictReport = candidateConflicts.report[work.key];
     const conflicts = work.submission && work.candidate ? { candidates: (conflictReport?.conflicts ?? []).map(conflict => conflict.key), files: conflictReport?.conflicts ?? [], unprobed: conflictReport?.unprobed ?? [], probed: !!conflictReport && candidateConflicts.available } : null;
     const dispatch = describeDispatch(work, reviews, sessions, now);
-    const baseRefresh = pendingBaseRefresh(work), baseConflict = work.reworkRequested || work.stage === 'build' ? null : baseRefreshConflict(work);
+    const baseRefresh = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
     const refreshCarry = currentBaseRefreshCarry(work);
     // A branch found carrying another item's unlanded commits, with the restore the control plane
     // owes, requested or ran for it (GY-127); and an approval GitHub dismissed for a merge-base
