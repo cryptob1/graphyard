@@ -266,6 +266,9 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
         // not a failure to repeat until the review is posted (GY-1090).
         const pending = answeredByPendingReview(error, request);
         if (!pending) throw error;
+        // A session that already posted its verdict answered the request (GY-1083); the control
+        // plane settles it once its observation reads that verdict.
+        if (pending.answered) return `${work.key}'s review of ${request.sha.slice(0, 12)} was already answered by reviewer session ${pending.agentName} with ${pending.answered.state} (review ${pending.answered.reviewId}); that verdict settles the request`;
         return `${work.key}'s review of ${request.sha.slice(0, 12)} is left to reviewer session ${pending.agentName} already answering that head; its verdict settles the request`;
       }
       return `launched reviewer ${profile.name} on ${request.sha.slice(0, 12)}`;
