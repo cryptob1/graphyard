@@ -108,6 +108,37 @@ export const triageParameters: JsonSchema = {
   },
 };
 
+/** The decomposition of a broad item into small child items (GY-1126). */
+export const decomposeParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['children', 'reason'],
+  properties: {
+    children: {
+      type: 'array', minItems: 2, maxItems: 10, description: 'The small, independently mergeable child items',
+      items: {
+        type: 'object', additionalProperties: false, required: ['title', 'criteria', 'plannedFiles'],
+        properties: {
+          title: text(200, 'The child item title'),
+          description: text(20000, 'What this child item implements'),
+          criteria: {
+            type: 'array', minItems: 1, maxItems: 20,
+            items: {
+              type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
+              properties: {
+                id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ... exactly matching parent criterion ID' },
+                text: text(4000, 'The criterion text, preserved exactly from parent'),
+                proofs: { type: 'array', minItems: 1, maxItems: 10, items: text(200, 'The proof names, preserved from parent') },
+              },
+            },
+          },
+          plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'Narrow planned files for this child') },
+          dependencies: { type: 'array', maxItems: 10, items: text(200, 'Local index or id of predecessor child or parent dependency') },
+        },
+      },
+    },
+    reason: text(2000, 'Why and how the item was split into child items'),
+  },
+};
+
 /** Every reason `value` does not match `schema`; empty when it does. */
 export function schemaErrors(schema: JsonSchema, value: unknown, path = 'input'): string[] {
   const type = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
@@ -163,6 +194,8 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
   if (role === 'triage') return [tool('graphyard_triage_decision', 'Graphyard triage decision', 'Record your judgement of the machine-filed backlog item you were asked to triage: release it with a priority, close it with a reason (naming the delivered item that already fixed it, if any), or merge it into another open item. Call it exactly once; it is your result.', triageParameters, () => 'the judgement', true)];
+  // The decomposition session's split of a broad item into child items (GY-1126), likewise for its own role only.
+  if (role === 'decomposition') return [tool('graphyard_decompose', 'Graphyard decompose', 'Record your decomposition of the broad work item into small, independently mergeable child items: each with its own criteria taken from the parent\'s, narrower plannedFiles, and dependencies where order matters. Call it exactly once; it is your result.', decomposeParameters, () => 'the decomposition', true)];
   return role === 'approver' ? [decide] : role === 'producer' ? [evidence] : [decide, evidence];
 }
 

@@ -187,6 +187,17 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
   }
 
+  if (work.children && work.children.length > 0) {
+    const unfinished = work.children.filter(k => !all.find(w => (w.key === k || w.id === k) && w.stage === 'done' && !w.closure));
+    if (unfinished.length > 0) {
+      return waits({
+        kind: 'dependency',
+        on: unfinished[0],
+        detail: `${key} was split into child items (${work.children.join(', ')}) and waits for ${unfinished.join(', ')} to be delivered`,
+      }, 'ready', `Child item ${unfinished[0]} is unfinished`);
+    }
+  }
+
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
   // A containment quarantine outlives the attempt that raised it, and no executor step lowers one:
   // reconciliation clears a lapsed lease — the other half of `reclaim`, and the half that works —

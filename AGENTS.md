@@ -52,6 +52,8 @@ merge gate decide progression. Report blockers explicitly.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
 
+Broad items exceeding size bounds (criteria count, planned-file breadth, or estimated change size) are decomposed before dispatch into small, independently mergeable child items whose criteria together cover the parent's criteria exactly. The parent delivers when all child items are delivered. Operators can opt an item out with `split: false`.
+
 Every session Graphyard launches — a worker under `watch`, and the reviewer, proof-producer
 and approver sessions the master and its loop start — receives its instruction as the
 session's own first request, on the runtime's command line, never as pasted text; no human

@@ -63,7 +63,22 @@ export const diagnosisPayloadSchema = z.object({
 }).strict().refine(payload => !!payload.covering !== !!payload.fix, 'A diagnosis names exactly one answer: the covering item, or the fix item to file');
 export type DiagnosisPayload = z.infer<typeof diagnosisPayloadSchema>;
 
-export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', diagnose: 'graphyard_diagnose' } as const;
+export const decomposedChildSchema = z.object({
+  title: line(200),
+  description: line(20000).default(''),
+  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: line(4000), proofs: z.array(line(200)).min(1).max(10) }).strict()).min(1).max(20),
+  plannedFiles: z.array(line(500)).min(1).max(100),
+  dependencies: z.array(line(200)).max(10).default([]),
+}).strict();
+export type DecomposedChild = z.infer<typeof decomposedChildSchema>;
+
+export const decompositionPayloadSchema = z.object({
+  children: z.array(decomposedChildSchema).min(2).max(10),
+  reason: line(2000),
+}).strict();
+export type DecompositionPayload = z.infer<typeof decompositionPayloadSchema>;
+
+export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', diagnose: 'graphyard_diagnose', decompose: 'graphyard_decompose' } as const;
 
 /**
  * `run.diagnostician` in .graphyard/master.json (GY-439): the diagnostician runs headless on Pi

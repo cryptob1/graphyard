@@ -19,6 +19,16 @@ A criterion states an outcome and its proofs:
 
 `plannedFiles` (paths, or directory prefixes ending `/`) is the change-scope contract, not a lock: the [merge queue](github.md#merge-queue) and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and candidates `git merge-tree` cannot merge. A root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
+### Decompose broad items before dispatch
+
+Broad items (many criteria, wide directory-level `plannedFiles` such as `src/`, or large estimated changes) produce large pull requests that conflict in the merge queue and cause speculative merge ejections.
+
+Before an item is first dispatched:
+1. **Size bounds check:** The item is judged against size bounds (criteria count, planned-file breadth, estimated change size). An item within bounds is dispatched directly.
+2. **Decomposition into child items:** An item exceeding the bounds is split by an agent session into small child items (e.g. `GY-N.1`, `GY-N.2`), each with narrower `plannedFiles` (specific file paths, not repository roots), dependencies where ordering matters, and a subset of criteria. The children's criteria union must cover the parent's criteria exactly—none may be dropped or weakened.
+3. **Parent delivery:** The parent item is held until all its children are delivered. When all child items are delivered, the parent closes as `done` and is delivered. `master status` shows the parent-child relation in both `work` rows and the `parentChild` inventory.
+4. **Opt-out:** An operator can opt an item out of splitting by setting `"split": false` when creating the item or via requirements revision. Explicitly setting `"split": true` opts into splitting.
+
 ## Review gate: verdicts, not threads
 
 The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (held on the item until it ships, then filed as backlog) or overridden — by its thread ID or a comment ID the prompt shows beside it; prose counts for nothing — or is withdrawn, and the relaunch's prompt names the threads it missed; the loop resolves those named, always by thread ID. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.

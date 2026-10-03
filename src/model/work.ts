@@ -63,6 +63,11 @@ export const createSchema = z.object({
   // A repair to Graphyard's own merge path (GY-406): allowed only when every plannedFiles entry is
   // inside the merge path, and it opens the audited repair lane (src/master/repair-lane.ts).
   repair: z.literal('merge-path').optional(),
+  // Decomposing broad items before dispatch (GY-1126): an item over size bounds is split into child items
+  // unless split is false (operator opt-out).
+  split: z.boolean().optional(),
+  parent: z.string().trim().min(1).max(100).nullable().optional(),
+  children: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
@@ -227,6 +232,7 @@ export interface Work extends Create {
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
   gates: Gate[]; violations: string[]; lane?: Lane; speedTarget?: number; // risk lane and its speed target (GY-883, model/policy.ts), stamped by the last evaluation
+  split?: boolean; parent?: string | null; children?: string[];
 }
 // One scope rule for every scoped read and mutation, so a route cannot answer
 // with data its own authorization would have refused.
