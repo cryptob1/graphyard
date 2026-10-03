@@ -134,7 +134,7 @@ test('manual:fault-class-scope — a test-duration baseline beside a planned tes
   for (const entry of asks) {
     const verdict = decideScopeRequest(standing(entry), { paths: entry.paths });
     assert.equal(verdict.state, 'approved', `${entry.id}: ${verdict.reason}`);
-    assert.match(verdict.reason, /tests\/helpers\/timing-baseline\.json is the test-duration baseline a change to tests\/\S+ must keep covering/);
+    assert.match(verdict.reason, /tests\/helpers\/timing-baseline\.json (is the test-duration baseline a change to tests\/\S+ must keep covering|records the timing line of a test file this item adds or changes)/);
   }
   // An item that plans no test file is not granted the baseline: it names no test whose entry it records.
   assert.equal(decideScopeRequest({ plannedFiles: ['src/a.ts'], criteria: [] }, { paths: [baseline] }).state, 'refused');

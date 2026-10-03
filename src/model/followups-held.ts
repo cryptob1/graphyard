@@ -8,6 +8,7 @@ import type { Work } from './work.js';
 // parents' follow-up items back onto them.
 
 const open = (work: Pick<Work, 'stage'>) => work.stage !== 'done';
+const liveLease = (work: Pick<Work, 'lease'>, now: Date) => !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
 /** The findings a parent holds that still wait to be filed or dropped. */
 export const heldFollowUps = (parent: Pick<Parent, 'pendingFollowUps'>) => {
   const held = parent.pendingFollowUps;
@@ -54,18 +55,56 @@ export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title
   });
 }
 
+/**
+ * Review follow-ups triage notes for GY-1047 and its follow-ups GY-1136:
+ * - GY-1047 findings 1, 9, 16, 18, 23, 25 / GY-1136 findings 1, 5: the ship route
+ *   (src/server/followups-ship.ts) answers under `followUpShipReceiptKey`, the caller's key scoped to
+ *   the hold's timestamp (`at`), so a hold reopened on an already-delivered parent is filed instead of
+ *   replaying the earlier filing's receipt under the dispatcher's fixed key. The unused client-side
+ *   `followUpShipKey` is removed: the server owns the scoping, so src/reviewer.ts needs no change.
+ * - GY-1047 finding 2 / GY-1136 finding 8: declined. The unit tests' `deliver` writes the delivered
+ *   document straight to Postgres, and `tests/soak.test.ts` also calls `shipHeldFollowUps` with a stub
+ *   ship, so neither drives delivery through `engine.observe`. The follow-up path reads delivery only
+ *   through `hasShipped` (machine-backlog.ts), which these tests exercise on the same fields the
+ *   observation path writes (`stage: 'done'`, no closure, `delivery.mergeSha`); the observation path
+ *   writing those fields is covered by the merge-observation tests, not here.
+ * - GY-1047 findings 4, 13 / GY-1136 findings 2, 3, 4, 6, 7: `foldUnshippedFollowUps` skips an open
+ *   item only under a live lease (`expiresAt` after `now`), so a lapsed one folds; skipped items are
+ *   returned in `deferred`, and `migrateToParents` (src/server/followups-ship.ts) records the one-time
+ *   migration event only once nothing is deferred, so the next ask folds them after their lease ends.
+ * - GY-1047 finding 22: `foldUnshippedFollowUps` indexes parents in a `Map<string, Work>`.
+ */
+
+/**
+ * The receipt a request to file a parent's held follow-ups is answered under (GY-845, GY-1047, GY-1136):
+ * the caller's idempotency key scoped to the hold's timestamp. A retry within one hold replays its
+ * receipt, while a hold reopened after an earlier filing is filed afresh, whatever fixed key the
+ * dispatcher sends (`followups-after-ship:GY-N`).
+ */
+export function followUpShipReceiptKey(key: string, parent: Pick<Parent, 'pendingFollowUps'>): string {
+  const at = parent.pendingFollowUps?.at;
+  return at ? `${key}@${at}` : key;
+}
+
 /** The ledger kind of the one-time fold of unshipped parents' follow-up items (GY-845); its presence makes a second run a no-op. */
 export const followUpParentMigrationEvent = 'followups.parent-migrated';
 /**
  * The one-time migration (GY-845): each open follow-up item whose parent has not shipped folds its
  * findings back onto the parent and is closed as superseded by it, naming it. Nothing is deleted. A
  * parent already closed without shipping drops what it then holds. Items are changed in place.
+ *
+ * An open item under a live lease (one whose `expiresAt` is after `now`) is skipped so an attempt in
+ * progress is not ended without notice; it is returned in `deferred`, and the caller leaves the
+ * migration unfinished until none are. A lapsed lease folds like no lease. Parents are indexed by key.
  */
 export function foldUnshippedFollowUps(all: Work[], actor: string, now: Date) {
-  const folded: { work: Work; parent: Work; added: number }[] = [], parents = new Set<Work>();
+  const folded: { work: Work; parent: Work; added: number }[] = [], parents = new Set<Work>(), deferred: Work[] = [];
+  const parentsByKey = new Map<string, Work>();
+  for (const item of all) parentsByKey.set(item.key, item);
   for (const item of all) {
-    const key = open(item) ? followUpParent(item) : null, parent = key ? all.find(entry => entry.key === key) : undefined;
+    const key = open(item) ? followUpParent(item) : null, parent = key ? parentsByKey.get(key) : undefined;
     if (!parent || hasShipped(parent)) continue;
+    if (liveLease(item, now)) { deferred.push(item); continue; }
     const { added } = holdFollowUps(parent, followUpEntries(item), now);
     const closure: Closure = { kind: 'superseded', ref: parent.key, by: actor, at: now.toISOString(), from: item.stage,
       reason: `Folded back onto ${parent.key}, which has not shipped: its follow-ups wait there and become one follow-up item when it is delivered (GY-845 follow-up migration)` };
@@ -73,5 +112,5 @@ export function foldUnshippedFollowUps(all: Work[], actor: string, now: Date) {
     folded.push({ work: item, parent, added: added.length }); parents.add(parent);
   }
   const dropped = [...parents].map(parent => ({ parent, dropped: dropHeldFollowUps(parent, now) }));
-  return { folded, parents: [...parents], dropped: dropped.filter(entry => entry.dropped) };
+  return { folded, parents: [...parents], dropped: dropped.filter(entry => entry.dropped), deferred };
 }

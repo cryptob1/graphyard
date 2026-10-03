@@ -36,7 +36,7 @@ before(async () => {
   port = Number(process.env.GRAPHYARD_STORE_LOCKS_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 203);
   postgres = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('store-locks'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['locks', 'restored', 'contended', 'deadlocked', 'lifecycle', 'board']) await postgres.createDatabase(name);
+  for (const name of ['locks', 'restored', 'contended', 'deadlocked', 'redeadlocked', 'lifecycle', 'board']) await postgres.createDatabase(name);
 });
 after(async () => {
   for (const store of stores) await store.close().catch(() => {});
@@ -168,6 +168,35 @@ test('GY-443 — a restore that deadlocks with a writer holding a later ledger t
     assert.match(refused.message, /Restore requires an empty database: work_items already holds 1 row/);
     assert.deepEqual((await target.pool.query('SELECT id FROM work_items')).rows.map(row => row.id), [id]);
   } finally { if (!committed) await writer.release().catch(() => {}); }
+});
+
+test('GY-794 — a restore that deadlocks every time runs exactly five transactions, then reports the 40P01', async () => {
+  const live = await open('locks');
+  const backup = await createBackup(live.pool);
+  const target = await open('redeadlocked');
+  // Every run's table lock deadlocks, as it would under a writer that keeps winning: the restore's own
+  // connection, with the 40P01 raised where Postgres raises it, so the real retry loop decides the count.
+  let runs = 0, rollbacks = 0;
+  const deadlocking = {
+    connect: async () => {
+      const db = await target.pool.connect();
+      return {
+        query: async (sql: string, params?: unknown[]) => {
+          if (sql === 'BEGIN') runs++;
+          if (sql === 'ROLLBACK') rollbacks++;
+          if (sql.startsWith('LOCK TABLE')) throw Object.assign(new Error('deadlock detected'), { code: '40P01' });
+          return db.query(sql, params);
+        },
+        release: () => db.release(),
+      };
+    },
+  } as unknown as pg.Pool;
+  const refused = await within(10_000, restoreBackup(deadlocking, backup).then(() => null, (error: Error & { code?: string }) => error), 'the restore');
+  assert.ok(refused, 'a restore that never stops deadlocking fails');
+  assert.equal(refused.code, '40P01', 'the operator sees the deadlock once the attempts are spent');
+  assert.equal(runs, 5, 'the restore runs exactly five transactions, as docs/deployment.md promises');
+  assert.ok(rollbacks >= runs, 'every run rolls back');
+  assert.equal(Number((await target.pool.query('SELECT count(*) AS n FROM work_items')).rows[0].n), 0, 'nothing was restored');
 });
 
 // ---- AC-2: the index ------------------------------------------------------------------------
