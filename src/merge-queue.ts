@@ -6,7 +6,7 @@ import { pathScopesOverlap } from './model/scope.js';
 import { evaluateLandability, landabilityEjection, type LandabilityAudit, type LandabilityVerdict } from './model/landability.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import { ciCheckName } from './model/ci-refusal.js';
-import { attributeDocsOverflow, docsBudgetProof, docsOverflowReason, docsTotal, type DocsWordBudget, type DocsWordCount } from './model/documentation.js';
+import { attributeDocsOverflow, docsBudgetProof, docsOverflowReason, ownDocsOverflow, type DocsWordBudget, type DocsWordCount } from './model/documentation.js';
 
 // Graphyard publishes speculative tips outside refs/heads and refs/tags: the namespace is
 // owned by the App, is never a branch a worker can push, and never appears as a PR head.
@@ -958,7 +958,17 @@ export function queuePlacement(work: Work, all: Work[], now: number) {
 // merge-queue ejection rule use only the newest trusted run for a required name; GitHub
 // check-run IDs are immutable and increase as the provider creates retries. Array
 // position is a fallback for legacy observations that predate run identity capture.
+// GY-1109: a cancelled run never supersedes a run that was not cancelled. GitHub cancels a run a
+// concurrency group replaced ("Canceling since a higher priority waiting request exists") or one a
+// person stopped: it reports nothing about the commit, so the newest run that was not cancelled
+// decides, and a check with only cancelled runs is read as its newest cancelled run.
 export function latestCheck(checks: Observation['checks']): Observation['checks'][number] | undefined {
+  const decisive = checks.filter(check => check.result !== 'cancelled');
+  return newestCheck(decisive.length ? decisive : checks);
+}
+/** Whether `run` is an adverse conclusion about its commit: a failed conclusion GitHub did not reach by cancelling the run (GY-1109). */
+export const failedRun = (run: { result: string } | undefined) => !!run && run.result !== 'cancelled' && failedConclusions.has(run.result);
+function newestCheck(checks: Observation['checks']): Observation['checks'][number] | undefined {
   return checks.reduce<Observation['checks'][number] | undefined>((latest, check) => {
     if (!latest) return check;
     if (check.id !== undefined && latest.id !== undefined) return check.id > latest.id ? check : latest;
@@ -1004,7 +1014,7 @@ export function requiredCheckRun(check: RequiredCheck, checks: Observation['chec
 }
 /** Whether a counting run failed: a policy check by the queue's conclusions, as ever; a protection-only one by the failed-CI rework rule's (GY-430). */
 export function requiredRunFailed(check: RequiredCheck, run: Observation['checks'][number] | undefined): boolean {
-  return !!run && (check.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result));
+  return !!run && run.result !== 'cancelled' && (check.policy ? failedConclusions.has(run.result) : failedCheckResults.includes(run.result));
 }
 /** The test gate's trusted CI apps as last recorded on the item; legacy snapshots use the engine's historical GitHub Actions default. */
 export const ciAppIdsOf = (work: Pick<Work, 'gates'>): readonly number[] => work.gates?.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
@@ -1119,15 +1129,21 @@ export function ejectedCheckLift(work: Work, all: Work[], ciAppIds: readonly num
   if (!requiredCheckPassed(check, run)) return null;
   // Only a rerun lifts: a run GitHub created after the failed one (check-run ids increase), or for a
   // run recorded without an id, one observed after a failed run of the check that is still retained.
-  const rerun = failed.runId !== null ? run!.id !== undefined && run!.id > failed.runId
-    : observation.checks.slice(0, observation.checks.indexOf(run!)).some(entry => entry.name === check.name && failedCheckResults.includes(entry.result));
+  // GY-1109: an ejection made for a run GitHub cancelled was never the tip's own failure, so the
+  // passing run that decides the check now lifts it whatever its id: GY-967's tip was ejected for a
+  // concurrency-cancelled run created after the rerun attempt that passed.
+  const cancelled = failed.runId !== null && observation.checks.some(entry => entry.id === failed.runId && entry.name === check.name && entry.result === 'cancelled');
+  const rerun = cancelled || (failed.runId !== null ? run!.id !== undefined && run!.id > failed.runId
+    : observation.checks.slice(0, observation.checks.indexOf(run!)).some(entry => entry.name === check.name && failedCheckResults.includes(entry.result)));
   if (!rerun) return null;
   if (required.some(entry => requiredRunFailed(entry, requiredCheckRun(entry, observation.checks, ciAppIds)))) return null;
   const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
   const departed = (predicted?.predecessors ?? []).some(key => { const item = all.find(entry => entry.key === key); return !item || (item.stage !== 'done' && !item.queue); });
   if (departed) return null;
   const tip = candidate.sha.slice(0, 12);
-  return { check: check.name, run: run!, tip: candidate.sha, reason: `ejection lifted: check ${check.name} passed on rerun${run!.id !== undefined ? ` (run ${run!.id})` : ''} on speculative tip ${tip}${failed.runId !== null ? `, replacing failed run ${failed.runId}` : ''}` };
+  return { check: check.name, run: run!, tip: candidate.sha, reason: cancelled
+    ? `ejection lifted: check ${check.name} passed${run!.id !== undefined ? ` (run ${run!.id})` : ''} on speculative tip ${tip}; the run it was ejected for (${failed.runId}) was cancelled by GitHub, not failed`
+    : `ejection lifted: check ${check.name} passed on rerun${run!.id !== undefined ? ` (run ${run!.id})` : ''} on speculative tip ${tip}${failed.runId !== null ? `, replacing failed run ${failed.runId}` : ''}` };
 }
 /**
  * Explicit, observed failure of a queued entry's speculative validation. Missing or pending
@@ -1196,7 +1212,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
     const failingDocs = own && own.tip === candidate!.sha && window.firstFailure === own
       ? (() => { const byKey = new Map(all.map(entry => [entry.key, entry])); const docs = byKey.get(own.entries.at(-1)!)?.observation?.docsBudget; return docs && own.tip && docs.sha === own.tip ? docs : undefined; })()
       : undefined;
-    if (failingDocs?.onlyFailure && failingDocs.budget && docsTotal(failingDocs.pages) > failingDocs.budget.total) {
+    if (failingDocs?.onlyFailure && failingDocs.budget && ownDocsOverflow(failingDocs)) {
       const byKey = new Map(all.map(entry => [entry.key, entry]));
       const tipDocsOf = (view: TipView) => { const docs = byKey.get(view.entries.at(-1)!)?.observation?.docsBudget; return docs && view.tip && docs.sha === view.tip ? docs : undefined; };
       // Only a failing tip is counted, so a prefix's count is its own record or the base the next
@@ -1701,7 +1717,7 @@ export function tipVerdict(work: Work, ciAppIds: readonly number[] | null = null
   // A tip whose only failure is the docs word budget is judged as that proof (GY-574), so the plan
   // attributes it: the counts, not the check's name, say the lone failure was the budget's.
   const docs = observation.docsBudget;
-  if (failed && docs?.sha === candidate.sha && docs.onlyFailure && docs.budget && docsTotal(docs.pages) > docs.budget.total) return { result: 'fail', check: docsBudgetProof };
+  if (failed && docs?.sha === candidate.sha && docs.onlyFailure && docs.budget && ownDocsOverflow(docs)) return { result: 'fail', check: docsBudgetProof };
   if (failed) return { result: 'fail', check: failed };
   if (runs.some(entry => requiredRunFailed(entry.check, entry.run))) return undefined;
   return runs.every(entry => requiredCheckPassed(entry.check, entry.run)) ? { result: 'pass' } : undefined;
@@ -1964,6 +1980,8 @@ export interface CheckRerun {
   probedAt?: string;
   /** When GitHub was asked a second time because no rerun was found at all (GY-1096); asked once only. */
   rerequestedAt?: string;
+  /** GY-1109: the run this rerun answers was cancelled by GitHub, not failed; such reruns have their own allowance. */
+  cancelled?: boolean;
   detail?: string;
   resolvedAt?: string;
 }
@@ -1979,6 +1997,8 @@ export const checkRerunVisibilityMs = 15 * 60_000;
 export const checkRerunProbeMs = 5 * 60_000;
 /** An accepted rerun whose workflow run GitHub fails to return for this long no longer holds the failure. */
 export const checkRerunUnreadableMs = 2 * checkRerunVisibilityMs;
+/** GY-1109: reruns of a cancelled run per candidate sha and check; past it the check stays pending, never failed. */
+export const cancelledRerunLimit = 3;
 /** Rerun records kept on an item; older ones remain on the ledger. */
 export const checkRerunLimit = 20;
 const holdingRerun = new Set<CheckRerun['state']>(['owed', 'requested']);
@@ -2032,6 +2052,10 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
     if (run && run.id !== undefined && run.id !== entry.failedRunId) {
       // GitHub's rerun is a new check run on the same sha: its conclusion is the rerun's outcome.
       if (run.result === 'success') { const resolved = { ...entry, state: 'passed' as const, rerunId: run.id, resolvedAt: at }; transitions.push({ kind: 'check.rerun.passed', rerun: resolved }); return resolved; }
+      // GY-1109: a run GitHub cancelled is no verdict on the commit (only a check whose runs were all
+      // cancelled reads one as newest): the rerun ends without failing, and the cancelled run is
+      // itself owed a rerun below, so the check is run again instead of counted as failed.
+      if (run.result === 'cancelled') { const ended = { ...entry, state: 'expired' as const, rerunId: run.id, detail: `GitHub cancelled ${entry.check} run ${run.id} instead of concluding it`, resolvedAt: at }; transitions.push({ kind: 'check.rerun.expired', rerun: ended }); return ended; }
       if (failedConclusions.has(run.result)) { const resolved = { ...entry, state: 'failed' as const, rerunId: run.id, resolvedAt: at }; transitions.push({ kind: 'check.rerun.failed', rerun: resolved }); return resolved; }
       if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
       return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
@@ -2049,8 +2073,12 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
     const run = latestOf(name);
     if (!run || run.id === undefined || !failedConclusions.has(run.result)) continue;
     const made = reruns.filter(entry => entry.sha === candidate.sha && entry.check === name);
-    if (made.some(entry => entry.failedRunId === run.id) || made.length >= limit) continue;
-    const owed: CheckRerun = { sha: candidate.sha, check: name, failedRunId: run.id, state: 'owed', at };
+    if (made.some(entry => entry.failedRunId === run.id)) continue;
+    // A cancelled run is not a failure, so it does not spend the failure's rerun allowance (GY-1109):
+    // it is rerun on its own small allowance (none when reruns are disabled), and past that the check stays pending, never failed.
+    const cancelled = run.result === 'cancelled';
+    if (cancelled ? limit <= 0 || made.filter(entry => entry.cancelled).length >= cancelledRerunLimit : made.filter(entry => !entry.cancelled).length >= limit) continue;
+    const owed: CheckRerun = { sha: candidate.sha, check: name, failedRunId: run.id, state: 'owed', at, ...(cancelled ? { cancelled: true } : {}) };
     reruns = [...reruns, owed];
     transitions.push({ kind: 'check.rerun.owed', rerun: owed });
   }
@@ -2073,7 +2101,7 @@ export function dueCheckRerunProbes(work: Work, ciAppIds: readonly number[], now
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
   return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'requested' && entry.runId !== undefined
     && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId
-    && now.getTime() - Date.parse(entry.rerequestedAt ?? entry.at) >= checkRerunVisibilityMs
+    && now.getTime() - Date.parse(entry.detail?.match(/cancelled:\d+:(\S+)/)?.[1] ?? entry.rerequestedAt ?? entry.at) >= checkRerunVisibilityMs
     && (!entry.probedAt || now.getTime() - Date.parse(entry.probedAt) >= checkRerunProbeMs));
 }
 /** The workflow run GitHub reports for a rerun (GY-1096), or null when there is none. */
@@ -2082,6 +2110,7 @@ export interface RerunWorkflowRun { status: string; conclusion: string | null; a
 export type CheckRerunProbe =
   | { kind: 'waiting'; status: string }
   | { kind: 'failed'; conclusion: string }
+  | { kind: 'cancelled'; attempt?: number }
   | { kind: 'missing' };
 /**
  * Classifies the workflow run read for an accepted rerun with no new check run: a run not yet
@@ -2094,6 +2123,8 @@ export function classifyRerunRun(entry: Pick<CheckRerun, 'attempt'>, run: RerunW
   if (run.status !== 'completed') return { kind: 'waiting', status: run.status };
   const later = entry.attempt !== undefined && run.attempt !== null && run.attempt > entry.attempt;
   if (!later) return { kind: 'missing' };
+  // GY-1109: a later attempt GitHub cancelled did not conclude the rerun; it keeps the hold and is rerun again.
+  if (run.conclusion === 'cancelled') return { kind: 'cancelled', ...(run.attempt !== null ? { attempt: run.attempt } : {}) };
   if (run.conclusion && failedConclusions.has(run.conclusion)) return { kind: 'failed', conclusion: run.conclusion };
   return { kind: 'waiting', status: 'completed' };
 }
