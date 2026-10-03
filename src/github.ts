@@ -18,7 +18,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME, LANDABLE_CHECK };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -1628,8 +1628,9 @@ export class GitHub {
   async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]): Promise<TipDocs | undefined> {
     const required = new Set(work.policy.checks ?? []);
     const latest = new Map<string, string>();
-    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed') latest.set(check.name, check.conclusion ?? '');
-    const failed = [...latest.values()].filter(result => failedCheckConclusions.has(result)).length;
+    // A cancelled run never supersedes one that was not cancelled, nor counts as failing (GY-1109).
+    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed' && (check.conclusion !== 'cancelled' || !latest.has(check.name) || latest.get(check.name) === 'cancelled')) latest.set(check.name, check.conclusion ?? '');
+    const failed = [...latest.values()].filter(result => result !== 'cancelled' && failedCheckConclusions.has(result)).length;
     if (!failed) return undefined;
     // The counts only sharpen an ejection: a tip they cannot be read for is bisected as before, never left unobserved.
     try {
@@ -3249,6 +3250,41 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           continue;
         }
         const probe = classifyRerunRun(due, found);
+        if (probe.kind === 'cancelled') {
+          // A rerun attempt GitHub cancelled did not conclude the rerun (GY-1109): it keeps the hold
+          // and is rerun again on the cancelled allowance (at most cancelledRerunLimit times),
+          // without spending the single re-request meant for vanished runs.
+          const cancelledCount = Number(due.detail?.match(/cancelled:(\d+)/)?.[1] ?? 0);
+          if (cancelledCount < cancelledRerunLimit) {
+            try {
+              const again = await github.rerunFailedJobs(due.failedRunId);
+              const detail = `cancelled:${cancelledCount + 1}:${new Date().toISOString()}`;
+              const itemToUpdate: Work = work!;
+              work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
+                const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
+                if (!jobRow) return itemToUpdate;
+                const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+                const cur = all.find(w => w.id === itemToUpdate.id);
+                if (!cur) return itemToUpdate;
+                const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
+                if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
+                const current = cur.checkReruns![index];
+                const at = now.toISOString();
+                const next: CheckRerun = { ...current, runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail, probedAt: at, waiting: undefined };
+                cur.checkReruns = cur.checkReruns!.map((entry, pos) => pos === index ? next : entry);
+                await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [cur.id, JSON.stringify(cur)]);
+                await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [cur.id, 'github', 'check.rerun.requested', JSON.stringify({ details: next, at })]);
+                return cur;
+              });
+            } catch (error) {
+              const detail = `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}`;
+              work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'refused', detail });
+            }
+          } else {
+            work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'waiting', status: 'cancelled' });
+          }
+          continue;
+        }
         if (probe.kind !== 'missing') { work = await engine.recordCheckRerunProbe(work.id, job.token, due, probe); continue; }
         if (due.rerequestedAt) {
           work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun twice but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes of either request` });

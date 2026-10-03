@@ -358,7 +358,8 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
     const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
+    // A run GitHub cancelled is no failure of the head (GY-1109): the check is rerun, never reworked.
+    return !!latest && ['failure', 'timed_out', 'action_required', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
   }).map(required => required.name).sort();
   if (!failed.length) return null;
   const predecessors = attribution?.predecessors ?? tipPredecessors(work);
