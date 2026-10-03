@@ -7,7 +7,10 @@ import { emptyDaemonState, reconcilePendingActions, runCycle, type DaemonEffects
 import { probeSupervisorAbsence } from '../src/containment-probe.js';
 import { annotatePaneShell, containmentSettlementRefusals, countHeldChildren, isInteractiveShell, paneShellReport, type ContainmentVerification } from '../src/quarantine.js';
 import type { Work } from '../src/model.js';
-import { containmentClock, readControlPlaneClock } from '../src/master/containment.js';
+import { containmentClock, readControlPlaneClock, unmeasured } from '../src/master/containment.js';
+import { containmentEscalationDetail, containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
+import { actionDetailMax } from '../src/daemon/state.js';
+import { boundDetail } from '../src/daemon/decisions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const observedAt = '2030-01-01T12:00:00.000Z';
@@ -335,20 +338,21 @@ const instances = (['GY-466', 'GY-521', 'GY-543'] as const).map((key, index) => 
     workspaces: [{ ...workspace, epoch, branch: `graphyard/${key.toLowerCase()}-${epoch}` }],
     containmentQuarantine: { ...quarantined.containmentQuarantine!, epoch } } as Work;
 });
-function slowPlane(options: { snapshotMs: number; timedReadMs: number | null }, work: Work = lapsedQuarantine) {
+function slowPlane(options: { snapshotMs: number; timedReadMs: number | null; failRead?: boolean; probe?: () => unknown }, work: Work | Work[] = lapsedQuarantine) {
   // The host clock runs exactly with the plane's; the snapshot is stamped halfway through its read.
   let local = Date.parse(observedAt) - options.snapshotMs / 2;
   const fetched: string[] = [];
   const fetcher = (async (url: string, init: RequestInit) => {
     fetched.push(`${init.method} ${url}`);
     local += options.timedReadMs!;
+    if (options.failRead) return new Response(null, { status: 502 });
     return new Response(null, { headers: { date: new Date(local - options.timedReadMs! / 2).toUTCString() } });
   }) as unknown as typeof fetch;
   const overrides: Partial<DaemonEffects> = {
-    snapshot: async () => { local += options.snapshotMs; return { work: [work], now: observedAt }; },
+    snapshot: async () => { local += options.snapshotMs; return { work: [work].flat(), now: observedAt }; },
     ...(options.timedReadMs === null ? {} : { controlPlaneClock: () => readControlPlaneClock('https://graphyard.example', { fetcher, clock: () => local }) }),
     containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
-      clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
+      clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: options.probe ?? (() => clean) } as any),
   };
   return { overrides, clock: () => local, fetched };
 }
@@ -402,123 +406,56 @@ test('unit:settle-clock-bound-named a timed read too slow to bound the offset is
   assert.doesNotMatch(row.attention!, /clocks disagree/);
 });
 
-test('manual:fault-class-containment simulated-day coverage: multiple quarantined items settle correctly across cycles with successful, slow, and failed timed reads', async () => {
-  // GY-811: simulated-day recurring-behavior validation for the timed clock read added to cycle-reclaim.ts:140.
-  // Multiple items, each with a lapsed verified-dead quarantine, tracked across cycles with varying clock-read outcomes.
-  const work1 = lapsedQuarantine, work2 = instances[0], work3 = instances[1];
-  const all = [work1, work2, work3];
+test('unit:settle-clock-bound-fast-read two lapsed quarantines in one cycle share one timed read and both settle, and a fence still in its grace window pays for no read', async () => {
+  const [first, second] = instances;
+  const plane = slowPlane({ snapshotMs: 12_000, timedReadMs: 200 }, [first, second]);
+  const { settled, state } = await loop(first, plane.overrides, undefined, plane.clock);
+  assert.deepEqual(plane.fetched, ['HEAD https://graphyard.example/'], 'one HEAD a cycle, however many quarantines it assesses');
+  assert.deepEqual(settled.map(assessment => assessment.key).sort(), ['GY-466', 'GY-521'], 'each lapsed, verified-dead quarantine settles');
+  for (const quarantined of [first, second]) assert.equal(state.actions[`settle:${quarantined.id}:${quarantined.containmentQuarantine!.epoch}`]?.state, 'done', `${quarantined.key} settled on the record`);
 
-  let cycleCount = 0, totalProbes = 0;
-  let local = Date.parse(observedAt) - 6_000;
-  const clock = () => local;
+  // Inside the grace window settlement is refused whatever the clock says, so no read is taken.
+  const graced = launched(null, at(-30_000));
+  const waiting = slowPlane({ snapshotMs: 12_000, timedReadMs: 200 }, graced);
+  assert.deepEqual((await loop(graced, waiting.overrides, undefined, waiting.clock)).settled, []);
+  assert.deepEqual(waiting.fetched, [], 'a quarantine in its grace window costs no HEAD');
+});
 
-  // Scenario 1: successful fast reads settle items in first cycle
-  const fetched1: string[] = [];
-  const { settled: settled1, state: state1 } = await loop(
-    { ...work1, id: work1.id, containmentQuarantine: { ...work1.containmentQuarantine!, epoch: 1 } } as Work,
-    {
-      snapshot: async () => { local += 12_000; return { work: [work1], now: at(0) }; },
-      controlPlaneClock: () => {
-        fetched1.push('HEAD');
-        local += 200;
-        return Promise.resolve({ clockOffset: { min: -100, max: 100 }, roundTripMs: 200, source: 'timed read' });
-      },
-      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
-        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
-    },
-    undefined,
-    clock
-  );
-  assert.equal(fetched1.length, 1, 'cycle 1 makes exactly one HEAD request for the single quarantine');
-  assert.equal(settled1.length, 1, 'cycle 1 settles the quarantine');
-  cycleCount++;
-  totalProbes += fetched1.length;
+test('unit:settle-clock-bound-named a failed timed read leaves the snapshot read\'s bound, named in the escalation; a slow timed read for the same cause records no second escalation, and a new cause does', async () => {
+  const key = `escalation:containment:${lapsedQuarantine.id}:1`;
+  const failing = slowPlane({ snapshotMs: 12_000, timedReadMs: 100, failRead: true });
+  const first = await loop(lapsedQuarantine, failing.overrides, undefined, failing.clock);
+  assert.deepEqual(failing.fetched, ['HEAD https://graphyard.example/']);
+  assert.deepEqual(first.settled, []);
+  const escalation = { ...first.state.actions[key] };
+  assert.match(escalation.detail, /the snapshot read of the control-plane clock took 12000ms round trip, so settlement waits on a faster control-plane read/);
+  assert.equal(escalation.attempts, 1);
 
-  // Scenario 2: settled items have no clock read on subsequent cycles
-  const fetched2: string[] = [];
-  const noQuarantine = { ...work1, id: work1.id, containmentQuarantine: null } as Work;
-  const { settled: settled2 } = await loop(
-    noQuarantine,
-    {
-      snapshot: async () => { local += 12_000; return { work: [noQuarantine], now: at(0) }; },
-      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
-        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
-    },
-    state1,
-    clock
-  );
-  assert.equal(settled2.length, 0, 'cycle 2 has no unsettled quarantines to settle');
-  cycleCount++;
+  const slow = slowPlane({ snapshotMs: 12_000, timedReadMs: 6_000 });
+  const second = await loop(lapsedQuarantine, slow.overrides, first.state, slow.clock);
+  assert.deepEqual(second.settled, []);
+  assert.deepEqual(slow.fetched, ['HEAD https://graphyard.example/']);
+  assert.deepEqual({ ...second.state.actions[key] }, escalation, 'another read and another round trip are not another cause');
 
-  // Scenario 3: multiple quarantines, one HEAD request per cycle total (not per item)
-  const fetched3: string[] = [];
-  const { settled: settled3, state: state3 } = await loop(
-    work2,
-    {
-      snapshot: async () => { local += 12_000; return { work: [work2, work3], now: at(0) }; },
-      controlPlaneClock: () => {
-        fetched3.push('HEAD');
-        local += 300;
-        return Promise.resolve({ clockOffset: { min: -150, max: 150 }, roundTripMs: 300, source: 'timed read' });
-      },
-      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
-        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
-    },
-    undefined,
-    clock
-  );
-  assert.equal(fetched3.length, 1, 'cycle 3 makes exactly one HEAD request for multiple quarantines (bounded probe volume)');
-  assert.ok(settled3.length >= 1, 'cycle 3 settles at least one quarantine');
-  cycleCount++;
-  totalProbes += fetched3.length;
+  const held = slowPlane({ snapshotMs: 12_000, timedReadMs: 6_000, probe: () => ({ ...clean, processes: [{ pid: 4242, evidence: 'command' as const }] }) });
+  const third = await loop(lapsedQuarantine, held.overrides, second.state, held.clock);
+  assert.deepEqual(third.settled, []);
+  assert.equal(third.state.actions[key].attempts, 2, 'a surviving process is a new cause, escalated again');
+  assert.match(third.state.actions[key].detail, /Process 4242 of the contained worker is still present/);
+});
 
-  // Scenario 4: slow clock read falls back to snapshot bounds, no settlement yet
-  const fetched4: string[] = [];
-  const { settled: settled4, state: state4 } = await loop(
-    work3,
-    {
-      snapshot: async () => { local += 12_000; return { work: [work3], now: at(0) }; },
-      controlPlaneClock: () => {
-        fetched4.push('HEAD');
-        local += 6_000;
-        return Promise.resolve({ clockOffset: { min: -3_000, max: 3_000 }, roundTripMs: 6_000, source: 'timed read' });
-      },
-      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
-        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
-    },
-    undefined,
-    clock
-  );
-  assert.equal(fetched4.length, 1, 'cycle 4 attempts the slow clock read');
-  assert.equal(settled4.length, 0, 'cycle 4 does not settle when the timed read is too slow');
-  cycleCount++;
-  totalProbes += fetched4.length;
-
-  // Scenario 5: failed clock read falls back to snapshot, escalation recorded
-  const fetched5: string[] = [];
-  const { settled: settled5 } = await loop(
-    work3,
-    {
-      snapshot: async () => { local += 12_000; return { work: [work3], now: at(0) }; },
-      controlPlaneClock: () => {
-        fetched5.push('HEAD');
-        local += 100;
-        throw new Error('network error');
-      },
-      containment: (items, observed) => assessContainment(items, { hostId: 'coordinator-host', observedAt: observed.now, clockOffset: observed.clockOffset,
-        clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, localNow: new Date(local), probe: () => clean } as any),
-    },
-    state4,
-    clock
-  );
-  assert.equal(fetched5.length, 1, 'cycle 5 attempts the clock read despite prior failure');
-  assert.equal(settled5.length, 0, 'cycle 5 does not settle when the timed read fails');
-  cycleCount++;
-  totalProbes += fetched5.length;
-
-  // System invariants: one HEAD per cycle with quarantines, no growth in probe volume
-  // Cycles 1, 3, 4, 5 each have quarantines and make one probe each (4 total)
-  assert.equal(totalProbes, 4, `total probes (${totalProbes}) = one per cycle with quarantines (bounded volume)`);
-  assert.ok(cycleCount >= 5, `cycleCount (${cycleCount}) validates simulated-day coverage across multiple cycles`);
+test('unit:settle-clock-bound-named an escalation detail past the action bound is masked before it is cut, so two cycles\' details for one cause compare equal whatever round trip and read they name', () => {
+  const detail = (padding: number, source: string, ms: number) => `GY-74: containment quarantine from epoch 1 cannot be settled automatically: ${'x'.repeat(padding)}; Verifying host could not bound its clock against the control plane within 5000ms: the ${source} of the control-plane clock took ${ms}ms round trip, so settlement waits on a faster control-plane read, not on a clock disagreement`;
+  let cutDiffered = false;
+  for (let padding = 1_600; padding <= 2_000; padding += 3) {
+    const [a, b] = [detail(padding, 'timed read', 6_000), detail(padding, 'snapshot read', 12_345)];
+    const [storedA, storedB] = [containmentEscalationDetail(a), containmentEscalationDetail(b)];
+    assert.ok(storedA.length <= actionDetailMax && storedB.length <= actionDetailMax, 'the stored detail fits the action bound');
+    assert.equal(containmentRefusalCause(storedA), containmentRefusalCause(storedB), `padding ${padding}: one cause, whatever was measured`);
+    if (unmeasured(boundDetail(a)) !== boundDetail(unmeasured(detail(padding, 'timed read', 12_345)))) cutDiffered = true;
+  }
+  assert.ok(cutDiffered, 'cutting before masking moves the cut with the number\'s width, which this range exercises');
+  const short = detail(10, 'timed read', 6_000);
+  assert.equal(containmentEscalationDetail(short), short, 'a detail that fits keeps its measurement');
 });
 
