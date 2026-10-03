@@ -1,5 +1,6 @@
 // Concern: who owns each attention item, control-plane attention, fleet and production summaries.
 import { environmentBlocked, blockedPath } from '../worker-sandbox.js';
+import { blockerView } from '../model/blocker-class.js';
 import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { type Work, standingEscalations } from '../model.js';
@@ -111,6 +112,11 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
   const escalation = standingEscalations(work)[0];
   if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  // A blocker of a routine class is the loop's to clear (GY-1008): it probes the cause every cycle.
+  const blocker = blockerView(work);
+  // A sandbox refusal the probe keeps failing on is the launcher's grant to fix (GY-134); the loop clears it once the grant lands.
+  const grant = environmentBlocked(work.blocker) ? `; while it fails, grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox")` : '; nothing to run by hand';
+  if (blocker && !blocker.needsSomeone) return agentOwner('control plane', `The loop re-checks the ${blocker.class} blocker every cycle and clears it once the probe passes${blocker.lastProbe ? ` (last probe ${blocker.lastProbe.at}: ${blocker.lastProbe.result})` : ''}${grant}`);
   // A required command the worker's sandbox refused is the launcher's to fix, never the item's (GY-134).
   if (environmentBlocked(work.blocker)) return agentOwner('master', `Grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox"), then graphyard master unblock ${key} REASON and dispatch it again`);
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
