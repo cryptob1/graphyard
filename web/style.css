@@ -349,4 +349,4 @@ table.agents-table td.why{white-space:normal;min-width:220px;overflow-wrap:anywh
 .usage-window-stats{font-size:11px;color:var(--text-2);white-space:nowrap}
 .usage-not-reported{font-size:var(--type-small);color:var(--text-3);font-style:italic}
 @media(max-width:650px){table.agents-table,table.agents-table tbody,table.agents-table tr,table.agents-table th,table.agents-table td{display:block;width:100%}table.agents-table thead{display:none}table.agents-table tr{border:1px solid var(--border);border-radius:6px;margin-bottom:10px}table.agents-table th,table.agents-table td{border:0;white-space:normal;min-width:0}table.agents-table td[data-label]::before{content:attr(data-label) ": ";color:var(--text-2)}.plan-header-content{flex-direction:column;align-items:flex-start;gap:6px}.usage-bar-track{width:100px}}
-
+.project-memory{margin-top:var(--space-4)}.project-memory .memory-content{display:grid;gap:var(--space-3);margin-top:var(--space-2)}.project-memory .memory-block h3{font-size:var(--type-small);color:var(--text-2);margin:0 0 var(--space-1)}.project-memory .memory-list{list-style:none;padding:0;margin:0;display:grid;gap:4px;font-size:var(--type-small)}
