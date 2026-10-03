@@ -9,6 +9,7 @@ import { listDecisions } from '../decision-ledger.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
+import { recordBlockerProbe } from '../blocker-probe.js';
 import { closeWork } from '../close.js';
 import { appendFollowUps, followUpsByPr, migrateFollowUps, promoteFollowUp, readFollowUps, recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
@@ -61,6 +62,14 @@ export const workRoutes = defineRoutes('work', [
       return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
         : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
         : recordCapacity(context.services, context.actor, target, data, key);
+    },
+  },
+  // The loop's probe of a standing blocker's cause (GY-1008): recorded, and on a pass the blocker cleared.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/blocker-probe$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'blocker-probe');
+      return recordBlockerProbe(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // Research before build (GY-259): the loop records a run and its brief as the coordinator, and
