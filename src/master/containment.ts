@@ -66,14 +66,19 @@ export async function snapshotWithClock<T extends { now: string }>(read: () => P
 export interface ControlPlaneClock { clockOffset: { min: number; max: number }; roundTripMs: number; source: 'timed read' | 'snapshot read' }
 /** The control-plane time and clock bounds a containment assessment is judged with, and the read that measured them. */
 export interface ContainmentObservation { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source'] }
-/** How long the timed clock read may take before the loop falls back to the snapshot's bounds. */
+/**
+ * How long the timed clock read may take before the loop falls back to the snapshot's bounds.
+ * Kept at 10 s (GY-795, GY-1043) so slow measured reads up to ~7 s can report their round trip
+ * rather than aborting, while capping cycle delay.
+ */
 export const controlPlaneClockTimeoutMs = 10_000;
 /**
  * Bound the local clock against the control plane with a light timed read (GY-811): a `HEAD /`
  * is answered by the plane's static route from a file, touching neither the database nor the
  * store, and stamped with the plane's `Date` header. Its round trip, plus the second the header is
  * truncated to, is the width of the bound, which stays short on a plane whose work snapshot takes
- * seconds to build.
+ * seconds to build. Using the static route rather than a PostgreSQL transaction clock avoids
+ * database connection contention on loaded planes; minor clock skew is absorbed by the 5 s tolerance.
  */
 export async function readControlPlaneClock(url: string, deps: { fetcher?: typeof fetch; clock?: () => number; timeoutMs?: number } = {}): Promise<ControlPlaneClock> {
   const fetcher = deps.fetcher ?? fetch, clock = deps.clock ?? Date.now;
@@ -98,7 +103,10 @@ export async function containmentClock(snapshotOffset: { min: number; max: numbe
   if (!read) return fallback;
   try { return await read(); } catch { return fallback; }
 }
-/** A containment refusal with its measured round trip masked: two cycles' refusals for the same cause compare equal. */
+/**
+ * A containment refusal with its measured round trip masked: two cycles' refusals for the same cause compare equal.
+ * Specifically masks only `/control-plane clock took \d+ms round trip/g` to avoid masking other numbers in the detail.
+ */
 export function unmeasured(detail: string) {
   return detail.replace(/control-plane clock took \d+ms round trip/g, 'control-plane clock took …ms round trip');
 }
