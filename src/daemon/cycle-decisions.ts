@@ -604,6 +604,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // The refusal wakes the item's observation job at once (GY-710), and the rework is decided
       // on the first cycle after that observation lands, not whenever the cadence reaches it. The
       // wake is stamped on the snapshot's clock, the one the observation's time is on.
+      // GY-1067 follow-up 2: the wake:observation:<id> action is bounded at one entry per item
+      // and pruned by the daemon's general action pruning in state.ts; it is shared with guarded
+      // merge in cycle-delivery.ts and retained so mergeObservationLanded can observe it.
       await wakeObservationJob(cycle, item, 'rework');
       return;
     }
