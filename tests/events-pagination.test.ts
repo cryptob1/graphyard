@@ -54,7 +54,7 @@ async function noise(work: Work, rows = NOISE) {
        FROM generate_series(1,$2::int) AS n`, [work.id, rows]);
 }
 
-/** One item's whole life: two attempts, a blocked report, a rework round and two submissions. */
+/** One item's whole life: three attempts, a blocked report that ended the first, a rework round and two submissions. */
 async function lifecycle() {
   let work = await engine.execute(operator, 'create', null, {
     title: 'An item whose history outlives one page', plannedFiles: ['src/'],
@@ -67,11 +67,14 @@ async function lifecycle() {
   await noise(work);
   work = await engine.execute(worker, 'blocked', work.id, { epoch: work.epoch, reason: 'Waiting on an external decision' }, randomUUID());
   work = await engine.execute(operator, 'unblock', work.id, { reason: 'The decision landed' }, randomUUID());
+  // The blocker ended attempt 1 (GY-1008): attempt 2 carries on and submits.
+  work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}-2`, branch: 'graphyard/gy-history-2' }, randomUUID());
   work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr: 4242 }, randomUUID());
   await noise(work);
   work = await engine.execute(operator, 'rework', work.id, { reason: 'Review found a gap', previousWorkerStopped: true }, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}-2`, branch: 'graphyard/gy-history-1' }, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}-3`, branch: 'graphyard/gy-history-2' }, randomUUID());
   work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr: 4242 }, randomUUID());
   await noise(work, NOISE);
   return work;
@@ -113,7 +116,7 @@ test('integration:events-pagination — an item with more than 2,000 events has 
   assert.ok(total > 2000, `the item carries ${total} events`);
   const lifecycleRows = await rows('SELECT seq,kind,created_at FROM events WHERE work_id=$1 AND NOT (kind=ANY($2::text[])) ORDER BY seq', [item.id, [...routineEventKinds]]);
   const routineRows = await rows('SELECT kind, count(*)::int AS count, min(created_at) AS first_at, max(created_at) AS last_at FROM events WHERE work_id=$1 AND kind=ANY($2::text[]) GROUP BY kind ORDER BY kind', [item.id, [...routineEventKinds]]);
-  assert.deepEqual(lifecycleRows.map(row => row.kind), ['create', 'ready', 'claim', 'workspace', 'blocked', 'unblock', 'submit', 'rework', 'claim', 'workspace', 'submit']);
+  assert.deepEqual(lifecycleRows.map(row => row.kind), ['create', 'ready', 'claim', 'workspace', 'blocked', 'unblock', 'claim', 'workspace', 'submit', 'rework', 'claim', 'workspace', 'submit']);
   assert.deepEqual(routineRows.map(row => [row.kind, row.count]), [['github.observed', 1200], ['heartbeat', 1200]]);
 
   // The read this replaces: the newest 300 rows of everything are all routine, so nothing of the
@@ -159,20 +162,20 @@ test('integration:events-pagination — an item with more than 2,000 events has 
   const { pipeline } = (await rows('SELECT document AS pipeline FROM work_items WHERE id=$1', [item.id]))[0].pipeline as Work;
   const reconstructed = reconstructTimeline(everything.events as LedgerEntry[]);
   assert.deepEqual(reconstructed, pipeline);
-  assert.equal(reconstructed.attempts.length, 2);
-  // Both attempts ended at their own submission; the rework that followed the first one is a
-  // rework round, and the blocked report is the hand-off it was.
-  assert.deepEqual(reconstructed.attempts.map(attempt => [attempt.epoch, attempt.end]), [[1, 'submitted'], [2, 'submitted']]);
+  assert.equal(reconstructed.attempts.length, 3);
+  // The blocked report ended the first attempt as released (GY-1008) and is the hand-off it was;
+  // the other two ended at their own submission, and the rework between them is a rework round.
+  assert.deepEqual(reconstructed.attempts.map(attempt => [attempt.epoch, attempt.end]), [[1, 'released'], [2, 'submitted'], [3, 'submitted']]);
   assert.equal(reconstructed.reworkRounds, 1);
   assert.deepEqual(reconstructed.interventions, { blocked: 1, requirements: 0 });
   assert.ok(reconstructed.submittedAt && reconstructed.resubmittedAt! > reconstructed.submittedAt);
 
   // Kind and time filters narrow the same read.
   const claims = await read(`events?work=${item.id}&kind=claim,submit&order=asc&view=history`);
-  assert.deepEqual(claims.body.events.map((event: any) => event.kind), ['claim', 'submit', 'claim', 'submit']);
+  assert.deepEqual(claims.body.events.map((event: any) => event.kind), ['claim', 'claim', 'submit', 'claim', 'submit']);
   const firstClaim = claims.body.events[0].created_at;
   const since = await read(`events?work=${item.id}&kind=claim,submit&since=${encodeURIComponent(firstClaim)}&until=${encodeURIComponent(claims.body.events[3].created_at)}&order=asc&view=history`);
-  assert.deepEqual(since.body.events.map((event: any) => event.kind), ['claim', 'submit', 'claim'], 'the window is half-open on until');
+  assert.deepEqual(since.body.events.map((event: any) => event.kind), ['claim', 'claim', 'submit'], 'the window is half-open on until');
   assert.deepEqual(since.body.filters.kinds, ['claim', 'submit']);
   // A routine kind named explicitly is returned, and then nothing is summarised away.
   const heartbeats = await read(`events?work=${item.id}&kind=heartbeat&limit=10&view=history`);
