@@ -325,3 +325,110 @@ test('manual:fault-class-stalled-gate — a blocker naming nothing the installat
   assert.deepEqual(faults.map(fault => [fault.kind, fault.faultClass]), [['blocker', 'stalled-gate']]);
   assert.equal(faultClassOf('workflow-permission'), 'configuration');
 });
+
+// ---- GY-1108: recurring stalled-gate faults (8 in 24 hours) ---------------------------------------
+//
+// The loop filed GY-1108 for 8 stalled-gate faults across eight items in 24 hours. Every instance was
+// a worker dispatch failing repeatedly with one reason: all worker profiles were busy with live or
+// lingering Herdr sessions, or reserved by concurrent dispatches.
+//
+// Like an observation job the claim woke (GY-1090) or a role at its concurrency limit (GY-950),
+// waiting for an occupied worker slot to free is a handoff in progress: it stalls only once the run
+// outlasts the 30-minute wait bound. Against the base each subtest fails because the base had no slot
+// wait bound on dispatch actions: the instance reproduces.
+
+interface Gy1108Instance {
+  id: string; at: string; kind: 'stalled-action'; subject: string;
+  action: 'dispatch'; reason: string; failures: string[]; detected: number;
+}
+const gy1108: Gy1108Instance[] = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1108-stalled-gate.json', import.meta.url)), 'utf8'));
+
+// Written out rather than imported, so this file loads against the base and each instance there
+// fails on its own assertion: the bound a worker slot wait keeps (src/model/action-kinds.ts).
+const workerSlotWaitBoundMs = 30 * 60_000;
+function workerSlotWait(reason: string): boolean {
+  const match = reason.match(/^no worker profile can take \S+: (.+)$/);
+  if (!match) return false;
+  const detail = match[1];
+  if (detail.startsWith('every healthy profile is reserved by another dispatch')) return true;
+  if (detail === 'no launch profile is configured') return false;
+  const entries = [...detail.matchAll(/([a-zA-Z0-9_-]+) \(([^)]+)\)/g)];
+  if (!entries.length) return false;
+  for (const [, , r] of entries) {
+    if (r === 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process') continue;
+    if (/^Herdr agent \S+ is \S+$/.test(r)) continue;
+    return false;
+  }
+  return true;
+}
+
+/** The dispatch row as the ledger records it: requested, then each claim and its failure. */
+function dispatchRow(instance: Gy1108Instance): ActionRow {
+  const failures = instance.failures;
+  const history: ActionRecord[] = [{ at: shift(failures[0], -90_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: `${instance.subject} is waiting for worker dispatch` }];
+  failures.forEach((at, index) => history.push(
+    { at: shift(at, -20_000), event: 'claimed', requester: 'graphyard', executor: 'graphyard-master@vishrog/1', result: null, reason: `attempt ${index + 1} claimed by graphyard-master@vishrog/1 on vishrog` },
+    { at, event: 'failed', requester: 'graphyard', executor: 'graphyard-master@vishrog/1', result: 'failed', reason: instance.reason }));
+  return { id: `dispatch-${instance.id}`, kind: 'dispatch', work: `work-${instance.subject}`, key: instance.subject, gate: 'ready', refusal: instance.reason,
+    reason: `${instance.subject} is waiting for worker dispatch`, binding: 'worker', inputs: { kind: 'dispatch', target: 'worker' },
+    requestedBy: 'graphyard', requestedAt: history[0].at, state: 'pending', claim: null, attempts: failures.length, history, result: 'failed', resolution: instance.reason, resolvedAt: failures.at(-1) } as unknown as ActionRow;
+}
+
+test('manual:fault-class-stalled-gate — GY-1108 lists 8 instances, and every one is replayed below', () => {
+  assert.equal(gy1108.length, 8);
+  assert.equal(new Set(gy1108.map(instance => instance.id)).size, 8);
+  assert.deepEqual(gy1108.map(instance => instance.subject), ['GY-1008', 'GY-866', 'GY-950', 'GY-1103', 'GY-1099', 'GY-1107', 'GY-1104', 'GY-1075']);
+  assert.ok(gy1108.every(instance => instance.action === 'dispatch' && instance.kind === 'stalled-action'));
+});
+
+for (const instance of gy1108) {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: a dispatch waiting for a worker slot is not a stall inside the slot bound`, () => {
+    assert.ok(workerSlotWait(instance.reason), 'the recorded reason names worker profiles occupied or reserved with no credential error');
+    assert.ok(instance.detected >= actionStallThreshold, 'three identical failures were on the row when the loop recorded it');
+    assert.ok(Date.parse(instance.failures.at(-1)!) - Date.parse(instance.failures[0]) < workerSlotWaitBoundMs, 'the whole run sat inside the worker slot wait bound');
+    // At the instant the loop recorded it, master status raises nothing for the row.
+    const detected = dispatchRow({ ...instance, failures: instance.failures.slice(0, instance.detected) });
+    const work = { id: detected.work, key: instance.subject, title: instance.subject, stage: 'build', actionQueue: { actions: [detected], history: [] } } as unknown as Work;
+    assert.deepEqual(stalledActionAttention({ work: [work], now: instance.at }).filter(entry => entry.subject === instance.subject), [], 'master status raises no stalled-action attention');
+    // Nor at any later failure of the same run.
+    for (let count = 1; count <= instance.failures.length; count++) {
+      const failures = instance.failures.slice(0, count);
+      assert.equal(actionStall(dispatchRow({ ...instance, failures })), null, `${count} failure(s) are a wait in progress`);
+    }
+    // Not weakened: the same row, still waiting once the run outlasts the bound, is a stall.
+    const outlasted = dispatchRow({ ...instance, failures: [shift(instance.failures.at(-1)!, -workerSlotWaitBoundMs), ...instance.failures.slice(1)] });
+    assert.ok(actionStall(outlasted), 'waiting for longer than the bound still stalls the row');
+  });
+}
+
+test('manual:fault-class-stalled-gate — a dispatch failure with credential or configuration errors still stalls', () => {
+  const at = '2026-10-02T08:59:06.536Z';
+  const makeFailures = () => [shift(at, -120_000), shift(at, -60_000), at];
+
+  // No launch profile configured
+  const unconfiguredReason = 'no worker profile can take GY-999: no launch profile is configured';
+  assert.equal(workerSlotWait(unconfiguredReason), false);
+  const unconfigured = dispatchRow({ id: 'unconfigured', at, kind: 'stalled-action', subject: 'GY-999', action: 'dispatch', reason: unconfiguredReason, failures: makeFailures(), detected: 3 });
+  assert.ok(actionStall(unconfigured), 'missing launch profile stalls after 3 attempts');
+
+  // Credential unavailable
+  const credReason = 'no worker profile can take GY-999: claude-primary (Worker credential is unavailable)';
+  assert.equal(workerSlotWait(credReason), false);
+  const credFailed = dispatchRow({ id: 'cred-failed', at, kind: 'stalled-action', subject: 'GY-999', action: 'dispatch', reason: credReason, failures: makeFailures(), detected: 3 });
+  assert.ok(actionStall(credFailed), 'unavailable credential stalls after 3 attempts');
+
+  // Cooldown
+  const cooldownReason = 'no worker profile can take GY-999: claude-primary (Cooling off after a failed launch until 2026-10-02T09:30:00.000Z: launch failed)';
+  assert.equal(workerSlotWait(cooldownReason), false);
+  const cooling = dispatchRow({ id: 'cooling', at, kind: 'stalled-action', subject: 'GY-999', action: 'dispatch', reason: cooldownReason, failures: makeFailures(), detected: 3 });
+  assert.ok(actionStall(cooling), 'profile cooling off stalls after 3 attempts');
+});
+
+test('manual:fault-class-stalled-gate — a dispatch where every healthy profile is reserved is a slot wait', () => {
+  const reservedReason = 'no worker profile can take GY-1103: every healthy profile is reserved by another dispatch (process 4177280 on vishrog since 2026-10-02T08:27:57.276Z)';
+  assert.equal(workerSlotWait(reservedReason), true);
+  const at = '2026-10-02T09:03:24.638Z';
+  const row = dispatchRow({ id: 'reserved', at, kind: 'stalled-action', subject: 'GY-1103', action: 'dispatch', reason: reservedReason, failures: [shift(at, -120_000), shift(at, -60_000), at], detected: 3 });
+  assert.equal(actionStall(row), null, 'reserved profiles are a wait in progress');
+});
+
