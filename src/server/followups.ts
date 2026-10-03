@@ -140,7 +140,6 @@ export async function promoteFollowUp(services: Services, caller: Principal, id:
       criteria: [{ id: 'AC-1', text: `The promoted finding is addressed in code, or declined with a recorded reason: ${finding!.text}`.slice(0, 2000), proofs: [promotedFindingProof] }],
       producerProofs: [promotedFindingProof],
       plannedFiles,
-      origin: { reviewFollowUps: { parent: parent!.key, findings: [finding!] } },
       reason: `Promoted from ${work.key} finding ${index} by ${actor.id}`.slice(0, 2000),
     };
     // A create that landed before an interrupted promotion recorded it: the item is found, not filed again.

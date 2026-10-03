@@ -5,7 +5,7 @@ import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
-import { decideScopeRequest, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
+import { decideScopeRequest, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { impliedModuleCluster } from '../src/model/scope-companions.js';
 import { derivePlannedFiles } from '../src/model/work.js';
 
@@ -205,4 +205,26 @@ test('manual:fault-class-scope — GY-1116: promoteFollowUp and derivePlannedFil
   const derived1115 = derivePlannedFiles(standing(gy1115), tree);
   assert.ok(derived1115.plannedFiles.includes('src/store/coordination-sql.ts'), 'derived plannedFiles includes src/store/coordination-sql.ts');
   assert.ok(derived1115.plannedFiles.includes('src/direct-merge.ts'), 'derived plannedFiles includes src/direct-merge.ts');
+
+  // Hardening tests from review findings:
+  // 1. Routine table schema change without migration evidence does not pull in server/main.ts or store/locks.ts:
+  const routineCluster = impliedModuleCluster(['src/store/tables/users.ts'], 'Add column email to users table');
+  assert.equal(routineCluster.includes('src/server/main.ts'), false, 'routine table schema does not include server/main.ts');
+  assert.equal(routineCluster.includes('src/store/locks.ts'), false, 'routine table schema does not include store/locks.ts');
+
+  // 2. Ordinary items do not treat description paths as criteria-backed implications:
+  const ordinaryImplied = impliedScopes([{ id: 'AC-1', text: 'Work item updates' }], [], undefined, 'See src/internal-helper.ts for details');
+  assert.equal(ordinaryImplied.some(i => i.scope === 'src/internal-helper.ts'), false, 'ordinary item description does not imply scope');
+
+  // Follow-up item does treat description paths as implications:
+  const followupImplied = impliedScopes([{ id: 'AC-1', text: 'Work item updates' }], [], { reviewFollowUps: { parent: 'GY-1', findings: [] } }, 'See src/internal-helper.ts for details');
+  assert.equal(followupImplied.some(i => i.scope === 'src/internal-helper.ts'), true, 'follow-up item description does imply scope');
+
+  // 3. plannedCompanions derives tokens from follow-up description and findings:
+  const companionsWithFollowup = plannedCompanions(
+    { plannedFiles: ['src/store/store.ts'], criteria: [{ id: 'AC-1', text: 'Base criteria' }], origin: { reviewFollowUps: { parent: 'GY-1', findings: [] } }, description: 'Needs wakeJob delivery' },
+    new Set(['src/store/store.ts', 'src/direct-merge.ts']),
+    []
+  );
+  assert.ok(companionsWithFollowup.some(c => c.path === 'src/direct-merge.ts'), 'plannedCompanions derives peer cluster from follow-up description');
 });

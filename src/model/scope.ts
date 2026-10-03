@@ -129,13 +129,14 @@ export function impliedScopes(
   origin?: any,
   description?: string | null,
 ): ScopeImplication[] {
-  const followUpPaths = [
+  const isFollowUp = !!origin?.reviewFollowUps;
+  const followUpPaths = isFollowUp ? [
     ...(origin?.reviewFollowUps?.findings ?? []).flatMap((finding: any) => [
       ...(finding.path ? [finding.path] : []),
       ...namedPaths(finding.text),
     ]),
     ...(description ? namedPaths(description) : []),
-  ];
+  ] : [];
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
     ...followUpPaths.map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),

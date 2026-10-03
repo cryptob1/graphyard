@@ -84,8 +84,9 @@ export function impliedModuleCluster(paths: readonly string[], text = ''): strin
   }
 
   // Server wiring & advisory lock registry:
-  if (paths.some(p => p.startsWith('src/store/tables/') || p === 'src/store/tables.ts' || p === 'src/server/main.ts' || p === 'src/store/locks.ts')
-      || /\b(?:CREATE INDEX CONCURRENTLY|ensureRetroIndex|events_retro_id|advisory|locks\.ts|main\.ts)\b/.test(combined)) {
+  const hasMigrationEvidence = /\b(?:CREATE INDEX(?: CONCURRENTLY)?|concurrently|ensureRetroIndex|events_retro_id|advisory[- ]lock|locks\.ts|main\.ts)\b/i.test(combined);
+  if (hasMigrationEvidence && (paths.some(p => p.startsWith('src/store/tables/') || p === 'src/store/tables.ts' || p === 'src/server/main.ts' || p === 'src/store/locks.ts')
+      || /\b(?:CREATE INDEX|ensureRetroIndex|events_retro_id|main\.ts)\b/.test(combined))) {
     cluster.add('src/server/main.ts');
     cluster.add('src/store/locks.ts');
   }
@@ -127,7 +128,12 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
   if (described) return `${path} is the web UI ${described.id} describes`;
 
   // GY-1116: peer modules, server wiring and importing tests implied by the change:
-  const allText = `${item.criteria.map(c => c.text).join(' ')} ${item.description ?? ''} ${(item.origin?.reviewFollowUps?.findings ?? []).map((f: any) => f.text).join(' ')}`;
+  const isFollowUp = !!item.origin?.reviewFollowUps;
+  const followUpText = isFollowUp ? [
+    item.description ?? '',
+    ...(item.origin?.reviewFollowUps?.findings ?? []).map((f: any) => f.text),
+  ].join(' ') : '';
+  const allText = `${item.criteria.map(c => c.text).join(' ')} ${followUpText}`.trim();
   const allPaths = [...ask, ...(item.plannedFiles ?? [])];
   if (path === 'src/store/coordination-sql.ts' && (allPaths.some(p => p === 'src/store/store.ts' || p === 'src/engine.ts') || /\b(?:reconcile|coordination-sql|reconcileItemLockSql)\b/.test(allText))) {
     return `${path} is the coordination SQL peer module of ${item.plannedFiles?.find(p => p.includes('store')) ?? 'src/store/store.ts'}`;
@@ -135,10 +141,11 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
   if (path === 'src/direct-merge.ts' && (/\b(?:wakeJob|wakeJobs|direct-merge)\b/.test(allText) || allPaths.includes('src/engine.ts'))) {
     return `${path} is the peer module implementing wakeJob delivery`;
   }
-  if (path === 'src/server/main.ts' && (allPaths.some(p => p.startsWith('src/store/tables/') || p === 'src/store/tables.ts' || p === 'src/store/locks.ts') || /\b(?:CREATE INDEX CONCURRENTLY|ensureRetroIndex|events_retro_id|main\.ts)\b/.test(allText))) {
+  const hasMigrationEvidence = /\b(?:CREATE INDEX(?: CONCURRENTLY)?|concurrently|ensureRetroIndex|events_retro_id|advisory[- ]lock|locks\.ts|main\.ts)\b/i.test(allText);
+  if (path === 'src/server/main.ts' && hasMigrationEvidence && (allPaths.some(p => p.startsWith('src/store/tables/') || p === 'src/store/tables.ts' || p === 'src/store/locks.ts') || /\b(?:CREATE INDEX|ensureRetroIndex|events_retro_id|main\.ts)\b/i.test(allText))) {
     return `${path} is server wiring for background migrations and index builds`;
   }
-  if (path === 'src/store/locks.ts' && (allPaths.some(p => p === 'src/server/main.ts' || p.startsWith('src/store/tables/') || p === 'src/backup.ts') || /\b(?:CREATE INDEX CONCURRENTLY|advisory|locks\.ts)\b/.test(allText))) {
+  if (path === 'src/store/locks.ts' && (hasMigrationEvidence || /\b(?:advisory|locks\.ts)\b/i.test(allText)) && (allPaths.some(p => p === 'src/server/main.ts' || p.startsWith('src/store/tables/') || p === 'src/backup.ts') || /\b(?:CREATE INDEX|advisory|locks\.ts)\b/i.test(allText))) {
     return `${path} is the advisory-lock registry for cross-replica exclusion`;
   }
   if (path === 'tests/store-locks.test.ts' && (allPaths.some(p => p === 'src/backup.ts' || p === 'src/store/locks.ts') || /\b(?:restoreDeadlockAttempts|store-locks|40P01)\b/.test(allText))) {
@@ -220,7 +227,7 @@ export async function importingTestGround(path: string, text: string | null, pla
  * the one already named for the proofs on the base, or the new one `proofTestFile` names — and the
  * documentation-budget gate the tree holds, when the plan holds documentation.
  */
-export function plannedCompanions(item: { plannedFiles: readonly string[]; criteria: readonly CompanionCriterion[] }, tree: ReadonlySet<string>, documentation: readonly string[]) {
+export function plannedCompanions(item: { plannedFiles: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: any; description?: string | null }, tree: ReadonlySet<string>, documentation: readonly string[]) {
   const added: { path: string; criterion: string | null; why: string }[] = [];
   const covered = (path: string) => item.plannedFiles.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path);
   const layout = testLayout(tree);
@@ -231,8 +238,27 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
     for (const file of tree) if (timingBaseline(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the test-duration baseline a new test file must be recorded in' });
   if (item.plannedFiles.some(entry => documentationPath(entry, documentation)))
     for (const file of tree) if (documentationBudgetGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the documentation-budget gate a documented change must keep passing' });
-  const allText = item.criteria.map(c => c.text).join(' ');
-  const cluster = impliedModuleCluster(item.plannedFiles, allText);
+  const isFollowUp = !!item.origin?.reviewFollowUps;
+  if (isFollowUp) {
+    const followUpPaths = [
+      ...(item.origin?.reviewFollowUps?.findings ?? []).flatMap((finding: any) => [
+        ...(finding.path ? [finding.path] : []),
+        ...namedPaths(finding.text),
+      ]),
+      ...(item.description ? namedPaths(item.description) : []),
+    ];
+    for (const file of followUpPaths) {
+      if (tree.has(file) && !covered(file)) {
+        added.push({ path: file, criterion: 'FOLLOWUP', why: 'the file a review follow-up names' });
+      }
+    }
+  }
+  const followUpText = isFollowUp ? [
+    item.description ?? '',
+    ...(item.origin?.reviewFollowUps?.findings ?? []).map((f: any) => f.text),
+  ].join(' ') : '';
+  const allText = `${item.criteria.map(c => c.text).join(' ')} ${followUpText}`.trim();
+  const cluster = impliedModuleCluster([...item.plannedFiles, ...added.map(entry => entry.path)], allText);
   for (const file of cluster) {
     if (tree.has(file) && !covered(file)) {
       added.push({ path: file, criterion: null, why: 'the implied module cluster (peer module, server wiring or importing test)' });
