@@ -6,9 +6,9 @@ import { faultClassItem, type FaultClass, type FaultInstance } from '../src/mode
 import { providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { actionableSubjects, emptyDaemonState, loopAttention, loopLiveness, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisStep, diagnosticianHeldUntil, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisReport, diagnosisStep, diagnosticianGate, diagnosticianHeldUntil, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import type { Cycle } from '../src/daemon/cycle.js';
-import { diagnosticianSettings } from '../src/runner/payloads.js';
+import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import type { RunFailure, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 
 // GY-1092 names this file for its proof: manual:fault-class-loop. The master loop filed ten loop
@@ -191,7 +191,7 @@ test('manual:fault-class-loop — after the reset one subject probes the provide
 test('manual:fault-class-loop — the hold is the latest reset any waiting diagnosis holds, not the newest refusal\'s', () => {
   const state = emptyDaemonState(config());
   const entry = (subject: string, updatedAt: number, retryAt: number) => ({ subject, kind: 'recurring', faultClass: 'loop', work: subject, state: 'waiting', startedAt: iso(updatedAt), updatedAt: iso(updatedAt),
-    runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: iso(retryAt), detail: '' }) as DaemonState['diagnoses'][string];
+    runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: iso(retryAt), refusedAt: iso(updatedAt), detail: '' }) as DaemonState['diagnoses'][string];
   state.diagnoses['GY-1083'] = entry('GY-1083', refusedAt, refusedAt + 3 * hour);
   state.diagnoses['GY-1084'] = entry('GY-1084', refusedAt + minute, refusedAt + hour);
   assert.equal(diagnosticianHeldUntil(state, refusedAt + 2 * hour), iso(refusedAt + 3 * hour));
@@ -274,4 +274,22 @@ test('manual:fault-class-loop — a proof the producer still owes past its timeo
   assert.equal(attention.length, 1);
   assert.equal(silence.longest?.key, 'proof:GY-727');
   assert.match(attention[0].text, /GY-727 is missing trusted evidence for unit:reconcile-tick-bounded for 437 minutes/);
+});
+
+test('manual:fault-class-loop — a waiting diagnosis is settled so inFlight counts no provider hold as active work, and diagnosticianGate keys on explicit refusal time', () => {
+  const state = emptyDaemonState(config());
+  const entry = (subject: string, updatedAt: number, retryAt: number, refusedAt: number) => ({
+    subject, kind: 'recurring', faultClass: 'loop', work: subject, state: 'waiting', startedAt: iso(updatedAt), updatedAt: iso(updatedAt),
+    runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: iso(retryAt), refusedAt: iso(refusedAt), detail: '' }) as DaemonState['diagnoses'][string];
+  const waitingEntry = entry('GY-1083', refusedAt, refusedAt + hour, refusedAt);
+  state.diagnoses['GY-1083'] = waitingEntry;
+  assert.ok(diagnosisSettled(waitingEntry));
+  assert.equal(diagnosisReport(state).inFlight, 0);
+
+  // If something later updates updatedAt, the gate still honours the refusal timestamp
+  waitingEntry.updatedAt = iso(refusedAt + 2 * hour);
+  state.diagnoses['GY-1083'].retryAt = iso(refusedAt + 10 * minute);
+  state.diagnoses['GY-1084'] = { subject: 'GY-1084', kind: 'recurring', faultClass: 'loop', work: 'GY-1084', state: 'running',
+    startedAt: iso(refusedAt + 15 * minute), updatedAt: iso(refusedAt + 15 * minute), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' } as DaemonState['diagnoses'][string];
+  assert.equal(diagnosticianGate(state, refusedAt + 20 * minute), 'held', 'the in-flight probe holds other launches even if waiting entry updatedAt changed');
 });

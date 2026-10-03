@@ -117,7 +117,7 @@ export function diagnosticianGate(state: Pick<DaemonState, 'diagnoses'>, clock: 
   const entries = Object.values(state.diagnoses), waiting = entries.filter(entry => entry.state === 'waiting');
   if (!waiting.length) return 'open';
   if (diagnosticianHeldUntil(state, clock)) return 'held';
-  const refused = Math.max(...waiting.map(entry => Date.parse(entry.updatedAt)));
+  const refused = Math.max(...waiting.map(entry => Date.parse(entry.refusedAt ?? entry.updatedAt)));
   const since = entries.filter(entry => entry.state !== 'waiting' && Date.parse(entry.startedAt) > refused);
   if (since.some(entry => entry.state !== 'running')) return 'open';
   return since.length ? 'held' : 'probe';
@@ -301,7 +301,7 @@ type Note = (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: str
 async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, note: Note) {
   const { config, state, snapshot, clock } = cycle;
   const entry: DiagnosisRecord = { subject: subject.id, kind: subject.kind, faultClass: subject.faultClass, work: subject.work?.key ?? null, state: 'running',
-    startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, detail: '' };
+    startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   state.diagnoses[subject.id] = entry;
   const context = await diagnostician.context(subject, namedPullRequests(subject, snapshot.work))
     .catch(error => ({ journal: [`(the excerpts could not be read: ${message(error)})`], serverLog: [], pullRequests: [] }));
@@ -329,6 +329,7 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
       // A reset already past says nothing about when the provider recovers: the hour's hold, as for none.
       entry.state = 'waiting';
       entry.retryAt = iso(Number.isFinite(named) && named > clock ? Math.max(named, clock + diagnosisLimitMinimumMs) : clock + diagnosisLimitHoldMs);
+      entry.refusedAt = iso(clock);
       // The provider's capacity, not the loop's failure: no fault kind, so no loop fault instance.
       await note(entry, 'waiting', `The diagnostician's provider refused the diagnosis of ${entry.subject} for its quota or rate limit (${outcome.limit.reason}); it is diagnosed again at ${entry.retryAt}, and no other diagnosis is launched before then`, null);
       return;
@@ -407,5 +408,5 @@ export function diagnosisReport(state: Pick<DaemonState, 'diagnoses'>, limit = 2
   const entries = Object.values(state.diagnoses).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return { inFlight: entries.filter(entry => !diagnosisSettled(entry)).length,
     recent: entries.slice(0, limit).map(entry => ({ subject: entry.subject, kind: entry.kind, faultClass: entry.faultClass, state: entry.state, cause: entry.diagnosis?.cause ?? null,
-      covering: entry.diagnosis?.covering ?? null, fix: entry.fix, decision: entry.decision, answeredBy: entry.answeredBy, retryAt: entry.retryAt, detail: entry.detail, updatedAt: entry.updatedAt })) };
+      covering: entry.diagnosis?.covering ?? null, fix: entry.fix, decision: entry.decision, answeredBy: entry.answeredBy, retryAt: entry.retryAt, refusedAt: entry.refusedAt, detail: entry.detail, updatedAt: entry.updatedAt })) };
 }

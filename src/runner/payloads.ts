@@ -113,12 +113,14 @@ export const diagnosisRecordSchema = z.object({
   fix: z.string().max(50).nullable().default(null),
   decision: z.object({ id: z.string().max(100), action: z.enum(['release', 'close']), work: z.string().max(50), approver: z.string().max(200).nullable().default(null) }).strict().nullable().default(null),
   answeredBy: z.string().max(50).nullable().default(null),
+  /** When a `waiting` diagnosis was refused by its provider. */
+  refusedAt: z.string().max(40).nullable().default(null),
   /** When a `waiting` diagnosis is run again: the provider's reset, else an hour after the refusal. */
   retryAt: z.string().max(40).nullable().default(null),
   detail: z.string().max(1000).default(''),
 }).strict();
 export type DiagnosisRecord = z.infer<typeof diagnosisRecordSchema>;
-export const diagnosisSettled = (record: Pick<DiagnosisRecord, 'state'>) => record.state === 'answered' || record.state === 'refused' || record.state === 'failed';
+export const diagnosisSettled = (record: Pick<DiagnosisRecord, 'state'>) => record.state === 'answered' || record.state === 'refused' || record.state === 'failed' || record.state === 'waiting';
 export const retainedDiagnoses = 200;
 
 /**
