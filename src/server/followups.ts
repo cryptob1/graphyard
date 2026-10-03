@@ -7,7 +7,7 @@ import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
 import { appendToItem, masterOnly, migrateToParents, readAll, recordDispatch, shipFollowUps, type Db } from './followups-ship.js';
 import { coalescedScope, plannedScope } from '../review-threads.js';
-import { namedPaths, plannedFilesMax } from '../model/scope.js';
+import { followUpPaths, plannedFilesMax } from '../model/scope.js';
 import type { Services } from './routes.js';
 
 // The control plane's half of the machine-filed backlog (GY-402): a later approval's findings
@@ -127,11 +127,7 @@ export async function promoteFollowUp(services: Services, caller: Principal, id:
     const promoted = { from: work.key, finding: index, parent: parent!.key };
     if (finding!.promoted) return { promoted, item: all.find(item => item.key === finding!.promoted) ?? { key: finding!.promoted }, duplicate: true };
     const title = `Promoted follow-up of ${parent!.key} (${work.key} finding ${index}): ${finding!.text}`.slice(0, 200);
-    const findingPaths = [...new Set([
-      ...(finding!.path ? [finding!.path] : []),
-      ...namedPaths(finding!.text),
-    ])].map(plannedScope).filter((path): path is string => !!path);
-    const plannedFiles = coalescedScope(findingPaths).slice(0, plannedFilesMax);
+    const plannedFiles = coalescedScope(followUpPaths([finding!]).map(plannedScope).filter((path): path is string => !!path)).slice(0, plannedFilesMax);
     const input = {
       title,
       description: `Promoted from finding ${index} of ${work.key}'s follow-up batch${parentKey ? `, filed for ${parent!.key}` : ''}${finding!.pr ? ` (PR #${finding!.pr})` : ''}${finding!.ref ? `; raised at ${finding!.ref}` : ''}.\n\nFinding${finding!.path ? ` (${finding!.path})` : ''}: ${finding!.text}`.slice(0, 20000),

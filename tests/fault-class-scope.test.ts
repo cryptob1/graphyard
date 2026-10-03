@@ -8,11 +8,11 @@ import type { WorkOrigin } from '../src/model/interventions.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
-import { decideScopeRequest, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
+import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
 import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
 import { derivePlannedFiles } from '../src/model/work.js';
-import { coalescedScope, plannedScope } from '../src/review-threads.js';
+import { coalescedScope, plannedScope, shippedFollowUpItem } from '../src/review-threads.js';
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -283,4 +283,17 @@ test('manual:fault-class-scope — GY-1116: follow-up paths are bounded by plann
   const coalesced = coalescedScope(manyPaths);
   assert.ok(coalesced.length <= 100, `coalesced entries (${coalesced.length}) within 100`);
   assert.ok(coalesced.some(p => p.endsWith('/')), 'coalesced into directory scopes');
+});
+
+test('manual:fault-class-scope — GY-1116: a dotted API name in a finding is prose, never a planned file', () => {
+  const gy1048 = instances.find(e => e.subject === 'GY-1048')!;
+  const finding = gy1048.origin!.reviewFollowUps!.findings![0];
+  assert.ok(namedPaths(finding.text).includes('store.init'), 'the finding text carries the dotted token');
+  const paths = followUpPaths([finding]);
+  assert.deepEqual(paths.sort(), ['src/server/main.ts', 'src/store/locks.ts', 'src/store/tables/work.ts']);
+  const shipped = shippedFollowUpItem({ key: 'GY-970' }, [{ path: finding.path ?? null, text: finding.text }]);
+  assert.equal(shipped.plannedFiles.includes('store.init'), false, 'the shipped follow-up item does not plan store.init');
+  assert.ok(shipped.plannedFiles.includes('src/server/main.ts'));
+  const implied = impliedScopes([{ id: 'AC-1', text: 'x' }], [], gy1048.origin, gy1048.description);
+  assert.equal(implied.some(entry => entry.scope === 'store.init'), false, 'store.init implies no scope');
 });

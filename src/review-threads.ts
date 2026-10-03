@@ -7,7 +7,7 @@
 // failure was swallowed, and the reviewer approved without judging or resolving any thread.
 import type { ChildRun } from './child-runner.js';
 import { appendedDescription, followUpEntriesMax, type FollowUpEntry } from './model/machine-backlog.js';
-import { namedPaths, plannedFilesMax } from './model/scope.js';
+import { followUpPaths, plannedFilesMax } from './model/scope.js';
 
 /** An unresolved review thread as the reviewer's launch prompt names it: an input to the verdict, not a merge blocker. */
 /**
@@ -434,11 +434,7 @@ export function followUpItem(input: { key: string; workId: string; pr: number; s
  * approvals named while it had not shipped, depending on nothing, since the parent has landed.
  */
 export function shippedFollowUpItem(parent: { key: string; pr?: number | null; mergeSha?: string | null }, findings: FollowUpEntry[]): FollowUpItem {
-  const findingPaths = findings.flatMap(finding => [
-    ...(finding.path ? [finding.path] : []),
-    ...namedPaths(finding.text),
-  ]).map(plannedScope).filter((path): path is string => !!path);
-  const scopes = coalescedScope(findingPaths);
+  const scopes = coalescedScope(followUpPaths(findings).map(plannedScope).filter((path): path is string => !!path));
   const intro = `The independent reviewer approved ${parent.key} with every acceptance criterion met and judged these ${findings.length} finding${findings.length === 1 ? '' : 's'} FOLLOW-UP: beyond the item's criteria. They were held on ${parent.key} until it shipped${parent.mergeSha ? ` (merge ${parent.mergeSha.slice(0, 12)})` : ''}, and filed here then.`;
   return {
     title: `Follow-ups from the approved review of ${parent.key}${parent.pr ? ` (PR #${parent.pr})` : ''}`.slice(0, 200),

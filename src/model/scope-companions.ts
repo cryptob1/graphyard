@@ -7,7 +7,7 @@
 // not optional add-ons" (GY-945, GY-883). These rules ground them per path,
 // so the loop grants them with no approver, and `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
-import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
+import { followUpPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
 interface CompanionCriterion { id: string; text: string; proofs?: readonly string[] }
 
@@ -213,20 +213,8 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
     for (const file of tree) if (timingBaseline(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the test-duration baseline a new test file must be recorded in' });
   if (item.plannedFiles.some(entry => documentationPath(entry, documentation)))
     for (const file of tree) if (documentationBudgetGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the documentation-budget gate a documented change must keep passing' });
-  const isFollowUp = !!item.origin?.reviewFollowUps;
-  if (isFollowUp) {
-    const followUpPaths = [
-      ...(item.origin?.reviewFollowUps?.findings ?? []).flatMap(finding => [
-        ...(finding.path ? [finding.path] : []),
-        ...namedPaths(finding.text),
-      ]),
-      ...(item.description ? namedPaths(item.description) : []),
-    ];
-    for (const file of followUpPaths) {
-      if (tree.has(file) && !covered(file)) {
-        added.push({ path: file, criterion: 'FOLLOWUP', why: 'the file a review follow-up names' });
-      }
-    }
-  }
+  if (item.origin?.reviewFollowUps)
+    for (const file of followUpPaths(item.origin.reviewFollowUps.findings ?? [], item.description))
+      if (tree.has(file) && !covered(file)) added.push({ path: file, criterion: 'FOLLOWUP', why: 'the file a review follow-up names' });
   return added;
 }

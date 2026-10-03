@@ -119,6 +119,16 @@ export function namedPaths(text: string) {
   return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
 }
 
+/**
+ * The files a review follow-up names (GY-1116): each finding's own path, and the paths its text or the
+ * item's description name unambiguously — a directory and a file extension. A dotted API name
+ * (`store.init`) is prose, not a file, so it never lands in plannedFiles or implies scope.
+ */
+export function followUpPaths(findings: readonly { path?: string | null; text: string }[], description?: string | null): string[] {
+  const named = (text: string) => namedPaths(text).filter(token => /\/[^/]+\.[A-Za-z0-9]{1,5}$/.test(token));
+  return [...new Set([...findings.flatMap(finding => [...(finding.path ? [finding.path] : []), ...named(finding.text)]), ...(description ? named(description) : [])])];
+}
+
 export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
@@ -131,17 +141,10 @@ export function impliedScopes(
   origin?: WorkOrigin | null,
   description?: string | null,
 ): ScopeImplication[] {
-  const isFollowUp = !!origin?.reviewFollowUps;
-  const followUpPaths = isFollowUp ? [
-    ...(origin?.reviewFollowUps?.findings ?? []).flatMap(finding => [
-      ...(finding.path ? [finding.path] : []),
-      ...namedPaths(finding.text),
-    ]),
-    ...(description ? namedPaths(description) : []),
-  ] : [];
+  const followUps = origin?.reviewFollowUps ? followUpPaths(origin.reviewFollowUps.findings ?? [], description) : [];
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
-    ...followUpPaths.map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
+    ...followUps.map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
     ...documentation.map(scope => ({ scope, kind: 'documentation' as const, why: `${scope} is documentation this repository requires updating when behaviour changes` })),
   ];
 }

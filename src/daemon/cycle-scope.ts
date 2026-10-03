@@ -69,11 +69,11 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
       if (pinning) { grounds.push({ path, ground: pinning }); continue; }
       const importing = await importingTestGround(path, text, item.plannedFiles ?? [], read);
       if (importing) { grounds.push({ path, ground: importing, companion: true }); continue; }
-      const peer = await peerModuleGround(path, text, item.plannedFiles ?? [], read);
-      if (peer) { grounds.push({ path, ground: peer, companion: true }); continue; }
       if (mentions) for (const identifier of phraseCallees(text, symbols).slice(0, 20)) if (!searched.has(identifier)) searched.set(identifier, await mentions(identifier));
       const symbol = criterionSymbolGround(path, text, symbols, searched);
       if (symbol) { grounds.push({ path, ground: symbol }); continue; }
+      const peer = await peerModuleGround(path, text, item.plannedFiles ?? [], read);
+      if (peer) { grounds.push({ path, ground: peer, companion: true }); continue; }
     }
     refusals.push(named.refusal);
   }

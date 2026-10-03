@@ -7,7 +7,7 @@ import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
-import { namedPaths, plannedFilesMax } from '../model/scope.js';
+import { followUpPaths, plannedFilesMax } from '../model/scope.js';
 import type { Services } from './routes.js';
 
 // Review follow-ups held on their parent until it ships (GY-845; model/machine-backlog.ts): a
@@ -29,7 +29,7 @@ export async function appendToItem(services: Services, db: Db, actor: Principal,
   if (added.length) {
     work.origin = { ...work.origin, reviewFollowUps: { parent, findings } };
     work.description = appendedDescription(work.description ?? '', added, heading);
-    const addedPaths = incoming.flatMap(f => [...(f.path ? [f.path] : []), ...namedPaths(f.text)]).map(plannedScope).filter((p): p is string => !!p);
+    const addedPaths = followUpPaths(added).map(plannedScope).filter((path): path is string => !!path);
     work.plannedFiles = coalescedScope([...(work.plannedFiles ?? []), ...addedPaths]).slice(0, plannedFilesMax);
     services.engine.evaluate(work, all, now);
     await recordDispatch(services, db, work, now);
