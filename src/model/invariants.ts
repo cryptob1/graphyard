@@ -195,6 +195,11 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
     const observation = item.observation, candidate = item.candidate;
     // Once GitHub was asked, its own MergeStateStatus says whether it can merge the head (CLEAN, UNSTABLE, HAS_HOOKS),
     // as `master status` judges a stalled merge (merge-queue.ts `mergeStalls`); a queued entry waits on its merge group.
+    // A BLOCKED head is deliberately not counted, though master status names one past ten minutes
+    // (GY-430): BLOCKED is GitHub refusing the merge for a rule it enforces, an attention item for the
+    // operator, and the control plane already answers it by asking for the head-bound merge after
+    // `blockedAutoMergeProbeMs`, which lands or records GitHub's refusal. This invariant is the
+    // control plane's own defect: GitHub says it can merge and nothing refuses it (GY-1060).
     const github = observation?.githubQueue && observation.githubQueue.head === candidate?.sha ? observation.githubQueue : null;
     const mergeable = item.stage === 'merge' && !!candidate && !!observation && observation.mergeable === true && !observation.merged && observation.candidate.sha === candidate.sha
       && (!github || !github.queue && mergeableNow(github));
