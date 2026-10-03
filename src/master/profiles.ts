@@ -363,47 +363,25 @@ export const masterConfigSchema = z.object({
   deliverySpeed: z.object({ readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(), mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional() }).strict().optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
-/**
- * How many sessions the automatic reviewer profile runs when its `concurrency` is unset (GY-1072).
- * Every automatic review goes to the profile `run.reviewerProfile` names, so at the general
- * default of one the whole installation reviewed one candidate at a time, and one finished
- * session left in its pane held the only name and stalled every review behind it. The profile
- * `run.reviewerProfile` names therefore runs this many sessions unless it declares its own
- * concurrency; every other profile keeps the default of one.
- */
+/** Sessions `run.reviewerProfile`'s profile runs at unset concurrency (GY-1072); other reviewer profiles keep one. */
 export const automaticReviewerConcurrency = 4;
+/** Sessions a producer profile runs at unset concurrency (GY-1113): at one, proofs queued an hour for a slot. */
+export const automaticProducerConcurrency = 4;
 /**
- * The config as the reviewer launchers and their readers count sessions: the automatic profile's unset
- * concurrency read as `automaticReviewerConcurrency`. `loadMasterConfig` applies it once at load
- * (GY-1075) and writers read `loadStoredMasterConfig`, so the default is never written back; it is
- * idempotent, so a caller handed a config built elsewhere may still apply it.
+ * The config as the launchers and their readers count sessions: unset concurrency read as the role's
+ * automatic default. `loadMasterConfig` applies it once at load (GY-1075) and writers read
+ * `loadStoredMasterConfig`, so a default is never written back; idempotent, so any caller may apply it.
  */
 export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 'run'>>(config: T): T {
   const automatic = config.run.reviewerProfile;
   if (!automatic || !config.reviewers.some(profile => profile.name === automatic && profile.concurrency === undefined)) return config;
   return { ...config, reviewers: config.reviewers.map(profile => profile.name === automatic && profile.concurrency === undefined ? { ...profile, concurrency: automaticReviewerConcurrency } : profile) };
 }
-/**
- * Automatic producer concurrency (GY-1113). Proof requests used to queue behind producer profiles
- * whose concurrency was unset because each profile defaulted to one slot; producer profiles without
- * an explicit concurrency therefore run this many sessions (default 4); a profile that declares
- * its own concurrency keeps it.
- */
-export const automaticProducerConcurrency = 4;
-/**
- * The config as the producer launchers and their readers count sessions: producer profiles with
- * unset concurrency read as `automaticProducerConcurrency` (GY-1113). `loadMasterConfig` applies it
- * once at load and writers read `loadStoredMasterConfig`, so the default is never written back;
- * it is idempotent, so a caller handed a config built elsewhere may still apply it.
- */
 export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(config: T): T {
   if (!config.producers.some(profile => profile.concurrency === undefined)) return config;
   return { ...config, producers: config.producers.map(profile => profile.concurrency === undefined ? { ...profile, concurrency: automaticProducerConcurrency } : profile) };
 }
-/** Both reviewer and producer defaults applied: the configuration readers and dispatchers evaluate under. */
-export function withRoleDefaults<T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'>>(config: T): T {
-  return withProducerDefaults(withReviewerDefaults(config));
-}
+export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'>>(config: T): T => withProducerDefaults(withReviewerDefaults(config));
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
