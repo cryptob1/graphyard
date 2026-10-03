@@ -19,7 +19,7 @@ On the worker, `graphyard master settle-containment GY-N "reason"` verifies noth
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes).
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643 (2026-09-26): 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
 
 ## Retro synthesis
 
@@ -124,7 +124,7 @@ Reconcile reads each live item once per pass, not per batch, and locks only its 
 
 ### Server startup readiness
 
-The server listens on its port before startup validation finishes, answering liveness probes promptly while gating unvalidated mutations. `GET /healthz` reports liveness throughout and a boolean `readiness` field that turns true once startup validation completes.
+The server listens before startup validation finishes. `GET /healthz` reports liveness throughout and a boolean `readiness` field that turns true once startup validation completes.
 
 ### Concurrent reconciliation
 
