@@ -363,16 +363,11 @@ export function deriveAccountPlan(
   const hasZaiCredential = (acc: typeof account) =>
     acc.credential?.key?.variable === 'ZAI_API_KEY' || (!!acc.credential?.key?.file && /zai/i.test(acc.credential.key.file));
   const match = /^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(account.name);
+  // A Z.AI-credentialed pi-X/opencode-X always names plan zai-X, alone or beside others, so its plan id never depends on
+  // the registry's size; only a sibling with its own Z.AI credential joins it (GY-1158).
   if (match && hasZaiCredential(account)) {
     const suffix = match[1];
-    const sharesSuffix = allAccounts.find(o =>
-      o.name !== account.name &&
-      new RegExp(`^(?:pi|opencode)[-_]${suffix}$`, 'i').test(o.name) &&
-      hasZaiCredential(o)
-    );
-    if (sharesSuffix || allAccounts.length <= 1) {
-      return { planId: `zai-${suffix.toLowerCase()}`, planName: `Z.AI (${suffix})`, planKind: 'zai' };
-    }
+    return { planId: `zai-${suffix.toLowerCase()}`, planName: `Z.AI (${suffix})`, planKind: 'zai' };
   }
 
   // 4. Default by runtime/provider

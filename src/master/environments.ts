@@ -228,10 +228,12 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
   const key = zaiKey ?? piKey ?? (fileKey?.trim() || undefined) ?? (fallbackKey?.trim() || undefined);
 
   const hasZaiKey = !!key;
+  // Z.AI-specific only on Z.AI evidence: the Pi runtime, a declared zai plan, or a key named Z.AI's. A plan id derived
+  // from the runtime is no evidence (every OpenCode account defaults to the 'zai' kind), nor is the account's name (GY-1158).
+  const declared = 'declaredPlan' in environment ? (environment as any).declaredPlan : (environment as any).plan;
   const isZaiSpecific = (environment.kind as string) === 'pi'
-    || (environment as any).plan?.startsWith?.('zai')
-    || keyFileName !== 'zai.key'
-    || /zai|glm/i.test(environment.name);
+    || /^zai/i.test(declared ?? '')
+    || keyFileName !== 'zai.key';
 
   if (isZaiSpecific) {
     if (!hasZaiKey || probe.quota === false) {

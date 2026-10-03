@@ -259,3 +259,37 @@ test('unit:gy-1158-finding-4 — eligibility is a pure read: a stale exhaustion 
   foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-1 * minute) });
   assert.match(accountIneligibility(registry, b, now, 'host-b')!, /acc-b quota is exhausted on plan .*acc-a quota is exhausted: quota exceeded/);
 });
+
+test('unit:gy-1158-finding-2 — an OpenCode account logged in to another provider stays logged in whatever its model name', async () => {
+  const runtime: any = { name: 'opencode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'XDG_DATA_HOME', modelFlag: '--model', login: null, loginFile: null } };
+  for (const [model, key] of [['sonnet', { file: 'anthropic.key', variable: 'ANTHROPIC_API_KEY' }], ['gpt-5', undefined], ['opus', undefined]] as const) {
+    const home = await temporaryDirectory('opencode-other-provider');
+    await mkdir(join(home, 'opencode'), { recursive: true });
+    await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant-fixture' } }));
+    const account: any = { name: 'opencode-a', runtime: 'opencode', model, enabled: true, credential: { host: HOST, home, ...(key ? { key } : {}) } };
+    const called: string[] = [];
+    const fetchStub = (async (url: string) => { called.push(String(url)); return new Response('{}', { status: 401 }); }) as typeof fetch;
+    const observed = await observeAccount(account, runtime, { fetch: fetchStub, cacheMs: 0, now: () => now });
+    assert.deepEqual(called, [], `model ${model}: nothing is sent to Z.AI`);
+    assert.equal(observed.quota.loggedIn, true, `model ${model}: the OpenCode account stays logged in on its own provider login`);
+  }
+});
+
+test('unit:gy-1158-finding-2 — an explicitly declared Z.AI plan still requires a Z.AI credential to be logged in', async () => {
+  const home = await temporaryDirectory('opencode-declared-zai');
+  await mkdir(join(home, 'opencode'), { recursive: true });
+  await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant-fixture' } }));
+  const runtime: any = { name: 'opencode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'XDG_DATA_HOME', modelFlag: '--model', login: null, loginFile: null } };
+  const account: any = { name: 'opencode-b', runtime: 'opencode', model: 'sonnet', plan: 'zai-team', enabled: true, credential: { host: HOST, home } };
+  const observed = await observeAccount(account, runtime, { cacheMs: 0, now: () => now, quota: false });
+  assert.equal(observed.quota.loggedIn, false, 'a declared Z.AI plan without a Z.AI key is not logged in');
+});
+
+test('unit:gy-1158-finding-1 — a Z.AI-credentialed pi-X derives the same plan alone or beside unrelated accounts', () => {
+  const pi: any = { name: 'pi-x', runtime: 'pi', model: 'glm-flash', credential: { host: HOST, home: '/agents/pi-x', key: { file: 'zai.key', variable: 'ZAI_API_KEY' } } };
+  const other: any = { name: 'claude-1', runtime: 'claude', model: 'opus', credential: { host: HOST, home: '/agents/claude-1' } };
+  assert.equal(deriveAccountPlan(pi, [pi]).planId, 'zai-x');
+  assert.equal(deriveAccountPlan(pi, [pi, other]).planId, 'zai-x');
+  const keyless: any = { name: 'opencode-x', runtime: 'opencode', model: 'sonnet', credential: { host: HOST, home: '/agents/opencode-x' } };
+  assert.notEqual(deriveAccountPlan(keyless, [pi, keyless]).planId, 'zai-x', 'a sibling without a Z.AI credential does not join the plan');
+});
