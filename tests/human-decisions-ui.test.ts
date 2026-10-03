@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -9,12 +9,12 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { HumanSignIn, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/auth.js';
+import { HumanSignIn, maxSignInLinks, maxSignInSessions, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/auth.js';
 import { hostSealKey, loginCommand, parkArgs, parkCommand, unsealOnHost } from '../src/cli/session-commands.js';
 import { defaultChoices, requestChoices, resolveHumanAnswer, type HumanRequestRow } from '../src/model/human-request.js';
 import type { Principal, Work } from '../src/model.js';
 import HumanRequestsPage, { signInAction } from '../web/pages/human-requests.js';
-import { redeemSignIn, signInCode } from '../web/pages/login.js';
+import { isSignInSessionToken, REDEEM_ATTEMPTS, redeemSignIn, signInCode } from '../web/pages/login.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
 import { principalSchema } from '../src/server/principals.js';
@@ -114,6 +114,8 @@ test('unit:operator-sign-in-link — graphyard login prints a one-time link that
   assert.equal(table.authenticate(fresh.token), null, 'the session expires');
   assert.throws(() => table.issue(operator, false), /Only the operator's own admin credential/, 'an unconfigured identity issues none');
   assert.throws(() => table.issue({ id: 'master', role: 'operator-agent' }, true), /Only the operator's own admin credential/);
+  // An admin declared an AI session issues none: redeeming would declare that agent's session human (GY-1041).
+  assert.throws(() => table.issue({ id: 'operator-bot', role: 'admin', sessionKind: 'ai' }, true), /operator-bot is declared an AI session and issues none/);
 
   // A request the admin credential itself cannot answer, because it is not a human session; the sign-in session can.
   const work = await park(await claimed(), ['money-or-accounts', 'A', 'hosting', 'plan', '--', 'Staging needs a paid plan']);
@@ -185,6 +187,44 @@ test('unit:human-request-choices — every human-only request carries its reques
   const written = JSON.stringify((await store.pool.query('SELECT document FROM work_items')).rows) + JSON.stringify((await store.pool.query('SELECT payload FROM events')).rows) + JSON.stringify((await store.pool.query('SELECT result, fingerprint FROM receipts')).rows);
   assert.ok(!written.includes(secret), 'the value is written nowhere in the clear');
   assert.throws(() => resolveHumanAnswer(credential.humanRequest!, { request: randomUUID(), outcome: 'provided', choice: 'decline', secret }), /sent only with the choice that asks for it/);
+});
+
+test('unit:sign-in-follow-ups — the sign-in tables stay bounded however often an admin asks for a link, a redemption that never reached the server is retried with the kept code, a link-opened session is never offered to a password store, and an interrupted seal-key write still seals to the host (GY-1041)', async () => {
+  // Bounded: the oldest link and session go first once the cap is reached; the newest still work.
+  const now = Date.parse('2026-10-02T12:00:00Z');
+  const table = new HumanSignIn(() => now);
+  const links = Array.from({ length: maxSignInLinks + 5 }, () => table.issue(operator, true));
+  assert.throws(() => table.redeem(links[0].code), /expired or was already used/, 'the oldest link was dropped at the cap');
+  assert.equal(table.redeem(links.at(-1)!.code).actor.id, operator.id, 'the newest link still opens');
+  const sessions = Array.from({ length: maxSignInSessions + 3 }, () => table.redeem(table.issue(operator, true).code));
+  assert.equal(table.authenticate(sessions[0].token), null, 'the oldest session was dropped at the cap');
+  assert.ok(table.authenticate(sessions.at(-1)!.token), 'the newest session stands');
+  const held = table as unknown as { links: Map<string, unknown>; sessions: Map<string, unknown> };
+  assert.ok(held.links.size <= maxSignInLinks && held.sessions.size <= maxSignInSessions, `${held.links.size} links, ${held.sessions.size} sessions`);
+
+  // Retried: a dropped request and a 503 are tried again with the same code; a refusal is final.
+  const tried: string[] = [];
+  const flaky = (replies: (() => Response)[]) => (async (_input: unknown, init?: RequestInit) => { tried.push(JSON.parse(String(init!.body)).code); return replies.shift()!(); }) as typeof fetch;
+  const noWait = async () => {};
+  const opened = await redeemSignIn('code-1', flaky([() => { throw new TypeError('network'); }, () => new Response('', { status: 503 }), () => Response.json({ token: 'gyh_fresh' })]), noWait);
+  assert.deepEqual([opened, tried], [{ kind: 'signed-in', token: 'gyh_fresh' }, ['code-1', 'code-1', 'code-1']]);
+  tried.length = 0;
+  assert.deepEqual(await redeemSignIn('code-2', flaky([() => new Response('', { status: 502 }), () => new Response('', { status: 401 })]), noWait), { kind: 'refused' });
+  assert.equal(tried.length, 2, 'a refusal is not retried');
+  tried.length = 0;
+  assert.deepEqual(await redeemSignIn('code-3', flaky(Array.from({ length: REDEEM_ATTEMPTS }, () => () => new Response('', { status: 500 }))), noWait), { kind: 'unreachable' });
+  assert.equal(tried.length, REDEEM_ATTEMPTS, 'retries are bounded');
+
+  // A session a link opened expires in hours: it is never saved as the durable Graphyard login.
+  assert.equal(isSignInSessionToken(sessions[1].token), true);
+  assert.equal(isSignInSessionToken(token(operator)), false);
+
+  // A seal key whose public half was never written (the process died between the two writes).
+  const home = await temporaryDirectory('graphyard-seal-'), pem = join(home, 'seal', 'host-a.pem');
+  const first = await hostSealKey('host-a', home);
+  await unlink(`${pem}.pub`);
+  assert.equal(await hostSealKey('host-a', home), first, 'the public half is derived from the kept private key, never EEXIST');
+  assert.equal((await readFile(`${pem}.pub`, 'utf8')).trim(), first, 'and written back');
 });
 
 test('unit:operator-principal-declared-human — the install plan declares its operator principal a human session and no agent principal; a roster rotation keeps it so', async () => {

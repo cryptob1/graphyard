@@ -28,11 +28,27 @@ export const LINK_REFUSED_NOTICE = 'That sign-in link has expired or was already
 
 /** The one-time code a sign-in link carries in its fragment (`/#sign-in=CODE`), which never reaches a server log. */
 export const signInCode = (hash: string) => /^#sign-in=([A-Za-z0-9_-]{16,200})$/.exec(hash)?.[1] ?? null;
+/** A human session token a sign-in link opened (server/auth.ts): it expires in hours, so it is never offered to a password store. */
+export const isSignInSessionToken = (token: string) => token.startsWith('gyh_');
+/** How many times a redemption that never got the server's answer is tried, and the pause before each retry. */
+export const REDEEM_ATTEMPTS = 3;
+export const REDEEM_RETRY_MS = 1_000;
+type Redemption = { kind: 'signed-in'; token: string } | { kind: 'refused' } | { kind: 'unreachable' };
 /**
  * Redeem a sign-in link's code for a human session token. The link is single use: the server
- * forgets it on the first attempt, whatever the outcome.
+ * forgets it on the first attempt that reaches it, whatever the outcome. A request that failed
+ * before an answer, or got a transient 5xx, is retried with the code kept in memory (the address
+ * bar no longer holds it): a link the server never consumed still opens, and one it did is refused.
  */
-export async function redeemSignIn(code: string, fetcher: typeof fetch): Promise<{ kind: 'signed-in'; token: string } | { kind: 'refused' } | { kind: 'unreachable' }> {
+export async function redeemSignIn(code: string, fetcher: typeof fetch, wait: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<Redemption> {
+  let outcome: Redemption = { kind: 'unreachable' };
+  for (let attempt = 0; attempt < REDEEM_ATTEMPTS && outcome.kind === 'unreachable'; attempt++) {
+    if (attempt) await wait(REDEEM_RETRY_MS * attempt);
+    outcome = await redeemOnce(code, fetcher);
+  }
+  return outcome;
+}
+async function redeemOnce(code: string, fetcher: typeof fetch): Promise<Redemption> {
   try {
     const response = await fetcher('/api/sign-in', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
     if (response.status === 401 || response.status === 400) return { kind: 'refused' };
@@ -133,7 +149,7 @@ export default function LoginPage({ token, error, signOut, setError, sessionEpoc
     const check = verifyToken(token, (input, init) => fetch(input, init), { setTimeout: (run, ms) => setTimeout(run, ms), clearTimeout: timer => clearTimeout(timer as ReturnType<typeof setTimeout>) }, onVerified);
     void check.result.then(outcome => {
       if (!active || epoch !== sessionEpoch.current) return;
-      if (outcome.kind === 'accepted') { offerToSavePassword(token); return; }
+      if (outcome.kind === 'accepted') { if (!isSignInSessionToken(token)) offerToSavePassword(token); return; }
       if (outcome.kind === 'rejected') { signOut(); setError(REJECTED_NOTICE); }
       else setUnreachable(true);
     });

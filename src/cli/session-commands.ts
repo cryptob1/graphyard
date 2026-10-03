@@ -1,4 +1,4 @@
-import { constants as cryptoConstants, createDecipheriv, generateKeyPairSync, privateDecrypt } from 'node:crypto';
+import { constants as cryptoConstants, createDecipheriv, createPublicKey, generateKeyPairSync, privateDecrypt } from 'node:crypto';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Work } from '../model.js';
@@ -150,14 +150,24 @@ export function parkArgs(words: readonly string[]) {
   return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined };
 }
 
-/** This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600; the public half is returned. */
+/**
+ * This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600;
+ * the public half is returned. The private key is written first and is the source of truth: a
+ * process that died before writing the `.pub` half left a key whose public half is derived from it
+ * here, so a later `park` still seals to this host instead of failing on EEXIST.
+ */
 export async function hostSealKey(hostId: string, home = configHome()) {
   const path = join(home, 'seal', `${hostId}.pem`);
-  try { return (await readFile(`${path}.pub`, 'utf8')).trim(); } catch { /* first use on this host */ }
-  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, privateKey, { mode: 0o600, flag: 'wx' });
-  await chmod(path, 0o600);
+  try { return (await readFile(`${path}.pub`, 'utf8')).trim(); } catch { /* first use on this host, or an interrupted one */ }
+  let privateKey: string;
+  try { privateKey = await readFile(path, 'utf8'); } catch {
+    privateKey = generateKeyPairSync('rsa', { modulusLength: 3072, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    // Another process may win the race to create it; its key is the one kept.
+    try { await writeFile(path, privateKey, { mode: 0o600, flag: 'wx' }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; privateKey = await readFile(path, 'utf8'); }
+    await chmod(path, 0o600);
+  }
+  const publicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString();
   await writeFile(`${path}.pub`, publicKey, { mode: 0o644 });
   return publicKey.trim();
 }
