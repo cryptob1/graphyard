@@ -267,19 +267,15 @@ export const masterRunSchema = z.object({
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),
-  // Worktree reclamation: how long an assignment worktree may sit untouched before its dependency
-  // directories count as disposable, and the free space below which `master status` raises disk
-  // pressure. Both are read from .graphyard/master.json on every cycle, so a host with a smaller
-  // volume raises the threshold without restarting the loop.
+  // Worktree reclamation: idle hours before dependencies count as disposable, and free space
+  // threshold for disk pressure. Both read from .graphyard/master.json on every cycle.
   reclaimIdleHours: z.number().min(0.25).max(720).optional(),
   diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
   // How many finished assignment worktrees one reclaim pass removes outright (GY-360; default 50),
   // so a large backlog drains over a few cycles without stalling any one of them.
   worktreeRemovalLimit: z.number().int().min(1).max(1000).optional(),
-  // The managed worktree root every proof and review checkout is created under: an absolute path
-  // on durable storage outside every worktree (default: the installation's data directory), the
-  // free space setup and each launch require of its volume, and the size the root may reach before
-  // `master status` asks for a reclaim — a user quota is invisible in the volume's free space.
+  // Managed worktree root for proof and review checkouts: absolute path outside worktrees,
+  // required free space, and max size before master status asks for a reclaim.
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
@@ -310,12 +306,9 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
-/**
- * GY-516: the product default for `mergeQueue.rerunFailedChecks`, so every installation reruns a
- * failed required check once on the same sha before the failure ejects the entry; 0 disables it.
- */
+// GY-516: default for mergeQueue.rerunFailedChecks (reruns failed check once on same sha; 0 disables).
 export const defaultRerunFailedChecks = 1;
-/** The most reruns per sha and check master config and the control plane accept. */
+// The most reruns per sha and check master config and the control plane accept.
 export const maxRerunFailedChecks = 3;
 export const masterConfigSchema = z.object({
   version: z.literal(1),
