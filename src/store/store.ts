@@ -4,6 +4,7 @@ import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
+import { StaleWrite, lockItem, staleWriteAttempts, type StoreTransactionOptions } from './item-lock.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
 // the lock budget stays exported here with the store that applies it.
@@ -13,6 +14,7 @@ import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js'
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
+export * from './item-lock.js';
 export type { CoordinationTrim } from './coordination-sql.js';
 
 /**
@@ -87,14 +89,23 @@ export class Store {
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request', coordinationLock: takeCoordinationLock = true }: { lane?: StoreLane; coordinationLock?: boolean } = {}): Promise<T> {
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions = {}): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.transactionOnce(fn, options); } catch (error) {
+        if (!(error instanceof StaleWrite) || options.retryStaleWrites === false || attempt >= staleWriteAttempts) throw error;
+      }
+    }
+  }
+  private async transactionOnce<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions): Promise<T> {
+    const { lane = 'request', itemLock } = options;
+    const fleetLock = options.fleetLock ?? (options.coordinationLock !== false);
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
-      // Serializes short coordination decisions across replicas, including dependency edits and cross-task workspace
-      // reservations; never held during external I/O. Reconciliation batches lock their own rows instead (GY-727).
-      if (takeCoordinationLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      // Serializes coordination decisions: fleet lock first, then per-item lock in fixed order so no deadlock is possible (GY-1124).
+      if (fleetLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      if (itemLock !== undefined && itemLock !== null) await lockItem(db, itemLock);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       const result = await fn(db, rows[0].now);
       await db.query('COMMIT');
@@ -264,10 +275,29 @@ export async function wakeJob(db: pg.PoolClient, id: string) {
   await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
 }
 
-export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
+export async function saveDocument(db: pg.PoolClient, work: Work, now: Date) {
+  const read = work.revision;
   work.revision++;
   work.updatedAt = now.toISOString();
-  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
+  // Written only over the revision it was read at (GY-1124): a heartbeat commits under its item lock
+  // alone, so a fleet command holding a copy read before that renewal must not overwrite it.
+  const written = await db.query("UPDATE work_items SET document=$2 WHERE id=$1 AND (document->>'revision')::numeric IS NOT DISTINCT FROM $3::numeric", [work.id, JSON.stringify(work), read ?? null]);
+  if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, read);
+}
+
+/**
+ * Write bookkeeping onto an item in place (GY-1124): no new revision and no ledger entry, so a
+ * reader resolving an older revision from the ledger (`onlyActionsMovedSince`) still counts saves
+ * exactly. Only for a caller holding the item's lock — the lock a heartbeat takes alone — so no
+ * renewal can commit between its read and this write; the revision guard refuses one that did.
+ */
+export async function rewriteDocument(db: pg.PoolClient, work: Work) {
+  const written = await db.query("UPDATE work_items SET document=$2 WHERE id=$1 AND (document->>'revision')::numeric IS NOT DISTINCT FROM $3::numeric", [work.id, JSON.stringify(work), work.revision ?? null]);
+  if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, work.revision);
+}
+
+export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
+  await saveDocument(db, work, now);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details);
 }
