@@ -15,23 +15,14 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `dispatch.sessionReconcile` reports closures (`sessions.unseen`: stale handles):
+**The control plane reconciles session liveness; never close sessions manually.** Sweeps run every dispatch tick (`run.dispatchIntervalSeconds`, default 10, max 30). Handles close on second consecutive missed sweep; unobserved handles get 3 minutes grace; foreign-host handles are left to their loop. `dispatch.sessionReconcile` reports closures (`sessions.unseen`: stale handles):
 
 - **Vanished**: missed twice.
-- **Ended**: agentless pane or terminal state; `idle`, `done` and
-  `blocked` are deliberately not terminal.
-- **Superseded**: review/proof session for a head the item moved past; a delivered item is closed the same
-  way as any other. Implementation sessions are left to the lease.
+- **Ended**: agentless pane or terminal state (`idle`, `done`, `blocked` are not terminal).
+- **Superseded**: review/proof session for an older head; delivered items close likewise. Implementation sessions follow leases.
 - **Duplicate**: older of two per role and head.
 
-A closure decides no gate, ends no lease, and stops no process. Concurrency is counted against live
-sessions only; a name is busy only while a live session has it. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) a session raises attention, never closure.
-
-**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
-that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
-another session's handle finished to free a slot.
+Closures decide no gates, end no leases, and stop no processes. Concurrency counts live sessions only; names stay busy while held. Past role maximums (4h implementation, 1h review, `run.producerTimeoutMinutes` producer, 12h coordination), sessions raise attention, never closure. For dead sessions, `master run --once` sweeps; for overlong ones, attach via handle command. Never mark handles finished to free slots.
 
 ### System invariants
 
