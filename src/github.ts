@@ -1672,6 +1672,7 @@ export class GitHub {
       pull: pr => this.request(`/pulls/${pr}`),
       blobAt: (path, ref) => this.blobAt(path, ref),
       blobContent: sha => this.blobContent(sha),
+      hasBlobContent: sha => this.hasBlobContent(sha),
       contains: (base, tip) => this.contains(base, tip),
       historySince: (base, tip) => this.historySince(base, tip),
     }, work, head, files, bound, speculative, branch, peers, budget);
@@ -1760,6 +1761,10 @@ export class GitHub {
     const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
     this.blobContents.set(sha, content);
     return content;
+  }
+  /** True when the blob bytes are already held in memory. */
+  hasBlobContent(sha: string): boolean {
+    return this.blobContents.has(sha);
   }
   /** Two fresh observations that must agree: the final check before a merge shares no cycle read (GY-806). */
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
@@ -2562,6 +2567,8 @@ export interface LandingGitHub {
    * cannot produce them keeps the conservative blob-identity comparison.
    */
   blobContent?(sha: string): Promise<Buffer | null>;
+  /** Whether the bytes of a blob by sha are already cached in memory. */
+  hasBlobContent?(sha: string): boolean;
   /** Whether `head` contains `base` by ancestry. */
   contains(base: string, head: string): Promise<boolean>;
   /** The commits `head` holds that `base` does not, or null when GitHub's list is truncated. */
@@ -2709,7 +2716,10 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
     const merged = threeWayMerge(baseContent, landingContent, headContent);
     if (merged.clean && merged.content !== null && merged.content.equals(landingContent)) file.mergeSha = file.baseSha;
     // The baseline lands as the merge result: judged by the lines it adds to what the commit holds (GY-1023).
-    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(files));
+    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) {
+      const inScopeTests = files.filter(f => inPlannedScope(plannedFiles, f.path) || f.status === 'added' || f.baseSha === null);
+      file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(inScopeTests));
+    }
   }
 }
 /**
@@ -2719,7 +2729,7 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
  * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
  * refuses rather than passes.
  */
-async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
+async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent' | 'hasBlobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
   // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
   // then asked a few at a time: in turn they held a final merge verification past its window.
   const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
@@ -2737,9 +2747,17 @@ async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobConten
   const found = await boundedMap(wanted, peerContainmentConcurrency, want => github.blobAt(want.path, base));
   wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
   // The timing baseline is judged by its lines, not its blob (GY-1023): two content reads from the same budget.
-  if (github.blobContent && budget.remaining >= 2) {
+  if (github.blobContent) {
     const read = github.blobContent.bind(github);
-    await judgeTimingCompanion(compared, async sha => { budget.remaining -= 1; const content = await read(sha).catch(() => null); return content && content.length <= mergeContentCap ? content.toString('utf8') : null; }, path => inPlannedScope(plannedFiles, path));
+    await judgeTimingCompanion(compared, async sha => {
+      const cached = github.hasBlobContent?.(sha);
+      if (!cached) {
+        if (budget.remaining < 1) return null;
+        budget.remaining -= 1;
+      }
+      const content = await read(sha).catch(() => null);
+      return content && content.length <= mergeContentCap ? content.toString('utf8') : null;
+    }, path => inPlannedScope(plannedFiles, path));
   }
   return compared;
 }
