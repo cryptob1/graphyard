@@ -41,7 +41,7 @@ RooFlow (`README.md`) is an open-source workflow configuration and system prompt
 ### 1. Cross-Session Continuity and Attempt Handover
 - **Mechanism**: RooFlow's `activeContext.md` and `progress.md` (or ConPort's `get_recent_activity_summary`, `config/roo_code_conport_strategy:39`) explicitly capture current focus, recent modifications, and open issues. Any agent session starting in the workspace immediately absorbs this state.
 - **Why it works**: A succeeding agent does not start from zero context; it continues from the exact frontier where the prior agent stopped, without re-exploring failed paths or re-reading unchanged files.
-- **Graphyard Mapping (`memory between sessions`, `dispatch`)**: Graphyard isolates attempts in fresh epochs and worktrees. When an attempt times out or fails (as observed in GY-1123 where attempts 10–15 timed out sequentially), the successor worker receives only the original static item description and criteria. Diagnostic learnings, failed test hypotheses, and partial progress from prior attempts are lost unless manually written into the work item description.
+- **Graphyard Mapping (`memory between sessions`, `dispatch`)**: Graphyard isolates attempts in fresh epochs and worktrees, but already hands a retried item over. When a worker attempt ends by interruption or by its provider account running out, `preservePartialWork` (`src/master/launch.ts`) commits the worktree's uncommitted changes, and `workerPrompt` (`src/master/dispatch.ts`) appends `resumedAttempt`: the successor's launch prompt names the prior epoch, why it ended, and the kept commit, branch and worktree to merge or cherry-pick, plus any human answer an earlier attempt received. The remaining gap is narrower: the handover carries code and an exit reason, not diagnostics — the commands the prior attempt ran, the failing test output it saw, or the hypotheses it ruled out — so a successor that fails the same way (as GY-1123's attempts 10–15 timed out in sequence) can still repeat the same trajectory.
 
 ### 2. Dense YAML Prompt Envelopes and Token Optimization
 - **Mechanism**: RooFlow structures its system instructions, tool definitions, and operational constraints as dense YAML keys (`modules/rooflow_core_prompt.yaml`, `config/.roomodes`).
@@ -56,7 +56,7 @@ RooFlow (`README.md`) is an open-source workflow configuration and system prompt
 ### 4. Role-Constrained Tool Privileges
 - **Mechanism**: Modes in `config/.roomodes` partition capabilities strictly at the configuration level: `flow-orchestrator` has read, browser, and MCP tools, but cannot edit files; `flow-architect` can edit documentation and memory files, but cannot execute arbitrary shell commands; `flow-ask` is strictly read-only.
 - **Why it works**: Prevents orchestrators or advisory agents from making premature code modifications, and prevents unprivileged modes from causing destructive side effects.
-- **Graphyard Mapping (`orchestration`, `dispatch`)**: Graphyard isolates sessions using OS-level confinement and separate worktrees, but within a session, the tool surface is generally homogeneous across workers, coordinators, and researchers.
+- **Graphyard Mapping (`orchestration`, `dispatch`)**: Graphyard already scopes tools by role. `sessionHarnessPlan` (`src/master/harness.ts`) gives each Claude session the master launches its own role file in place of the repository's settings: workers get the worktree plan from `workerHarnessPlan` (push only to their assigned branch, no trusted evidence, no review verdicts); reviewers are read-only (`Edit` and `Write` denied, no commit or push, one verdict on their own pull request); proof producers may only submit evidence. The remaining gap is runtime coverage: a session on a runtime other than Claude (Codex, opencode, Cursor, Pi) loads no generated rules, so for those runtimes the role boundary rests on the lease, the session's credential and branch protection alone, and these rules are a prompt policy, not authority.
 
 ### 5. Architectural Decision Logging Decoupled from Code Diffs
 - **Mechanism**: RooFlow prompts enforce immediate, real-time logging of architectural decisions, rationale, and consequences to `decisionLog.md` (`config/.roo/system-prompt-flow-architect:1127-1146`) whenever a design choice is made.
@@ -98,19 +98,19 @@ RooFlow (`README.md`) is an open-source workflow configuration and system prompt
 
 ### Lesson 1: Structured Attempt Handover Context for Retried Work Items
 - **RooFlow Evidence**: `config/.roo/system-prompt-flow-architect:1088-1106` (`activeContext.md`) and `config/roo_code_conport_strategy:39` (`get_recent_activity_summary`).
-- **Graphyard Change**: When a worker lease expires, times out, or fails before submission, `src/cli/handoff.ts` and `src/worker.ts` capture a structured summary (last failure reason, executed commands, failing test output, uncommitted modified files) and write `.graphyard/worktrees/GY-N/ATTEMPT_HANDOVER.md`. Dispatched successor attempts receive this handover block in their launch request payload.
-- **Expected Gain**: Eliminates repetitive retry loops where consecutive workers fail identically on the same timeout or unexpected error.
+- **Graphyard Change**: Extend the existing handover rather than add a parallel one. Kept work and the exit reason already reach the successor (`preservePartialWork` in `src/master/launch.ts`, `resumedAttempt` in `src/master/dispatch.ts`). Add the missing diagnostic data — the prior attempt's last observed screen or failing output and the commands it ran — to the record `resumedAttempt` reads, bounded in size, and cover attempts that end by lease expiry or timeout as well as interruption and capacity exhaustion.
+- **Expected Gain**: Cuts retry loops where consecutive workers fail identically on the same timeout or unexpected error, beyond what kept commits already save.
 - **Effort**: Small.
 
 ### Lesson 2: Dense YAML-Structured Instruction Templates for Agent Launch Harnesses
 - **RooFlow Evidence**: `modules/rooflow_core_prompt.yaml` and `config/.roomodes`.
-- **Graphyard Change**: Convert verbose Markdown system prompts and rule envelopes in `src/master-prompt.ts`, `src/worker.ts`, and `.graphyard/launch/*.role` into structured YAML blocks specifying identity, role constraints, tool protocols, and execution rules.
+- **Graphyard Change**: Convert verbose Markdown system prompts and rule envelopes built by `src/master/dispatch.ts` (`workerPrompt`) and the role files under `.graphyard/launch/` into structured YAML blocks specifying identity, role constraints, tool protocols, and execution rules.
 - **Expected Gain**: 20–30% reduction in launch prompt token consumption and stronger rule adherence across diverse model runtimes.
 - **Effort**: Small.
 
 ### Lesson 3: Mandatory Pre-Edit Re-Read and Error Recovery Protocol in Worker Instructions
 - **RooFlow Evidence**: Rules R14 (`R14_FileEditPreparation`) and R15 (`R15_FileEditErrorRecovery`) in `config/.roo/system-prompt-flow-code:929-939`.
-- **Graphyard Change**: In `src/worker.ts`, inject explicit behavioral rules requiring workers to obtain fresh file contents with line numbers immediately before diff application, and upon any diff failure to re-read the target file before retrying (falling back to whole-file replacement on a second failure).
+- **Graphyard Change**: In `workerPrompt` (`src/master/dispatch.ts`), inject explicit behavioral rules requiring workers to obtain fresh file contents with line numbers immediately before diff application, and upon any diff failure to re-read the target file before retrying (falling back to whole-file replacement on a second failure).
 - **Expected Gain**: Slashes failed diff attempts, corrupted edits, and token churn during the implementation phase.
 - **Effort**: Small.
 
@@ -122,8 +122,8 @@ RooFlow (`README.md`) is an open-source workflow configuration and system prompt
 
 ### Lesson 5: Role-Constrained Toolsets at the Launcher Boundary
 - **RooFlow Evidence**: Tool group assignments per mode in `config/.roomodes` (Orchestrator and Ask modes restricted from file editing; Architect restricted from command execution).
-- **Graphyard Change**: In `src/herdr.ts` and agent launch profiles, configure strict tool whitelists by role: coordinators and diagnosticians receive read-only tools; reviewers receive read and comment tools; only implementation workers receive edit tools (scoped to plannedFiles).
-- **Expected Gain**: Enforces least-privilege tool boundaries, preventing coordinators and reviewers from accidentally modifying code or dirtying worktrees.
+- **Graphyard Change**: Role-scoped rules already exist for Claude sessions (`sessionHarnessPlan` in `src/master/harness.ts`: read-only reviewers, evidence-only producers, branch-scoped workers). Evaluate the remaining coverage instead: carry the same role boundaries to the other worker runtimes through their own configuration where they offer one, and consider scoping worker edits to `plannedFiles`.
+- **Expected Gain**: Least-privilege tool boundaries on every runtime, not only Claude, so a reviewer or producer launched on another runtime cannot modify code or dirty a worktree by accident.
 - **Effort**: Medium.
 
 ### Lesson 6: Searchable Historical Knowledge Base for Completed Work Items
@@ -143,10 +143,10 @@ RooFlow (`README.md`) is an open-source workflow configuration and system prompt
 ## 5. Ready-to-File Graphyard Work Items
 
 ### Work Item 1: Record and Inject Structured Attempt Handover Context for Retried Worker Sessions
-- **Description**: When a worker lease expires, times out, or reports a non-fatal failure, the control plane captures a concise diagnostic summary including the exit reason, last commands, and modified files. Successor worker sessions dispatched for subsequent attempts receive this handover context in their initial launch request payload to prevent repeating identical failed trajectories.
+- **Description**: The successor of an interrupted or capacity-exhausted worker attempt already receives the prior exit reason and its kept commit, branch and worktree (`preservePartialWork` in `src/master/launch.ts`, `resumedAttempt` in `src/master/dispatch.ts`). Extend that handover with the diagnostics it lacks — the last observed output and the commands the prior attempt ran — and record it for attempts that end by lease expiry or timeout too, so successors stop repeating identical failed trajectories.
 - **Acceptance Criteria**:
-  - AC-1: When a worker assignment is reclaimed or fails before submission, Graphyard records an attempt handover summary on the item containing the failure reason, elapsed time, and last observed diagnostic output.
-  - AC-2: Unit tests in `tests/attempt-handover.test.ts` verify that the handover summary is generated on lease reclamation and is formatted into the launch request file (`.graphyard/launch/NAME.request`) for attempt N+1.
+  - AC-1: When a worker attempt ends before submission by interruption, capacity exhaustion, lease expiry or timeout, Graphyard records on the item, beside the existing partial-work record, a bounded diagnostic summary with the last observed output of the prior session.
+  - AC-2: Tests verify that `workerPrompt` for attempt N+1 includes that diagnostic summary alongside the existing kept-work handover, and that an attempt with no recorded diagnostics produces the same prompt as today.
 
 ### Work Item 2: Adopt YAML-Structured Instruction Templates for Agent Launch Harnesses
 - **Description**: Refactor verbose Markdown system prompt templates in Graphyard launch harnesses into schema-validated, compact YAML instruction envelopes. This reduces prompt token overhead across fleet sessions while improving structural rule adherence across diverse model runtimes.
