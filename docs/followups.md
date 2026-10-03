@@ -12,7 +12,7 @@ The loop records new findings deduplicated by path and text (`followups.recorded
     graphyard followups GY-N      # GET /api/work/GY-N/followups
     graphyard followups --pr N    # GET /api/followups?pr=N
 
-Findings are numbered from 1: file, text, thread, pull request, head, promoted item.
+Findings are numbered from 1.
 
 ## Promoting a finding
 
@@ -22,7 +22,7 @@ An admin or `intent:create` operator agent (`POST /api/work/GY-N/promote`) makes
 
 ## Past the review-round cap
 
-An item's review round is one more than its rework rounds (`pipeline.reworkRounds`); `master status` shows `reviewRound` (`round`, `cap`, `capped`). The cap is `reviewRoundCap` in `.graphyard/master.json` (default 3). Past it, no review finding sends an item back to a worker: reviewers must name each blocking finding on a `BLOCKING:` line, and non-blocking ones on a `Follow-up finding:` line.
+An item's review round is its rework rounds plus one; `master status` shows `reviewRound` (`round`, `cap`, `capped`); the cap is `reviewRoundCap` in `.graphyard/master.json` (default 3). Past it, no finding sends an item back to a worker: reviewers name each blocking finding on a `BLOCKING:` line, and non-blocking ones on a `Follow-up finding:` line.
 
 - A change request without a `BLOCKING:` line records findings as follow-ups and withdraws the verdict; the head is reviewed again without rework (withdrawn once; a repeat escalates).
 - One naming a blocking finding, or one Graphyard cannot withdraw, raises an escalation for an independent approver (`graphyard master decide GY-N rework REASON`).

@@ -23,11 +23,11 @@ Stop the worker, then [`rework`](operations.md#recovery-recipes). `scripts/rewor
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, recurring refusal and rework causes become drafts (`retro.drafted`), never self-applied or filed. [Approved](protocol/work-commands.md) requirements join [`retroStanding`](protocol/read-endpoints.md), checks refuse a failing `complete` (`409`), catalogue entries classify recurrences; one recurring after application is redrafted (`recurredAfter`).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, recurring causes become drafts (`retro.drafted`), never self-applied. [Approved](protocol/work-commands.md) ones join [`retroStanding`](protocol/read-endpoints.md) and refuse a failing `complete` (`409`); one recurring after application is redrafted (`recurredAfter`).
 
 ## Flaky CI check
 
-A failing required check [reruns once](github.md#merge-queue) per sha, keeping position, approval and proofs (`check.rerun.waiting`, `check.rerun.rerequested`); a second failure or refusal ejects (`check.rerun.*`). `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
+A failing required check [reruns once](github.md#merge-queue) per sha, keeping position, approval and proofs (`check.rerun.waiting`, `check.rerun.rerequested`); a second failure or refusal ejects (`check.rerun.*`). A cancelled run never fails: it reruns (≤3) or stays pending. `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
 
 ## Accepted evidence turns out to be wrong
 
@@ -72,7 +72,7 @@ After an hour without deliveries, check `https://github.com/settings/apps/APP-SL
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default: volume size, else advisory 10 GiB); `tmp-inodes`, free `/tmp` inodes (filesystem-wide; warns under 25%); the loop clears 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`.
+Per `resources` entry: ledgers and `agent-names` (holders 10m past settling), `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow the volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default: volume size, else advisory 10 GiB); `tmp-inodes`, free `/tmp` inodes (filesystem-wide; warns under 25%); the loop clears 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`; `loaded-revision` counts code moves.
 
 ## Storage retention
 
@@ -115,7 +115,7 @@ Only an `admin` grants or revokes, to `producer` principals: exact name, `kind:*
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, at most half the pool) pace each token's above-reserve budget to the reset, head first; when tight, idle items await webhooks. `observationThroughput`: pace, head lag (`github` past two minutes). `leaseHealth`: lease pool (heartbeat, claim, `complete`, `blocked`) p50/p95, raised past 5 s.
 
-Reconcile reads each live item once per pass, locking only its batch rows; contended batches back off, then defer a tick; deferrals and ticks over 5 s warn.
+Reconcile reads each live item once per pass; contended batches back off, then defer a tick; ticks over 5 s warn.
 
 ### Concurrent reconciliation
 

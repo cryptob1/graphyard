@@ -31,7 +31,7 @@ Unset limits derive from the principals (`delegationLimits` drift).
 
 ### Production deployment observation
 
-A new `GRAPHYARD_BUILD_SHA` checks undeployed merges once (`delivery.deployment-contained`, `production.deployment-pending`); one unserved after five minutes is a `delivery.deployment-incident`, and `master status` reports `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident`; `master status` reports `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 

@@ -19,7 +19,7 @@ Running rows offer **Copy local**, `herdr agent attach w1V:pJD`, and **Copy remo
 
 ## Settings › Agents: the fleet panel
 
-**Can launch now?**: per role, yes or why not, until when. **Accounts**: one state chip each. **Account details**: **old probe** past an hour (`quotaStaleThresholdMs`), **probe failed** after a failed smoke test.
+**Can launch now?**: per role, yes or why not, until when. **Accounts** groups accounts by provider plan (Claude, Codex, Z.AI, Cursor, Muse, Antigravity), a bar per usage window (percent used, reset countdown) or "usage not reported by <provider>"; chips, first that applies: Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle (`web/agent-status.ts`). **Account details**: **old probe** past an hour (`quotaStaleThresholdMs`), **probe failed** after a failed smoke test.
 
 ## The status sentence
 

@@ -1,7 +1,23 @@
 <!-- page: Build integrations | 4 | the release API. -->
 # Releases and observed delivery
 
-Which release each environment should run, verified only by service-scoped observers ([rollback](recovery.md#rollback)). `admin`: policy, approvals. `producer` + `builder` registration: builds. `admin`/`promoter`: selection. `producer` + `observer` registration and lease (`POST /api/delivery/lease`): observations.
+Which release each environment should run, verified only by service-scoped observers ([rollback](recovery.md#rollback)).
+
+## Release candidates
+
+Graphyard's own deployment: main → candidate → uat → production. `.railway/railway.ts` deploys `release/uat` and `release/production`, which only `graphyard release` moves, to a candidate's exact SHA.
+
+- `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with the items delivered since the last promotion; `.github/workflows/release-candidate.yml` cuts every six hours and runs the [long suites](github.md#pre-merge-gate-and-release-candidate-validation).
+- `release uat ID` deploys to `uat` (own Postgres, no `GITHUB_*` credential).
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits for `/healthz` to serve the SHA, runs the endpoint, `--api` (`GRAPHYARD_UAT_TOKEN`) and suite checks, and records `rc-uat/ID`.
+- `release promote ID` needs that record, deploys the SHA to production and records `rc-production/ID`; `release verify --url URL` confirms it.
+- A failed candidate files one follow-up item (`release follow-up ID` retries); fix forward.
+
+`release status` lists candidates. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN` and `GRAPHYARD_RELEASE_TOKEN`.
+
+## Who writes what
+
+`admin`: policy, approvals. `producer` + `builder` registration: builds. `admin`/`promoter`: selection. `producer` + `observer` registration and lease (`POST /api/delivery/lease`): observations.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
@@ -39,8 +55,8 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete `provider`/`host-attestation` listings verify; a repeated `snapshotId` returns its receipt; `POST /api/delivery/notify` only hints. A 2 s sweep (`graphyard delivery sweep` forces one) verifies a generation once all services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to included items; else `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery`: state.
+Only complete `provider`/`host-attestation` listings verify. A 2 s sweep verifies a generation once all services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to included items; else `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery`: state.
 
 ## Attribution
 
-Validation requests bind the manifest, a compatibility signature (build inputs, bundle, configuration, source, policy, artifacts) and observed measurements; client SHAs count for nothing (`POST /api/validation/result` refuses top-level SHAs). An in-window mismatch records `attribution-undermined`, voiding the pass. `GET /api/analytics/attribution`: mismatches, paid-run cost.
+Validation requests bind the manifest, a compatibility signature and observed measurements; `POST /api/validation/result` refuses client SHAs. An in-window mismatch records `attribution-undermined`, voiding the pass. `GET /api/analytics/attribution`: mismatches, paid-run cost.

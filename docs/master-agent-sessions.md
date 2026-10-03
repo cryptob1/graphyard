@@ -15,7 +15,7 @@ Workers: `master worker add FILE`; reviewers: `master reviewer setup`/`master re
 
 ### The coordinator checkout is confined at the OS level
 
-Non-master launches get a shell-unwritable checkout or are refused: Codex via `--sandbox workspace-write` (no checkout or `.git` grant), others via bubblewrap (unshared PIDs, fresh `/proc`, hidden systemd, keyring-only bus proxy; writable: session directory, shared Git areas). On a dirty checkout the loop and executors never start, self-upgrade or restart; escalation names paths and leases.
+Non-master launches get a shell-unwritable checkout or are refused: Codex via `--sandbox workspace-write` (no checkout or `.git` grant), others via bubblewrap (writable: session directory, shared Git areas). On a dirty checkout the loop and executors never start, self-upgrade or restart; escalation names paths and leases.
 
 ## Accounts and failover
 

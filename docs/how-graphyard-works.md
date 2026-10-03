@@ -16,12 +16,7 @@ A card stops at its first refusing gate, naming what is missing.
 
 ## Shared project memory
 
-Workers, reviewers and producers receive a role-filtered project-memory digest in their first request (≤500 words):
-- Decisions and reasons; operator answers.
-- Recurring faults and remedies.
-- Merges after the base with changed files (last 24 hours).
-
-The loop updates memory from applied decisions, operator answers, faults and merges, persisting `.graphyard/project-memory.json`. `master status` reports `projectMemory`.
+Workers, reviewers and producers get a role-filtered digest (≤500 words) in their first request: decisions and operator answers, recurring faults and remedies, and the last 24 hours' merges with changed files. The loop maintains it in `.graphyard/project-memory.json` (`master status` `projectMemory`).
 
 ## Risk lanes
 
@@ -30,7 +25,7 @@ The loop updates memory from applied decisions, operator answers, faults and mer
 - **Medium** (60 min): default; adds producer proofs.
 - **Low** (30 min): test/docs-only or single-module; required CI, one approval.
 
-Every lane requires `e2e:` proofs and bootstrap obligations; low and medium reworks need no approver.
+Low and medium reworks need no approver.
 
 ## Who holds which authority
 
@@ -48,8 +43,6 @@ Text equivalent: the operator sends human-only decisions; Herdr hosts master, sl
 
 Text equivalent: callers use the API; the engine applies each mutation in one locked Postgres transaction; the reconciliation worker syncs GitHub, publishes the check and merges; webhooks only wake jobs.
 
-- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates old evidence.
-- Claims bump epoch; old-epoch or expired-lease commands refuse.
-- Evidence belongs to its producer; latest trusted record per proof and candidate wins.
-- History is append-only; retries replay.
+- Gates deterministically check one candidate, `(PR, head SHA, base SHA)`, under the current policy revision; a push or base change invalidates evidence.
+- Claims bump the epoch; stale-epoch commands refuse. The latest trusted record per proof and candidate wins.
 - Graphyard merges only the exact authorized candidate, once. Merge is not [delivery](delivery.md).

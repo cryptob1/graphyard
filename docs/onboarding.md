@@ -33,11 +33,11 @@ CLAUDE_CONFIG_DIR=~/.coding_agents/claude-a claude            # /login
 node "$GRAPHYARD_CLI" master environments --apply
 ```
 
-Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended sessions); `"prompt"` is refused at launch.
+Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes); `"prompt"` is refused at launch.
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (needs the host's executor) seals a key or login into a smoke-tested 0600 auth file; admins **Retry** failures.
+Settings › **Agents** › **Connect an account** (via the host's executor) seals a key or login into a smoke-tested 0600 auth file.
 
 ### Configure the fleet
 
@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--key-file zai.key --key-variable ZAI_API_KEY` exports a 0600 key per run. Two unjudged Pi runs bench an account from a role an hour. Registry writes refuse pasted secrets (PEM, JWT, z.ai key, long tokens), except word-built model ids.
+`--plan NAME` names the account's provider plan (`none` clears; else inferred: same host and home, or `pi-X`/`opencode-X` on Z.AI); a plan's accounts share one failover budget. `--key-file zai.key --key-variable ZAI_API_KEY` exports a 0600 key per run. Two unjudged Pi runs bench an account from a role an hour. Registry writes refuse pasted secrets (PEM, JWT, z.ai key, long tokens), except word-built model ids.
 
 ### Add a role
 

@@ -13,19 +13,19 @@ A criterion is `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `
 
 `plannedFiles` (paths, or `/`-ending directory prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue) and `sync` integrate overlaps. `master status` shows `overlap.concurrent` and candidates `git merge-tree` cannot merge. A root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
+`worktree GY-N EPOCH` first frees the branch: a rework checkout holding it is detached; the item's abandoned worktree under `.graphyard/worktrees` mid-rebase, `am` or bisect is aborted and removed (`reclaimed`). One dirty, unreadable, leased or elsewhere is named and left alone; failures carry git's stderr. After **3** consecutive same-cause dispatch failures the loop records a blocker (`dispatchblock`; refusals retried from 5 minutes, doubling to an hour) until `graphyard unblock GY-N REASON`.
+
 ## Review gate: verdicts, not threads
 
-The gate is reviewer approval of the exact head plus required CI; threads are inputs: approval names each listed thread resolved, follow-up (held until ship) or overridden by ID; the loop resolves named threads by ID. Refused duplicate filings link the existing item or use an approval-and-body-hash key. Retries stop after 10 identical 4xx failures, raising one attention item. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.
+The gate is reviewer approval of the exact head plus required CI; threads are inputs the approval names by ID as resolved, follow-up (held until ship) or overridden, and the loop resolves them. Retries stop after 10 identical 4xx failures (one attention item). After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
 `plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass, as do `tests/helpers/timing-baseline.json` lines of tests touched; every other file must match the bound base byte-for-byte. Deletions, reverts or rewrites are refused; carried files never eject. Workers cannot widen `plannedFiles`; scope requests or revisions can. Asks over 20 files in one directory become their deepest common directory (`tests/`); pending asks merge into one decision.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on whether a candidate can land: build and acceptance gates are its refusals; the merge queue ejects an entry only for a reason it gives. Recomputed live; a newly landable head re-enters the queue. The control plane publishes the verdict as `graphyard/landable` on candidate heads (GY-887).
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on whether a candidate can land, recomputed live: gates refuse and the queue ejects only for its reasons; a newly landable head re-enters. The control plane publishes the verdict as `graphyard/landable` on candidate heads (GY-887).
 
 ### Keep current with `graphyard sync`
-
-The landing check three-way merges the head onto its landing commit: out-of-scope changes that commit extended pass; deleting or rewriting is refused. Observations recompute it, clearing stale refusals.
 
 Before pushing, `graphyard sync GY-N` merges `origin/BASE` (never rebases), regenerates and commits. `graphyard sync GY-N --restore` restores every out-of-scope file to the base tip in a commit naming them; it never rewrites history or force-pushes.
 
