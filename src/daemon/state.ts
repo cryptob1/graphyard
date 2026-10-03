@@ -12,7 +12,7 @@ import { timingsSchema } from '../master/timings.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
@@ -369,6 +369,8 @@ export function masterSummary(master: MasterSessionState, now: number) {
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
 }
 
+export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict();
+export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -423,6 +425,12 @@ export const daemonStateSchema = z.object({
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
+  /**
+   * Per work item id, the run of consecutive dispatch failures with one unchanged cause (GY-1078),
+   * across epochs: each failed launch spends an epoch, so no per-epoch record could see the run.
+   * Cleared by a launch that lands and once the blocker naming the cause is recorded.
+   */
+  dispatchFailures: z.record(z.string(), dispatchFailureRunSchema).default(() => ({})),
   /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
 }).strict();
@@ -430,6 +438,8 @@ export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500;
+/** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
+export const retainedDispatchFailureRuns = 500;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
 export const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
@@ -493,6 +503,8 @@ export function pruneDaemonState(state: DaemonState) {
   const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
   const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
   if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
+  const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));
+  if (runs.length > retainedDispatchFailureRuns) for (const [id] of runs.slice(0, runs.length - retainedDispatchFailureRuns)) delete state.dispatchFailures[id];
   return state;
 }
 
