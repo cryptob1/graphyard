@@ -389,6 +389,7 @@
     "tests/master-browser.test.ts": 9978,
     "tests/master-daemon.test.ts": 1750,
     "tests/master-loop-resilience.test.ts": 2910,
+    "tests/master-status-headroom.test.ts": 340,
     "tests/master-supervision.test.ts": 8261,
     "tests/master-verification.test.ts": 18589,
     "tests/master.test.ts": 5066,
