@@ -25,6 +25,7 @@ Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; needs `--domain` and `--ssh-key NAME`.
+  A coordinator that produces `manual:install-hetzner-live` also needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in the repository-root `.env` (mode `0600`, never committed); without them that launch is refused.
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host` and `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
@@ -60,7 +61,7 @@ At the printed `http://127.0.0.1:4311` the human registers and installs the App.
 
 ## Step 6: the first pull request
 
-Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`. **Verify** the check required on the base branch.
+Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`, which requires it and `graphyard/landable`, both bound to the App. **Verify** both checks required on the base branch.
 
 `--plan` and `--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
 

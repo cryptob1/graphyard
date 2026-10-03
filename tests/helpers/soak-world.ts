@@ -6,6 +6,7 @@ import { GitHub, landingCheck, scopeLookupBudget, type LandingGitHub } from '../
 import type { HerdrAgent } from '../../src/master.js';
 import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
+import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
 import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
@@ -16,6 +17,10 @@ import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../.
 // anything for Graphyard: the loop and the engine act, and this world only answers them.
 
 export const minute = 60_000, hour = 60 * minute;
+/** The check the simulated base branch's protection requires that the policy does not name (GY-1060). */
+export const protectionOnlyCheck = 'secrets';
+/** A classic protection context answered by a commit status, not a check run (GY-1060): app 0, `source: 'status'`, as the real adapter reads it. */
+export const statusContext = 'ci/legacy';
 /** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
 export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
@@ -133,6 +138,10 @@ export class SimulatedGitHub {
   runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number }[]>();
   /** Every rerun the control plane asked for: the item, the tip and the failed check run. */
   reruns: { key: string; sha: string; checkRunId: number; at: number }[] = [];
+  /** The `graphyard/landable` runs the control plane published per head (GY-887), with how often each was written. */
+  landable = new Map<string, { id: number; body: LandableCheckRun; writes: number }[]>();
+  /** Every GitHub request publishing the landability verdict cost: the head's run listing, the pull request read before a success, and each write. */
+  landableRequests: { key: string; head: string; kind: 'list' | 'pull' | 'post' | 'patch'; at: number }[] = [];
   /** Each item's first speculative tip, the one its flake hits. */
   private flakeTips = new Map<string, string>();
   /**
@@ -331,7 +340,9 @@ export class SimulatedGitHub {
     if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
     if (!this.runs.has(head)) {
       const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
-      const runs = ['test', 'typecheck'].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now }));
+      // `secrets` is required by the base branch's protection alone (GY-1060), bound to no app, as
+      // PR #221's scan was: every gate, verdict and window view of the day reads it beside the policy's.
+      const runs = ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now }));
       // The project's own documentation budget check (GY-574): the budget is the project's own
       // rule, counted over the pages its configuration names (here docs/ and README.md, as the
       // committed graphyard.json does), and this project's CI fails the check when that total is
@@ -496,13 +507,16 @@ export class SimulatedGitHub {
         const landing = pr.open && !pr.merged ? await world.landing(work, peers) : undefined;
         // Every landed peer the landing check reported (GY-756), as `observed KEY -> landed KEY`.
         world.landedReports.push(...(landing?.landed ?? []).map(entry => `${work.key} -> ${entry.key}`));
-        const checks = world.checks(pr, now).map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id, attempt: run.attempt }));
+        const runs = world.checks(pr, now);
+        // The status context reports with CI, as the real adapter reads it: a commit status of app 0.
+        const checks: Observation['checks'] = [...runs.map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id, attempt: run.attempt })),
+          ...(runs.length ? [{ name: statusContext, result: 'success', appId: 0, source: 'status' as const }] : [])];
         // A failing published tip carries its docs counts, observed exactly as production observes
         // them (GY-574): the real word counter over this world's trees and blobs.
         const speculation = work.queue?.speculation;
         const published = !!speculation && speculation.tip === pr.head && speculation.policyRevision === work.policyRevision;
         const docsBudget = published && pr.open && !pr.merged
-          ? await world.tipDocs(work, pr.head, speculation!.base, checks.map(run => ({ id: run.id, name: run.name, status: 'completed', conclusion: run.result })))
+          ? await world.tipDocs(work, pr.head, speculation!.base, checks.filter(run => !run.source).map(run => ({ id: run.id, name: run.name, status: 'completed', conclusion: run.result })))
           : undefined;
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
@@ -514,7 +528,7 @@ export class SimulatedGitHub {
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
           mergeable: pr.open, conflicting: false, baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
-          protected: true, files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
+          protected: true, requiredChecks: [{ name: 'test', appId: options.ciAppId }, { name: 'typecheck', appId: options.ciAppId }, { name: protectionOnlyCheck, appId: null }, { name: statusContext, appId: null }], files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
           // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
           ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
           // The failing published tip's docs counts (GY-574), from which its overflow is attributed.
@@ -616,6 +630,26 @@ export class SimulatedGitHub {
         if (pr.head !== work.candidate.sha) return;
         const previous = pr.graphyardCheck.get(pr.head);
         if (previous?.conclusion !== (passed ? 'success' : 'failure')) pr.graphyardCheck.set(pr.head, { conclusion: passed ? 'success' : 'failure', at: clock.now() });
+      },
+      // As GitHub.publishLandable: a success is written only while the pull request still has that
+      // head, and a run that already says the same is not written again.
+      async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}) {
+        const body = landableCheckRun(work, all, new Date(clock.now()));
+        if (!body) return;
+        const request = (kind: 'list' | 'pull' | 'post' | 'patch') => world.landableRequests.push({ key: work.key, head: body.head_sha, kind, at: clock.now() });
+        const success = body.conclusion === 'success';
+        if (success) {
+          request('pull');
+          if (world.pr(work).head !== body.head_sha) return;
+        }
+        request('list');
+        const runs = world.landable.get(body.head_sha) ?? [];
+        const existing = runs.at(-1);
+        if (landableCheckCurrent(existing?.body, body)) return;
+        await beforeWrite(success);
+        request(existing ? 'patch' : 'post');
+        if (existing) { existing.body = body; existing.writes++; }
+        else world.landable.set(body.head_sha, [...runs, { id: ++world.serial, body, writes: 1 }]);
       },
       async mergeQueueState(number: number): Promise<GitHubMergeQueueState> {
         const pr = world.prs.get(number)!;
