@@ -1,10 +1,12 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
+import { branchHolders, heldBranchRefusal, holderRefusals } from '../worktree-holders.js';
 import { reclaimCommand, type CheckoutReclaimReport, type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
 import type { MasterConfig, MasterRun } from './profiles.js';
 import { assertOutsideWorktrees } from './config.js';
@@ -668,13 +670,30 @@ export async function submittedBranchRefusal(root: string, branch: string, remot
 
 /**
  * GY-860: record the reservation with any earlier attempt's preserved hold on the branch, then
- * release that hold. A refused reservation or a failed release is a workspace failure that costs no attempt.
+ * release that hold. A holder whose epoch holds a live lease, or an operation outside this item's
+ * session worktrees, is never touched (GY-1078): it is named and nothing is reserved. A refusal,
+ * a refused reservation or a failed release is a workspace failure that costs no attempt.
  */
-export async function reserveReleasingHold(root: string, branch: string, path: string, run: ChildRun, mutate: (name: string, data: unknown) => Promise<unknown>, epoch: number, host: string) {
+export async function reserveReleasingHold(root: string, branch: string, path: string, run: ChildRun, mutate: (name: string, data: unknown) => Promise<unknown>, epoch: number, host: string,
+  work: Pick<Work, 'key' | 'lease'>, now: number) {
+  const refusals = spawnSync('git', ['-C', root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0
+    ? holderRefusals(root, branchHolders(root, branch, path), work, now, { dirty: false }) : [];
+  if (refusals.length) {
+    const detail = heldBranchRefusal(branch, refusals);
+    await releaseUnderFailure(mutate, epoch, detail);
+    throw new Error(`Git worktree creation failed: ${detail} The claim was released as a workspace failure, so the attempt costs nothing.`);
+  }
   try { return await releaseHeldBranch(root, branch, path, run, preserved => mutate('workspace', { epoch, host, path, branch, ...(preserved ? { preserved } : {}) })); }
   catch (error) {
     const detail = failureText(error);
     await releaseUnderFailure(mutate, epoch, `Reserving ${branch} or releasing an earlier attempt's hold on it failed: ${detail}`);
     throw new Error(`Git worktree creation failed while reserving ${branch} or releasing an earlier attempt's hold on it: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; repair the host and it redispatches.`);
   }
+}
+
+/** GY-860: a worktree the host's git could not build releases the claim with git's message, so the epoch returns; the error says so. */
+export async function workspaceFailure(mutate: (name: string, data: unknown) => Promise<unknown>, epoch: number, error: unknown): Promise<never> {
+  const detail = failureText(error);
+  await releaseUnderFailure(mutate, epoch, detail);
+  throw new Error(`Git worktree creation failed: ${detail}. The claim was released as a workspace failure, so the attempt costs nothing; inspect the event and repair the host before it redispatches.`);
 }
