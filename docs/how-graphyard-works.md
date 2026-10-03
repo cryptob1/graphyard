@@ -12,6 +12,15 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 5. **Acceptance**: granted producers report proofs its [lane](#risk-lanes) requires.
 6. **Done**: Graphyard rechecks gates, merges, observes.
 
+## Shared project memory
+
+Workers, reviewers and producers start with a role-scoped memory digest (<=500 words):
+- Approved decisions and answered operator requests.
+- Recurring fault classes with sanctioned remedies.
+- Merges to main after session base (or last 24h) with files.
+
+Updated from applied decisions, human answers, fault classes and merges — never agent claims — kept in cursor and `.graphyard/project-memory.json`. `graphyard master status` reports `projectMemory`; shown on Workers page.
+
 ## Risk lanes
 
 `src/model/policy.ts` sets a **risk lane** (`low`, `medium`, `high`) by paths; landability requires facts by lane.

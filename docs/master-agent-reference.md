@@ -19,13 +19,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 #### A contaminated branch
 
-Listed under `branches.contaminated`; run `master repair GY-42`:
-
-| Command | Purpose
-| --- | ---
-| `master repair GY-N REASON` | Restore its reviewed head
-
-or the worker runs `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
+Listed under `branches.contaminated`; run `master repair GY-N REASON` to restore its reviewed head, or worker runs `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
