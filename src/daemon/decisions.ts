@@ -1,6 +1,8 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
-import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
+import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
+import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
@@ -220,6 +222,33 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
+ * GY-1008. A planned-file-scope blocker — a worker's blocker naming the files its change needs and
+ * the commit it needs them for — as the same additive `requirements` decision a routed scope request
+ * becomes, requested by the master's operator-agent identity and judged by the independent
+ * approver, with no master session involved. The recorded blocker already ended its attempt, so
+ * nothing about a worker is attested; the approver judges the widening alone. Null when the
+ * blocker is anything else, when plannedFiles already cover every file it names (the blocker step
+ * then clears it), or when no fold represents the widening under the plannedFiles cap.
+ */
+export function blockerScopeDecision(work: Work): RoutineDecision | null {
+  if (work.stage === 'done' || !work.blocker || work.scopeRequest || work.blocker.startsWith(scopeRefusalBlocker)) return null;
+  const classification = itemBlockerClass(work);
+  if (classification?.class !== 'planned-file-scope' || (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears) return null;
+  const paths = uncoveredBlockerPaths(work, classification);
+  if (!paths.length) return null;
+  const widened = widenedPlannedFiles(work, paths);
+  if (!widened.representable) return null;
+  let broad: string | null = null;
+  try { guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, work.blocker, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
+  catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
+  const asked = `${work.key}: its worker recorded a planned-file-scope blocker naming ${paths.join(', ')} for commit ${classification.commit}, which ended its attempt: "${work.blocker.slice(0, 500)}". `
+    + 'Approve the additive plannedFiles widening if the item\'s criteria justify those files, refuse with the reason otherwise; the loop clears the blocker once plannedFiles cover them. '
+    + (broad ? `${broad.slice(0, 300)} It needs the broad-scope flag: grant it only with a stated reason why narrower paths will not do. ` : '');
+  const named = `Criteria: ${work.criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
+  return { action: 'requirements', binding: `blocker-scope:${classification.commit}:${paths.join(',')}`.slice(0, decisionBindingMax), input: { plannedFiles: widened.plannedFiles },
+    reason: (asked + named).slice(0, 2000) };
+}
+/**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
@@ -352,7 +381,8 @@ export function failedCheckRework(work: Work, baseFailed?: ReadonlySet<string>):
     const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
+    // A run GitHub cancelled is no failure of the head (GY-1109): the check is rerun, never reworked.
+    return !!latest && ['failure', 'timed_out', 'action_required', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
   }).map(required => required.name).sort();
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
