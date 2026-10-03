@@ -9,9 +9,9 @@ Claims last 120 s; renew every ≤30 s. Owner mutations carry the epoch; expired
 
 ### Push credential
 
-Workers never push with the host's `gh` login. The launcher keeps a credential in `worker-sessions/GY-N-EPOCH` (0700, files 0600) via `GH_CONFIG_DIR`, emptying `GH_TOKEN`/`GITHUB_TOKEN`. `POST /api/work/UUID/push-credential` `{"epoch": N}` (lease holder only; `graphyard push-credential GY-N EPOCH DIR`) mints an unstored App token (`contents`, `pull_requests`, `workflows` write) within the 4-hour lease bound, never for lapsed, submitted or overdue epochs; `watch` re-mints near expiry and revokes at session end. A base merge queue allowing App bypass refuses minting (409).
+Workers never push with the host's `gh` login. The launcher keeps a credential in `worker-sessions/GY-N-EPOCH` (0700, files 0600) via `GH_CONFIG_DIR`, emptying `GH_TOKEN`/`GITHUB_TOKEN`. `POST /api/work/UUID/push-credential` `{"epoch": N}` (lease holder only; `graphyard push-credential GY-N EPOCH DIR`) mints an unstored App token (`contents`, `pull_requests`, `workflows` write) within the 4-hour lease bound, never for lapsed, submitted or overdue epochs; `watch` re-mints near expiry and revokes at session end.
 
-**Limitation (GY-1066):** no token is minted (409) while a base merge queue lets the App bypass it or hides its bypass list, so a ruleset making the control-plane App its bypass actor launches no worker (the launch failure says so); a transient ruleset read is a retryable 502.
+**Limitation (GY-1066):** no token is minted (409) while a base merge queue lets the App bypass it or hides its bypass list, so such a ruleset launches no worker.
 
 A GitHub credential failure (git's or `gh`'s refusal, or a 401 naming GitHub) ends the attempt with its `blocked` report, keeping its work; once the `github-credential` blocker clears the item relaunches with a fresh credential. Each counts as a failed attempt: relaunches wait 5, then 15 minutes; a third in a row holds for an approver.
 
@@ -24,16 +24,4 @@ A GitHub credential failure (git's or `gh`'s refusal, or a 401 naming GitHub) en
 
 ## Blocked work unblocks itself
 
-`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`) and releases the lease in the blocker's transaction; the capacity record carries `blocked on epoch N: REASON` for the next attempt. Each cycle (`blockers` step) the loop classes every standing blocker (`src/model/blocker-class.ts`), probing credentials and paths in the confinement the next worker gets (an unconfinable probe fails).
-
-| Class | Probe, every cycle | Cleared when |
-| --- | --- | --- |
-| `github-credential` | `gh auth status`, `git ls-remote`, `git push --dry-run` under the attempt's own launch | all pass |
-| `control-plane-error` | server health | healthy |
-| `sandbox-path` | write the path (`.git/` via `git rev-parse --git-path`) in that sandbox | it succeeds |
-| `worktree-mismatch` | the attempt's lease | ended |
-| `outside-scope-test-failure` | base branch tip | moved |
-| `planned-file-scope` | additive `requirements` widening for the approver | files covered |
-| `needs-decision` | approver launched and supervised | none requested |
-
-Probes are recorded (`POST /api/work/KEY/blocker-probe`) on change or every five minutes; a pass clears the blocker (`blocker.cleared`). `genuine` and `human-only` blockers, a fourth clear without a submission, and scope no fold fits never clear; they need someone in `master status` and the board (class, last and next probe).
+`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`) and releases the lease. Each cycle the loop classes standing blockers (`src/model/blocker-class.ts`), probing in the next worker's confinement: `github-credential` clears when `gh auth status`, `git ls-remote` and `git push --dry-run` pass; `control-plane-error` on server health; `sandbox-path` once the path is writable; `worktree-mismatch` once the attempt's lease ends; `outside-scope-test-failure` once the base tip moves; `planned-file-scope` once an approved widening covers the files; `needs-decision` once the approver decides. A passing probe (`POST /api/work/KEY/blocker-probe`) records `blocker.cleared`. `genuine` and `human-only` blockers, and a fourth clear without a submission, need someone (`master status`, the board).

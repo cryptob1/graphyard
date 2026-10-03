@@ -35,7 +35,7 @@ Text equivalent: in bootstrap the human operator supervises one worker while gat
 
 ![Authority held by the operator, Graphyard, Herdr sessions, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: the operator sends human-only decisions; Herdr hosts master, slice lead and worker; reviewer and producer hold their own credentials. Colours: [legend](glossary.md#diagram-legend).
+Text equivalent: the operator sends human-only decisions; Herdr hosts master, slice lead and worker; reviewer and producer hold their own credentials ([legend](glossary.md#diagram-legend)).
 
 ## Correctness rules
 

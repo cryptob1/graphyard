@@ -24,7 +24,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`master reviewer setup` creates it (Pull requests write); review tokens last one hour. Grants recheck every five minutes and on 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
+`master reviewer setup` creates it. Grants recheck every five minutes and on 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
 
 ## Require the check
 

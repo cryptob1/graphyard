@@ -27,7 +27,7 @@ Unset limits derive from the principals (`delegationLimits` drift).
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
 ```
 
-`GRAPHYARD_CI_PRODUCER_TOKEN` and `GRAPHYARD_URL` live in the default-branch-only `graphyard-reporting` environment. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID`, `--rotate ID`; `--deploy` sets the secret).
+`GRAPHYARD_CI_PRODUCER_TOKEN` and `GRAPHYARD_URL` live in the default-branch-only `graphyard-reporting` environment; `scripts/configure-integrations.mjs --apply` updates the roster.
 
 ### Production deployment observation
 
@@ -39,7 +39,7 @@ A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.d
 
 ## Manual fallback
 
-Unsupported or existing deployments: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, then `doctor`.
+Elsewhere: set the variables table by hand, run `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, then `doctor`.
 
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials`.

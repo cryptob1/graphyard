@@ -43,11 +43,11 @@ Permission flows read `GET /api/github/installation`, recording `record.json` un
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their credential; `master executors restart` moves them to the current release. A verified deployment moves a clean checkout to the base tip (else `upgrade` attention), restarting on runtime changes; `releaseLag` flags lag past 10 minutes. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, and `deactivating` units.
+Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their credential; `master executors restart` moves them to the current release, as a verified deployment does for a clean checkout (`releaseLag` past 10 minutes). `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, and `deactivating` units.
 
 A `resync` completes only on an observation newer than its claim (`POST /api/work/:id/resync` `{ since }` wakes the job; `wake: false` only reads); else it fails and backs off, stalling after thirty minutes.
 
-`dispatch`/`request-review` completes on a session already answering the head. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, with no count and no list): it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it; ticks requeue ownerless items (`liveness.violations`). A failed cycle backs off (min(interval, 30 s), doubling); one item's throw fails only its own action.
+`dispatch`/`request-review` completes on a session already answering the head. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, with no count and no list): it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it; ticks requeue ownerless items (`liveness.violations`). One item's throw fails only its own action.
 
 ## Resources and disk
 

@@ -35,7 +35,7 @@ The full suite is CI's gate, not the worker's: a worker builds, runs `graphyard 
 
 ### Generated files never conflict
 
-`sync` regenerates `docs/README.md`, `docs/protocol.md` ([development](development.md)) and the managed `AGENTS.md` blocks. The regression guard treats paths in `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` as `generated`, refusing only a deletion.
+`sync` regenerates `docs/README.md`, `docs/protocol.md` and the managed `AGENTS.md` blocks; the regression guard refuses only deleting a `GRAPHYARD_GENERATED_FILES` path.
 
 ## Ship in under thirty minutes
 

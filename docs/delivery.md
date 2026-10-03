@@ -59,4 +59,4 @@ Only complete `provider`/`host-attestation` listings verify. A 2 s sweep verifie
 
 ## Attribution
 
-Validation requests bind the manifest, a compatibility signature and observed measurements; `POST /api/validation/result` refuses client SHAs. An in-window mismatch records `attribution-undermined`, voiding the pass. `GET /api/analytics/attribution`: mismatches, paid-run cost.
+Validation requests bind the manifest, a compatibility signature and observed measurements; `POST /api/validation/result` refuses client SHAs. An in-window mismatch records `attribution-undermined`, voiding the pass.

@@ -25,7 +25,7 @@ Generated `AGENTS.md`: **every session Graphyard launches receives its instructi
 
 ### Agent environments
 
-Login homes (`~/.coding_agents`): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode), `CURSOR_CONFIG_DIR` (`CURSOR_CONFIG_DIR=HOME agent login`). Tokens: `~/.config/graphyard/workers/`, `producers/` (0600).
+Login homes (`~/.coding_agents`): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode), `CURSOR_CONFIG_DIR`. Tokens: `~/.config/graphyard/workers/`, `producers/` (0600).
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply

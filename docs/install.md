@@ -38,7 +38,7 @@ Add `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --sc
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials and [variables](deployment.md#variables), deploys, [protects](github.md#require-the-check) the branch. **Verify** `GET /healthz`.
+Deploys and [protects](github.md#require-the-check) the branch. **Verify** `GET /healthz`.
 
 ## Step 3: App confirmation
 

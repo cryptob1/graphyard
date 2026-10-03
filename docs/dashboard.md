@@ -9,7 +9,7 @@ Each open item is in one group: **Needs you** (only you may decide), **Blocked**
 
 ## Needs you
 
-`graphyard login` prints the operator's single-use, ten-minute sign-in link; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`; a refused answer keeps the form.
+`graphyard login` prints a single-use, ten-minute operator sign-in link. Requests offer choices and notes; **Provide now** seals credentials for `unseal GY-N`; a refused answer keeps the form.
 
 ## Workers
 
@@ -31,4 +31,4 @@ Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**; merged reads 
 
 ## Insights
 
-**Flow**, [optimistic merges](github.md#optimistic-merges); **Show details**: shipping pulse, 24-hour to 90-day flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis)), **Validation**, **Releases**.
+**Flow**, [optimistic merges](github.md#optimistic-merges); **Show details**: flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis)), **Validation**, **Releases**.

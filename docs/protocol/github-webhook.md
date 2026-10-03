@@ -7,10 +7,10 @@
 
 ## Reads that are not repeated
 
-- **Immutable:** SHA commits and compares, cached once in `github_cache`; oldest-read rows age out past 20,000 rows or 128 MB (64 MB in memory; over 1 MB memory-only, over 8 MB uncached).
+- **Immutable:** SHA commits and compares, cached in `github_cache` (oldest-read rows age out past 20,000 rows or 128 MB).
 - **Per cycle:** base ref every 15 s (restarted by a base push or own ref write); branch rules every 5 min or on a protection, ruleset or `repository` event.
 - **Webhooks:** pull request, review, check and `push` events claim items first on any replica, skipping polls within the interval.
 
 ## Automatic dispatch records
 
-`autoDispatch` records each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) request (`producers`/`review`): `id`, `kind`, `sha`, `baseSha`, `policyRevision`, `pr`, `requestedAt`, `reason`, `state`. Approval/trusted evidence → `satisfied`; head, base or policy change, rework, closed PR → `cancelled`. Transitions append `dispatch.requested`/`dispatch.satisfied`/`dispatch.cancelled`; resolved ones move to `autoDispatch.history`. No gate moves.
+`autoDispatch` records each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) request (`producers`/`review`) with its head, base, policy revision and `state`. Approval/trusted evidence → `satisfied`; head, base or policy change, rework, closed PR → `cancelled`. Transitions append `dispatch.requested`/`dispatch.satisfied`/`dispatch.cancelled`; resolved ones move to `autoDispatch.history`. No gate moves.

@@ -19,7 +19,7 @@ Non-master launches get a shell-unwritable checkout or are refused: Codex via `-
 
 ## Accounts and failover
 
-Without a [registry](onboarding.md#configure-the-fleet) role, a profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`). Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`); with none, roles wait, relaunching oldest-first. A runtime's limit notice (not agent text) commits worker changes as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or after reset.
+Without a [registry](onboarding.md#configure-the-fleet) role, a profile's `accounts` lists [agent environments](onboarding.md#agent-environments). Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`); with none, roles wait, relaunching oldest-first. A runtime's limit notice (not agent text) commits worker changes as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or after reset.
 
 ## The loop's own master session
 
@@ -53,7 +53,7 @@ Reviewers and producers are `awaiting acknowledgement` until 30 s active (`count
 
 A resolved blocker or scope request re-prompts the inactive session once (`complete GY-N EPOCH PR`); re-blocking hands the epoch to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, handed on after 30 more. Pastes target the attempt's pane, never a shared agent name; a gone pane hands on.
 
-Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts, re-adopted; lost ones retry free. Only Pi is confined; triage and diagnosis runs end with the loop.
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts; lost ones retry free.
 
 ### Panes are closed and reclaimed
 

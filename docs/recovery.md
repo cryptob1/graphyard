@@ -7,7 +7,7 @@
 
 ## Artifact backends, capacity and migration
 
-Artifacts live in Postgres (default) or S3: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_{ENDPOINT,BUCKET,REGION,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, optional `_PREFIX`. Only the server holds the credential; reads verify SHA-256. Failed uploads return 503 (retry, same key); past `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB), 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves ≤100 per call; at `remaining` 0, switch every replica.
+Artifacts live in Postgres (default) or S3: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_{ENDPOINT,BUCKET,REGION,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, optional `_PREFIX`. Reads verify SHA-256; failed uploads return 503 (retry), past `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB) 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves ≤100 per call; at `remaining` 0, switch every replica.
 
 ## Rollback
 

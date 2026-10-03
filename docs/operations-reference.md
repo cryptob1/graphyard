@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` `daemon`: health, `cycleTime` p50/p95, `metrics.timings`; cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`. `run.launchConcurrency` (default 3) bounds launches.
+Restart `graphyard master run` freely; it never dispatches twice. `master status` `daemon` reports health and cycle times; cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`. `run.launchConcurrency` (default 3) bounds launches.
 
 ### Perpetual master loop
 
@@ -113,7 +113,7 @@ Only an `admin` grants or revokes, to `producer` principals: exact name, `kind:*
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, at most half the pool) pace each token's above-reserve budget to the reset, head first; when tight, idle items await webhooks. `observationThroughput`: pace, head lag (`github` past two minutes). `leaseHealth`: lease pool (heartbeat, claim, `complete`, `blocked`) p50/p95, raised past 5 s.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4) pace each token's budget to the reset. `observationThroughput`: pace, head lag (`github` past two minutes). `leaseHealth`: lease pool (heartbeat, claim, `complete`, `blocked`) p50/p95, raised past 5 s.
 
 Reconcile reads each live item once per pass; contended batches back off, then defer a tick; ticks over 5 s warn.
 

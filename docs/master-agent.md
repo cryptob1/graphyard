@@ -40,7 +40,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Machine-filed backlog
 
-With `run.research`, each feature (or `"research": true`) revision gets a read-only Pi brief that build follows; differing answers rework, failure never blocks, product questions go to a human.
+With `run.research`, each feature revision gets a read-only Pi brief that build follows; failure never blocks.
 
 [Follow-ups](followups.md) stay on the item until `graphyard promote-followup`. Pi also triages machine-filed items (`triageConcurrency`, default 2): release, approved close, or merge (`machineUntriaged`, `operatorBacklog`).
 
@@ -55,7 +55,7 @@ The master never launches reviews or producers by hand (`master review GY-N [PRO
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"` (`criterion`, `behaviour`, `result`, `executed`): the proof rerun without the criterion's behaviour must fail with a case executed; otherwise the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`) and reworked, naming the surviving mutation. Unexercised `manual:` proofs re-attest with an approver-confirmed `exercise` that fails on base. Attestations carry only on a kept patch-id.
+A passing producer records `"exercise"`: the proof rerun without the criterion's behaviour must fail with a case executed; otherwise the pass is recorded as not exercising its criterion (`unexercised`, `evidence.exercise.refused`) and reworked. Unexercised `manual:` proofs re-attest with an approver-confirmed `exercise` that fails on base. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
