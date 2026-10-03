@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -220,15 +220,23 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
   assert.match(docs, /GET \/api\/board/, 'docs/dashboard.md documents the endpoint');
 });
 
-// Every way a module reaches another: `import … from`, `export … from`, a side-effect `import`,
-// a dynamic `import(` and a `require(` — to web/ itself or anything under it (GY-469).
-const reachesWeb = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)['"`](?:\.\.\/)+web(?:\/|['"`])/;
+// Every way a module names another: `import … from`, `export … from`, a side-effect `import`, a
+// dynamic `import(` and a `require(`, in any quote. A relative specifier is resolved against the
+// importing file, dot segments and all, so `../x/../web/y` counts and `src/web/y` does not (GY-469).
+const specifiers = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"`])([^'"`]+)\1/g;
+const reachesWeb = (path: string, source: string) => [...source.matchAll(specifiers)].some(([, , specifier]) =>
+  specifier!.startsWith('.') && /^web(?:\/|$)/.test(posix.join(posix.dirname(path), specifier!)));
 
-test('manual:review-followups-triaged GY-469.1: the layering guard catches every form that reaches web/ — `from`, `export … from`, a side-effect import, a dynamic `import(` and `require(` — and nothing that only names a sibling', () => {
-  for (const form of [`import { x } from '../web/x.js';`, `export * from "../../web/x.js";`, `import '../../web/x.css';`, `await import('../web/x.js')`, `require('../web/x')`, `import x from '../../web';`])
-    assert.match(form, reachesWeb, `the guard catches ${form}`);
-  for (const form of [`import { x } from './web/x.js';`, `import x from '../webhooks/x.js';`, `const web = 'web/';`])
-    assert.doesNotMatch(form, reachesWeb, `the guard ignores ${form}`);
+test('manual:review-followups-triaged GY-469.1 (layering-guard-covers-every-import-form): the layering guard catches every form that reaches web/ — `from`, `export … from`, a side-effect import, a dynamic `import(`, `require(` and a path through dot segments — and nothing that resolves elsewhere', () => {
+  for (const [path, form] of [
+    ['src/server/a.ts', `import { x } from '../../web/x.js';`], ['src/a.ts', `export * from "../web/x.js";`], ['src/model/a.ts', `import '../../web/x.css';`],
+    ['src/a.ts', 'await import(`../web/${name}.js`)'], ['src/a.ts', `require('../web/x')`], ['src/model/a.ts', `import x from '../../web';`],
+    ['src/a.ts', `import '../placeholder/../web/x.js';`], ['src/a.ts', `import x from './../web/x.js';`],
+  ] as const) assert.ok(reachesWeb(path, form), `the guard catches ${form} in ${path}`);
+  for (const [path, form] of [
+    ['src/a.ts', `import { x } from './web/x.js';`], ['src/model/a.ts', `import x from '../web/x.js';`], ['src/a.ts', `import x from '../webhooks/x.js';`],
+    ['src/a.ts', `import '../web/../src/x.js';`], ['src/a.ts', `const web = '../web/';`], ['src/a.ts', `import x from 'web/x';`],
+  ] as const) assert.ok(!reachesWeb(path, form), `the guard ignores ${form} in ${path}`);
 });
 
 test('unit:server-does-not-import-web — the layering runs web → src only: no module under src imports from web/, so the runtime image needs no web tree (GY-371)', async () => {
@@ -236,23 +244,64 @@ test('unit:server-does-not-import-web — the layering runs web → src only: no
   const offenders: string[] = [];
   for (const path of sources) {
     const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-    if (reachesWeb.test(source)) offenders.push(path);
+    if (reachesWeb(path, source)) offenders.push(path);
   }
   assert.deepEqual(offenders, [], 'src imports nothing from web/');
   assert.doesNotMatch(await readFile(new URL('../Dockerfile', import.meta.url), 'utf8'), /COPY web /, 'the runtime image does not copy web/');
 });
 
-test('manual:review-followups-triaged GY-469.2: every `who` label the board writes names a role, and an unknown label reads as held, never the control plane (GY-469)', async () => {
+/** The source text of each top-level argument of the call whose `(` is at `open`, quoted strings skipped whole. */
+function callArguments(source: string, open: number): string[] {
+  const args: string[] = [];
+  let depth = 0, start = open + 1;
+  for (let at = open; at < source.length; at++) {
+    const char = source[at]!;
+    if (char === "'" || char === '"' || char === '`') { at = source.indexOf(char, at + 1); continue; }
+    if ('([{'.includes(char)) depth++;
+    else if (')]}'.includes(char) && --depth === 0) { args.push(source.slice(start, at).trim()); return args; }
+    else if (char === ',' && depth === 1) { args.push(source.slice(start, at).trim()); start = at + 1; }
+  }
+  throw new Error(`unclosed call at ${open}`);
+}
+
+/** The expression after `who:` up to the next top-level `,`, `;`, `}` or `)`. */
+function whoValue(source: string, from: number): string {
+  let depth = 0;
+  for (let at = from; at < source.length; at++) {
+    const char = source[at]!;
+    if (char === "'" || char === '"' || char === '`') { at = source.indexOf(char, at + 1); continue; }
+    if ('([{'.includes(char)) depth++;
+    else if (depth === 0 && ',;})'.includes(char)) return source.slice(from, at).trim();
+    else if (')]}'.includes(char)) depth--;
+  }
+  return source.slice(from).trim();
+}
+
+// What a `who` may be besides a label: its type, or a label forwarded from `prSteps`/`waitsOn`.
+const forwardsLabel = new Set(['string', 'who', 'steps.who']);
+
+test('manual:review-followups-triaged GY-469.2 (actor-role-covers-every-label): every `who` label nextActor, prSteps and waitsOn write — as `who:` in any quote, or the last argument of prSteps\' make() — names a role; any other `who` expression fails the scan; an unknown label reads as held, never the control plane (GY-469)', async () => {
   const labels = new Set<string>();
+  const unscanned: string[] = [];
+  const take = (path: string, expression: string) => {
+    const literal = /^(['"`])([^'"`]*)\1$/.exec(expression);
+    if (literal && !(literal[1] === '`' && literal[2]!.includes('${'))) labels.add(literal[2]!);
+    else if (!forwardsLabel.has(expression)) unscanned.push(`${path}: ${expression}`);
+  };
   for (const path of ['src/model/board.ts', 'src/model/pr-steps.ts']) {
     const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-    for (const match of source.matchAll(/\bwho: '([^']+)'/g)) labels.add(match[1]!);
+    for (const match of source.matchAll(/\bwho\s*:/g)) take(path, whoValue(source, match.index + match[0].length));
+    for (const match of source.matchAll(/\bmake\(/g)) take(path, callArguments(source, match.index + match[0].length - 1).at(-1)!);
   }
-  assert.ok(labels.size >= 5, `found the labels: ${[...labels].join(', ')}`);
-  assert.deepEqual([...labels].filter(label => !Object.hasOwn(roleOf, label)), [], 'roleOf lists every label nextActor and prSteps write');
+  assert.deepEqual(unscanned, [], 'every who is a literal label or forwards one');
+  for (const label of ['Nobody yet', 'Automated checks', 'Nobody — it was closed', 'Nobody — it is live', 'Nobody — it has merged'])
+    assert.ok(labels.has(label), `the scan finds ${label} among ${[...labels].join(', ')}`);
+  assert.deepEqual([...labels].filter(label => !Object.hasOwn(roleOf, label)), [], 'roleOf lists every label nextActor, prSteps and waitsOn write');
   const work = { scopeRequest: null, lease: null } as unknown as Work;
   assert.equal(actorRole(work, 'moving', 'Nobody yet'), 'held');
   assert.equal(actorRole(work, 'moving', 'Automated checks'), 'executor');
+  for (const label of ['Nobody — it was closed', 'Nobody — it is live', 'Nobody — it has merged'])
+    assert.equal(actorRole(work, null, label), 'held', `${label}: nobody acts on closed or merged work`);
   assert.equal(actorRole(work, 'moving', 'Some future label'), 'held', 'an unknown label is not reported as the executor');
   assert.equal(actorRole(work, 'moving', 'toString'), 'held', 'an inherited property is no label');
 });

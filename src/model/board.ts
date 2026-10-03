@@ -184,12 +184,13 @@ function heldMeaning(total: number, held: string[]): string {
  */
 export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only', 'held'] as const;
 export type ActorRole = typeof actorRoles[number];
-/** Every `who` label `nextActor` (and `prSteps`) writes, with the role it names. */
+/** Every `who` label `nextActor`, `prSteps` and `waitsOn` write, with the role it names. */
 export const roleOf: Readonly<Record<string, ActorRole>> = {
   You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
   // The control plane's own steps: the dispatcher, the CI run, the merge queue, the production watch.
   'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor',
-  'Nobody yet': 'held',
+  // Nobody acts: a dependency holds it, or `prSteps` reads it closed, live or merged.
+  'Nobody yet': 'held', 'Nobody — it was closed': 'held', 'Nobody — it is live': 'held', 'Nobody — it has merged': 'held',
 };
 
 /**
