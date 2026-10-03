@@ -14,11 +14,13 @@ import { scopeStep, successorStep } from './cycle-scope.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
+import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { triageBacklogStep } from './cycle-triage.js';
 import { remedyStep } from './cycle-remedies.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
+import { syncProjectMemory } from '../project-memory.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -211,6 +213,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   await settleLaunches();
   spent('dispatch');
 
+  // 4b. Past the review-round cap (GY-1118) a change request is filed as follow-ups and withdrawn, or escalated; it is never reworked.
+  await timings.step('review cap', () => reviewCapStep(cycle));
   await timings.step('decisions', () => decisionStep(cycle, settled, assessments, capacity));
   await settleLaunches();
   spent('decisions');
@@ -263,6 +267,12 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   state.cycle += 1;
   state.lastCycleAt = new Date(now()).toISOString();
   if (state.lock) state.lock = { ...state.lock, heartbeatAt: state.lastCycleAt };
+  state.projectMemory = await syncProjectMemory({
+    existing: state.projectMemory,
+    work: snapshot.work,
+    state,
+    now: clock,
+  });
   pruneDaemonState(state);
   await effects.persist(state);
   return { actions: performed, metrics, deployment: state.deployment, health, silence, budget: latencyBudget(state.latency), scope: budget };
