@@ -347,8 +347,8 @@ test('every unverifiable containment signal refuses automatic settlement and kee
 test('dependencies and explicit blockers refuse claims', async () => {
   const parent = await create(); let child = await create([parent.id]); child = await engine.execute(operator, 'ready', child.id, {}, randomUUID());
   await assert.rejects(engine.execute(worker, 'claim', child.id, {}, randomUUID()), /dependencies/);
-  const w = await claimed(); await engine.execute(worker, 'blocked', w.id, { epoch: 1, reason: 'Need API contract' }, randomUUID());
-  await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  const w = await claimed(); const blocked = await engine.execute(worker, 'blocked', w.id, { epoch: 1, reason: 'Need API contract' }, randomUUID());
+  assert.equal(blocked.lease, null, 'the blocker ended the attempt (GY-1008)');
   await assert.rejects(engine.execute(other, 'claim', w.id, {}, randomUUID()), /blocker/);
 });
 test('workspace reservations are exclusive across tasks and machines', async () => {
@@ -361,8 +361,7 @@ test('workspace reservations are exclusive across tasks and machines', async () 
 });
 test('operator can unblock abandoned work with an auditable reason', async () => {
   const w = await claimed();
-  await engine.execute(worker, 'blocked', w.id, { epoch: 1, reason: 'Contract missing' }, randomUUID());
-  await engine.execute(worker, 'release', w.id, { epoch: 1 }, randomUUID());
+  assert.equal((await engine.execute(worker, 'blocked', w.id, { epoch: 1, reason: 'Contract missing' }, randomUUID())).lease, null, 'the blocker ended the attempt (GY-1008)');
   await assert.rejects(engine.execute(other, 'unblock', w.id, { reason: 'Ignore it' }, randomUUID()), /permission/);
   await engine.execute(operator, 'unblock', w.id, { reason: 'Contract independently confirmed' }, randomUUID());
   const result = await engine.execute(other, 'claim', w.id, {}, randomUUID()); assert.equal(result.epoch, 2);
