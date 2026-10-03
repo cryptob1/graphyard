@@ -100,7 +100,7 @@ export interface Candidate { sha: string; baseSha: string; pr: number; branch: s
 export interface ScopeFile {
   path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
   previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
-  baseSha?: string | null; previousBaseSha?: string | null;
+  baseSha?: string | null; previousBaseSha?: string | null; /** Timing-baseline companion verdict (GY-1023), from both versions' contents. */ companion?: { allowed: boolean; detail: string };
 }
 export interface Observation {
   clockOffset?: { min: number; max: number };
@@ -110,7 +110,7 @@ export interface Observation {
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[] }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
