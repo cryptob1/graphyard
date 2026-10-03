@@ -1,4 +1,5 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
+import { observationWaker } from '../master/base-break-refresh.js';
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
@@ -42,8 +43,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
-  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
-    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
+  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) => performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   /**
    * End the agent registry session a watch's launch holds (GY-182). At a role concurrency of 1 a
    * live one refuses the next decision's approver, so it goes wherever the approver is closed or
@@ -510,7 +510,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
-      // The shared memory takes the approver's judgement as it settled, never a refusal (GY-1125).
       recordSettledDecision(state.projectMemory, watch, judged, stamp);
       await note(`${base}:settled`, item, 'decision', 'done', step.detail);
       if (judged) await noteScopeOutcome(item, watch, judged);
@@ -567,18 +566,16 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (held === undefined || age < held) capacityRank.set(watch.work, age);
   }
   const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
-  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => {
-    const aRank = waitingRank(a), bRank = waitingRank(b);
-    return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
-  }) : snapshot.work;
-  // A producer request whose attempts are used up calls for a rework once its escalation has stood
-  // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
+  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => waitingRank(a) - waitingRank(b)) : snapshot.work;
+  // Spent producer attempts call for a rework once the proof step's escalation has stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
-  for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
+  const wake = effects.observe && observationWaker(effects.observe);
+  for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
+    let item = read;
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment, exhausted);
+    let decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment, exhausted);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, exhausted);
@@ -591,19 +588,23 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       return;
     }
-    const key = decisionKey(item, decision);
+    let key = decisionKey(item, decision);
     needed.add(key);
+    // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
+    let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
+    const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
+    const again = fresh && routineDecision(fresh, config, now(), assessment);
+    if (fresh && again?.action !== 'rework') {
+      const waitKey = `wait:rework:${item.id}`, detail = `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`;
+      if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail);
+      return;
+    }
+    if (fresh && again) { item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key); wait = reworkObservationWait(item, now(), pause); }
     const watch = state.approvals[key];
-    // Rework waits for an observation that still describes the item (GY-144). A request already
-    // standing is left as it is — neither supervised into a second request nor withdrawn — until
-    // GitHub is observed again and the item says whether it still needs the round.
-    const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
-      // The refusal wakes the item's observation job at once (GY-710), and the rework is decided
-      // on the first cycle after that observation lands, not whenever the cadence reaches it. The
-      // wake is stamped on the snapshot's clock, the one the observation's time is on.
+      // The refusal wakes the item's observation job at once (GY-710).
       await wakeObservationJob(cycle, item, 'rework');
       return;
     }

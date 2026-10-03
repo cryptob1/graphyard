@@ -7,6 +7,7 @@ import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { baseBreakHold } from '../master/base-break-refresh.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
@@ -339,6 +340,12 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  // Failed only on tests the base branch broke and its tip fixed (GY-793): the observation job
+  // refreshes the candidate onto that tip, and no worker is sent back for what it did not break.
+  // Guarded after the GY-516 rerun is spent too: once the rerun has failed again nothing else
+  // stands this rework down, so the hold is the only thing keeping the worker out of a round
+  // the base breakage answers.
+  if (baseBreakHold(work)) return null;
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only
