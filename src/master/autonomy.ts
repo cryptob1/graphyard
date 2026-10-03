@@ -623,7 +623,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     // Registered first, like every launched session (GY-172 AC-2).
     ({ delivery } = await registeredLaunch(register, { id: `escalation:${context.escalation.trigger}:${context.fingerprint.slice(0, 12)}`, kind: 'coordination', role: 'escalation', principal: config.operatorAgent!.id, runtime, host: config.hostId,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, cwd: checkout!.directory, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
+      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: checkout!.directory, cwd: checkout!.directory, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
   } catch (error) {
     if (checkout) await settleCheckout(root, checkout.directory); const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
     // A registry session that could not be ended is kept on a record due now: the loop ends it
