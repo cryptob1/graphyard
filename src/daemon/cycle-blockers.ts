@@ -1,6 +1,6 @@
 // Concern: cycle step 2d — every standing blocker re-checked each cycle (GY-1008): environmental causes probed and cleared, a needs-decision blocker's approver launched.
 import type { Work } from '../model.js';
-import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, unrepresentableScope, type BlockerClassification } from '../model/blocker-class.js';
+import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, itemSpecificPlaneError, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, unrepresentableScope, type BlockerClassification } from '../model/blocker-class.js';
 import { scopeRefusalBlocker } from '../model/scope.js';
 import { approvalWatchSchema, message, type DaemonAction } from './state.js';
 import { handWatchPrefix } from './cycle-decisions.js';
@@ -85,6 +85,7 @@ export async function blockerStep(cycle: Cycle) {
     const classification = itemBlockerClass(item);
     if (!classification || !item.blocker || !environmentalBlockerClasses.includes(classification.class)) continue;
     if ((item.blockerProbe?.clears ?? 0) >= maxAutomaticClears || item.blocker.startsWith(scopeRefusalBlocker)) continue;
+    if (classification.class === 'control-plane-error' && itemSpecificPlaneError(item.blocker)) continue;
     void probe(item, classification);
   }
 
@@ -113,6 +114,13 @@ export async function blockerStep(cycle: Cycle) {
       return;
     }
 
+    // A server error on the item's own request (HTTP 500) can stand while the server reports
+    // healthy, so health cannot show it gone: the master rechecks the failed operation.
+    if (classification.class === 'control-plane-error' && itemSpecificPlaneError(blocker)) {
+      await handOver(`${item.key} is blocked on a server error its own request met, which the server's health cannot show fixed, so it needs the master to recheck that operation: ${blocker}`);
+      return;
+    }
+
     let result: BlockerProbeResult | null = null;
     if (environmentalBlockerClasses.includes(classification.class)) {
       result = await probe(item, classification);
@@ -125,11 +133,12 @@ export async function blockerStep(cycle: Cycle) {
         else if (clock - Date.parse(since) >= blockerEscalateMs && !state.actions[escalatedKey(item, blocker)])
           performed.push(await note(escalatedKey(item, blocker), item, 'done', `${item.key} is blocked (${classification.class}) and its probe has failed since ${since}, so it is reported to the master; the loop keeps probing: ${result.probe} fails (${result.detail}); it is: ${blocker}`));
       } else if (state.actions[failingKey(item, blocker)]) delete state.actions[failingKey(item, blocker)];
-      // The base tip the failure was met on is the first one the loop read; a later tip is a new base.
+      // The base the failure was met on is the one the attempt's branch was built on when its
+      // worktree is here, else the first tip the loop read; a later tip is a new base.
       if (classification.class === 'outside-scope-test-failure' && result.baseTip) {
-        const seen = state.actions[baseKey(item, blocker)];
-        if (!seen) await note(baseKey(item, blocker), item, 'done', result.baseTip);
-        else if (seen.detail !== result.baseTip) result = { ...result, passed: true, detail: `the base tip moved from ${seen.detail.slice(0, 12)} to ${result.baseTip.slice(0, 12)}` };
+        const seen = state.actions[baseKey(item, blocker)]?.detail ?? result.failedOn;
+        if (!state.actions[baseKey(item, blocker)]) await note(baseKey(item, blocker), item, 'done', seen ?? result.baseTip);
+        if (seen && seen !== result.baseTip) result = { ...result, passed: true, detail: `the base tip moved from ${seen.slice(0, 12)} to ${result.baseTip.slice(0, 12)}` };
       }
     } else if (classification.class === 'planned-file-scope') {
       const missing = uncoveredBlockerPaths(item, classification);

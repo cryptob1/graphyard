@@ -69,6 +69,14 @@ const githubCredential = (text: string) => credentialFailures.test(text) || (gen
 // test running out of memory (`JavaScript heap out of memory`) is about the item, not the plane.
 const planeMemory = String.raw`\b(?:server|postgres(?:ql)?|database|control plane)\b[^.\n]*\b(?:out of memory|ENOMEM)\b|\b(?:out of memory|ENOMEM)\b[^.\n]*\b(?:on|in|from|at) (?:the )?(?:graphyard )?(?:server|postgres(?:ql)?|database|control plane)\b`;
 const controlPlane = new RegExp(String.raw`\binternal (?:server )?error\b|\bHTTP 5\d\d\b|\(5\d\d\)|\b50[0234] (?:Internal|Bad Gateway|Service Unavailable|Gateway)|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|${planeMemory}|server (?:is )?(?:down|unavailable|unreachable)`, 'i');
+// A server error on one request (HTTP 500) can stand while the server reports healthy; the plane
+// being down, unreachable or overloaded (502-504, refused or reset connections) is the whole plane's.
+const requestServerError = /\bHTTP 500\b|\(500\)|\b500 Internal\b|"status":\s*500\b|\binternal (?:server )?error\b/i;
+const planeWideError = /\bHTTP 50[234]\b|\(50[234]\)|\b50[234] (?:Bad Gateway|Service Unavailable|Gateway)|"(?:status|code)":\s*50[234]\b|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|Application failed to respond|server (?:is )?(?:down|unavailable|unreachable)|\b(?:out of memory|ENOMEM)\b/i;
+/** Whether a control-plane blocker is a server error the item's own request met (GY-1055): the server's health cannot show it fixed. */
+export function itemSpecificPlaneError(text: string | null | undefined) {
+  return !!text && requestServerError.test(text) && !planeWideError.test(text);
+}
 // A read-only file system is a filesystem refusal on its own; a permission refusal (EACCES, EPERM,
 // "Permission denied", a failed write) counts only when it names the path it refused, so an
 // application's own permission error is not probed as a sandbox path.

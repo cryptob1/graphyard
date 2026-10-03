@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { classifyBlocker } from '../src/model/blocker-class.js';
+import { classifyBlocker, itemSpecificPlaneError } from '../src/model/blocker-class.js';
+import { blockedAttemptAccount, blockedAttemptProfile, probeBlocker } from '../src/daemon/blocker-probes.js';
+import { recordEnvironmentLog, recordObservedExhaustion, selectionKey } from '../src/master/environments.js';
+import { emptyRegistry } from '../src/model/registry.js';
+import { closeEndedScopeRequest } from '../src/engine.js';
+import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { credentialFailure } from '../src/worker-credential.js';
 import { keepBlockedWork } from '../src/cli/lease.js';
 import { blockerEscalateMs, blockerProbeConcurrency, blockerStep } from '../src/daemon/cycle-blockers.js';
@@ -152,4 +157,72 @@ test('unit:blocker-followups-probe-loop — probes run concurrently under a boun
   state = 'approved';
   await blockerStep(cycleOf([prose], { decisions: async () => ({ decisions: [{ ...decision, state }] }), recordBlockerProbe: async (_item: Work, probe: { result: string }) => { clears.push(probe.result); } }, Date.now(), watched.state).cycle);
   assert.deepEqual(clears, ['fail', 'pass']);
+});
+
+test('unit:blocker-followups-plane-and-base — a server error on the item\'s own request is the master\'s, not cleared on health, and a base that moved before the first probe counts as moved', async () => {
+  for (const text of ['complete GY-9 failed: HTTP 500 Internal Server Error', 'submit was refused (500): internal error while writing the evidence'])
+    assert.equal(itemSpecificPlaneError(text), true, text);
+  for (const text of ['claim GY-9: {"status":"error","code":502,"message":"Application failed to respond"}', 'status failed: ECONNREFUSED 127.0.0.1:8787', 'complete: HTTP 503 Service Unavailable', 'npm test failed'])
+    assert.equal(itemSpecificPlaneError(text), false, text);
+
+  const clears: string[] = [];
+  const recordProbe = async (_item: Work, probe: { result: string }) => { clears.push(probe.result); };
+  const healthy = async () => ({ probe: 'the Graphyard server health check', passed: true, detail: 'the server reports healthy' });
+  const own = blocked(20, 'complete GY-20 failed: HTTP 500 Internal Server Error');
+  assert.equal(classifyBlocker(own.blocker).class, 'control-plane-error');
+  const handed = cycleOf([own], { probeBlocker: healthy, recordBlockerProbe: recordProbe }, Date.now());
+  await blockerStep(handed.cycle);
+  assert.deepEqual(clears, [], 'a healthy server does not clear it');
+  assert.ok(handed.performed.some(action => /needs the master to recheck/.test(action.detail)));
+  // The plane being unreachable is the whole plane's: health still clears it.
+  await blockerStep(cycleOf([blocked(21, 'claim GY-21 failed: HTTP 502 Bad Gateway')], { probeBlocker: healthy, recordBlockerProbe: recordProbe }, Date.now()).cycle);
+  assert.deepEqual(clears, ['pass']);
+
+  // The base advanced between the failure and the loop's first probe: the attempt's branch names the base it failed on.
+  clears.length = 0;
+  const failedOn = 'a'.repeat(40), tip = 'b'.repeat(40);
+  const outside = blocked(22, 'npm test fails on main in tests/db.test.ts, outside plannedFiles');
+  assert.equal(classifyBlocker(outside.blocker).class, 'outside-scope-test-failure');
+  await blockerStep(cycleOf([outside], { probeBlocker: async () => ({ probe: 'the base branch has moved since the failure', passed: false, detail: `the base tip is ${tip.slice(0, 12)}`, baseTip: tip, failedOn }), recordBlockerProbe: recordProbe }, Date.now()).cycle);
+  assert.deepEqual(clears, ['pass'], 'cleared on the first probe');
+  // The probe reads that base from the attempt's worktree.
+  const read = await probeBlocker(outside, classifyBlocker(outside.blocker), { run: () => '', baseTip: async () => tip, failedBase: async () => failedOn, launch: null, cwd: '/srv/wt', clock: Date.now() });
+  assert.equal(read?.failedOn, failedOn);
+});
+
+test('unit:blocker-followups-attempt-launch — the probe uses the profile and the account the blocked attempt ran under, and a blocker closes the attempt\'s scope request without clearing itself', async () => {
+  const root = await temporaryDirectory('blocker-followups-launch');
+  const homes = { held: join(root, 'held'), out: join(root, 'out'), good: join(root, 'good') };
+  for (const [name, home] of Object.entries(homes)) {
+    await mkdir(home, { recursive: true });
+    if (name !== 'out') await writeFile(join(home, 'cli-config.json'), JSON.stringify({ authInfo: { userId: name } }));
+  }
+  const worker = (name: string, agentName: string, accounts?: string[]) => ({ name, principal: 'worker-p', agentName, mode: 'launch', kind: 'cursor', credentialFile: join(root, `${name}.token`), agentArgs: [], environment: {}, ...(accounts ? { accounts } : {}) });
+  const launchConfig = masterConfigSchema.parse({ ...config(), credentialFile: join(root, 'coordinator.token'),
+    environments: [{ name: 'acct-held', kind: 'cursor', home: homes.held }, { name: 'acct-out', kind: 'cursor', home: homes.out }, { name: 'acct-good', kind: 'cursor', home: homes.good }],
+    workers: [worker('one', 'p-one'), worker('two', 'p-two', ['acct-held', 'acct-out', 'acct-good'])] }) as MasterConfig;
+  const item = { ...blocked(30, 'git push failed: HTTP 401 from github.com'), lastAssignment: { epoch: 1, owner: 'worker-p' } } as unknown as Work;
+
+  // Two profiles share the principal: the attempt's session handle names the one it ran under.
+  const withSession = { ...item, sessions: [{ id: 'worker-p:1', kind: 'implementation', principal: 'worker-p', agentName: 'p-two', startedAt: new Date().toISOString() }] } as unknown as Work;
+  assert.equal((await blockedAttemptProfile(launchConfig, withSession))?.name, 'two');
+  // With no handle, the profile whose latest launch was for this item.
+  await recordEnvironmentLog(launchConfig, [], [], { key: selectionKey('worker', 'two'), environment: 'acct-good', kind: 'cursor', at: new Date().toISOString(), work: item.key });
+  assert.equal((await blockedAttemptProfile(launchConfig, item))?.name, 'two');
+
+  // A later launch for another item replaced this one's selection: the account is the one dispatch
+  // would choose now — not one a session saw spent, not one logged out — not the first configured.
+  await recordEnvironmentLog(launchConfig, [], [], { key: selectionKey('worker', 'two'), environment: 'acct-held', kind: 'cursor', at: new Date().toISOString(), work: 'GY-999' });
+  await recordObservedExhaustion(launchConfig, 'acct-held', { at: new Date().toISOString(), resetsAt: new Date(Date.now() + 3_600_000).toISOString(), reason: 'usage limit reached', role: 'worker', profile: 'two', work: null });
+  const local = { document: async () => emptyRegistry(), select: async () => { throw new Error('a probe never selects a session'); }, end: async () => {} } as any;
+  const account = await blockedAttemptAccount(launchConfig, item, launchConfig.workers[1], { registry: local });
+  assert.equal(account?.name, 'acct-good');
+
+  // `blocked` ends the attempt, so its scope request closes on the record; the blocker it just
+  // recorded stands, whatever its words.
+  const scoped = { key: 'GY-31', lease: null, blocker: `${scopeRefusalBlocker} src/a.ts and the new blocker`, scopeRequest: { epoch: 1, paths: ['src/a.ts'], requestedBy: 'worker-p', at: new Date().toISOString(), reason: 'x', decision: null } } as unknown as Work;
+  const closed = closeEndedScopeRequest(scoped, new Date(), 'blocked');
+  assert.equal(closed?.by, 'blocked');
+  assert.equal(scoped.scopeRequest, null);
+  assert.ok(scoped.blocker?.endsWith('and the new blocker'), 'the blocker the worker reported is kept');
 });
