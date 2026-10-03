@@ -54,9 +54,26 @@ export interface BlockerClassification {
   path: string | null;
 }
 
-const githubCredential = /could not read (?:Username|Password) for '?https?:\/\/github\.com|Authentication failed for '?https?:\/\/github\.com|gh auth login|not logged in(?:to| to) (?:any )?(?:GitHub|github\.com)|Bad credentials|terminal prompts disabled|Permission denied \(publickey\)|invalid (?:GitHub )?token|GH_TOKEN|GITHUB_TOKEN|github credential/i;
-const controlPlane = /\binternal (?:server )?error\b|\bHTTP 5\d\d\b|\(5\d\d\)|\b50[0234] (?:Internal|Bad Gateway|Service Unavailable|Gateway)|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|out of memory|\bENOMEM\b|server (?:is )?(?:down|unavailable|unreachable)/i;
-const sandbox = /Read-only file system|\bEROFS\b|\bEACCES\b|\bEPERM\b|Operation not permitted|Permission denied|unable to (?:append|create|write|unlink)|cannot write|sandbox/i;
+// What `credentialFailure` (src/worker-credential.ts) ends an attempt on, word for word: the messages
+// git and `gh` print themselves alone, a generic authentication refusal only beside GitHub, git or
+// `gh` (GY-1066). That module is not browser-safe, so its patterns are restated here and the test
+// holds the two together: every blocker the engine ends as a credential failure is classed
+// `github-credential`, so its credential probe runs.
+const credentialFailures = /could not read (?:Username|Password) for '?https:\/\/github\.com|The token in \S+ is invalid|Authentication failed for '?https:\/\/github\.com|Invalid username or (?:password|token)|You are not logged into any GitHub hosts|To get started with GitHub CLI, please run:? +gh auth login|Permission to \S+ denied to \S+/i;
+const genericAuthenticationFailures = /HTTP 401\b|\bBad credentials\b|Requires authentication|Permission denied \(publickey\)/i;
+const githubContext = /github\.com|api\.github|\bgh (?:pr|api|auth|repo|run|release)\b|\bgit (?:push|fetch|pull|clone|ls-remote)\b/i;
+// What a worker writes about its GitHub login in its own words.
+const githubCredentialWords = /could not read (?:Username|Password) for '?https?:\/\/github\.com|Authentication failed for '?https?:\/\/github\.com|gh auth login|not logged in(?:to| to) (?:any )?(?:GitHub|github\.com)|terminal prompts disabled|invalid (?:GitHub )?token|GH_TOKEN|GITHUB_TOKEN|github credential/i;
+const githubCredential = (text: string) => credentialFailures.test(text) || (genericAuthenticationFailures.test(text) && githubContext.test(text)) || githubCredentialWords.test(text);
+// A memory failure is the control plane's only when it names the server: a worker's own build or
+// test running out of memory (`JavaScript heap out of memory`) is about the item, not the plane.
+const planeMemory = String.raw`\b(?:server|postgres(?:ql)?|database|control plane)\b[^.\n]*\b(?:out of memory|ENOMEM)\b|\b(?:out of memory|ENOMEM)\b[^.\n]*\b(?:on|in|from|at) (?:the )?(?:graphyard )?(?:server|postgres(?:ql)?|database|control plane)\b`;
+const controlPlane = new RegExp(String.raw`\binternal (?:server )?error\b|\bHTTP 5\d\d\b|\(5\d\d\)|\b50[0234] (?:Internal|Bad Gateway|Service Unavailable|Gateway)|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|${planeMemory}|server (?:is )?(?:down|unavailable|unreachable)`, 'i');
+// A read-only file system is a filesystem refusal on its own; a permission refusal (EACCES, EPERM,
+// "Permission denied", a failed write) counts only when it names the path it refused, so an
+// application's own permission error is not probed as a sandbox path.
+const readOnlyFileSystem = /Read-only file system|\bEROFS\b/i;
+const fileRefusal = /\bEACCES\b|\bEPERM\b|Operation not permitted|Permission denied|unable to (?:append|create|write|unlink)|cannot write/i;
 const worktree = /\bworktree\b[^.]*\b(?:another|other|different|wrong|mismatch|belongs to|not (?:this|the) item|instead of)\b|\b(?:another|other|different|wrong) (?:item's )?(?:worktree|checkout)\b|attached to (?:the )?\S+ worktree|worktree mismatch/i;
 const suiteFailure = /\b(?:tests?|suites?|specs?|checks?|typecheck)\b[^.]*\b(?:fail\w*|red|broken)\b|\b(?:fail\w*|red|broken)\b[^.]*\b(?:tests?|suites?|specs?)\b/i;
 const outsideScope = /\boutside (?:(?:the|its|this item's|my) )?(?:plannedFiles|planned files|scope|item)|\bnot in (?:the |its )?(?:plannedFiles|planned files|scope)|\bunrelated\b|\bon (?:main|the base(?: branch)?)\b|\bpre-?existing\b/i;
@@ -64,6 +81,8 @@ const scopeWords = /SCOPE NEEDED|\bplannedFiles\b|\bplanned[- ]files?\b|\bneeds?
 const decisionWords = /\b(?:decision|approver|approval)\b/i;
 const decisionWait = /\b(?:needs?|await\w*|waits?|waiting|requested|pending|launch\w*|judge\w*|unanswered)\b/i;
 const commitToken = /\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b/g;
+// After the word "commit" any abbreviation is one, all digits or all letters included.
+const namedCommit = /\bcommit\s+([0-9a-f]{7,40})\b/gi;
 const uuidToken = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
 /** The first path the text says could not be written: an explicit environment blocker's path, a quoted path, or the first path-shaped token. */
@@ -72,7 +91,7 @@ function refusedPath(text: string): string | null {
   if (recorded) return recorded;
   const quoted = /['"`]((?:\/|\.{0,2}\/|\.git\/|[\w.-]+\/)[^'"`\s]+)['"`]/.exec(text)?.[1];
   if (quoted) return quoted;
-  return /((?:\/|\.git\/)[^\s'"`:,;]+)/.exec(text)?.[1] ?? null;
+  return /(?<![\w.~-])((?:\/|\.git\/)[\w.~-][^\s'"`:,;]*)/.exec(text)?.[1] ?? null;
 }
 
 /**
@@ -86,16 +105,19 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   const none = { paths: [], commit: null, decision: null, path: null };
   if (context.humanRequest || blocker.startsWith(humanRequestBlocker) || /^A human declined /.test(blocker)) return { class: 'human-only', ...none };
   if (!blocker) return { class: 'genuine', ...none };
-  if (githubCredential.test(blocker)) return { class: 'github-credential', ...none };
-  if (controlPlane.test(blocker)) return { class: 'control-plane-error', ...none };
+  if (githubCredential(blocker)) return { class: 'github-credential', ...none };
   if (worktree.test(blocker)) return { class: 'worktree-mismatch', ...none };
-  if (sandbox.test(blocker)) return { class: 'sandbox-path', ...none, path: refusedPath(blocker) };
+  // A suite that fails outside the item is that, whatever its output says about servers or permissions.
   if (suiteFailure.test(blocker) && outsideScope.test(blocker)) return { class: 'outside-scope-test-failure', ...none };
+  if (controlPlane.test(blocker)) return { class: 'control-plane-error', ...none };
+  const path = refusedPath(blocker);
+  if (readOnlyFileSystem.test(blocker) || (fileRefusal.test(blocker) && path)) return { class: 'sandbox-path', ...none, path };
   if (blocker.startsWith(scopeRefusalBlocker) || scopeWords.test(blocker)) {
     // A URL is a reference, not a file: its host and path never become planned paths or a commit.
     const unlinked = blocker.replace(/\b(?:https?:\/\/|www\.)\S+/gi, ' ');
     const paths = namedPaths(unlinked);
-    const commit = unlinked.match(commitToken)?.find(token => !paths.some(path => path.includes(token))) ?? null;
+    const unclaimed = (token: string) => !paths.some(path => path.includes(token));
+    const commit = [...unlinked.matchAll(namedCommit)].map(match => match[1].toLowerCase()).find(unclaimed) ?? unlinked.match(commitToken)?.find(unclaimed) ?? null;
     return paths.length && commit ? { class: 'planned-file-scope', ...none, paths, commit } : { class: 'genuine', ...none };
   }
   if (decisionWords.test(blocker) && decisionWait.test(blocker)) return { class: 'needs-decision', ...none, decision: uuidToken.exec(blocker)?.[0].toLowerCase() ?? null };
