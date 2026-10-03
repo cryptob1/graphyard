@@ -29,9 +29,20 @@ export interface ExecutorFleet {
   attention: AttentionItem[];
 }
 
-export async function executorFleet(root: string, masterApi: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, run?: SystemctlRunner, merger?: ReportedLoopMerger | null): Promise<ExecutorFleet> {
+/**
+ * A slot systemd is stopping is in a transition, not down (GY-1086): every restart — the loop's
+ * self-upgrade restarting the fleet, an operator's — passes through it, and a stop that holds reads
+ * `inactive` on the next observation. A slot starting (`activating`) stays judged: a crash loop
+ * sits there between its failures.
+ */
+export const slotDown = (active: string) => active !== 'active' && active !== 'deactivating' && active !== 'reloading';
+
+export async function executorFleet(root: string, masterApi: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, run?: SystemctlRunner, merger?: ReportedLoopMerger | null | (() => Promise<{ name: string; live?: boolean } | null>)): Promise<ExecutorFleet> {
+  const resolvedLoop = typeof merger === 'function' ? await merger().catch(() => null) : merger;
   // The loop on this host, read from its cursor's live lock when the caller did not name it.
-  const loop = merger !== undefined ? merger : await detectLoopMerger(root).catch(() => null);
+  const loop: ReportedLoopMerger | null = resolvedLoop !== undefined
+    ? (resolvedLoop ? { live: (resolvedLoop as any).live !== false, name: resolvedLoop.name } : null)
+    : await detectLoopMerger(root).catch(() => null);
   const supervision = await executorSupervisionStatus(root, run);
   let presence: ExecutorFleet['presence'];
   try {
@@ -39,16 +50,16 @@ export async function executorFleet(root: string, masterApi: (path: string) => P
     presence = answer ? { ...withLoopMerger(answer, loop), available: true } : { available: false, reason: 'the deployed server reports no executor presence; deploy main so GET /api/actions carries executors', live: [], served: [], unserved: [], liveMs: executorLiveMs };
   } catch (error) { presence = { available: false, reason: `GET /api/actions failed: ${error instanceof Error ? error.message : String(error)}`, live: [], served: [], unserved: [], liveMs: executorLiveMs }; }
   const unserved = describeUnserved(presence);
-  const attention: AttentionItem[] = unserved.map(entry => ({ subject: entry.keys[0], text: entry.text, ...agentOwner('master', supervision.declaration && supervision.units.some(unit => unit.active !== 'active') ? supervision.start : `${entry.start}; on this host: ${supervision.start}`) }));
+  const attention: AttentionItem[] = unserved.map(entry => ({ subject: entry.keys[0], text: entry.text, ...agentOwner('master', supervision.declaration && supervision.units.some(unit => slotDown(unit.active)) ? supervision.start : `${entry.start}; on this host: ${supervision.start}`) }));
   // Without presence the control plane cannot say who is alive, but a host whose every declared
   // slot is down while rows are pending is unserved from here, and is named as such.
   const pending = openActions(snapshot.work, new Date(snapshot.now)).filter(({ row }) => !(loop?.live && row.kind === 'merge'));
-  if (!presence.available && pending.length && supervision.units.length && supervision.units.every(unit => unit.active !== 'active')) {
+  if (!presence.available && pending.length && supervision.units.length && supervision.units.every(unit => slotDown(unit.active))) {
     attention.push({ subject: pending[0].row.key, text: `Every declared executor slot on this host is down (${supervision.units.map(unit => `${unit.unit} ${unit.active}`).join(', ')}) while ${pending.length} action(s) are pending, the oldest ${pending[0].row.kind} for ${pending[0].row.key} since ${pending[0].row.requestedAt}; ${presence.reason}`, ...agentOwner('master', supervision.start) });
   }
   // A declared slot that is not running is worth a line on its own: the fleet is one short of
   // what the host said it runs, whether or not anything is unserved yet.
-  for (const unit of supervision.units.filter(entry => entry.active !== 'active')) {
+  for (const unit of supervision.units.filter(entry => slotDown(entry.active))) {
     if (attention.some(item => item.next === `systemctl --user start ${unit.unit}` || item.next.includes(unit.unit))) continue;
     attention.push({ subject: 'executors', text: `Executor slot ${unit.slot} is ${unit.active} although this host declares ${supervision.declaration!.count} slot(s); journalctl --user -u ${unit.unit} says why`, ...agentOwner('master', `systemctl --user start ${unit.unit}`) });
   }

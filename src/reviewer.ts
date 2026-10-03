@@ -7,6 +7,7 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped, type ClientErrorRun } from './retry-stop.js';
+import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStatus, type ReviewRoundStatus } from './review-cap.js';
 import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
@@ -473,8 +474,8 @@ export function assertReviewCandidate(work: Work, observedAt: string, request?: 
 
 export type ReviewBinding = ReturnType<typeof assertReviewCandidate>;
 
-/** The changes-requested rounds after which only an unmet acceptance criterion may request changes (GY-167). */
-export const reviewRoundCap = 3;
+/** The changes-requested rounds after which only an unmet acceptance criterion may request changes (GY-167); the item's own round is capped by master.json `reviewRoundCap` (GY-1118). */
+export const reviewRoundCap = defaultReviewRoundCap;
 export type ReviewHistory = NonNullable<ReviewRecord['reviewRound']>;
 /**
  * What earlier review rounds of this pull request mean for the next launch (GY-167): the head the
@@ -500,11 +501,15 @@ export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBindi
 }
 
 /** The prompt's review-round section: the delta since the head last reviewed, and the cap once three rounds requested changes (GY-167). */
-export function reviewRoundSection(sha: string, history?: ReviewHistory) {
-  if (!history) return '';
+/** `rounds` is the item's own review round against the configured cap (GY-1118); past it the cap applies whatever this pull request's history holds. */
+export function reviewRoundSection(sha: string, history?: ReviewHistory, rounds?: ReviewRoundStatus) {
+  if (!history && !rounds?.capped) return '';
+  history ??= { changesRequested: 0 };
+  const cap = rounds?.cap ?? reviewRoundCap;
   return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
       + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '')
-    + (history.changesRequested >= reviewRoundCap ? `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. ` : '')
+    + (rounds?.capped || history.changesRequested >= cap ? `${rounds?.capped ? `This is review round ${rounds.round} of this item, past its cap of ${cap} rounds` : `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision`}, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. `
+      + 'Name each blocking finding — an acceptance criterion not met, wrong behaviour, or a security defect — on its own line starting BLOCKING: in the body of REQUEST_CHANGES, and every other finding on its own line starting Follow-up finding:; a change request with no BLOCKING: line is withdrawn by Graphyard, its findings filed as follow-ups, and one with a blocking finding is escalated to an independent approver rather than reworked. ' : '')
     + (history.withdrawn ? `A previous approval of this head, review ${history.withdrawn.reviewId}, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread${history.withdrawn.threads.length === 1 ? '' : 's'} ${history.withdrawn.threads.join(' ')}: a thread described only in prose, or named by an ID that is neither its thread ID nor one of its listed comment IDs, is not accounted for. `
       + `Name each of ${history.withdrawn.threads.length === 1 ? 'that thread' : 'those threads'} by its thread ID on exactly one of those closing lines. ` : '');
 }
@@ -535,13 +540,19 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  * candidate changes: the criterion is judged beside the item's own, with the repository's paths.
  */
 /** `research` is the item's recorded research brief (GY-259): the change is checked against its recommended approach and answered questions. */
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, memory?: ProjectMemory | null) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null) {
+  let rounds: ReviewRoundStatus | undefined;
+  if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
+    rounds = roundsOrMemory;
+  } else if (roundsOrMemory && !memory) {
+    memory = roundsOrMemory as ProjectMemory;
+  }
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
-    + reviewRoundSection(binding.sha, history)
+    + reviewRoundSection(binding.sha, history, rounds)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
@@ -611,13 +622,15 @@ export function answeringRecord(records: readonly ReviewRecord[], requestId: str
     && !!record.verdict && conflictingVerdictStates.includes(record.verdict.state) && !withdrawnSinceSettled(record, observation)).at(-1) ?? null;
 }
 /**
- * A settled verdict the control plane has since seen withdrawn: its observation, read after the loop
- * settled the record, lists that review in another state (dismissed) or no longer lists it at all.
- * Such a verdict answers nothing, so the request is reviewed again (stale-dismissal).
+ * A settled verdict the control plane has since seen withdrawn (GY-1083, GY-1140): its observation lists
+ * that review in another state (dismissed), or reports it in dismissedReviewIds. A verdict that is not
+ * observed yet awaits the control plane's observation ingestion, and is not withdrawn; treating an
+ * unobserved verdict as withdrawn caused duplicate reviewer launches and review-conflict faults (GY-1092, GY-1052).
  */
 function withdrawnSinceSettled(record: ReviewRecord, observation: Work['observation'] | undefined) {
   const listed = observation?.reviews.find(review => review.id === record.verdict!.reviewId);
   if (listed) return !conflictingVerdictStates.includes(listed.state);
+  if (observation?.dismissedReviewIds) return observation.dismissedReviewIds.includes(record.verdict!.reviewId);
   const settledAt = Date.parse(record.closedAt ?? record.verdict!.submittedAt), observedAt = Date.parse(observation?.at ?? '');
   return Number.isFinite(settledAt) && Number.isFinite(observedAt) && observedAt > settledAt;
 }
@@ -753,7 +766,9 @@ export async function launchReview(root: string, work: Work, profileName: string
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
+        // The request is the session's own first message, on the runtime's command line (GY-93), read
+        // from the request file in the session's checkout so the typed line stays short (GY-121).
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -1129,9 +1144,13 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // settled record. A closed session carrying the approval the control plane is still waiting for
   // on this exact head is therefore re-read, and a dismissal reopens it as an unanswered session,
   // so the request is relaunched instead of waiting on a verdict that no longer exists.
+  // A change request the loop withdrew past the review-round cap (GY-1118) is reopened the same way,
+  // so the same head is reviewed again rather than the request standing answered by a withdrawn verdict.
   for (const record of ledger.reviews) {
-    if (record.state !== 'completed' || record.verdict?.state !== 'APPROVED') continue;
-    const request = dependencies.work?.find(item => item.key === record.key)?.autoDispatch?.review;
+    if (record.state !== 'completed' || (record.verdict?.state !== 'APPROVED' && record.verdict?.state !== 'CHANGES_REQUESTED')) continue;
+    const owner = dependencies.work?.find(item => item.key === record.key), request = owner?.autoDispatch?.review;
+    // Only past the cap is a change request ever withdrawn; before it, the head goes back to a worker.
+    if (record.verdict.state === 'CHANGES_REQUESTED' && !(owner && pastReviewCap(owner, reviewRoundCapOf(config)))) continue;
     if (!request || request.state !== 'requested' || request.sha !== record.sha || request.baseSha !== record.baseSha || request.policyRevision !== record.policyRevision) continue;
     if ((await observe(record, reviewer, new Set()))?.state !== 'DISMISSED') continue;
     record.verdict = { ...record.verdict, state: 'DISMISSED' };
@@ -1171,8 +1190,8 @@ async function approvalGaps(repository: string, record: ReviewRecord, reviewId: 
     return unaccountedThreads(review?.body, record.threadsListed, !!record.criteriaOnly, record.threadAliases);
   } catch (error) { return `the approval could not be read to check which listed threads it accounts for (${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)})`; }
 }
-/** Withdraw an approval as the reviewer App that gave it: GitHub's review dismissal, with a short-lived reviewer token. */
-async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer'], repository: string, pr: number, reviewId: number, message: string) {
+/** Withdraw a verdict as the reviewer App that gave it — an incomplete approval, or a change request past the review-round cap (GY-1118): GitHub's review dismissal, with a short-lived reviewer token. */
+export async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer'], repository: string, pr: number, reviewId: number, message: string) {
   if (!reviewerApp) throw new Error('no reviewer App is registered');
   const { token } = await mintReviewerToken(await readReviewerCredential(root, reviewerApp.credentialFile), repository);
   const response = await fetch(`https://api.github.com/repos/${repository}/pulls/${pr}/reviews/${reviewId}/dismissals`, { method: 'PUT', signal: AbortSignal.timeout(15_000),

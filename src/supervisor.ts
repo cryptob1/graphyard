@@ -277,6 +277,11 @@ export function renewalGraceMs(error: unknown): number | null {
   return Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
+/**
+ * The one line the watch supervisor prints before its first control-plane call, naming the item and
+ * epoch from its argv; the launcher quotes it as the starting detail of a supervisor still setting up (GY-1033).
+ */
+export const setupLine = (subject: string, epoch: number) => `graphyard: establishing containment for ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
 export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0, granted = 0;
@@ -918,7 +923,10 @@ function observeUnit(run: (command: string, args: string[]) => string) {
   return {
     enabledState: enabled, activeState: active,
     enabled: enabled === null ? null : ['enabled', 'enabled-runtime', 'static', 'indirect', 'alias'].includes(enabled),
-    active: active === null ? null : ['active', 'activating', 'reloading'].includes(active),
+    // A unit stopping is in a transition (GY-1086): a restart — the loop's own self-upgrade hand-off,
+    // an operator's restart — passes through it and the cycle in flight reads it, so it is not read
+    // as down; a stop that holds is `inactive` on the next reading.
+    active: active === null ? null : ['active', 'activating', 'reloading', 'deactivating'].includes(active),
   };
 }
 

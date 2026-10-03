@@ -13,7 +13,7 @@ import type { Work } from './work.js';
  * names the executor, its host and the kinds it can run, and the control plane keeps the last time
  * each one asked. It is kept in memory beside the engine, not in the ledger — a poll that claims
  * nothing writes nothing, and presence is only ever a statement about now: after a restart it is
- * empty until the next poll, which is the truth.
+ * empty until the next poll, and that emptiness is judged only once a liveness window has passed.
  *
  * A pending row is *unserved* when no executor seen inside the liveness window can run its kind.
  * That is reported apart from a row waiting its turn behind other work, with how long it has
@@ -112,6 +112,12 @@ export async function ledgerLoopMerger(query: (text: string, values: unknown[]) 
 
 export class ExecutorRegistry {
   private readonly seen = new Map<string, ExecutorPresence>();
+  /**
+   * When this registry began listening (GY-1086). Presence is in memory, so a control plane that
+   * has just started has heard from nobody yet: until one liveness window has passed, an empty
+   * registry is a fleet not yet heard from, not a fleet that is down.
+   */
+  constructor(readonly since: Date = new Date()) {}
   /** One claim poll: the executor, where it runs, what it can run, and that it asked now. */
   observe(poll: { executor: string; host: string; principal: string; kinds: NextActionKind[] }, now: Date, claimed = false) {
     const key = `${poll.principal}\0${poll.executor}`;
@@ -149,6 +155,8 @@ export interface ExecutorReport {
   unserved: UnservedAction[];
   /** The live master loop that serves `merge` on this installation, when one is known; merge rows then wait on it. */
   loop?: ReportedLoopMerger | null;
+  /** Nobody has polled yet and the registry is younger than one liveness window: nothing is judged unserved until it is not. */
+  listening?: boolean;
 }
 
 /** The command that serves a kind: the supervised slot on a coordinator host, or the bare executor. */
@@ -159,11 +167,15 @@ export const startExecutorFor = (kind: NextActionKind) => `start an executor tha
  * row a live executor of its kind could take is waiting its turn and is not listed, however long
  * it has waited: that is the queue's own idle report (`idleActionable`), which names a different
  * failure. A row whose kind no executor may ever run is not listed either — no fleet serves it by
- * design. Only an executor-runnable kind with no live executor at all is unserved.
+ * design. Only an executor-runnable kind with no live executor at all is unserved. A registry
+ * still inside its first liveness window that nobody has polled judges nothing: every executor
+ * alive before the control plane restarted is still to be heard from.
  */
 export function executorReport(all: Work[], registry: ExecutorRegistry, now: Date, liveMs = executorLiveMs, loop: ReportedLoopMerger | null = null): ExecutorReport {
   const live = registry.live(now, liveMs);
   const served = [...new Set(live.flatMap(entry => entry.kinds))].sort() as NextActionKind[];
+  const age = now.getTime() - registry.since.getTime();
+  if (!live.length && age >= 0 && age < liveMs) return { live, liveMs, served, unserved: [], listening: true };
   const merging = loop?.live ? loop : null;
   const unserved = openActions(all, now)
     .filter(({ row }) => (executorRunnableKinds as readonly NextActionKind[]).includes(row.kind) && !served.includes(row.kind) && !(merging && row.kind === 'merge'))

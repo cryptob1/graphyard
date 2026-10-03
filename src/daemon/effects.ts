@@ -14,7 +14,7 @@ import { RefusedResponse } from '../model/refusal.js';
 import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
-import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
+import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
@@ -144,6 +144,14 @@ export interface DaemonEffects {
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
   /**
+   * GY-1118: records a capped change request's non-blocking findings as the item's follow-up batch
+   * (`POST /api/work/KEY/followups`), as the master's operator-agent identity, idempotent on `key`.
+   * With `withdrawReview` absent too, a capped change request is escalated instead.
+   */
+  fileReviewFollowUps?: (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) => Promise<unknown>;
+  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal). */
+  withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
+  /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
    * base branch, checks out its tip when the checkout is a clean detached checkout, and, when the
    * diff touches code the loop or the executors load, restarts the fleet and then re-executes the
@@ -226,14 +234,14 @@ export interface DaemonEffects {
    */
   sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>;
   /**
-   * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the
-   * prompt's non-destructive answer into the session's pane; `promptSession` then gives it the one
-   * instruction to carry on with a safe alternative. A loop wired without them never answers a
-   * prompt, and fails an attempt blocked on one once it has stood for `blockedPromptFailMs`.
+   * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the prompt's
+   * non-destructive answer into the session's pane; `promptSession` then gives it the one instruction to carry on
+   * with a safe alternative. Without them a prompt is never answered, and the attempt fails after `blockedPromptFailMs`.
    */
   answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
+  blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
@@ -548,7 +556,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // that follows lands in the runtime's input rather than in the closing menu.
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
-    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
+    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
@@ -636,6 +644,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get replan() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
+    },
+    get fileReviewFollowUps() {
+      return current().operatorAgent ? async (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) =>
+        asOperatorAgent('POST', `work/${encodeURIComponent(work.key)}/followups`, { findings, reason }, key) : undefined;
+    },
+    get withdrawReview() {
+      const reviewer = current().reviewer;
+      return reviewer ? (work: Work, reviewId: number, message: string) => dismissApproval(root, reviewer, current().repository, work.candidate!.pr, reviewId, message) : undefined;
     },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
