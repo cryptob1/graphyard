@@ -392,6 +392,27 @@ export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 
   if (!automatic || !config.reviewers.some(profile => profile.name === automatic && profile.concurrency === undefined)) return config;
   return { ...config, reviewers: config.reviewers.map(profile => profile.name === automatic && profile.concurrency === undefined ? { ...profile, concurrency: automaticReviewerConcurrency } : profile) };
 }
+/**
+ * Automatic producer concurrency (GY-1113). Proof requests used to queue behind producer profiles
+ * whose concurrency was unset because each profile defaulted to one slot; producer profiles without
+ * an explicit concurrency therefore run this many sessions (default 4); a profile that declares
+ * its own concurrency keeps it.
+ */
+export const automaticProducerConcurrency = 4;
+/**
+ * The config as the producer launchers and their readers count sessions: producer profiles with
+ * unset concurrency read as `automaticProducerConcurrency` (GY-1113). `loadMasterConfig` applies it
+ * once at load and writers read `loadStoredMasterConfig`, so the default is never written back;
+ * it is idempotent, so a caller handed a config built elsewhere may still apply it.
+ */
+export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(config: T): T {
+  if (!config.producers.some(profile => profile.concurrency === undefined)) return config;
+  return { ...config, producers: config.producers.map(profile => profile.concurrency === undefined ? { ...profile, concurrency: automaticProducerConcurrency } : profile) };
+}
+/** Both reviewer and producer defaults applied: the configuration readers and dispatchers evaluate under. */
+export function withRoleDefaults<T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'>>(config: T): T {
+  return withProducerDefaults(withReviewerDefaults(config));
+}
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
