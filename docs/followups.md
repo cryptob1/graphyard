@@ -63,3 +63,21 @@ A finding is promoted once: promotions of one finding are serialized, the batch 
 the item it became, and repeating the command answers that item (`"duplicate": true`). The batch
 keeps every finding. A promoted finding no longer waits on the item: the follow-up item filed when
 it ships carries only the findings not promoted.
+
+## Past the review-round cap
+
+An item's review round is one more than its rework rounds (`pipeline.reworkRounds`); `master
+status` shows it on each work row as `reviewRound` (`round`, `cap`, `capped`). The cap is
+`reviewRoundCap` in `.graphyard/master.json` (default 3). Past it, no review finding sends the
+item back to a worker, and the reviewer is told to name each blocking finding — an acceptance
+criterion not met, wrong behaviour, a security defect — on a `BLOCKING:` line of its change request,
+and every other finding on a `Follow-up finding:` line. Both are read wherever they sit in the body:
+
+- A change request from the reviewer App naming no `BLOCKING:` line: the loop records its
+  findings (its `Follow-up finding:` lines, else its paragraphs minus the verdict's judgement and
+  thread-summary lines) as this item's follow-ups, withdraws it as the reviewer App, and the same
+  head is reviewed again, with no rework. A head is withdrawn once: a second change request on it
+  escalates as below.
+- One naming a blocking finding, or one Graphyard cannot withdraw (a person's, an agent
+  provider's): the loop requests no rework and raises an escalation for an independent approver,
+  who decides with `graphyard master decide GY-N rework REASON` or has the head re-reviewed.
