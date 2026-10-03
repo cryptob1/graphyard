@@ -368,6 +368,7 @@
     "tests/launch-freshness.test.ts": 1000,
     "tests/launch-prompt-delivery.test.ts": 1889,
     "tests/launch-settings-warning.test.ts": 1021,
+    "tests/launch-supervisor-setup.test.ts": 900,
     "tests/launches-off-cycle.test.ts": 20753,
     "tests/lease-lapse.test.ts": 3241,
     "tests/lease-lifecycle.test.ts": 3106,
