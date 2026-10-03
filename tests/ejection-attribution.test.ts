@@ -188,7 +188,6 @@ test('unit:cancelled-rerun-probed-twice — a failure rerun whose attempt is can
   await onlyJob(work);
   await processJob(engine, gh);
   work = await reload(work);
-  console.log("DEBUG STEP 2 checkReruns:", work.checkReruns, "attemptsRequested:", attemptsRequested);
 
   assert.equal(work.queue?.sequence, sequence, 'keeps place after first cancellation');
   assert.equal(work.queueEjection ?? null, null);
