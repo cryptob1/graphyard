@@ -51,6 +51,7 @@ export class GitHubCacheStore {
   private flushing: Promise<void> | null = null;
   private prunedAt = 0;
   private closed = false;
+  private closing: Promise<void> | null = null;
   private reportedAt = 0;
   /** The installation's billable charges across replicas (GY-806), on the same database and scope; the adapter attaches it with the cache. */
   readonly charges: GitHubChargeLedger;
@@ -97,6 +98,7 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
   }
   /** Queue an entry for the next write-behind batch. */
   put(kind: GitHubCacheKind, key: string, value: unknown, etag: string | null = null) {
+    if (this.closed) return;
     let json: string;
     try { json = JSON.stringify(value instanceof Set ? [...value] : value ?? null); } catch { return; }
     if (json.length > this.maxValueBytes) return;
@@ -107,6 +109,7 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
   }
   /** Mark an entry as just used, so pruning keeps what the adapter still reads. */
   touch(kind: GitHubCacheKind, key: string) {
+    if (this.closed) return;
     const id = this.key(kind, key);
     if (this.pending.has(id) || this.pending.size >= this.maxPending) return;
     this.pending.set(id, 'touch');
@@ -124,7 +127,7 @@ ORDER BY updated_at, key`, [prefix, caps.etag, caps.ancestry, caps.blob, caps.hi
     catch (error) { this.report('lookup', error); return undefined; }
   }
   private schedule() {
-    if (this.timer) return;
+    if (this.closed || this.timer) return;
     this.timer = setTimeout(() => { this.timer = null; void this.flush(); }, this.flushMs);
     this.timer.unref?.();
   }
@@ -186,10 +189,17 @@ ON CONFLICT (key) DO UPDATE SET kind=EXCLUDED.kind, etag=EXCLUDED.etag, value=EX
       return result.rowCount ?? 0;
     } catch (error) { this.report('prune', error); return 0; }
   }
-  /** Stop the timers and write what is queued. */
+  /** Stop the timers and write what is queued. A chunk that fails during shutdown is retried once before closing (GY-1052). */
   async close() {
-    this.closed = true;
-    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
-    await Promise.all([this.flush(), this.charges.close()]);
+    if (this.closed) return;
+    if (this.closing) return this.closing;
+    this.closing = (async () => {
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+      await Promise.all([this.flush(), this.charges.close()]);
+      if (this.pending.size) await this.flush();
+      this.closed = true;
+      if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    })();
+    return this.closing;
   }
 }

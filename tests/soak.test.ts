@@ -1378,7 +1378,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const shared = { cycles: 0, observations: 0, refReads: 0, protectionReads: 0, overRead: [] as string[], stale: [] as string[], failed: [] as string[] };
   const chargeInstallation = `soak-charges-${days}`, chargeOptions = { syncMs: 2 ** 31 - 1 };
   const replicaA = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-a' });
-  let replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-b-0' }), restarts = 0;
+  let replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-b-0' }), chargeRestarts = 0;
   const charged = { b: [] as number[], cycles: 0, peakRows: 0, instancesSeen: new Set<string>(), overBound: [] as string[], miscounted: [] as string[], boundaryCycles: 0 };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
@@ -1536,7 +1536,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         if (openPrs.length) { shared.cycles++; shared.observations += openPrs.length; }
         if (cycleSends.ref - sent.ref > 1) shared.overRead.push(`+${Math.round(elapsed / minute)} min ${cycleSends.ref - sent.ref} ref reads`);
         shared.refReads = cycleSends.ref; shared.protectionReads = cycleSends.protection;
-        if (elapsed > 0 && elapsed % (3 * hour) < minute) { await replicaB.close(); replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: `replica-b-${++restarts}` }); }
+        if (elapsed > 0 && elapsed % (3 * hour) < minute) { await replicaB.close(); replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: `replica-b-${++chargeRestarts}` }); }
         for (let index = 0; index < cycleSends.ref - sent.ref; index++) replicaA.charge(now, 'GET /git/ref/heads/:branch', 'git');
         for (let index = 0; index < cycleSends.protection - sent.protection; index++) replicaA.charge(now, 'GET /branches/:branch/protection', 'branches');
         for (const _pr of openPrs) { replicaB.charge(now, 'GET /pulls/:n', 'pulls'); charged.b.push(now); }
@@ -1731,7 +1731,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, followUpDay, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts },
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, followUpDay, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, staleMerges, restartLog };
 }
 

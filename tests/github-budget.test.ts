@@ -596,5 +596,18 @@ test('unit:github-immutable-cache — a batch whose write fails is queued once m
     await cache.flush(); await cache.flush();
     assert.equal(await cache.lookup('immutable', '/commits/def'), undefined, 'a second failure drops the entry');
     await cache.flush();
+
+    // close() retries a batch that fails during shutdown flush rather than dropping it (GY-1052)
+    failures = 1;
+    const closeScope = `close-retry-${randomUUID()}`;
+    const closingCache = new GitHubCacheStore({ query: async (text: string, values?: unknown[]) => {
+      if (text.startsWith('INSERT') && failures-- > 0) throw new Error('connection reset');
+      return db.pool.query(text, values);
+    } } as any, closeScope, { flushMs: 60_000 });
+    closingCache.put('immutable', '/commits/close-retry', { sha: 'close-retry' });
+    await closingCache.close();
+    const reopened = new GitHubCacheStore(db.pool, closeScope);
+    assert.deepEqual(await reopened.lookup('immutable', '/commits/close-retry'), { sha: 'close-retry' }, 'a chunk failing during shutdown gets its single retry before close returns');
+    await reopened.close();
   } finally { console.error = error; await cache.close(); }
 });
