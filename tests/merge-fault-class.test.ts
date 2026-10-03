@@ -215,5 +215,7 @@ for (const entry of gy1129Instances) {
     // Not weakened: the same conflict unhandled after two hours with no rework requested is a merge fault.
     assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), false, 'merge'), now).length, 1, 'a base conflict unhandled for two hours still counts as a merge fault');
     assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), false, 'build'), now).length, 1, 'returned to build with no rework decided for two hours, it still counts as a merge fault');
+    assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), true, 'merge'), now).length, 1, 'a base conflict with rework requested unhandled for two hours still counts as a merge fault');
+    assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), true, 'build'), now).length, 1, 'returned to build with rework requested but unhandled for two hours still counts as a merge fault');
   });
 }
