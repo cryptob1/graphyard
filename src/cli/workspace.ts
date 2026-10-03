@@ -311,9 +311,7 @@ export const workspaceCommands = defineCommands([
             settle: () => settleContainment(
               (requestId, body) => api(`work/${work.id}/settle`, body, requestId),
               { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
-            ),
-            // A fence this supervisor cannot lower is put on the item's record before it exits (GY-1155).
-            report: failure => api(`work/${work.id}/request`, containmentFailureNote(epoch, failure), randomUUID()),
+            ), report: failure => api(`work/${work.id}/request`, containmentFailureNote(epoch, failure), randomUUID()), // a fence it cannot lower goes on the record
           } : undefined,
         }));
     },
