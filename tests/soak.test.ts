@@ -2925,7 +2925,7 @@ test('unit:decisions-step-bounded — with 90 open items and hundreds of recorde
     heldBy: () => null,
     timings: new Timings(now),
     launcher: new Launcher(10),
-    launch: (_kind, _item, _key, _holds, body) => { void body([]); },
+    launch: (_kind, _item, _key, _holds, body) => { void body([]); return true; },
     detached: false,
     exhaustedProofs: async () => [],
   });
