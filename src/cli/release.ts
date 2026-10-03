@@ -1,12 +1,14 @@
 import { defineCommands } from './registry.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
-  apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
-  ledgerStatus, promote, readLedger, readServed, syncLedger, validateAndRecord, type CutTrigger, type Suite,
+  apiSuite, assessProductionServing, awaitServing, candidateReport, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
+  ledgerStatus, promote, readLedger, readServed, syncLedger, testProofSuite, validateAndRecord, type CutTrigger, type Git, type Ledger, type ReleaseCandidate, type Suite,
 } from '../release-candidate.js';
+import { candidateProofPlan } from '../model/release-train.js';
+import type { Work } from '../model.js';
 
-const switches = new Set(['no-push', 'api']);
-const subcommands = new Set(['cut', 'status', 'uat', 'validate', 'follow-up', 'promote', 'verify']);
+const switches = new Set(['no-push', 'api', 'no-proofs']);
+const subcommands = new Set(['cut', 'status', 'uat', 'validate', 'follow-up', 'promote', 'verify', 'proofs', 'settle']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -21,7 +23,18 @@ function flags(args: string[]) {
 }
 
 const workKey = (created: any) => String(created?.key ?? created?.work?.key ?? created?.id);
-const usage = 'Use release cut [--trigger schedule|manual] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... | release follow-up ID | release promote ID | release verify --url URL';
+const usage = 'Use release cut [--trigger schedule|manual] | release status | release uat ID | release proofs ID | release validate ID --url URL [--api] [--no-proofs] [--check PATH]... [--suite NAME=COMMAND]... | release follow-up ID | release promote ID | release settle ID|all | release verify --url URL';
+
+/**
+ * GY-1101: report one candidate's ledger state to the control plane, which moves every merged item
+ * the candidate contains along the release train (Done once a promoted candidate carries it). A
+ * failed report never undoes the ledger step; `release settle` sends it again.
+ */
+async function settle(api: (path: string, data?: unknown, requestId?: string) => Promise<any>, ledger: Ledger, candidate: ReleaseCandidate) {
+  try { return { settled: await api('release-candidates', candidateReport(ledger, candidate), `release-candidate-settle:${candidate.id}:${ledger.uat.some(r => r.id === candidate.id) ? 'uat' : 'cut'}:${ledger.production.some(r => r.id === candidate.id) ? 'promoted' : 'open'}`), settleError: null }; }
+  catch (error) { return { settled: null, settleError: error instanceof Error ? error.message : String(error) }; }
+}
+const reread = (git: Git, base: string) => { syncLedger(git, base); return readLedger(git); };
 
 /** Release candidates: cut from main, validated on UAT, the exact SHA promoted to production. */
 export const releaseCommands = defineCommands([
@@ -34,12 +47,15 @@ export const releaseCommands = defineCommands([
       '                                deliveries it carries; merges to main never pause',
       '  release status                Every candidate with its UAT verdict and production promotion',
       '  release uat ID|latest         Deploy the candidate to UAT: release/uat moves to its exact SHA',
-      '  release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
-      '                                Run the suites against UAT serving the candidate and record the',
-      '                                verdict; --api drives the deployed API with GRAPHYARD_UAT_TOKEN;',
-      '                                a failure files one follow-up item naming suite and SHA',
+      '  release proofs ID|latest      The integration:/e2e: proofs the candidate owes for its merged items',
+      '  release validate ID --url URL [--api] [--no-proofs] [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
+      '                                Run the suites and the owed proofs against the candidate and record',
+      '                                the verdict; --api drives the deployed API with GRAPHYARD_UAT_TOKEN;',
+      '                                a failure files one fix-forward item naming proofs, suites and range',
       '  release follow-up ID          File the follow-up of a failed candidate whose filing failed',
-      '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA',
+      '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA; its',
+      '                                merged items are Done',
+      '  release settle ID|latest|all  Report the ledger state again so merged items reach Done',
       '  release verify --url URL [--wait SECONDS]',
       '                                Check production serves a promoted candidate and name it',
     ],
@@ -64,7 +80,20 @@ export const releaseCommands = defineCommands([
       if (id === 'uat') return print(deployToUat(git, target, base));
       if (id === 'promote') {
         const result = promote(git, target, { base, push, now: new Date() });
-        print(result); if (!result.promoted) process.exitCode = 1; return;
+        if (!result.promoted) { print(result); process.exitCode = 1; return; }
+        const ledger = reread(git, base);
+        return print({ ...result, ...await settle(api, ledger, findCandidate(ledger, result.candidate)) });
+      }
+      if (id === 'proofs') {
+        const ledger = reread(git, base);
+        return print(candidateProofPlan(findCandidate(ledger, target), await api('work') as Work[]));
+      }
+      if (id === 'settle') {
+        const ledger = reread(git, base);
+        const candidates = target === 'all' ? [...ledger.candidates].reverse() : [findCandidate(ledger, target)];
+        const results = [];
+        for (const candidate of candidates) results.push({ candidate: candidate.id, ...await settle(api, ledger, candidate) });
+        print(results); if (results.some(entry => entry.settleError)) process.exitCode = 1; return;
       }
       const url = options.one('url');
       const waitMs = Number(options.one('wait') ?? 900) * 1000;
@@ -81,9 +110,15 @@ export const releaseCommands = defineCommands([
           if (!name || !command) throw new Error(`--suite takes NAME=COMMAND, got ${entry}`);
           suites.push(commandSuite(name, command));
         }
+        // GY-1101: the integration:/e2e: proofs the candidate's merged items owe run against its own checkout.
+        if (options.one('no-proofs') === undefined) {
+          const ledger = reread(git, base);
+          for (const entry of candidateProofPlan(findCandidate(ledger, target), await api('work') as Work[])) suites.push(testProofSuite(entry.proof, repositoryRoot()));
+        }
         const result = await validateAndRecord(git, target, url, suites, { base, push, timeoutMs: waitMs,
           file: async (item, requestId) => workKey(await api('work', item, requestId)) });
-        print(result); if (result.record.result !== 'passed') process.exitCode = 1; return;
+        const ledger = reread(git, base);
+        print({ ...result, ...await settle(api, ledger, findCandidate(ledger, result.record.id)) }); if (result.record.result !== 'passed') process.exitCode = 1; return;
       }
       if (id === 'follow-up') {
         syncLedger(git, base);

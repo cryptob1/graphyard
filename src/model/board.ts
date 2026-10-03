@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import { isClosed } from './closure.js';
-import { deliveryState } from './delivery.js';
+import { deliveryState } from './delivery.js'; import { pendingReleaseOf } from './release-train.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
 import { scopeRefusalBlocker, terminalScopeRefusal } from './scope.js';
 import { shortShas } from './format.js';
@@ -78,6 +78,7 @@ export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> 
     // Shipped whether or not a per-item deployment record exists; only an outstanding
     // post-deployment check, or production observed not serving it yet, keeps it at Deploy.
     // Work merged before delivery records existed has nothing left to wait on.
+    if (pendingReleaseOf(work)) return 'moving'; // merged, awaiting a promoted release candidate (GY-1101): never blocked or stalled
     if (!work.delivery || leftFlowAt(work, release)) return 'shipped';
     return deliveryState(work) === 'delivered-with-failure' || release.failed.has(work.key) ? 'blocked' : 'moving';
   }
