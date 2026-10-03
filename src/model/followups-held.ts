@@ -57,10 +57,11 @@ export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title
 
 /**
  * Review follow-ups triage notes for GY-1047 and its follow-ups GY-1136:
- * - GY-1047 findings 1, 9, 16, 18, 23, 25 / GY-1136 findings 1, 5: `followUpShipKey` incorporates the
- *   hold's timestamp (`at`) into the idempotency key, and the dispatcher (`shipHeldFollowUps` in
- *   src/reviewer.ts) sends it, so a hold reopened on an already-delivered parent asks under a fresh key
- *   instead of replaying the earlier filing's receipt.
+ * - GY-1047 findings 1, 9, 16, 18, 23, 25 / GY-1136 findings 1, 5: the ship route
+ *   (src/server/followups-ship.ts) answers under `followUpShipReceiptKey`, the caller's key scoped to
+ *   the hold's timestamp (`at`), so a hold reopened on an already-delivered parent is filed instead of
+ *   replaying the earlier filing's receipt under the dispatcher's fixed key. The unused client-side
+ *   `followUpShipKey` is removed: the server owns the scoping, so src/reviewer.ts needs no change.
  * - GY-1047 finding 2 / GY-1136 finding 8: declined. The unit tests' `deliver` writes the delivered
  *   document straight to Postgres, and `tests/soak.test.ts` also calls `shipHeldFollowUps` with a stub
  *   ship, so neither drives delivery through `engine.observe`. The follow-up path reads delivery only
@@ -75,13 +76,14 @@ export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title
  */
 
 /**
- * Idempotency key for filing held follow-ups after ship (GY-845, GY-1047; findings 1, 9, 16, 18, 23, 25).
- * Incorporates the hold's timestamp so a re-hold after an earlier filing generates a distinct key
- * and avoids replaying the cached receipt of the previous filing.
+ * The receipt a request to file a parent's held follow-ups is answered under (GY-845, GY-1047, GY-1136):
+ * the caller's idempotency key scoped to the hold's timestamp. A retry within one hold replays its
+ * receipt, while a hold reopened after an earlier filing is filed afresh, whatever fixed key the
+ * dispatcher sends (`followups-after-ship:GY-N`).
  */
-export function followUpShipKey(parent: Pick<Parent, 'key' | 'pendingFollowUps'>): string {
-  const at = parent.pendingFollowUps?.at ?? '';
-  return `followups-after-ship:${parent.key}${at ? `:${at}` : ''}`;
+export function followUpShipReceiptKey(key: string, parent: Pick<Parent, 'pendingFollowUps'>): string {
+  const at = parent.pendingFollowUps?.at;
+  return at ? `${key}@${at}` : key;
 }
 
 /** The ledger kind of the one-time fold of unshipped parents' follow-up items (GY-845); its presence makes a second run a no-op. */

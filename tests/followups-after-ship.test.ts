@@ -10,7 +10,7 @@ import { fileFollowUpThreads, followUpItem, type AppendFollowUpFindings, type Cr
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
 import { repeatedClientErrorLimit } from '../src/retry-stop.js';
 import { followUpEntries, followUpParent, openFollowUpItem, overdueTriage, type TriageJudgement } from '../src/model/machine-backlog.js';
-import { foldUnshippedFollowUps, followUpShipKey, pendingFollowUpsReport } from '../src/model/followups-held.js';
+import { foldUnshippedFollowUps, followUpShipReceiptKey, pendingFollowUpsReport } from '../src/model/followups-held.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { clearTriageRuns, triageSettled, triageStep, triageTool } from '../src/triage.js';
 import { researchSettings } from '../src/research.js';
@@ -143,21 +143,19 @@ test('unit:followups-wait-on-parent — an approval of an unshipped parent files
   assert.equal(pendingFollowUpsReport(await store.list()).some(entry => entry.parent === parent.key), false, 'no longer pending once filed');
   // The next pass files nothing more, and a retried ship is answered with the same item.
   assert.deepEqual(await shipHeldFollowUps(await store.list(), ship), []);
-  assert.equal((await ship(parent.key, followUpShipKey(await reload(parent.key)))).key, item!.key);
+  assert.equal((await ship(parent.key, `followups-after-ship:${parent.key}`)).key, item!.key);
   assert.equal((await followUpsOf(parent.key)).length, 1);
 
-  // GY-1136 (findings 1, 5): findings held again once that item is closed start a new hold, and the
-  // dispatcher asks under that hold's key, so they are filed as a new item, not answered with the old receipt.
+  // GY-1136 (findings 1, 5): findings held again once that item is closed start a new hold, answered
+  // under its own receipt, so the dispatcher's fixed key files them as a new item rather than replaying the first.
   await ok(operator, `work/${item!.key}/close`, { kind: 'obsolete', reason: 'Handled elsewhere' });
   await approve(await reload(parent.key), 103, ['src/c.ts — held after the first filing closed']);
-  const rehold = await reload(parent.key);
-  assert.deepEqual(rehold.pendingFollowUps?.findings.map(finding => finding.text), ['src/c.ts — held after the first filing closed']);
-  const keys: string[] = [];
-  const reshipped = await shipHeldFollowUps(await store.list(), async (target, key) => { keys.push(key); return ship(target, key); });
-  assert.deepEqual(keys, [followUpShipKey(rehold)]);
+  assert.deepEqual((await reload(parent.key)).pendingFollowUps?.findings.map(finding => finding.text), ['src/c.ts — held after the first filing closed']);
+  const reshipped = await shipHeldFollowUps(await store.list(), ship);
   const second = (await followUpsOf(parent.key)).filter(entry => !isClosed(entry));
   assert.equal(second.length, 1, reshipped.join('\n'));
   assert.notEqual(second[0]!.key, item!.key);
+  assert.match(reshipped.join('\n'), new RegExp(`as ${second[0]!.key}$`));
   assert.deepEqual(followUpEntries(second[0]!).map(finding => finding.text), ['src/c.ts — held after the first filing closed']);
 });
 
@@ -392,20 +390,15 @@ test('manual:review-followups-triaged GY-1047.2: foldUnshippedFollowUps resolves
   }
 });
 
-test('manual:review-followups-triaged GY-1047.3: followUpShipKey incorporates the hold timestamp to prevent receipt replay on re-held findings after ship (findings 1, 9, 16, 18, 23, 25)', () => {
-  const parentWithoutHold = { key: 'GY-500', pendingFollowUps: null };
-  assert.equal(followUpShipKey(parentWithoutHold), 'followups-after-ship:GY-500');
-
-  const t1 = '2026-10-02T10:00:00.000Z';
-  const parentWithFirstHold = { key: 'GY-500', pendingFollowUps: { at: t1, findings: [{ path: 'src/a.ts', text: 'finding 1' }] } };
-  assert.equal(followUpShipKey(parentWithFirstHold as any), `followups-after-ship:GY-500:${t1}`);
-
-  const t2 = '2026-10-02T14:30:00.000Z';
-  const parentWithSecondHold = { key: 'GY-500', pendingFollowUps: { at: t2, findings: [{ path: 'src/b.ts', text: 'finding 2' }] } };
-  assert.equal(followUpShipKey(parentWithSecondHold as any), `followups-after-ship:GY-500:${t2}`);
-
-  // The keys for the first and second holds differ, ensuring the second ship does not replay the first receipt
-  assert.notEqual(followUpShipKey(parentWithFirstHold as any), followUpShipKey(parentWithSecondHold as any));
+test('manual:review-followups-triaged GY-1047.3: the ship receipt is scoped to the hold timestamp so re-held findings after ship are not answered with the earlier receipt (GY-1047 findings 1, 9, 16, 18, 23, 25; GY-1136 findings 1, 5)', () => {
+  const key = 'followups-after-ship:GY-500';
+  assert.equal(followUpShipReceiptKey(key, { pendingFollowUps: null }), key);
+  const t1 = '2026-10-02T10:00:00.000Z', t2 = '2026-10-02T14:30:00.000Z';
+  const first = { pendingFollowUps: { at: t1, findings: [{ path: 'src/a.ts', text: 'finding 1' }] } } as any;
+  const second = { pendingFollowUps: { at: t2, findings: [{ path: 'src/b.ts', text: 'finding 2' }] } } as any;
+  assert.equal(followUpShipReceiptKey(key, first), `${key}@${t1}`);
+  assert.equal(followUpShipReceiptKey(key, first), followUpShipReceiptKey(key, { ...first }), 'a retry within one hold replays');
+  assert.notEqual(followUpShipReceiptKey(key, first), followUpShipReceiptKey(key, second));
 });
 
 test('manual:review-followups-triaged GY-1047.4: foldUnshippedFollowUps reports deferred leased items so callers can defer finalizing migration', () => {

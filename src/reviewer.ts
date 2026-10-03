@@ -15,7 +15,7 @@ import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { researchReviewSection } from './research.js';
 import { openFollowUpItem } from './model/machine-backlog.js';
-import { followUpShipKey, heldFollowUps, shippedFollowUpsOwed } from './model/followups-held.js';
+import { heldFollowUps, shippedFollowUpsOwed } from './model/followups-held.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
 
@@ -1251,7 +1251,7 @@ export async function shipHeldFollowUps(work: readonly Work[], ship: ShipFollowU
   for (const parent of owed) {
     const previous = runs[parent.key];
     if (previous?.stoppedAt) continue;
-    try { events.push(`filed the ${heldFollowUps(parent).length} follow-up finding(s) held on ${parent.key} until it shipped as ${(await ship(parent.key, followUpShipKey(parent))).key}`); delete runs[parent.key]; }
+    try { events.push(`filed the ${heldFollowUps(parent).length} follow-up finding(s) held on ${parent.key} until it shipped as ${(await ship(parent.key, `followups-after-ship:${parent.key}`)).key}`); delete runs[parent.key]; }
     catch (error) {
       const failure = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300), run = nextClientErrorRun(previous, failure);
       if (!run) { delete runs[parent.key]; events.push(`the follow-ups held on ${parent.key} could not be filed, and are retried next pass: ${failure}`); continue; }
