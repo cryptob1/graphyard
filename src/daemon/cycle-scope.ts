@@ -229,12 +229,14 @@ export async function scopeStep(cycle: Cycle) {
 
   // 2b. The promise that decision rests on: workers wait minutes, not a shift. A p90 above the
   //     budget, or any request left undecided past the blocked bound, is escalated with the
-  //     numbers — the loop is the only thing that could have answered them.
+  //     numbers — the loop is the only thing that could have answered them. A slow p90 is a scope
+  //     fault (`action:scope`): what is slow is the answer to requests for files, not one two-party
+  //     decision, and counted as `action:escalation` it filed under the decision class (GY-1084).
   const budget = scopeBudget(open.map(item => settled.get(item.id) ?? item), state.scope, clock, !!effects.decide && !!effects.approver);
   for (const breach of budget.breaches) {
     const key = `escalation:scope-budget:${breach.id}`;
     if (!detailChanged(state.actions[key], breach.detail)) continue;
-    performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: breach.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, breach.id === 'p90' ? 'action:scope' : undefined));
   }
   return { settled, budget };
 }

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
 import { GitHub, landingCheck, scopeLookupBudget, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
-import { Refusal, type Observation, type Work } from '../../src/model.js';
+import { Refusal, type Observation, type ScopeFile, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
 import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
@@ -169,6 +169,8 @@ export class SimulatedGitHub {
   restoreWrites: { key: string; write: 'reset' | 'merge'; refused: boolean; at: number }[] = [];
   /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
   botReviewers = new Set<string>();
+  /** GY-1084. Heads whose own diff also rewrites files outside the item's planned files, as GitHub's compare reports them. */
+  strays = new Map<string, ScopeFile[]>();
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
   landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
   private serial = 0;
@@ -528,7 +530,7 @@ export class SimulatedGitHub {
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
           mergeable: pr.open, conflicting: false, baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
-          protected: true, requiredChecks: [{ name: 'test', appId: options.ciAppId }, { name: 'typecheck', appId: options.ciAppId }, { name: protectionOnlyCheck, appId: null }, { name: statusContext, appId: null }], files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
+          protected: true, requiredChecks: [{ name: 'test', appId: options.ciAppId }, { name: 'typecheck', appId: options.ciAppId }, { name: protectionOnlyCheck, appId: null }, { name: statusContext, appId: null }], files: pr.files, scopeFiles: world.strays.get(pr.head) ?? [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
           // What the base changed since the bound base, which an optimistic merge (GY-500) needs disjoint from the head's files.
           ...(pr.open ? { baseChanges: world.baseChangesSince(pr.base) } : {}),
           // The failing published tip's docs counts (GY-574), from which its overflow is attributed.

@@ -9,6 +9,7 @@ import type { SettledReviewSession } from './model/dispatch.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from './auto-dispatch.js';
 import { agentRequestAttention } from './cli/loop-report.js';
 import { owedAttention, scopeRequestAttention } from './cli/owed-report.js';
+import { loopRequestsJudgment } from './daemon/decisions.js';
 import { executorFleet } from './cli/executor-report.js';
 import { stuckRequestReport } from './cli/stuck-requests.js';
 import { stalledItemAttention } from './cli/status-attention.js';
@@ -196,7 +197,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere.
   const stalled = stalledActionAttention(snapshot);
   // What waits on a judgment rather than on capacity, named once and counted apart (GY-104).
-  const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], scopeRequests);
+  const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], scopeRequests, (work, judgment) => loopRequestsJudgment(work, judgment, master));
   // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
   const budget = githubBudgetAttention(coordinator);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });

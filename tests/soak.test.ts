@@ -195,6 +195,8 @@ const blockedMergeItem = 6;
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
+/** GY-1084: the shipped file the stray item's first head rewrites outside its plan (a high-risk path, so its rework keeps its approver). */
+const strayPath = 'src/server/routes.ts';
 /** GY-845: the FOLLOW-UP findings one approval of item `n` names: one every approval repeats, one of its own. */
 const followUpFindings = (n: number, review: number) => [{ path: file(n), text: `${file(n)} — the finding every approval of item ${n} repeats` }, { path: file(n), text: `${file(n)} — the finding approval ${review} names` }];
 
@@ -454,7 +456,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean; stray?: number;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -835,6 +837,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       }
       const head = sha('head', session.key, session.epoch);
       if (numberOf(session) === plan.breaksMain && session.attempt === 1) github.breaking.add(head);
+      // GY-1084: the stray item's first head also rewrites a shipped file outside its plan, which
+      // the build gate refuses; only its worker can restore the file, in the round the loop asks.
+      if (numberOf(session) === options.stray && session.attempt === 1) github.strays.set(head, [
+        { path: file(numberOf(session)), status: 'added', sha: sha('blob', head), baseSha: null, additions: 12, deletions: 0, binary: false },
+        { path: strayPath, status: 'modified', sha: sha('blob', head, strayPath), baseSha: sha('content', strayPath, 'root'), additions: 2, deletions: 1, binary: false }]);
       const grown = docs?.grow(numberOf(session));
       const pr = github.push(session.key, session.branch, principal.id, head, grown ? [...files(numberOf(session)), grown.page] : files(numberOf(session)), grown);
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
@@ -908,6 +915,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // what its first request after the loss of the loop's own cursor already cited.
   const refused: { key: string; decision: string }[] = [];
   const decideCalls: { key: string; action: string; reason: string; input: unknown }[] = [];
+  let strayTimedOut = false;
+  const strayRows = new Set<string>(), strayFaults = new Set<string>();
   // GY-551: decisions a master requested and put to an approver by hand (`master approver`), whose
   // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
   // stops `done`, and one relaunch is refused by a registry timeout.
@@ -1065,10 +1074,17 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot, dispatch, requestProof, approver, merge, refuseMerge,
     closeSession: pane => { if (options.regression === 'approvers-left-open' && /approver/.test(herdr.agents.get(pane)?.name ?? '')) return; herdr.close(pane); },
-    decide: (work, action, reason, input = {}) => {
+    decide: async (work, action, reason, input = {}) => {
       const bound = decisionInput(action, work, input);
       decideCalls.push({ key: work.key, action, reason, input: bound });
-      return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: bound, reason });
+      const answer = await api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: bound, reason });
+      // GY-1084: the stray item's first rework request is recorded, but its answer times out
+      // (`AbortSignal.timeout`), as eleven requests did on 2026-10-01: the outcome is unknown.
+      if (numberOf(work) === options.stray && action === 'rework' && !strayTimedOut) {
+        strayTimedOut = true;
+        throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+      }
+      return answer;
     },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
@@ -1712,6 +1728,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
       for (const key of Object.keys(state.actions)) actionKeys.add(key);
+      // GY-1084: every state the stray item's decision rows passed through, and its decision faults, across restarts.
+      if (options.stray) {
+        const stray = items[options.stray - 1].key;
+        for (const [key, row] of Object.entries(state.actions)) if (row.kind === 'decision' && row.work === stray && key.startsWith('decision:rework:')) strayRows.add(`${key.split(':').slice(3, -1).join(':')} ${row.state}`);
+        for (const entry of state.faults.instances) if (entry.subject === stray && entry.faultClass === 'decision') strayFaults.add(`${entry.kind}: ${entry.text}`);
+      }
       blockerKeysPeak = Math.max(blockerKeysPeak, Object.keys(state.actions).filter(key => key.startsWith('blocker:')).length);
       // Only the day that holds a merge BLOCKED pays for the extra snapshot read each cycle.
       if (plan.blockedMerge) mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
@@ -1799,7 +1821,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
-    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
+    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, strayRows, strayFaults, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
     wakes, staleMerges, restartLog };
 }
 
@@ -2511,7 +2533,7 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
 // GY-475's citation day runs before the regression day: the days share one control plane, and
 // the regression day leaves items mid-flight on purpose, whose rework a later day's loop would
 // take up with the pull request of a simulated GitHub that day can no longer reach.
-test('unit:soak-invariants-hold — after a restart the first request for a refused rework decision already cites the refusal the binding names, and no request is refused', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — after a restart the first request for a refused rework decision already cites the refusal the binding names, and no request is refused; a head the build gate refuses for out-of-scope changes gets one rework round, its timed-out request read back rather than sent again', { timeout: 600_000 }, async () => {
   // GY-475: the approver refuses the rework decision items 3 and 7 call for; the loop settles the
   // watch, escalates the refusal and never re-requests it. A restart then loses the cursor while
   // both items still call for the same decision — same head, base and grounds binding. The ledger
@@ -2520,9 +2542,11 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   // refusal and is accepted on the first attempt, where a scan blind to the binding would send an
   // uncited request, take the 409 the server answers it with, and spend one of the three bounded
   // refusal answers per item.
-  const day = await simulateDay({ hours: 6, refuseReworkOf: [3, 7] });
+  // GY-1084: item 2 (fault-free on this day) also pushes a first head that rewrites a shipped file
+  // outside its plan, and the loop's rework request for it times out after the control plane recorded it.
+  const day = await simulateDay({ hours: 6, refuseReworkOf: [3, 7], stray: 2 });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { final, violations, observed, failures, lost, escalations, herdr, refused, decideCalls, restarted, state } = day;
+  const { final, violations, observed, failures, lost, escalations, herdr, refused, decideCalls, restarted, state, github, items, actionKeys, strayRows, strayFaults } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the refusals, the restart and the cited re-requests');
   assert.deepEqual(failures, [], 'no cycle failed');
@@ -2530,7 +2554,7 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
   assert.ok(restarted, 'the day included the scenario restart');
   assert.equal(refused.length, 2, 'both scenario refusals were judged');
-  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), basePlan.rework.size + 2, 'the refusals added no rework rounds beyond the main day\'s own (review, the reverted merge, and the spent producer request; the failed rerun is superseded by the out-of-queue merge)');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), basePlan.rework.size + 3, 'the refusals added no rework rounds beyond the main day\'s own (review, the reverted merge, and the spent producer request; the failed rerun is superseded by the out-of-queue merge) and the stray head\'s one');
   for (const { key, decision } of refused) {
     const item = final.find(entry => entry.key === key)!;
     const history = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(item.id)}/decisions`)).decisions as { id: string; action: string; state: string; input: any }[];
@@ -2551,6 +2575,23 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
     assert.ok(!Object.values(state.approvals).some(watch => watch.work === key), `${key}: no watch is left open on the item`);
   }
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
+  // GY-1084: the out-of-scope head. The loop asked its rework round once for that head — one
+  // decision bound to it, judged by an approver whose session closed when it settled — and the
+  // timed-out request was read back and adopted, never sent a second time nor recorded failed.
+  const strayItem = final.find(item => item.key === items[1].key)!;
+  const [strayHead, ...otherStrays] = [...github.strays.keys()];
+  assert.ok(strayHead && !otherStrays.length, 'one head strayed outside its plan');
+  assert.equal(strayItem.stage, 'done', 'the stray item was delivered');
+  assert.notEqual(strayItem.candidate!.sha, strayHead, 'what landed is the rework round\'s head, not the stray one');
+  assert.equal(strayItem.pipeline?.reworkRounds, 1, 'the stray head cost exactly one rework round');
+  const strayDecisions = ((await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(strayItem.id)}/decisions`)).decisions as { action: string; state: string; input: any }[]).filter(entry => entry.action === 'rework');
+  assert.deepEqual(strayDecisions.map(entry => [entry.input?.binding, entry.state]), [[`${strayHead}:outside-scope`, 'applied']], 'one rework decision, bound to the stray head, applied');
+  assert.equal(decideCalls.filter(call => call.key === strayItem.key && call.action === 'rework').length, 1, 'the timed-out request was read back, not sent again');
+  const strayKeys = [...actionKeys].filter(key => key.startsWith(`decision:rework:${strayItem.id}:`));
+  assert.deepEqual(strayKeys.map(key => key.split(':').slice(3, -1).join(':')), [`${strayHead}:outside-scope`], 'one decision action, for the stray head');
+  assert.deepEqual([...strayRows].sort(), [`${strayHead}:outside-scope done`, `${strayHead}:outside-scope waiting`], 'the timed-out request waited, then was adopted: never recorded failed');
+  assert.deepEqual([...strayFaults], [], 'the stray item recorded no decision fault all day');
+  assert.ok(![...herdr.agents.values()].some(agent => (agent.name ?? '').startsWith(`graphyard-approver-${strayItem.key.toLowerCase()}-`)), 'no approver session for the stray rework is left open');
 });
 
 test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 600_000 }, async () => {
