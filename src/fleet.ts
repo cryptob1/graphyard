@@ -184,7 +184,7 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
   if (kind) {
     const planInfo = deriveAccountPlan(account, [account]);
-    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: account.plan ?? planInfo.planId, keyFile: account.credential.key?.file } as any, probe);
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, keyFile: account.credential.key?.file } as any, probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
     return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
       resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null } };
