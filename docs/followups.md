@@ -1,10 +1,11 @@
-<!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item, retrieved, promoted on demand. -->
+<!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item until it ships, retrieved, promoted on demand. -->
 # Review follow-ups
 
 The independent reviewer's approval may name findings beyond an item's acceptance criteria and
-judge each FOLLOW-UP. Graphyard records them against the approved item itself — never as a work
-item, neither one per review nor one per item — and an operator promotes a finding to a work item
-only on demand.
+judge each FOLLOW-UP. Graphyard records them against the approved item itself and holds them there
+until it ships — no work item per review, and none for an item that may still change. Once the
+item ships, the findings still standing become its one follow-up item; an operator may promote a
+finding to a work item of its own sooner.
 
 ## Recorded on the item and the pull request
 
@@ -16,11 +17,27 @@ pull request and head):
   deduplicated by file path and finding text. A retried filing records nothing twice.
 - On the pull request, each follow-up thread gets a reply naming the item and is resolved; a
   finding with no thread is already on the approval's own `Follow-up finding:` line.
-- Nothing is filed: the backlog gains no item, and no ready-stage item carries no implementation.
+- Nothing is filed while the item has not shipped: the findings are held on it
+  (`pendingFollowUps`), listed on its page and under `pendingFollowUps` in `graphyard master status`.
+- A parent never has more than one open follow-up item, in any stage: while it has one open
+  (backlog, released, in build or beyond), a later approval's findings are appended to that item,
+  deduplicated, instead.
 
-Follow-up items filed before this (`Follow-ups from the approved review of GY-N (PR #M)`) still
-take a later approval's findings while open, and are triaged as before
-([machine-filed backlog](master-agent.md#machine-filed-backlog)).
+## Filed once the item ships
+
+The item ships when it is delivered and, if it was merged optimistically, once main's required
+suite passes on the merge (until then a failing suite reverts it). The loop then files the held
+findings not promoted as one follow-up item, `Follow-ups from the approved review of GY-N (PR #M)`,
+depending on nothing (`POST /api/work/GY-N/followups` with `{"ship":true}`), once: a retried filing
+answers the same item, and a filing refused with one unchanged client error stops after 10
+attempts. The item lands in the backlog, where triage judges it
+([machine-filed backlog](master-agent.md#machine-filed-backlog)); triage never judges a follow-up
+item whose parent has not shipped.
+
+An item closed without shipping drops the findings it holds, recording why on its record and in
+its `work.closed` event; a later approval of it files nothing. A one-time migration folded each open
+follow-up item filed before this whose parent had not shipped back onto that parent, closing it as
+superseded by the parent; nothing was deleted.
 
 ## Retrieving a batch
 
@@ -44,7 +61,8 @@ code, or declined with a recorded reason — which a producer session may hold o
 
 A finding is promoted once: promotions of one finding are serialized, the batch marks it with
 the item it became, and repeating the command answers that item (`"duplicate": true`). The batch
-keeps every finding; the rest wait until an operator promotes them.
+keeps every finding. A promoted finding no longer waits on the item: the follow-up item filed when
+it ships carries only the findings not promoted.
 
 ## Past the review-round cap
 
