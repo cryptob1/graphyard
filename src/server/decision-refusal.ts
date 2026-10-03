@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema, type DecisionSituation } from '../model/approval.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { save } from '../store.js';
 import { authenticated, digest, findWork, readDecisions, receipt, record } from './decisions.js';
@@ -45,12 +45,25 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
  * (GY-973 for 14 hours, GY-1005 for hours on 2026-10-01; approval→merge p90 reached 59 h). The
  * refusal is lifted in the same transaction, for exactly the candidate it named, so the entry
  * re-enters the queue on the loop's next cycle and the guarded merge re-checks every gate.
+ *
+ * The approver judged the request, not whatever hold the item carries when the refusal arrives:
+ * the decision's recorded `situation` (GY-229) must name the refusal's head and base, so refusing
+ * a rework requested for head H on base B1 never clears a later refusal of H on base B2 — both
+ * share the binding `H:merge-refused`. A decision recorded without a situation names no base and
+ * lifts nothing. A refusal under an older policy revision already holds nothing
+ * (`standingMergeRefusal`), so it is not "lifted" either (GY-1073).
  */
-export const refusedReworkLiftsMergeRefusal = (work: Pick<Work, 'mergeRefusal' | 'candidate'>, decision: { action: string }) => {
-  const refusal = work.mergeRefusal, candidate = work.candidate;
-  return decision.action === 'rework' && refusal?.action === 'rework' && !!candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha;
+type JudgedRework = { action: string; input?: { binding?: string } | undefined; situation?: DecisionSituation | null };
+export const refusedReworkLiftsMergeRefusal = (work: Pick<Work, 'mergeRefusal' | 'candidate' | 'policyRevision'>, decision: JudgedRework) => {
+  const refusal = work.mergeRefusal, candidate = work.candidate, judged = decision.situation;
+  // Only the rework requested on the merge-refusal ground judges it: a rework of the same head on
+  // another ground (a failed check, a thread — each its own binding, GY-407) says nothing of it.
+  return decision.action === 'rework' && refusal?.action === 'rework' && !!candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha
+    && refusal.policyRevision === work.policyRevision
+    && decision.input?.binding === `${refusal.sha}:merge-refused`
+    && !!judged && judged.sha === refusal.sha && judged.baseSha === refusal.baseSha;
 };
-async function liftRefusedReworkMergeRefusal(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string }, actor: Principal, reason: string, now: Date) {
+async function liftRefusedReworkMergeRefusal(db: Parameters<typeof save>[0], work: Work, decision: JudgedRework & { id: string }, actor: Principal, reason: string, now: Date) {
   if (!refusedReworkLiftsMergeRefusal(work, decision)) return;
   const refusal = work.mergeRefusal!;
   work.mergeRefusal = null;

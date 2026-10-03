@@ -15,8 +15,9 @@ import { GitHub, processJob } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
 import { createHash } from 'node:crypto';
 import { Refusal, isClosed, type Principal, type Work } from '../src/model.js';
-import { approverSessionName, assessContainment, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { readControlPlaneClock } from '../src/master/containment.js';
+import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus } from '../src/master/dispatch.js';
+import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
 import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
@@ -44,6 +45,7 @@ import { fleet, requested } from './helpers/review-fleet.js';
 import { reclaimResources, readReclaimReports, settleTmpReclaim } from '../src/master-resources.js';
 import { heldOpenPaths, reclaimTmpDirectories, writeTempOwner, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, type TmpReclaimReport } from '../src/tmp-reclaim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { expandTypedCommand } from './helpers/launch-shell.js';
 import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
@@ -202,6 +204,101 @@ const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
 /** GY-845: the FOLLOW-UP findings one approval of item `n` names: one every approval repeats, one of its own. */
 const followUpFindings = (n: number, review: number) => [{ path: file(n), text: `${file(n)} — the finding every approval of item ${n} repeats` }, { path: file(n), text: `${file(n)} — the finding approval ${review} names` }];
 
+// ---------------------------------------------------------------------------
+// The failover day (GY-417): the dispatch path is the real `dispatchWork` on a real master root,
+// with one launch profile whose preferred account's OpenCode runtime never comes up. Everything the
+// launcher reads outside Herdr is real — the credential homes, the account ledger beside the
+// coordinator's credential file, the launch records — and Herdr is this world.
+// ---------------------------------------------------------------------------
+
+/** What one real dispatch recorded, sampled the way master status reads it between cycles. */
+interface LaunchSample { key: string; failures: Awaited<ReturnType<typeof readAccountStartFailures>>; attention: Awaited<ReturnType<typeof workerLaunchStatus>> }
+type Dispatched = Awaited<ReturnType<typeof dispatchWork>>;
+/** The failover day's inputs and outputs, threaded through `simulateDay` and back to the test. */
+interface Failover { root: string; master: MasterConfig; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[] }
+
+/**
+ * The Herdr side of the failover day: the panes the real `dispatchWork` creates live in the same
+ * SimulatedHerdr the loop reads. An account whose runtime is in `broken` draws the echoed launch
+ * command for ever — the runtime never comes up, and the launcher closes its pane at the start
+ * bound; any other account's runtime reports ready at once. `healthyEverywhere` ends the broken
+ * run, so a later launch starts on the preferred account and clears its failure count.
+ */
+class FailoverWorld {
+  /** The runtime kind of every `pane run`, in order: the launches the world actually served. */
+  kinds: string[] = [];
+  /** Panes of runtimes in the broken set that the launcher closed at the start bound. */
+  closedBrokenPanes = 0;
+  launched = 0;
+  readonly herdr = new SimulatedHerdr(() => clock.now());
+  private readonly typed = new Map<string, string>();
+  private readonly kindsByPane = new Map<string, string>();
+  private panes = 0;
+  /** The launcher's own start clock: its waits at the start bound pass here, not on the day's. */
+  now = clock.now();
+  constructor(private broken: Set<string>) {}
+  healthyEverywhere() { this.broken.clear(); }
+  wait = (ms: number) => { this.now += ms; };
+  bounds() { return { clock: () => this.now, wait: this.wait }; }
+  run = (command: string, args: string[]): string => {
+    if (command !== 'herdr') throw new Error(`Unexpected command ${command}`);
+    const json = (result: unknown) => JSON.stringify({ result });
+    const kind = (pane: string) => this.kindsByPane.get(pane);
+    const healthy = (pane: string) => { const runtime = kind(pane); return !!runtime && !this.broken.has(runtime); };
+    if (args[0] === 'tab' && args[1] === 'create') {
+      const pane = this.herdr.open(`pending-${++this.panes}`, 'unknown');
+      this.herdr.agents.get(pane)!.agent = null;
+      return json({ root_pane: { pane_id: pane, tab_id: `wS:t${this.panes}` } });
+    }
+    if (args[0] === 'pane' && args[1] === 'run') {
+      const runtime = expandTypedCommand(args[3]).kind;
+      this.kindsByPane.set(args[2], runtime); this.typed.set(args[2], args[3]); this.kinds.push(runtime);
+      return '';
+    }
+    if (args[0] === 'pane' && args[1] === 'read') return healthy(args[2]) ? `${kind(args[2])} ready\n` : `vish@host ~/code/project ❯ ${this.typed.get(args[2]) ?? ''}\n`;
+    if (args[0] === 'pane' && args[1] === 'list') return json({ panes: this.herdr.paneList() });
+    if (args[0] === 'pane' && args[1] === 'close') {
+      if (kind(args[2]) && this.broken.has(kind(args[2])!)) this.closedBrokenPanes += 1;
+      this.herdr.close(args[2]);
+      return json({});
+    }
+    if (args[0] === 'agent' && args[1] === 'get') {
+      if (!healthy(args[2])) return JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
+      // A runtime that came up is what Herdr now lists in the pane, as the loop reads it.
+      const agent = this.herdr.agents.get(args[2]);
+      if (agent) { agent.agent = kind(args[2])!; agent.agent_status = 'idle'; }
+      return json({ agent: { pane_id: args[2], agent: kind(args[2]), agent_status: 'idle' } });
+    }
+    if (args[0] === 'agent' && args[1] === 'rename') { const agent = this.herdr.agents.get(args[2]); if (agent) agent.name = args[3]; return json({ agent }); }
+    if (args[0] === 'agent' && args[1] === 'list') return json({ agents: this.herdr.list() });
+    return json({});
+  };
+}
+
+/** The failover day's coordinator: a real master root with an OpenCode and a Claude account logged in, and one launch profile naming them in that order. */
+async function failoverInstalled() {
+  const root = await temporaryDirectory('soak-master'), credentials = await temporaryDirectory('soak-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
+  const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository, baseBranch: 'main', githubAppId: 1234 }));
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wS' }, coordinatorStatus as typeof fetch);
+  const homes = await temporaryDirectory('soak-homes');
+  const opencodeHome = join(homes, 'opencode-a');
+  await mkdir(join(opencodeHome, 'opencode'), { recursive: true });
+  await writeFile(join(opencodeHome, 'opencode/auth.json'), JSON.stringify({ 'zai-coding-plan': { type: 'api', key: 'k' } }), { mode: 0o600 });
+  const claudeHome = join(homes, 'claude-b');
+  await mkdir(claudeHome, { recursive: true });
+  await writeFile(join(claudeHome, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'claude-b-token', refreshToken: 'r', expiresAt: Date.now() + 5 * 3_600_000, subscriptionType: 'max' } }), { mode: 0o600 });
+  const credentialFile = join(credentials, 'worker.token');
+  await writeFile(credentialFile, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const profile: WorkerProfile = { name: 'soak-failover', principal: 'worker-one', agentName: 'soak-worker-failover', mode: 'launch', kind: 'opencode', credentialFile, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a', 'claude-b'] };
+  const base = await loadMasterConfig(root);
+  // The day's loop configuration, on the coordinator's real credential and Herdr workspace, with the one launch profile.
+  await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...soakConfig, url: base.url, credentialFile: base.credentialFile, herdrWorkspace: base.herdrWorkspace,
+    environments: [{ name: 'opencode-a', kind: 'opencode', home: opencodeHome }, { name: 'claude-b', kind: 'claude', home: claudeHome }], workers: [profile] });
+  return { root, master: await loadMasterConfig(root), profile };
+}
+
 /**
  * The diagnostician's answer, derived the way a read-only session would from the evidence the
  * prompt carries: the cause is the held integration job standing for the class, and the answer is
@@ -336,12 +433,15 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean }) {
+async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+  /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
+  failover?: Failover }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
   const plan = { ...basePlan, ...options.plan };
-  const config: MasterConfig = options.queued
+  const failover = options.failover;
+  const config: MasterConfig = failover ? failover.master : options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
     : soakConfig;
@@ -368,7 +468,7 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
   };
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days, ...(docs ? { docs: { budget: docs.budget, pages: docs.pages } } : {}) },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
-  const herdr = new SimulatedHerdr(() => clock.now());
+  const herdr = failover ? failover.world.herdr : new SimulatedHerdr(() => clock.now());
   // GY-453: approvers as headless Pi runs in the real run registry on disk, the loop restarting
   // (detaching every run) after every other cycle a run is live, and adopting them on the next.
   const headless = options.headless ? { pi: new SimulatedPi(), root: await temporaryDirectory('soak-runs'), applied: [] as string[], submitted: [] as string[],
@@ -554,7 +654,38 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
   };
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
-  const dispatch: DaemonEffects['dispatch'] = async (work, profile) => {
+  const dispatch: DaemonEffects['dispatch'] = failover ? async (work, profile, free, snapshot) => {
+    // An earlier day's item still open in the shared store goes the simulated way: the day's own
+    // five are what the real launch path and its ledger are judged on.
+    if (!items.some(item => item.id === work.id)) return simulatedDispatch(work, profile, free, snapshot);
+    // The real dispatch path (GY-417): the launcher claims through the engine, launches through
+    // the world's Herdr, and falls forward to the profile's next account when the preferred
+    // account's runtime never comes up. The day's fourth dispatch finds the account healthy, so
+    // the same account starts and clears its run of failures.
+    const principal = principalOf(profile), world = failover.world;
+    world.launched += 1;
+    if (world.launched === 4) world.healthyEverywhere();
+    let epoch = 0, branch = '';
+    const result = await dispatchWork(failover.root, work, profile, free, world.run, snapshot.work,
+      async () => {
+        const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
+        epoch = claimed.epoch; branch = `graphyard/${work.key.toLowerCase()}-${epoch}`;
+        const path = await temporaryDirectory('soak-launch');
+        await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
+        return { epoch, path, base: github.tip };
+      },
+      async (_root, _key, claimedEpoch) => { await engine.execute(principal, 'release', work.id, { epoch: claimedEpoch }, id()); },
+      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true });
+    failover.dispatches.push(result);
+    failover.samples.push({ key: work.key, failures: await readAccountStartFailures(failover.master), attention: await workerLaunchStatus(failover.root, failover.master) });
+    // The launched session works its request in the pane the launcher created and submits like
+    // any session of the day; the world's tick renews its lease and pushes its head.
+    const attempt = (attempts.get(work.key) ?? 0) + 1; attempts.set(work.key, attempt);
+    sessions.push({ work: work.id, key: work.key, branch, profile, epoch, attempt, pane: result.pane!, pushAt: clock.now() + plan.workMs, diesAt: null, exitsAt: null, dispatchAt: clock.now(), state: 'working', syncs: 0,
+      scopeAt: null, misreadAt: null, misread: false, credentialAt: null });
+    return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
+  } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
+  async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
@@ -596,7 +727,7 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
       await engine.execute(principal, 'scope', work.id, { epoch, paths: ask.slice(at, at + 50), reason: `Item ${n}: the ${ask.length === 1 ? 'file' : 'files'} this change touches` }, id());
     // The pane is the session's own coordinate: the loop records it on the implementation handle.
     return { key, epoch, pane, agentName: profile.agentName };
-  };
+  }
   const lowerFence = async (session: Session) => {
     if (session.settlementToken) await engine.execute(principalOf(session.profile), 'settle', session.work, { epoch: session.epoch, settlementToken: session.settlementToken }, id());
   };
@@ -846,8 +977,8 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
   // only its own items: an earlier day's half-finished item (a rework decision nobody adopted)
   // would otherwise be dispatched, pushed and refused here for its linked pull request. The
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
-  // for every earlier day's delivered work.
-  const ownItems = options.reassigned || options.headless || options.credentialBlocked || options.containment ? new Set(items.map(item => item.id)) : null;
+  // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well.
+  const ownItems = options.reassigned || options.headless || options.credentialBlocked || options.containment || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -1545,7 +1676,7 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, followUpDay, lanesSeen, laneApplications, approverWorks, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size } };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, followUpDay, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size } };
 }
 
 /**
@@ -2368,6 +2499,64 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
+  // GY-417: account failover and the failure ledger repeat per dispatch, so the real loop runs a
+  // day whose every dispatch goes through `dispatchWork` on a master root whose OpenCode account's
+  // runtime never comes up: each launch falls forward to the Claude account, is recorded, and is
+  // bounded — the failed pane is closed at the start bound and the claim is released. The fourth
+  // dispatch finds the account healthy: it starts, and the ledger and its attention item clear.
+  const { root, master, profile } = await failoverInstalled();
+  const world = new FailoverWorld(new Set(['opencode']));
+  const { final, violations, failures, lost, reportedDispatches, sessions, failover } = await simulateDay({
+    hours: 3, failover: { root, master, world, dispatches: [], samples: [] },
+    plan: { items: 5, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 5, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 5 } },
+  });
+  assert.ok(failover, 'the day ran the failover scenario');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all five items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the real launches');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
+  assert.equal(world.launched, 5, 'every item of the day was dispatched through the real path');
+  assert.deepEqual(world.kinds, ['opencode', 'claude', 'opencode', 'claude', 'opencode', 'claude', 'opencode', 'opencode'],
+    `three launches fell forward to the second account, the last two started on the preferred one: ${world.kinds.join(', ')}`);
+  assert.equal(world.closedBrokenPanes, 3, 'each runtime that never started had its pane closed at the start bound');
+  assert.equal(failover.dispatches.length, 5);
+
+  // Every fallback dispatch named the account that failed and the one that took the launch.
+  for (const [index, dispatched] of failover.dispatches.entries()) {
+    if (index < 3) {
+      assert.ok(dispatched.fallback!.note.startsWith('opencode-a failed to start: ') && dispatched.fallback!.note.endsWith('; launched on claude-b'), dispatched.fallback!.note);
+      assert.equal(dispatched.account!.environment, 'claude-b');
+    } else {
+      assert.equal(dispatched.fallback, null, 'a dispatch whose preferred account starts records no fallback');
+      assert.equal(dispatched.account!.environment, 'opencode-a');
+    }
+  }
+
+  // The ledger grew one failure per launch across items, raised exactly one attention item at
+  // three in a row — three items, still one item, never more — and cleared on the healthy start.
+  const counts = failover.samples.map(sample => sample.failures['opencode-a']?.failures ?? 0);
+  assert.deepEqual(counts, [1, 2, 3, 0, 0], `one consecutive failure per launch across items: ${counts.join(', ')}`);
+  const raised = failover.samples.map(sample => sample.attention.items.length);
+  assert.deepEqual(raised, [0, 0, 1, 0, 0], `one attention item, exactly at three consecutive failures: ${raised.join(', ')}`);
+  assert.equal(new Set(failover.samples.map(sample => sample.key)).size, 5, 'the failing launches ran on different items');
+  const attention = failover.samples[2].attention.items[0];
+  assert.equal(attention.subject, 'opencode-a never starts');
+  assert.ok(attention.text.includes('failed to start 3 launches in a row'), attention.text);
+  assert.ok(attention.text.includes('opencode-a (runtime opencode)'), attention.text);
+  const row = failover.samples[2].attention.rows[profile.name];
+  assert.ok(row.fallback!.startsWith('opencode-a failed to start: ') && row.fallback!.endsWith('; launched on claude-b'), row.fallback!);
+  assert.equal(failover.samples[3].attention.rows[profile.name].fallback, null, 'the healthy start turned the row\'s fallback off');
+
+  // The last dispatch record and the ledger agree: the account started, nothing is held against it.
+  const record = (await readProfileLaunchRecords(root, [profile]))[profile.name];
+  assert.equal(record.account, 'opencode-a');
+  assert.equal(record.runtime, 'opencode');
+  assert.deepEqual(record.failedAccounts, []);
+  assert.deepEqual(await readAccountStartFailures(master), {}, 'the healthy start cleared the account\'s run of failures');
 });
 
 test('unit:soak-invariants-hold — review follow-ups across a day: approvals of unshipped parents (re-approvals during rework included) are held on them, each delivered parent gets exactly one follow-up item, a parent closed unshipped drops its findings, a refused ship stops at the bound, and every invariant holds', { timeout: 300_000 }, async () => {
