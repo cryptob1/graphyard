@@ -11,6 +11,7 @@ import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
 import { masterSessionStep } from './cycle-master.js';
 import { scopeStep, successorStep } from './cycle-scope.js';
+import { blockerStep } from './cycle-blockers.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
@@ -203,6 +204,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
   // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
   await timings.step('successors', () => successorStep(cycle));
+  // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
+  await timings.step('blockers', () => blockerStep(cycle));
   spent('decisions');
 
   const assessments = await timings.step('reclaim', () => reclaimStep(cycle));
