@@ -1,19 +1,19 @@
 <!-- page: Agent protocol | 1 | every work mutation. -->
 # Work commands
 
-Every endpoint except `/healthz` requires `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)). Every mutation requires an `Idempotency-Key`, reused only to retry the identical request (replaying the original result). Errors are `{ "error": "reason" }`; a `409` is a coordination refusal: read it, don't retry blindly.
+All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; read a `409` refusal, never blindly retry.
 
-Create with `POST /api/work` ([example](../../examples/work.json)): `title` and `criteria` are required; `dependencies`, `exclusiveResources`, `plannedFiles` and `producerProofs` (`manual:` proofs a producer may run) optional. Other commands are `POST /api/work/KEY/COMMAND`:
+`POST /api/work` ([example](../../examples/work.json)) requires `title`, `criteria`; optional `dependencies`, `exclusiveResources`, `plannedFiles`, `producerProofs` (producer-runnable `manual:` proofs). Others: `POST /api/work/KEY/COMMAND`:
 
-- `requirements`: the whole document with `expectedPolicyRevision` and `reason`; `admin`, or additively an operator agent.
-- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`). `graphyard master unblock` rereads and retries a stale-revision refusal, at most three writes, while the same blocker stands; a cleared or changed blocker is reported instead.
-- `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; a human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` for an explained `lease-loss`.
-- `rework`, `recover`: `{"reason":…, "previousWorkerStopped":true}`; `admin` (`recover` for a delivered quarantine).
-- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}` (`release` may carry `"cause"`, kept on its event: a watch supervisor whose session is gone releases this way, leaving no blocker); `blocked` `{"epoch":1,"reason":…,"partialWork":…}`: a reason ends the attempt and releases the lease; null clears while leased.
-- `blocker-probe` `{blocker,class,probe,result,detail,nextAt}`: coordinator; a `pass` clears a routine blocker ([classes](leases.md#blocked-work-unblocks-itself)).
-- `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.
-- `submit`: `{"epoch":1,"pr":123}`, refused (`409`) when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
-- `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator or admin, delivered work, once.
-- `followups` `{findings,reason}` (master): on the approved item (`parent:true` optional), appends to its open follow-up item in any stage, else records the findings on its own record, held until it ships; on an open legacy follow-up item appends (`409` once closed); `{ship:true,reason}` files a delivered item's held findings as one item; `GET /api/work/KEY/followups` and `GET /api/followups?pr=N` read batches; `promote` `{index}` (operator) files one finding as an item, once ([follow-ups](../followups.md)); `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
-- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) under the caller; `POST /api/retro/ID/approve|refuse` `{reason}`: an AI admin or operator agent holding `decision:approve`, never a human session, the drafter or an identity that recorded the instances (`403`; `409` once judged). `submit` is also refused while the candidate fails an applied retro check.
+- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents: additively).
+- `ready`, `unblock`: `{"reason"}` (operator agents add `expectedRevision`); `master unblock` retries stale-revision refusals (three writes) while the blocker stands.
+- `resolve`: `{"trigger","expectedRevision","reason"}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
+- `rework`, `recover` (delivered quarantine): `admin`, `{"reason","previousWorkerStopped":true}`.
+- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}` (optional `"cause"`); `blocked` `{"epoch":1,"reason","partialWork"}`: a reason ends the attempt and releases the lease; null clears while leased; `workspace` `{"epoch":1,"host","path","branch":"graphyard/gy-1-1"}`.
+- `blocker-probe` (coordinator): a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself).
+- `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
+- `deployment`: `{"sha","mergeSha","source":"endpoint","observedAt"}`; coordinator/admin, once, delivered work.
+- `followups` `{findings,reason}` (master): holds an approved item's findings until it ships (`parent:true` appends to its open follow-up item; `409` once closed); `{ship:true,reason}` files them as one item. `promote` `{index}` (operator): finding → item, once ([follow-ups](../followups.md)); `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).
+- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis); `POST /api/retro/ID/approve|refuse` `{reason}`: an AI holder of `decision:approve`, never a human, drafter or recorder (`403`; `409` once judged).
+
 No endpoint sets lifecycle state.

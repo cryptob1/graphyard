@@ -3,13 +3,13 @@
 
 ## Where a new feature goes
 
-- A CLI command: a `src/cli/` module (`defineCommands`); help is generated.
-- An HTTP route: a `src/server/routes/` module (`defineRoutes`).
-- A schema or gate rule: its module under `src/model/`; commands via `src/engine.ts`, GitHub I/O `src/github.ts`.
-- A table: a `defineTable` under `src/store/tables/` (migrations and backups derive).
-- A dashboard view: a `web/pages/` page listed in `web/pages/index.tsx`.
-- A protocol topic: a `docs/protocol/` page starting `<!-- page: Agent protocol | N | summary -->`.
-- Managed `AGENTS.md` text: the template in `src/repository-setup.ts` or `src/master.ts`; re-render `AGENTS.md`.
+- CLI command: `src/cli/` module (`defineCommands`), generated help.
+- HTTP route: `src/server/routes/` module (`defineRoutes`).
+- Schema or gate rule: `src/model/`; commands via `src/engine.ts`, GitHub I/O `src/github.ts`.
+- Table: `defineTable` in `src/store/tables/` (migrations, backups derive).
+- Dashboard view: `web/pages/` page listed in `index.tsx`.
+- Protocol topic: `docs/protocol/` page starting `<!-- page: Agent protocol | N | summary -->`.
+- Managed `AGENTS.md` text: `src/repository-setup.ts` or `src/master.ts` templates.
 
 `tests/hotspots.test.ts` holds each assembler to a size budget.
 
@@ -19,9 +19,9 @@
 npm ci && npm run build && npm test
 ```
 
-`npm test` hides `GRAPHYARD_*`/`HERDR_*` variables and reserves free Postgres ports. Worktree installs need [bubblewrap](install.md#preconditions).
+`npm test` hides `GRAPHYARD_*`/`HERDR_*`, reserving free Postgres ports. Worktree installs need [bubblewrap](install.md#preconditions).
 
-Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their ownership refusal, noted; `tests/helpers/unprivileged-stat.mjs` simulates this.
+Attestor tests expect an ownership refusal where a sandbox stats `/tmp` and `/home` as uid 65534 (`tests/helpers/unprivileged-stat.mjs`).
 
 ## CI
 
@@ -29,8 +29,8 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 ## Documentation
 
-`docs/README.md` and `docs/protocol.md` are generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; `GRAPHYARD_GENERATED_FILES` ([value](coordination.md#generated-files-never-conflict)) exempts them from the regression guard. README.md and `docs/` stay within the `wordBudget` in `graphyard.json` (12,000 words, no page over 1,200), each topic on one page (`tests/docs-budget.test.ts`): link, never restate. A total over the budget never fails CI: the test warns, and `master status` reports the total and the largest pages; a page over its per-page cap still fails. At 97% of the budget, `master status` raises `docs`; the loop files one 5%-headroom trim item.
+`docs/README.md` and `docs/protocol.md` are generated in full from each page's `page:` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. Pages stay within `graphyard.json`'s `wordBudget` (a page over its cap fails CI; the total only [warns](onboarding.md#documentation-policy)), one topic per page: link, never restate.
 
 ## Trusted contracts
 
-Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry first, then require later work's proof.
+Trusted CI runs only protected source: land a contract's harness and `scripts/contracts.mjs` entry before requiring its proof.

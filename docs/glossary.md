@@ -1,85 +1,79 @@
 <!-- page: Start here | 2 | terms, roles, who decides. -->
 # Glossary
 
-## The eight distinctions
-
 ### 1. Human operator (human authority)
 
-The `admin` credential holder declaring `sessionKind: "human"`, who alone decides goals and priorities, spending money or opening accounts, and credentials for people.
+The `admin` holder (`sessionKind: "human"`); alone decides goals, priorities, spending, accounts and people's credentials.
 
-**Canonical usage:** *human operator*; bare *operator* means this person.
+**Canonical usage:** *human operator*; bare *operator* means them.
 
 ### 2. AI agent
 
-A model acting through a runtime with only its credential's authority.
+A model acting with only its credential's authority.
 
-**Canonical usage:** name the role (*worker*, *master*, *approver*, *reviewer*, *proof producer*).
+**Canonical usage:** the role's name.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running agent instance in a runtime.
+One agent instance in a runtime.
 
-**Canonical usage:** *session*; *runtime* for the hosting software.
+**Canonical usage:** *session*; *runtime* hosts it.
 
 ### 4. Principal, role, and credential
 
-A *principal* is an authenticated identity, its *role* the authority class, its *credential* (*token*) the secret.
+*Principal*: authenticated identity; *role*: its authority class; *credential* (*token*): its secret.
 
-**Canonical usage:** one principal per concurrent session.
+**Canonical usage:** one principal per session.
 
 ### 5. Worker lease and worktree
 
-A *lease* is one worker's time-limited ownership of one item at one *epoch*; the *assigned worktree* is the registered `(host, path)` checkout with a reserved branch.
+*Lease*: a worker's timed hold on one item at one *epoch*; *assigned worktree*: its registered `(host, path)` checkout.
 
 **Canonical usage:** *lease*, *epoch*, *assigned worktree*.
 
 ### 6. Independent reviewer and proof producer
 
-A *reviewer* is a non-author GitHub identity approving the exact head; a *proof producer*, a `producer` principal granted exact proof names; neither implements it.
+*Reviewer*: a non-author GitHub identity approving the exact head; *proof producer*: a `producer` principal granted exact proofs. Neither implements.
 
 **Canonical usage:** *reviewer*, *proof producer*.
 
 ### 7. Graphyard control plane
 
-The server, database, dashboard and CLI.
+Server, database, dashboard, CLI.
 
-**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; it never *runs* a session.
+**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; never *runs* sessions.
 
 ### 8. Herdr runtime
 
-The supervisor that launches sessions and reports their liveness.
+Launches sessions, reports liveness.
 
-**Canonical usage:** *Herdr*; other runtimes by product name.
+**Canonical usage:** *Herdr*; others by product name.
 
 ## The roles at a glance
 
-| Role | Held by | May | Never |
-| --- | --- | --- | --- |
-| `admin` | Human operator | Any decision | Share with an AI session |
-| `operator-agent` | Master and approver | Add intent; request or approve decisions | Approve its own request; merge |
-| `coordinator` | Master loop | Dispatch, guarded merge | Implement, produce evidence |
-| `slice-lead` | Slice lead | Rule on its slice, escalate | Implement, merge |
-| `worker` | Worker | Claim, heartbeat, register, submit | Satisfy an acceptance gate |
-| `producer` | CI, runner, observer | Evidence for granted proofs | Prove its own work |
-| `reader` | Dashboards | Read | Mutate |
-
-## Risk lane
-
-Every item rides one — `low`, `medium` or `high` — decided by the shipped path policy (`src/model/policy.ts`) from the paths its change touches; the landability verdict takes it, decides from it which facts it requires, and reports it with its speed target. Low lands on its required CI checks and one approving review: its criteria's producer-run and `manual:` proofs are not required, and its reworks need no approver. Medium adds its producer-run proofs; high keeps the full path, attestations and rework approval included. An `e2e:` proof and an inherited obligation hold in every lane. See [risk lanes](how-graphyard-works.md#risk-lanes).
+| Role | Held by | May | Never
+|---|---|---|---
+| `admin` | Human operator | Any decision | Share with AI
+| `operator-agent` | Master and approver | Add intent; request, approve decisions | Approve its own request; merge
+| `coordinator` | Master loop | Dispatch, guarded merge | Implement, produce evidence
+| `slice-lead` | Slice lead | Rule on its slice, escalate | Implement, merge
+| `worker` | Worker | Claim, heartbeat, register, submit | Satisfy acceptance
+| `producer` | CI, runner, observer | Report granted proofs | Prove its own work
+| `reader` | Dashboards | Read | Mutate
 
 ## Who decides
 
-The master applies non-weakening intent (create, release, unblock, add requirements) directly. Rewriting requirements, resolving escalations, rework (a [high-lane](#risk-lane) one; a low or medium rework applies as it is requested), recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures and merges with automatic merging off are requested with `graphyard master decide GY-N ACTION REASON` and applied by a separate approver with `graphyard master approve GY-N DECISION REASON`; the server refuses an approver that requested the decision, held an assignment on the item, produced its evidence, or would receive the grant. Reviewers, producers and the merge gate decide the rest. A human-only decision [parks](master-agent-reference.md#items-scope-and-human-waits) the item until the human answers.
+The master applies non-weakening intent (create, release, unblock, add requirements). Two-party decisions (`master decide GY-N ACTION REASON`, applied by another approver's `master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, and merges with automatic merging off. The approver is never the requester, assignee, producer or grantee. Reviewers, producers and the merge gate decide the rest; human-only ones [park](master-agent-reference.md#items-scope-and-human-waits) the item.
 
 ## Diagram legend
 
 | Shape and colour | Term |
 | --- | --- |
 | Amber rounded box | Human operator |
-| Green rounded box | Agent session with one role and credential |
-| Blue square box | Graphyard control plane |
-| Violet box or container | Herdr runtime |
-| Grey square box | GitHub and other external facts |
-| Dashed chip | Credential, lease epoch, or worktree |
+| Green rounded box | Agent session |
+| Blue box | Control plane |
+| Violet box | Herdr runtime |
+| Grey box | GitHub, external facts |
+| Dashed chip | Credential, epoch, worktree |
 | Solid arrow | Authenticated command |
 | Dashed arrow | Observation, never authority |

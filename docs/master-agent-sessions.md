@@ -3,37 +3,27 @@
 
 ## Launch profiles
 
-Add a worker with `master worker add FILE` ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)).
-
-Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)).
-
-`master producer replace`, `master producer remove` and `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
+Workers: `master worker add FILE`; reviewers: `master reviewer setup`/`master reviewer add FILE` ([worker](../examples/master/claude-worker.json), [reviewer](../examples/master/claude-reviewer.json)). `master producer replace`, `master producer remove`, `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
 
 ### Session handles
 
-`master status` `sessions` lists handles (runtime, host, pane, transcript, attach).
+`master status` `sessions`: runtime, host, pane, transcript, attach.
 
 ### Approval modes
 
-Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor, started and logged in as `agent`: `cursor` is the IDE launcher and `cursor-agent` refuses interactive runs); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); `--dangerously-skip-permissions`, request via `--prompt-interactive` (Antigravity `agy`); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
+`"approvals": "auto"` adds no-prompt flags (Claude Code `--permission-mode bypassPermissions` plus `.claude.json` trust, opencode `OPENCODE_PERMISSION`, Gemini/Qwen `--yolo`); Cursor runs as `agent`, not `cursor-agent`. `"prompt"`, `refusedLaunchKinds` and runtimes without command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtime arguments need `{request}`.
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; the session bus is a keyring-only proxy), only the session's worktree or checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (no bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. The loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names the paths and their leases.
+Non-master launches get a shell-unwritable checkout or are refused: Codex via `--sandbox workspace-write` (no checkout or `.git` grant), others via bubblewrap (writable: session directory, shared Git areas). On a dirty checkout the loop and executors never start, self-upgrade or restart; escalation names paths and leases.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
-
-A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise one attention item until a start.
-
-On a runtime's own limit notice (never agent text) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset.
+Without a [registry](onboarding.md#configure-the-fleet) role, a profile's `accounts` lists [agent environments](onboarding.md#agent-environments). Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`); with none, roles wait, relaunching oldest-first. A runtime's limit notice (not agent text) commits worker changes as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or after reset.
 
 ## The loop's own master session
 
-The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until the loop ends it; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover naming standing judgement work. It relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred at most 30 minutes for an open item's merge. A failed registry end is retried each cycle. Each cycle wakes it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
-
-## How a session starts
+A one-session fleet role (`master registry role set master ACCOUNTS …`); the loop and `master start` adopt a live `masterAgentName`. Started on the master prompt plus a handover, it relaunches on exit, limit notice, or past `run.masterSessionMinutes` (default 240; a merge defers up to 30 minutes). Changed subjects wake it; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`daemon.master`).
 
 ### The request is the session's first message
 
@@ -41,44 +31,37 @@ Never pasted ([authorization](onboarding.md#what-the-generated-instructions-auth
 
 #### How the request reaches the runtime
 
-The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`), mode 0600, removed with the checkout, and types:
+The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`), mode 0600, removed with the checkout, and types a line bounded at **512 bytes** whatever the request is:
 
 ```
 GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
-The typed line is bounded at **512 bytes** whatever the request is.
-
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). A launch command holding the foreground is starting: its supervisor prints `graphyard: establishing containment for GY-N epoch E` before any control-plane call. It is refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. A runtime that printed below its command and returned the pane to its shell fails at once, quoting its last lines; retried as `Automatic producer launch for GY-N refused 1 time(s)`. A failed launch stops its supervisor, closes its pane, releases its claim.
+The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). A foreground launch command is starting: supervisor prints `graphyard: establishing containment for GY-N epoch E` before calling the API. Refused with the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. Returning to shell fails immediately (`Automatic producer launch for GY-N refused 1 time(s)`), releasing supervisor, pane and claim.
 
 OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)).
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
+A runtime stopped at a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (especially **credential** or **payment**) escalates. A held worker is in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item stays dispatchable.
 
-### Acknowledgement, the one re-prompt, and never started
+### Acknowledgement, resume and idle sessions
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`).
+Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); resultless, it is **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`).
 
-### Resume, idle-with-lease and exited sessions
+A resolved blocker or scope request re-prompts the inactive session once (`complete GY-N EPOCH PR`); re-blocking hands the epoch to a fresh session, preferably another runtime. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, handed on after 30 more. Pastes target the attempt's pane, never a shared agent name; a gone pane hands on.
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
-
-Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
-
-Every paste goes to the **pane on the attempt's own session handle**, never the profile's reusable agent name another session may hold (GY-852); a gone pane hands the attempt on.
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts; lost ones retry free.
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session has ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
+Ending a session closes its pane. Each cycle closes up to **6** panes launched **on this host** whose session/worktree is gone, agentless past **120 s**, without an agent or lease; >**20** agentless raises attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
 - **A cursor that fails its schema is repaired, not fatal**, logged once with the path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
-
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+- **A tick failure is attributed and surfaced** in `dispatch.lastFailure`. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
+- **A session that exits at launch is classified from its pane.** One that exits **at launch** leaves `herdr agent get` only `agent_not_found`, so `herdr pane read` decides: a **provider limit notice** fails over exactly as a mid-session exhaustion; anything else is refused with the pane's last words and retried.
