@@ -25,7 +25,8 @@ test('unit:cycle-decisions-headroom — src/daemon/cycle-decisions.ts and every 
 test('unit:workspace-cli-headroom — src/cli/workspace.ts and every split module stay within 260 lines', async () => {
   const cliFiles = [
     'src/cli/workspace.ts',
-    'src/cli/workspace-sync.ts',
+    'src/cli/workspace-worktree.ts',
+    'src/cli/workspace-generated.ts',
   ];
   for (const file of cliFiles) {
     const text = await read(file);
