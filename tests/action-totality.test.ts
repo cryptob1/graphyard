@@ -25,10 +25,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *
  * Three proofs, one per criterion:
  *
- * - `integration:no-failing-gate-without-action` drives an item into the GY-103 state — a review
+ * - `unit:no-failing-gate-without-action` drives an item into the GY-103 state — a review
  *   gate refusing while no review request stands — under every review provider, and asserts the
  *   control plane names an action or an explicit wait for each of them, never silence.
- * - `integration:action-mapping-total-over-states` runs the real gate evaluator over a battery of
+ * - `unit:action-mapping-total-over-states` runs the real gate evaluator over a battery of
  *   states, collects every refusal it words, and proves totality over outcomes rather than over
  *   rules: every refusal is a declared shape, every shape maps inside its declared kinds, every
  *   rule is reachable, and no state yields an item with a failing gate and no answer.
@@ -39,7 +39,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
-const PROOF = 'integration:totality';
+const PROOF = 'unit:totality';
 const CI_APP = 15368;
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);

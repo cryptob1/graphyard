@@ -54,7 +54,7 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 
 ### Pre-merge gate and release-candidate validation
 
-The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): the build, the docs check and the Node and browser suites, every job bounded so the set finishes in under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA: each [release candidate](delivery.md#release-candidates), or a dispatched `sha` or `rc-*` tag alone.
+The merge gate is build, typecheck, the pre-merge unit set and one independent review: required `typecheck` and `test` (`.github/workflows/ci.yml`, under ten minutes), `unit:` proofs, and `manual:` attestations in the high lane. `integration:` and `e2e:` proofs are never merge gates; with the soak and timing-budget files (`releaseCandidateTests`, `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart they run in `.github/workflows/release-candidate.yml` on one pinned SHA: each [release candidate](delivery.md#release-candidates), or a dispatched `sha` or `rc-*` tag.
 
 ### Proofs in CI
 

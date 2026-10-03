@@ -20,7 +20,7 @@ const repository = 'owner/closed-question';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
 const coordinator: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
-const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['integration:*'], sessionKind: 'ai' };
+const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:*'], sessionKind: 'ai' };
 const credentials = [operator, implementer, coordinator, producer].map(principal => ({ ...principal, token: `closed-question-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'decision:attest'] };
@@ -58,13 +58,13 @@ const events = async (work: Work) => (await store.pool.query('SELECT actor, kind
 const acceptance = (work: Work) => work.gates.find(gate => gate.name === 'acceptance')!.reasons;
 
 const flagQuestion = {
-  criterion: 'AC-1', proof: 'integration:flag-declared', question: `Does ${flagFile} declare the --json flag the criterion requires?`,
+  criterion: 'AC-1', proof: 'unit:flag-declared', question: `Does ${flagFile} declare the --json flag the criterion requires?`,
   criteria: ['yes', 'no', 'cannot tell'], pass: 'yes', state: [{ kind: 'file', path: flagFile }, { kind: 'changed-files' }, { kind: 'criterion' }],
 };
 const input = (title: string, extra: Record<string, unknown> = {}) => ({
   title, plannedFiles: [flagFile],
   criteria: [
-    { id: 'AC-1', text: 'The CLI declares a --json flag', proofs: ['integration:flag-declared'] },
+    { id: 'AC-1', text: 'The CLI declares a --json flag', proofs: ['unit:flag-declared'] },
     { id: 'AC-2', text: 'An auditor reviews the output format', proofs: ['manual:format-audit'] },
   ],
   closedQuestions: [flagQuestion], ...extra,
@@ -107,17 +107,17 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
 test('integration:closed-question-evidence — one criterion is judged end to end by asking its question against the bound state, and the record carries every field a reader needs to re-run it', async () => {
   reply = { answer: 'yes', probability: 0.97 };
   let work = await candidate('closed question evidence');
-  assert.ok(acceptance(work).some(reason => reason.startsWith('AC-1: integration:flag-declared needs trusted passing evidence')), 'unproven before the answer');
-  assert.ok((work.autoDispatch?.producers ?? []).some(request => request.state === 'requested' && request.proofs?.includes('integration:flag-declared')), 'a producer session is requested until the question is answered');
+  assert.ok(acceptance(work).some(reason => reason.startsWith('AC-1: unit:flag-declared needs trusted passing evidence')), 'unproven before the answer');
+  assert.ok((work.autoDispatch?.producers ?? []).some(request => request.state === 'requested' && request.proofs?.includes('unit:flag-declared')), 'a producer session is requested until the question is answered');
   asked.length = 0;
 
   // The loop's producer launcher puts the question to the control plane before any session starts.
-  const judged = await judgeClosedQuestions(work, { proofs: ['integration:flag-declared'] }, httpClosedQuestionJudge(url, token(producer), { key: work.key, sha: head, baseSha: base, policyRevision: work.policyRevision }));
-  assert.deepEqual(judged, { decided: ['integration:flag-declared'], escalated: [], remaining: [] }, 'a decided proof leaves nothing for a producer session to do');
+  const judged = await judgeClosedQuestions(work, { proofs: ['unit:flag-declared'] }, httpClosedQuestionJudge(url, token(producer), { key: work.key, sha: head, baseSha: base, policyRevision: work.policyRevision }));
+  assert.deepEqual(judged, { decided: ['unit:flag-declared'], escalated: [], remaining: [] }, 'a decided proof leaves nothing for a producer session to do');
   assert.equal(asked.length, 1, 'the responder was asked exactly once');
 
   work = await reload(work.id);
-  const evidence = work.evidence.filter(entry => entry.proof === 'integration:flag-declared');
+  const evidence = work.evidence.filter(entry => entry.proof === 'unit:flag-declared');
   assert.equal(evidence.length, 1);
   const [record] = evidence;
   // The binding: exact candidate and policy, attributed to the responder, trusted as a decided verdict.
@@ -149,57 +149,57 @@ test('integration:closed-question-evidence — one criterion is judged end to en
   assert.deepEqual(asked[0].criteria, ['yes', 'no', 'cannot tell']);
 
   // The gate is satisfied by the answer, and the producer request for the proof is withdrawn.
-  assert.equal(currentEvidence(work, 'integration:flag-declared')?.id, record.id);
+  assert.equal(currentEvidence(work, 'unit:flag-declared')?.id, record.id);
   assert.ok(!acceptance(work).some(reason => reason.startsWith('AC-1:')), acceptance(work).join('\n'));
-  assert.ok(!(work.autoDispatch?.producers ?? []).some(request => request.state === 'requested' && request.proofs?.includes('integration:flag-declared')), 'no producer session is requested for a decided proof');
+  assert.ok(!(work.autoDispatch?.producers ?? []).some(request => request.state === 'requested' && request.proofs?.includes('unit:flag-declared')), 'no producer session is requested for a decided proof');
   const recorded = (await events(work)).find(row => row.kind === 'closed-question.answered');
   assert.equal(recorded.actor, producer.id);
   assert.equal(recorded.payload.details.evidence.closedQuestion.stateHash, answer.stateHash);
 
   // Asking again for the same head replays the recorded judgement instead of asking twice.
-  const again = await judgeClosedQuestions(work, { proofs: ['integration:flag-declared'] }, httpClosedQuestionJudge(url, token(producer), { key: work.key, sha: head, baseSha: base, policyRevision: work.policyRevision }));
-  assert.deepEqual(again.decided, ['integration:flag-declared']);
+  const again = await judgeClosedQuestions(work, { proofs: ['unit:flag-declared'] }, httpClosedQuestionJudge(url, token(producer), { key: work.key, sha: head, baseSha: base, policyRevision: work.policyRevision }));
+  assert.deepEqual(again.decided, ['unit:flag-declared']);
   assert.equal(asked.length, 1);
-  assert.equal((await reload(work.id)).evidence.filter(entry => entry.proof === 'integration:flag-declared').length, 1);
+  assert.equal((await reload(work.id)).evidence.filter(entry => entry.proof === 'unit:flag-declared').length, 1);
 });
 
 test('integration:low-confidence-escalates — an answer below the threshold is never a verdict: the gate stays unsatisfied and the escalation names the probability', async () => {
   // An ambiguous case: the responder leans "yes" but is not sure.
   reply = { answer: 'yes', probability: 0.62 };
   let work = await candidate('ambiguous closed question');
-  const response = await judge(coordinator, work, 'integration:flag-declared');
+  const response = await judge(coordinator, work, 'unit:flag-declared');
   assert.equal(response.status, 200, JSON.stringify(response.body));
   assert.equal(response.body.verdict, 'escalated');
   assert.equal(response.body.escalation.path, 'producer-session');
   assert.match(response.body.escalation.reason, /probability 0\.62 \(below the threshold 0\.9\)/);
 
   work = await reload(work.id);
-  const record = work.evidence.find(entry => entry.proof === 'integration:flag-declared')!;
+  const record = work.evidence.find(entry => entry.proof === 'unit:flag-declared')!;
   // Recorded alongside, as what prompted the escalation — and untrusted, so it decides nothing.
   assert.equal(record.trusted, false);
   assert.equal(record.closedQuestion!.verdict, 'escalated');
   assert.equal(record.closedQuestion!.probability, 0.62);
   assert.equal(record.closedQuestion!.threshold, 0.9);
   assert.match(record.closedQuestion!.escalation!.reason, /0\.62/);
-  assert.equal(currentEvidence(work, 'integration:flag-declared'), undefined);
-  assert.ok(acceptance(work).some(reason => reason.startsWith('AC-1: integration:flag-declared needs trusted passing evidence')), 'the gate is not satisfied');
+  assert.equal(currentEvidence(work, 'unit:flag-declared'), undefined);
+  assert.ok(acceptance(work).some(reason => reason.startsWith('AC-1: unit:flag-declared needs trusted passing evidence')), 'the gate is not satisfied');
   const escalated = (await events(work)).find(row => row.kind === 'closed-question.escalated');
   assert.match(escalated.payload.details.evidence.closedQuestion.escalation.reason, /probability 0\.62/);
 
   // The launcher keeps the proof on its ordinary path: the producer session is launched for it.
-  const judged = await judgeClosedQuestions(work, { proofs: ['integration:flag-declared'] }, httpClosedQuestionJudge(url, token(producer), { key: work.key, sha: head, baseSha: base, policyRevision: work.policyRevision }));
+  const judged = await judgeClosedQuestions(work, { proofs: ['unit:flag-declared'] }, httpClosedQuestionJudge(url, token(producer), { key: work.key, sha: head, baseSha: base, policyRevision: work.policyRevision }));
   assert.deepEqual(judged.decided, []);
-  assert.deepEqual(judged.remaining, ['integration:flag-declared']);
+  assert.deepEqual(judged.remaining, ['unit:flag-declared']);
   assert.match(judged.escalated[0].reason, /probability 0\.62/);
 
   // Even a record forged to claim trust cannot turn an unsure answer into a verdict.
   const forged = { ...record, id: randomUUID(), trusted: true, result: 'pass' as const, closedQuestion: { ...record.closedQuestion!, verdict: 'decided' as const } };
-  assert.equal(currentEvidence({ ...work, evidence: [...work.evidence, forged] }, 'integration:flag-declared'), undefined, 'probability below the recorded threshold never counts');
+  assert.equal(currentEvidence({ ...work, evidence: [...work.evidence, forged] }, 'unit:flag-declared'), undefined, 'probability below the recorded threshold never counts');
 
   // A question may raise the threshold, never lower it below the responder's floor.
   reply = { answer: 'yes', probability: 0.85 };
   const lowered = await candidate('lowered threshold', { closedQuestions: [{ ...flagQuestion, threshold: 0.5 }] });
-  const refused = await judge(coordinator, lowered, 'integration:flag-declared');
+  const refused = await judge(coordinator, lowered, 'unit:flag-declared');
   assert.equal(refused.body.verdict, 'escalated', JSON.stringify(refused.body));
   assert.equal(refused.body.evidence.closedQuestion.threshold, 0.9);
 });
@@ -228,7 +228,7 @@ test('integration:answer-is-evidence-not-approval — an answer cannot satisfy a
   // 2. A human-only decision. The worker parks the item on one; no answer resumes it.
   const parked = await claimed('human-only decision');
   await ok(token(implementer), 'POST', `work/${parked.key}/park`, { epoch: parked.epoch, kind: 'money-or-accounts', reason: 'The proof needs a paid sandbox account', needed: 'A sandbox account for the payment provider' });
-  const human = await judge(coordinator, parked, 'integration:flag-declared');
+  const human = await judge(coordinator, parked, 'unit:flag-declared');
   assert.equal(human.status, 409);
   assert.match(human.body.error, /waits on a human-only decision \(money-or-accounts\); an answer never stands in for one/);
   const stillParked = await reload(parked.id);
@@ -238,7 +238,7 @@ test('integration:answer-is-evidence-not-approval — an answer cannot satisfy a
   // 3. A scope widening the criteria do not name. The worker asks for a path no criterion implies.
   const scoped = await claimed('scope widening');
   await ok(token(implementer), 'POST', `work/${scoped.key}/scope`, { epoch: scoped.epoch, paths: ['src/billing/ledger.ts'], reason: 'The flag also needs the ledger' });
-  const scope = await judge(coordinator, scoped, 'integration:flag-declared');
+  const scope = await judge(coordinator, scoped, 'unit:flag-declared');
   assert.equal(scope.status, 409);
   assert.match(scope.body.error, /open scope request its criteria do not name .*an answer never approves a scope widening/);
   const unwidened = await reload(scoped.id);
@@ -247,7 +247,7 @@ test('integration:answer-is-evidence-not-approval — an answer cannot satisfy a
 
   assert.equal(asked.length, 0, 'the responder was never asked in any of the three');
   // And the route has no field through which an answer could be attached to a decision.
-  const attached = await call(token(coordinator), 'POST', `work/${work.key}/closed-question`, { proof: 'integration:flag-declared', sha: head, baseSha: base, policyRevision: work.policyRevision, decision: requested.body.id });
+  const attached = await call(token(coordinator), 'POST', `work/${work.key}/closed-question`, { proof: 'unit:flag-declared', sha: head, baseSha: base, policyRevision: work.policyRevision, decision: requested.body.id });
   assert.equal(attached.status, 400);
 });
 
@@ -261,18 +261,18 @@ test('the responder is replaceable by a local command, and state an untrusted pa
   // A question asked against the pull request body is refused before the responder sees anything.
   asked.length = 0;
   const work = await candidate('untrusted state', { closedQuestions: [{ ...flagQuestion, state: [{ kind: 'pull-request-body' }] }] });
-  const refused = await judge(coordinator, work, 'integration:flag-declared');
+  const refused = await judge(coordinator, work, 'unit:flag-declared');
   assert.equal(refused.status, 409);
   assert.match(refused.body.error, /pull-request-body is excluded by the responder configuration: an untrusted party may author it/);
   const vendored = await candidate('excluded path', { closedQuestions: [{ ...flagQuestion, state: [{ kind: 'file', path: 'vendor/lib.js' }] }] });
-  assert.match((await judge(coordinator, vendored, 'integration:flag-declared')).body.error, /vendor\/lib\.js is excluded/);
+  assert.match((await judge(coordinator, vendored, 'unit:flag-declared')).body.error, /vendor\/lib\.js is excluded/);
   assert.equal(asked.length, 0);
   // Workers ask nothing: only the loop, a producer or an admin may request a judgement.
-  assert.equal((await judge(implementer, work, 'integration:flag-declared')).status, 403);
+  assert.equal((await judge(implementer, work, 'unit:flag-declared')).status, 403);
 });
 
 test('the accuracy study recommends adoption only from this repository\'s own outcomes', () => {
-  const cases = (count: number, wrong = 0): StudyCase[] => Array.from({ length: count }, (_, index) => ({ key: `GY-${index + 1}`, sha: String(index).padStart(40, '0'), proof: 'integration:x', known: 'pass', session: 'pass', answer: index < wrong ? 'fail' : 'pass', probability: 0.95 }));
+  const cases = (count: number, wrong = 0): StudyCase[] => Array.from({ length: count }, (_, index) => ({ key: `GY-${index + 1}`, sha: String(index).padStart(40, '0'), proof: 'unit:x', known: 'pass', session: 'pass', answer: index < wrong ? 'fail' : 'pass', probability: 0.95 }));
   assert.equal(accuracyStudy(cases(19), 0.9).recommendation, 'refuse', 'fewer than twenty past candidates never recommends adoption');
   const adopted = accuracyStudy(cases(24), 0.9);
   assert.equal(adopted.recommendation, 'adopt', adopted.reason);
@@ -280,5 +280,5 @@ test('the accuracy study recommends adoption only from this repository\'s own ou
   const wrong = accuracyStudy(cases(24, 1), 0.9);
   assert.equal(wrong.recommendation, 'refuse');
   assert.equal(wrong.confidentWrong[0].key, 'GY-1');
-  assert.match(wrong.reason, /1 confident answer\(s\) were wrong \(GY-1 integration:x/);
+  assert.match(wrong.reason, /1 confident answer\(s\) were wrong \(GY-1 unit:x/);
 });

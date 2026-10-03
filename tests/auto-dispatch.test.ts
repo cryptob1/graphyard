@@ -35,13 +35,14 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 
 function observation(candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
   return { candidate: { ...candidate, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-    // GY-883: the observed scope rides the public API path, the high lane, whose full path demands all three proof groups this file binds.
+    // GY-883: the observed scope rides the public API path, the high lane, whose full path demands every proof group this file binds
+    // (unit, and manual where the item marks its manual proof producer-runnable). GY-1101: integration proofs are never a pre-merge group.
     files: ['src/server/routes/a.ts'], scopeFiles: [{ path: 'src/server/routes/a.ts', status: 'modified' as const, sha: sha40('s'), additions: 1, deletions: 1, binary: false }], at, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
   return { id: 'work-64', key: 'GY-64', title: 'Auto-dispatch', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
-    criteria: [{ id: 'AC-1', text: 'Review', proofs: ['integration:auto-dispatch-review', 'unit:auto-dispatch-binding'] }, { id: 'AC-2', text: 'Producers', proofs: ['integration:auto-dispatch-producers', 'manual:auto-dispatch-status'] }],
+    criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:auto-dispatch-review', 'unit:auto-dispatch-binding'] }, { id: 'AC-2', text: 'Producers', proofs: ['unit:auto-dispatch-producers', 'manual:auto-dispatch-status'] }],
     policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-64', branch: 'graphyard/gy-64-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
@@ -49,35 +50,40 @@ function work(overrides: Partial<Work> = {}): Work {
 const evidence = (proof: string, overrides: Partial<Evidence> = {}): Evidence => ({ id: `ev-${proof}`, proof, sha: H, baseSha: B, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at, ...overrides });
 const live = (item: Work) => [...(item.autoDispatch?.review ? [item.autoDispatch.review] : []), ...(item.autoDispatch?.producers ?? [])];
 /** Trusted passes for every mechanical proof of the fixture: since GY-115 the review request follows them. */
-const provenHead = (sha = H) => [evidence('unit:auto-dispatch-binding', { sha }), evidence('integration:auto-dispatch-review', { id: 'e2', sha }), evidence('integration:auto-dispatch-producers', { id: 'e3', sha })];
+const provenHead = (sha = H) => [evidence('unit:auto-dispatch-binding', { sha }), evidence('unit:auto-dispatch-review', { id: 'e2', sha }), evidence('unit:auto-dispatch-producers', { id: 'e3', sha })];
 
 test('unit:auto-dispatch-binding — a buildable head requests one review and one producer per proof group, bound to head, base and policy, deterministically', () => {
   const item = work();
   const transitions = reconcileAutoDispatch(item, [item], new Date(clock));
-  assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.requested', 'dispatch.requested']);
+  assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.requested']);
   const state = item.autoDispatch!;
   // GY-115: the head's mechanical proofs run first; no reviewer is asked about it yet.
   assert.equal(state.review, null); assert.equal(reviewNeed(item, [item], new Date(clock)).state, 'proofs-pending');
-  // Groups: every unit and integration proof; the manual proof stays with the operator unless the item marks it producer-runnable.
-  assert.deepEqual(state.producers.map(request => [request.group, request.proofs]), [['unit', ['unit:auto-dispatch-binding']], ['integration', ['integration:auto-dispatch-review', 'integration:auto-dispatch-producers']]]);
+  // Groups: every unit proof in one group; the manual proof stays with the operator unless the item marks it producer-runnable.
+  assert.deepEqual(state.producers.map(request => [request.group, request.proofs]), [['unit', ['unit:auto-dispatch-review', 'unit:auto-dispatch-binding', 'unit:auto-dispatch-producers']]]);
   assert.ok(state.producers.every(request => request.sha === H && request.baseSha === B && request.policyRevision === 1 && request.state === 'requested'));
-  assert.equal(new Set(live(item).map(request => request.id)).size, 2, 'request ids are distinct');
+  assert.equal(new Set(live(item).map(request => request.id)).size, 1, 'one request per group');
   // Pure: the same record and clock reconcile to the same ids and nothing new.
   const again = work(); reconcileAutoDispatch(again, [again], new Date(clock));
   assert.deepEqual(live(again).map(request => request.id), live(item).map(request => request.id));
   assert.deepEqual(reconcileAutoDispatch(item, [item], new Date(clock + 1000)), [], 'an unchanged head asks for nothing twice');
   // The proofs pass: the producers are satisfied and the review request is raised, bound to head, base and policy.
   item.evidence = provenHead();
-  assert.deepEqual(reconcileAutoDispatch(item, [item], new Date(clock + 2000)).map(entry => entry.event), ['dispatch.requested', 'dispatch.satisfied', 'dispatch.satisfied']);
+  assert.deepEqual(reconcileAutoDispatch(item, [item], new Date(clock + 2000)).map(entry => entry.event), ['dispatch.requested', 'dispatch.satisfied']);
   assert.deepEqual({ sha: state.review!.sha, baseSha: state.review!.baseSha, policyRevision: state.review!.policyRevision, pr: state.review!.pr, provider: state.review!.provider, state: state.review!.state }, { sha: H, baseSha: B, policyRevision: 1, pr: 64, provider: 'github', state: 'requested' });
   assert.match(state.review!.reason, /independent approval of a1ffffffffff against b1ffffffffff under policy revision 1/);
   const reviewedAgain = work({ evidence: provenHead() }); reconcileAutoDispatch(reviewedAgain, [reviewedAgain], new Date(clock + 2000));
   assert.equal(reviewedAgain.autoDispatch!.review!.id, state.review!.id, 'the review request id is a function of what it binds and when');
-  assert.deepEqual(dispatchRequestsFor(item, H).length, 3); assert.deepEqual(dispatchRequestsFor(item, H2), []);
+  assert.deepEqual(dispatchRequestsFor(item, H).length, 2); assert.deepEqual(dispatchRequestsFor(item, H2), []);
   // A manual proof the item marks producer-runnable joins the manual group.
   const marked = work({ producerProofs: ['manual:auto-dispatch-status'] });
   reconcileAutoDispatch(marked, [marked], new Date(clock));
-  assert.deepEqual(marked.autoDispatch!.producers.map(request => request.group), ['unit', 'integration', 'manual']);
+  assert.deepEqual(marked.autoDispatch!.producers.map(request => request.group), ['unit', 'manual']);
+  assert.equal(new Set(live(marked).map(request => request.id)).size, 2, 'request ids are distinct across groups');
+  // GY-1101: an integration proof is a release-candidate proof, never a pre-merge group.
+  const integration = work({ criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:auto-dispatch-binding', 'integration:auto-dispatch-review'] }] });
+  reconcileAutoDispatch(integration, [integration], new Date(clock));
+  assert.deepEqual(integration.autoDispatch!.producers.map(request => [request.group, request.proofs]), [['unit', ['unit:auto-dispatch-binding']]]);
   assert.equal(automatableProof(marked, 'manual:auto-dispatch-status'), true); assert.equal(automatableProof(work(), 'manual:auto-dispatch-status'), false); assert.equal(automatableProof(work(), 'e2e:flow'), false);
   assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], producerProofs: ['unit:x'] }).success, false, 'only manual proofs are marked; the rest are producer-runnable already');
   assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['manual:x'] }], producerProofs: ['manual:x'] }).success, true);
@@ -90,10 +96,10 @@ test('unit:auto-dispatch-binding — a head change cancels every request for the
   const moved = { sha: H2, baseSha: B };
   item.candidate = { ...item.candidate!, ...moved }; item.observation = observation(moved);
   const transitions = reconcileAutoDispatch(item, [item], new Date(clock + 60_000));
-  assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.cancelled', 'dispatch.cancelled', 'dispatch.requested', 'dispatch.requested']);
+  assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.cancelled', 'dispatch.requested']);
   for (const cancelled of transitions.filter(entry => entry.event === 'dispatch.cancelled')) { assert.ok(old.includes(cancelled.request.id)); assert.equal(cancelled.request.resolution, `head changed from ${H.slice(0, 12)} to ${H2.slice(0, 12)}`); }
   assert.ok(live(item).every(request => request.sha === H2 && !old.includes(request.id)));
-  assert.equal(item.autoDispatch!.history.length, 2); assert.ok(item.autoDispatch!.history.every(request => request.state === 'cancelled'));
+  assert.equal(item.autoDispatch!.history.length, 1); assert.ok(item.autoDispatch!.history.every(request => request.state === 'cancelled'));
   // A review request stands for its head only: proven on H2, then replaced by H, it is cancelled with the reason.
   item.evidence = provenHead(H2); reconcileAutoDispatch(item, [item], new Date(clock + 70_000));
   const review = item.autoDispatch!.review!.id;
@@ -104,31 +110,38 @@ test('unit:auto-dispatch-binding — a head change cancels every request for the
   // A Graphyard-authored tip that carried the approval and one proof asks only for what was re-required.
   const carry = { from: { sha: H, baseSha: B }, to: { sha: H2, baseSha: B2 }, policyRevision: 1, at, predecessor: 'GY-1', changedFiles: ['docs/x.md'], reviewedFiles: ['src/a.ts'],
     approval: { carried: true as const, provider: 'github' as const, reviewer: 'graphyard-reviewer[bot]', sha: H, reviewId: 9, originalSha: H, reason: 'carried' },
-    evidence: [{ proof: 'unit:auto-dispatch-binding', carried: true, evidenceId: 'ev-unit:auto-dispatch-binding', producer: 'proof-runner', reason: 'disjoint' }, { proof: 'integration:auto-dispatch-review', carried: false, reason: 'touched' }, { proof: 'integration:auto-dispatch-producers', carried: false, reason: 'touched' }] };
+    evidence: [{ proof: 'unit:auto-dispatch-binding', carried: true, evidenceId: 'ev-unit:auto-dispatch-binding', producer: 'proof-runner', reason: 'disjoint' }, { proof: 'unit:auto-dispatch-review', carried: false, reason: 'touched' }, { proof: 'unit:auto-dispatch-producers', carried: false, reason: 'touched' }] };
   const tipped = work({ candidate: { sha: H2, baseSha: B2, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B2 }), evidence: [evidence('unit:auto-dispatch-binding')],
     queue: { sequence: 1, enqueuedAt: at, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-64', tip: H2, base: B2, baseTree: sha40('7b'), predecessors: ['GY-1'], policyRevision: 1, publishedAt: at, carry } } } as Partial<Work>);
   reconcileAutoDispatch(tipped, [tipped], new Date(clock));
   assert.equal(tipped.autoDispatch!.review, null, 'a carried approval needs no reviewer');
-  assert.deepEqual(tipped.autoDispatch!.producers.map(request => [request.group, request.proofs]), [['integration', ['integration:auto-dispatch-review', 'integration:auto-dispatch-producers']]], 'the carried proof is not produced again');
+  assert.deepEqual(tipped.autoDispatch!.producers.map(request => [request.group, request.proofs]), [['unit', ['unit:auto-dispatch-review', 'unit:auto-dispatch-producers']]], 'the carried proof is not produced again');
 });
 
 test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the request, a failure is not re-requested, and rework, closure, merge and other providers request nothing', () => {
+  // Trusted evidence for every proof of the group passes: its request resolves as satisfied and stays resolved.
+  const proven = work();
+  reconcileAutoDispatch(proven, [proven], new Date(clock));
+  const satisfiedId = proven.autoDispatch!.producers[0].id;
+  proven.evidence = provenHead();
+  const settled = reconcileAutoDispatch(proven, [proven], new Date(clock + 1000));
+  assert.deepEqual(settled.filter(entry => entry.request.kind === 'producer').map(entry => [entry.event, entry.request.id, entry.request.resolution]), [['dispatch.satisfied', satisfiedId, 'trusted passing evidence binds every proof: unit:auto-dispatch-review (proof-runner), unit:auto-dispatch-binding (proof-runner), unit:auto-dispatch-producers (proof-runner)']]);
+  assert.deepEqual(proven.autoDispatch!.producers, []);
+  assert.deepEqual(reconcileAutoDispatch(proven, [proven], new Date(clock + 2000)), [], 'a satisfied head is idempotent');
+  // Evidence for one proof of the group leaves its request standing; the review still waits.
   const item = work();
   reconcileAutoDispatch(item, [item], new Date(clock));
   const requested = { unit: item.autoDispatch!.producers[0].id };
-  // Unit evidence passes: its request resolves as satisfied and stays resolved; the review still waits.
   item.evidence = [evidence('unit:auto-dispatch-binding')];
-  const settled = reconcileAutoDispatch(item, [item], new Date(clock + 1000));
-  assert.deepEqual(settled.map(entry => [entry.event, entry.request.id, entry.request.resolution]), [['dispatch.satisfied', requested.unit, 'trusted passing evidence binds every proof: unit:auto-dispatch-binding (proof-runner)']]);
-  assert.equal(item.autoDispatch!.review, null); assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['integration']);
-  assert.deepEqual(reconcileAutoDispatch(item, [item], new Date(clock + 2000)), [], 'a satisfied head is idempotent');
-  // A failed trusted run resolves the integration request, is not asked for again on this head, and no reviewer is asked about it.
-  item.evidence.push(evidence('integration:auto-dispatch-review', { id: 'ev-fail', result: 'fail' }));
+  assert.deepEqual(reconcileAutoDispatch(item, [item], new Date(clock + 1000)), [], 'a group with a proof left to prove keeps its request');
+  assert.equal(item.autoDispatch!.review, null); assert.deepEqual(item.autoDispatch!.producers.map(request => [request.group, request.id]), [['unit', requested.unit]]);
+  // A failed trusted run resolves the unit request, is not asked for again on this head, and no reviewer is asked about it.
+  item.evidence.push(evidence('unit:auto-dispatch-review', { id: 'ev-fail', result: 'fail' }));
   const failed = reconcileAutoDispatch(item, [item], new Date(clock + 3000));
-  assert.equal(failed.length, 1); assert.equal(failed[0].event, 'dispatch.satisfied'); assert.match(failed[0].request.resolution!, /trusted evidence failed for integration:auto-dispatch-review \(proof-runner\); the next head is requested afresh/);
+  assert.equal(failed.length, 1); assert.equal(failed[0].event, 'dispatch.satisfied'); assert.match(failed[0].request.resolution!, /trusted evidence failed for unit:auto-dispatch-review \(proof-runner\); the next head is requested afresh/);
   assert.deepEqual(item.autoDispatch!.producers, []); assert.equal(item.autoDispatch!.review, null);
-  assert.equal(reviewNeed(item, [item], new Date(clock)).state, 'proof-failed'); assert.match(reviewNeed(item, [item], new Date(clock)).reason, /^AC-1: integration:auto-dispatch-review failed on a1ffffffffff/);
-  assert.deepEqual(automatableOutcomes(item, [item], new Date(clock)).map(entry => [entry.proof, entry.outcome]), [['integration:auto-dispatch-review', 'failed'], ['unit:auto-dispatch-binding', 'proven'], ['integration:auto-dispatch-producers', 'unproven']]);
+  assert.equal(reviewNeed(item, [item], new Date(clock)).state, 'proof-failed'); assert.match(reviewNeed(item, [item], new Date(clock)).reason, /^AC-1: unit:auto-dispatch-review failed on a1ffffffffff/);
+  assert.deepEqual(automatableOutcomes(item, [item], new Date(clock)).map(entry => [entry.proof, entry.outcome]), [['unit:auto-dispatch-review', 'failed'], ['unit:auto-dispatch-binding', 'proven'], ['unit:auto-dispatch-producers', 'unproven']]);
   // Proven, the head is reviewed; the approval satisfies the request.
   item.evidence = provenHead();
   const review = reconcileAutoDispatch(item, [item], new Date(clock + 3500)).find(entry => entry.request.kind === 'review')!.request.id;
@@ -153,7 +166,7 @@ test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the
     Object.assign(fresh, overrides);
     const transitions = reconcileAutoDispatch(fresh, [fresh], new Date(clock + 1000));
     assert.match(dispatchIneligibility(fresh)!, pattern);
-    assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.cancelled', 'dispatch.cancelled', 'dispatch.cancelled'], pattern.source);
+    assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.cancelled', 'dispatch.cancelled'], pattern.source);
     for (const transition of transitions) assert.match(transition.request.resolution!, pattern);
     assert.equal(live(fresh).length, 0);
   }
@@ -162,7 +175,7 @@ test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the
   const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 }] } as any });
   reconcileAutoDispatch(agent, [agent], new Date(clock));
   assert.equal(agent.autoDispatch!.review, null); assert.equal(reviewNeed(agent).state, 'proofs-pending', 'the control plane\'s own review dispatch waits for the proofs too');
-  assert.equal(agent.autoDispatch!.producers.length, 2, 'producers are launched whatever the review provider');
+  assert.equal(agent.autoDispatch!.producers.length, 1, 'producers are launched whatever the review provider');
   agent.evidence = provenHead(); assert.match(reviewNeed(agent).reason, /control plane dispatches agent review/);
   // GY-191: being behind alone never withholds review. A mergeable head behind the tip is reviewed as it
   // stands; the merge queue integrates and re-tests it against the current base before merging.
@@ -175,7 +188,7 @@ test('unit:auto-dispatch-binding — a verdict or trusted evidence satisfies the
   assert.equal(conflicting.autoDispatch!.review, null); assert.match(reviewNeed(conflicting).reason, /does not contain the base tip .* merge conflict/);
   const unproven = work({ observation: observation({ sha: H, baseSha: B }, { baseTipContained: false, baseTip: B2, mergeable: false, conflicting: true }) });
   reconcileAutoDispatch(unproven, [unproven], new Date(clock));
-  assert.equal(unproven.autoDispatch!.producers.length, 2, 'evidence for a head behind the base still carries, so it is produced');
+  assert.equal(unproven.autoDispatch!.producers.length, 1, 'evidence for a head behind the base still carries, so it is produced');
 });
 
 test('unit:auto-dispatch-binding — the reviewer profile automatic dispatch launches is the configured one, else the only one', () => {
@@ -198,7 +211,7 @@ test('unit:auto-dispatch-binding — the reviewer profile automatic dispatch lau
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const implementer: Principal = { id: 'implementer', role: 'worker' };
-const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] };
+const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:*'] };
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 640;
 before(async () => {
@@ -213,7 +226,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 const reload = async (item: Work) => (await store.list()).find(entry => entry.id === item.id)!;
 const events = async (item: Work, kind: string) => (await store.events(item.id)).filter(event => event.kind === kind).reverse();
 async function submitted(title: string) {
-  let item = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['integration:auto-dispatch-review', 'unit:auto-dispatch-binding'] }, { id: 'AC-2', text: 'Status', proofs: ['manual:auto-dispatch-status'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:auto-dispatch-review', 'unit:auto-dispatch-binding'] }, { id: 'AC-2', text: 'Status', proofs: ['manual:auto-dispatch-status'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/dispatch/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());
@@ -230,37 +243,39 @@ test('integration:auto-dispatch-review — the control plane records the review 
   assert.ok(item.gates.find(gate => gate.name === 'build')!.passed);
   // GY-115: the head's producers are requested first; its reviewer waits for their proofs.
   assert.equal(item.autoDispatch!.review, null);
-  assert.deepEqual(item.autoDispatch!.producers.map(request => [request.group, request.proofs, request.state]), [['unit', ['unit:auto-dispatch-binding'], 'requested'], ['integration', ['integration:auto-dispatch-review'], 'requested']]);
-  assert.equal((await events(item, 'dispatch.requested')).length, 2);
+  assert.deepEqual(item.autoDispatch!.producers.map(request => [request.group, request.proofs, request.state]), [['unit', ['unit:auto-dispatch-review', 'unit:auto-dispatch-binding'], 'requested']]);
+  assert.equal((await events(item, 'dispatch.requested')).length, 1);
   const pass = (proof: string, sha: string, actor: Principal = producer) => engine.execute(actor, 'evidence', item.id, { proof, sha, baseSha: B, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
-  item = await pass('unit:auto-dispatch-binding', H); item = await pass('integration:auto-dispatch-review', H);
+  item = await pass('unit:auto-dispatch-binding', H); item = await pass('unit:auto-dispatch-review', H);
   const review = item.autoDispatch!.review!;
   assert.deepEqual([review.state, review.sha, review.baseSha, review.policyRevision, review.pr, review.provider], ['requested', H, B, 1, item.submission!.pr, 'github']);
   const requested = await events(item, 'dispatch.requested');
-  assert.equal(requested.length, 3); assert.deepEqual(requested.map(event => event.actor), ['graphyard', 'graphyard', 'graphyard']);
-  assert.equal(requested[2].payload.details.id, review.id); assert.equal(requested[2].payload.details.sha, H);
+  assert.equal(requested.length, 2); assert.deepEqual(requested.map(event => event.actor), ['graphyard', 'graphyard']);
+  assert.equal(requested[1].payload.details.id, review.id); assert.equal(requested[1].payload.details.sha, H);
   // A worker push: the observation binds the new head, the old review is cancelled with the reason, and the new head's producers are requested.
   item = await engine.observe(item.id, item.revision, observed(item, { sha: H2, baseSha: B }));
   assert.equal(item.autoDispatch!.review, null);
-  const moved: DispatchRequest[] = item.autoDispatch!.producers; assert.equal(moved.length, 2); assert.ok(moved.every(request => request.sha === H2));
+  const moved: DispatchRequest[] = item.autoDispatch!.producers; assert.equal(moved.length, 1); assert.ok(moved.every(request => request.sha === H2));
   const cancelled = await events(item, 'dispatch.cancelled');
   assert.deepEqual(cancelled.map(event => event.payload.details.id), [review.id]);
   assert.equal(cancelled[0].payload.details.resolution, `head changed from ${H.slice(0, 12)} to ${H2.slice(0, 12)}`);
-  assert.equal(item.autoDispatch!.history.length, 3);
-  assert.equal((await events(item, 'dispatch.requested')).length, 5);
+  assert.equal(item.autoDispatch!.history.length, 2);
+  assert.equal((await events(item, 'dispatch.requested')).length, 3);
   // Trusted evidence satisfies a producer request; untrusted evidence does not.
   item = await pass('unit:auto-dispatch-binding', H2, implementer);
-  assert.equal(item.autoDispatch!.producers.length, 2, 'a worker assertion satisfies nothing');
+  assert.equal(item.autoDispatch!.producers.length, 1, 'a worker assertion satisfies nothing');
   item = await pass('unit:auto-dispatch-binding', H2);
-  assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['integration']);
-  assert.equal((await events(item, 'dispatch.satisfied')).length, 3);
-  // Proven, the new head is reviewed; the approval of the exact head satisfies the review request.
-  item = await pass('integration:auto-dispatch-review', H2);
+  assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['unit'], 'a group with a proof left to prove keeps its request');
+  assert.equal((await events(item, 'dispatch.satisfied')).length, 1);
+  // Proven, the new head's producer request is satisfied and the head is reviewed; the approval of the exact head satisfies the review request.
+  item = await pass('unit:auto-dispatch-review', H2);
+  assert.deepEqual(item.autoDispatch!.producers, []);
+  assert.equal((await events(item, 'dispatch.satisfied')).length, 2);
   assert.equal(item.autoDispatch!.review!.sha, H2);
   item = await engine.observe(item.id, item.revision, observed(item, { sha: H2, baseSha: B }, { reviews: [{ id: 11, reviewer: 'graphyard-reviewer[bot]', sha: H2, state: 'APPROVED' }] }));
   assert.equal(item.autoDispatch!.review, null);
   const satisfied = await events(item, 'dispatch.satisfied');
-  assert.equal(satisfied.length, 5); assert.match(satisfied.at(-1)!.payload.details.resolution, /approved by graphyard-reviewer\[bot\]/);
+  assert.equal(satisfied.length, 3); assert.match(satisfied.at(-1)!.payload.details.resolution, /approved by graphyard-reviewer\[bot\]/);
   assert.ok(item.gates.find(gate => gate.name === 'review')!.passed);
   // GitHub dismisses the approval: the proven head is asked for a review again, so a request is live.
   item = await engine.observe(item.id, item.revision, observed(item, { sha: H2, baseSha: B }, { reviews: [{ id: 11, reviewer: 'graphyard-reviewer[bot]', sha: H2, state: 'DISMISSED' }] }));
@@ -332,6 +347,12 @@ function masterConfig(credentialFile: string, overrides: Partial<Omit<MasterConf
  * once — the review request a proven twin of the head raises beside the producers the unproven head
  * raises — so one tick exercises every launch path.
  */
+/**
+ * GY-1101: integration proofs are release-candidate proofs, so a head's producer groups are its unit
+ * proofs and, once the item marks its manual proof producer-runnable, the manual group: the tests
+ * that need two groups on one head mark it.
+ */
+const twoGroups: Partial<Work> = { producerProofs: ['manual:auto-dispatch-status'] };
 const requestedWork = (overrides: Partial<Work> = {}) => {
   const item = work(overrides); reconcileAutoDispatch(item, [item], new Date(clock));
   const twin = work({ ...overrides, evidence: [...(overrides.evidence ?? []), ...provenHead(overrides.candidate?.sha ?? H).map(entry => ({ ...entry, producer: 'independent-runner' }))] }); reconcileAutoDispatch(twin, [twin], new Date(clock));
@@ -360,29 +381,29 @@ test('integration:auto-dispatch-producers — one tick launches exactly one revi
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const config = masterConfig(token);
     const log: string[] = [];
-    let item = requestedWork();
+    let item = requestedWork(twoGroups);
     const requestedAt = Date.now();
     const effects = stubEffects(() => [item], log);
     const cursor = emptyDispatchCursor(config);
     const started = Date.now();
     const first = await runDispatchTick(config, cursor, effects, () => started);
-    assert.deepEqual(log, ['review:GY-64:a1ff:claude-reviewer', 'producer:GY-64:a1ff:unit:producer-a', 'producer:GY-64:a1ff:integration:producer-b']);
+    assert.deepEqual(log, ['review:GY-64:a1ff:claude-reviewer', 'producer:GY-64:a1ff:unit:producer-a', 'producer:GY-64:a1ff:manual:producer-b']);
     assert.equal(first.launched.length, 3); assert.deepEqual(first.refused, []); assert.deepEqual(first.waiting, []);
     assert.ok(Date.now() - requestedAt < 30_000, 'the launch follows the request inside the bound');
     // A second tick, a restart from the ledgers, or a re-read snapshot launches nothing again.
     const second = await runDispatchTick(config, cursor, effects, () => started + 10_000);
     assert.equal(log.length, 3); assert.equal(second.skipped, 3); assert.equal(second.launched.length, 0);
     // The head changes: the control plane's new requests launch; the old ones are the ledgers' business.
-    item = requestedWork({ candidate: { sha: H2, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
+    item = requestedWork({ ...twoGroups, candidate: { sha: H2, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }) });
     await runDispatchTick(config, cursor, effects, () => started + 20_000);
-    assert.deepEqual(log.slice(3), ['review:GY-64:a2ff:claude-reviewer', 'producer:GY-64:a2ff:unit:producer-a', 'producer:GY-64:a2ff:integration:producer-b']);
+    assert.deepEqual(log.slice(3), ['review:GY-64:a2ff:claude-reviewer', 'producer:GY-64:a2ff:unit:producer-a', 'producer:GY-64:a2ff:manual:producer-b']);
     // A satisfied or carried request is never launched: nothing is requested for it.
-    item = requestedWork({ observation: observation({ sha: H, baseSha: B }, { reviews: [{ id: 5, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }] }), evidence: [evidence('unit:auto-dispatch-binding'), evidence('integration:auto-dispatch-review', { id: 'e2' }), evidence('integration:auto-dispatch-producers', { id: 'e3' })] });
+    item = requestedWork({ observation: observation({ sha: H, baseSha: B }, { reviews: [{ id: 5, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }] }), evidence: [evidence('unit:auto-dispatch-binding'), evidence('unit:auto-dispatch-review', { id: 'e2' }), evidence('unit:auto-dispatch-producers', { id: 'e3' })] });
     assert.equal(live(item).length, 0);
     assert.equal((await runDispatchTick(config, cursor, effects, () => started + 30_000)).launched.length, 0);
     assert.equal(cursor.ticks, 4);
     // The loop itself: one tick per interval, stopped by the signal, launching on the first pass.
-    const loopLog: string[] = []; let loopItem = requestedWork();
+    const loopLog: string[] = []; let loopItem = requestedWork(twoGroups);
     const loopEffects = stubEffects(() => [loopItem], loopLog);
     const stopping = new AbortController();
     const running = runAutoDispatch(config, emptyDispatchCursor(config), loopEffects, { intervalMs: 20, signal: stopping.signal, log: () => {} });
@@ -401,20 +422,20 @@ test('integration:auto-dispatch-producers — busy or dependent producer profile
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const single = masterConfig(token, { producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: join(directory, 'producer-a.token'), agentArgs: [], approvals: 'auto', environment: {} }] });
     const log: string[] = [];
-    const item = requestedWork();
+    const item = requestedWork(twoGroups);
     // One producer profile, two groups: the second group waits for the profile to free up, and says so.
     const oneAtATime = stubEffects(() => [item], log);
     const cursor = emptyDispatchCursor(single);
     const tick = await runDispatchTick(single, cursor, oneAtATime, () => clock);
     assert.deepEqual(log, ['review:GY-64:a1ff:claude-reviewer', 'producer:GY-64:a1ff:unit:producer-a']);
-    assert.equal(tick.waiting.length, 1); assert.equal(tick.waiting[0].group, 'integration'); assert.match(tick.waiting[0].reason, /every independent producer profile is busy/);
+    assert.equal(tick.waiting.length, 1); assert.equal(tick.waiting[0].group, 'manual'); assert.match(tick.waiting[0].reason, /every independent producer profile is busy/);
     // The profile is still busy in Herdr on the next tick; once free, the waiting group launches.
     await runDispatchTick(single, cursor, { ...oneAtATime, agents: () => [{ name: 'produce-a', agent_status: 'working' }] }, () => clock + 10_000);
     assert.equal(log.length, 2);
     oneAtATime.producers.length = 0; oneAtATime.reviews.length = 0;
-    const freed = requestedWork({ evidence: [evidence('unit:auto-dispatch-binding')], observation: observation({ sha: H, baseSha: B }, { reviews: [{ id: 5, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }] }) });
+    const freed = requestedWork({ ...twoGroups, evidence: [evidence('unit:auto-dispatch-binding'), evidence('unit:auto-dispatch-review', { id: 'e2' }), evidence('unit:auto-dispatch-producers', { id: 'e3' })], observation: observation({ sha: H, baseSha: B }, { reviews: [{ id: 5, reviewer: 'graphyard-reviewer[bot]', sha: H, state: 'APPROVED' }] }) });
     await runDispatchTick(single, cursor, { ...oneAtATime, snapshot: async () => ({ work: [freed], now: iso(20_000) }) }, () => clock + 20_000);
-    assert.deepEqual(log.slice(2), ['producer:GY-64:a1ff:integration:producer-a']);
+    assert.deepEqual(log.slice(2), ['producer:GY-64:a1ff:manual:producer-a']);
     // A producer whose principal implemented the item is never chosen: its evidence would not be trusted.
     const dependent = requestedWork({ implementers: ['proof-runner'] });
     const dependentLog: string[] = [];
@@ -429,7 +450,7 @@ test('integration:auto-dispatch-producers — busy or dependent producer profile
     assert.match(bareTick.waiting.find(entry => entry.kind === 'producer')!.reason, /master producer add/);
     // A refused launch is recorded with a widening retry, cleared by the launch that succeeds, and capped.
     const config = masterConfig(token);
-    const flaky = requestedWork();
+    const flaky = requestedWork(twoGroups);
     let refuse = true;
     const flakyLog: string[] = [];
     const flakyEffects = stubEffects(() => [flaky], flakyLog, { launchReview: async () => { if (refuse) throw new Error('GY-64 GitHub observation is missing or older than two minutes'); flakyLog.push('review-ok'); } });
@@ -447,7 +468,7 @@ test('integration:auto-dispatch-producers — busy or dependent producer profile
     const capped = await runDispatchTick(config, stuck, stubEffects(() => [flaky], []), () => clock + 1000);
     assert.match(capped.waiting.find(entry => entry.kind === 'review')!.reason, /no further automatic attempt, launch it with master review/);
     // Herdr unreadable: nothing launches, every request waits.
-    const blind = await runDispatchTick(config, emptyDispatchCursor(config), stubEffects(() => [requestedWork()], [], { agents: () => null }), () => clock);
+    const blind = await runDispatchTick(config, emptyDispatchCursor(config), stubEffects(() => [requestedWork(twoGroups)], [], { agents: () => null }), () => clock);
     assert.deepEqual(blind.launched, []); assert.equal(blind.waiting.length, 3); assert.match(blind.waiting[0].reason, /Herdr session inventory is unavailable/);
     // The cursor lives beside the coordinator credential, stays private, and refuses another repository.
     const root = await temporaryDirectory('dispatch-root'); execFileSync('git', ['init', '-q', root]);
@@ -472,29 +493,30 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
     await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
     const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const verify = async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } });
+    const verify = async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'manual:*'] } });
     await assert.rejects(saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, async () => ({ actor: { id: 'proof-runner', role: 'worker' } })), /producer role/);
     await assert.rejects(saveProducerProfile(root, { name: 'producer-a', principal: 'someone-else', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, verify), /does not match the profile principal/);
     const added = await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, verify);
-    assert.deepEqual([added.added, added.principal, added.proofs, added.launch.args], ['producer-a', 'proof-runner', ['unit:*', 'integration:*'], ['--permission-mode', 'bypassPermissions']]);
+    assert.deepEqual([added.added, added.principal, added.proofs, added.launch.args], ['producer-a', 'proof-runner', ['unit:*', 'manual:*'], ['--permission-mode', 'bypassPermissions']]);
     await assert.rejects(saveProducerProfile(root, { name: 'producer-b', principal: 'proof-runner', agentName: 'produce-b', kind: 'claude', credentialFile: credential }, verify), /must be unique/);
     const config = await loadMasterConfig(root);
     assert.equal(config.producers.length, 1);
     const profile = config.producers[0];
-    const item = requestedWork();
-    const request = item.autoDispatch!.producers.find(entry => entry.group === 'integration')!;
+    const item = requestedWork(twoGroups);
+    const request = item.autoDispatch!.producers.find(entry => entry.group === 'unit')!;
+    const other = item.autoDispatch!.producers.find(entry => entry.group === 'manual')!;
     assert.deepEqual(independentProducerProfiles(work({ implementers: ['proof-runner'] }), [profile]), []);
     const binding = assertProducerCandidate(item, request, new Date().toISOString());
-    assert.deepEqual([binding.sha, binding.baseSha, binding.policyRevision, binding.group, binding.proofs, binding.requestId], [H, B, 1, 'integration', request.proofs, request.id]);
+    assert.deepEqual([binding.sha, binding.baseSha, binding.policyRevision, binding.group, binding.proofs, binding.requestId], [H, B, 1, 'unit', request.proofs, request.id]);
     assert.throws(() => assertProducerCandidate(item, { ...request, sha: H2 }, new Date().toISOString()), /is not the requested head/);
     assert.throws(() => assertProducerCandidate(work({ reworkRequested: true, autoDispatch: item.autoDispatch }), request, new Date().toISOString()), /awaiting rework/);
     const prompt = producerPrompt(config, binding, profile);
-    for (const fragment of ['GY-64', '#64', H, B, 'policy revision 1', 'integration:auto-dispatch-review', 'integration:auto-dispatch-producers', 'never print, copy, cat, or echo', 'git worktree add --detach', '"result":"pass"|"fail"', `node ${config.cliPath} evidence GY-64`, 'never weaken, skip or narrow a test']) assert.ok(prompt.includes(fragment), `the producer prompt must state ${fragment}`);
+    for (const fragment of ['GY-64', '#64', H, B, 'policy revision 1', 'unit:auto-dispatch-review', 'unit:auto-dispatch-binding', 'unit:auto-dispatch-producers', 'never print, copy, cat, or echo', 'git worktree add --detach', '"result":"pass"|"fail"', `node ${config.cliPath} evidence GY-64`, 'never weaken, skip or narrow a test']) assert.ok(prompt.includes(fragment), `the producer prompt must state ${fragment}`);
     assert.equal(prompt.includes('producer-token-'), false, 'the credential value never reaches the prompt');
     const calls: string[][] = [];
     const run = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-produce', tab_id: 'tab-produce' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
     const launched = await launchProducer(root, item, request, profile, [], new Date().toISOString(), { run });
-    assert.deepEqual([launched.work, launched.sha, launched.group, launched.pane, launched.principal, launched.requestId], ['GY-64', H, 'integration', 'pane-produce', 'proof-runner', request.id]);
+    assert.deepEqual([launched.work, launched.sha, launched.group, launched.pane, launched.principal, launched.requestId], ['GY-64', H, 'unit', 'pane-produce', 'proof-runner', request.id]);
     const tab = calls[0];
     assert.ok(tab.includes(`GRAPHYARD_TOKEN_FILE=${credential}`), 'the session receives the credential path, not the value');
     assert.equal(JSON.stringify(calls).includes('producer-token-'), false);
@@ -508,22 +530,22 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     assert.equal(typed.args.at(-1), producerPrompt(config, { ...binding, checkout: launched.checkout }, profile)); assert.equal(typed.stem, join(launched.checkout, '.graphyard/launch/produce-a'));
     assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false); assert.equal(launched.delivery, 'request');
     const ledger = await readProducerLedger(root);
-    assert.equal(ledger.producers.length, 1); assert.equal(ledger.producers[0].state, 'pending'); assert.deepEqual(ledger.producers[0].outcome, { 'integration:auto-dispatch-review': 'missing', 'integration:auto-dispatch-producers': 'missing' });
+    assert.equal(ledger.producers.length, 1); assert.equal(ledger.producers[0].state, 'pending'); assert.deepEqual(ledger.producers[0].outcome, { 'unit:auto-dispatch-review': 'missing', 'unit:auto-dispatch-binding': 'missing', 'unit:auto-dispatch-producers': 'missing' });
     assert.equal((await stat(join(root, '.graphyard/producers.json'))).mode & 0o777, 0o600);
     await assert.rejects(launchProducer(root, item, request, profile, [], new Date().toISOString(), { run }), /already pending/);
-    await assert.rejects(launchProducer(root, item, item.autoDispatch!.producers[0], profile, [{ name: 'produce-a' }], new Date().toISOString(), { run }), /already visible in Herdr/);
-    // Evidence for one proof leaves the session pending with the outcome updated; both proofs complete it and close the pane.
-    const partial = work({ autoDispatch: item.autoDispatch, evidence: [evidence('integration:auto-dispatch-review')] });
+    await assert.rejects(launchProducer(root, item, other, profile, [{ name: 'produce-a' }], new Date().toISOString(), { run }), /already visible in Herdr/);
+    // Evidence for one proof leaves the session pending with the outcome updated; every proof completes it and closes the pane.
+    const partial = work({ autoDispatch: item.autoDispatch, evidence: [evidence('unit:auto-dispatch-review')] });
     let reconciled = await reconcileProducers(root, config, [partial], [{ name: 'produce-a', pane_id: 'pane-produce', agent_status: 'working' }], { run });
-    assert.equal(reconciled.producers[0].state, 'pending'); assert.deepEqual(reconciled.producers[0].outcome, { 'integration:auto-dispatch-review': 'pass', 'integration:auto-dispatch-producers': 'missing' });
-    assert.equal(proofOutcome(work({ evidence: [evidence('integration:auto-dispatch-review', { trusted: false })] }), reconciled.producers[0], 'integration:auto-dispatch-review'), 'untrusted');
+    assert.equal(reconciled.producers[0].state, 'pending'); assert.deepEqual(reconciled.producers[0].outcome, { 'unit:auto-dispatch-review': 'pass', 'unit:auto-dispatch-binding': 'missing', 'unit:auto-dispatch-producers': 'missing' });
+    assert.equal(proofOutcome(work({ evidence: [evidence('unit:auto-dispatch-review', { trusted: false })] }), reconciled.producers[0], 'unit:auto-dispatch-review'), 'untrusted');
     const closeCalls: string[][] = [];
     const closing = (_command: string, args: string[]) => { closeCalls.push(args); return run(_command, args); };
-    const complete = work({ autoDispatch: item.autoDispatch, evidence: [evidence('integration:auto-dispatch-review'), evidence('integration:auto-dispatch-producers', { id: 'e2' })] });
+    const complete = work({ autoDispatch: item.autoDispatch, evidence: [evidence('unit:auto-dispatch-review'), evidence('unit:auto-dispatch-binding', { id: 'e1' }), evidence('unit:auto-dispatch-producers', { id: 'e2' })] });
     reconciled = await reconcileProducers(root, config, [complete], [{ name: 'produce-a', pane_id: 'pane-produce', agent_status: 'working' }], { run: closing });
     assert.equal(reconciled.producers[0].state, 'completed'); assert.match(reconciled.producers[0].resolution!, /trusted passing evidence recorded/);
     assert.deepEqual(closeCalls[0], ['pane', 'close', 'pane-produce']);
-    assert.equal(summarizeProducers(reconciled.producers).completed[0].outcome['integration:auto-dispatch-producers'], 'pass');
+    assert.equal(summarizeProducers(reconciled.producers).completed[0].outcome['unit:auto-dispatch-producers'], 'pass');
     // Cancellation, expiry, and an idle session are each settled with their reason.
     const settle = async (records: Partial<ProducerRecord>, items: Work[], agents: any[] | null, now: Date) => {
       const current = await readProducerLedger(root);
@@ -548,8 +570,8 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     const row = status.work[0];
     assert.equal(row.dispatch!.review!.requestId, item.autoDispatch!.review!.id); assert.equal(row.dispatch!.review!.session, null); assert.equal(row.dispatch!.review!.failure!.attempts, 2);
     assert.match(row.attention!, /Automatic review launch for GY-64 refused 2 time\(s\): observation stale/);
-    const integration = row.dispatch!.producers.find(entry => entry.group === 'integration')!;
-    assert.equal(integration.session!.state, 'completed'); assert.equal(integration.session!.profile, 'producer-a'); assert.ok(integration.sinceMs >= 90_000);
+    const unit = row.dispatch!.producers.find(entry => entry.group === 'unit')!;
+    assert.equal(unit.session!.state, 'completed'); assert.equal(unit.session!.profile, 'producer-a'); assert.ok(unit.sinceMs >= 90_000);
     assert.equal(status.counts.dispatchRequested, 3);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
@@ -639,7 +661,7 @@ test('unit:dispatcher-cursor-repaired — a cursor that fails validation on load
   try {
     execFileSync('git', ['init', '-q', root]);
     const config = masterConfig(await coordinatorToken(directory));
-    const item = requestedWork(), review = item.autoDispatch!.review!;
+    const item = requestedWork(twoGroups), review = item.autoDispatch!.review!;
     // The cursor as the defect left it: the wrapped wait reason past the cap, and the failure reason it wrapped past it too.
     const persisted = { ...emptyDispatchCursor(config), ticks: 7, lastTickAt: iso(-10_000), lastSuccessAt: iso(-10_000),
       failures: { [review.id]: { kind: 'review', work: 'GY-64', sha: H, attempts: 4, reason: 'e'.repeat(700), at: iso(-10_000), nextAt: iso(-1) } },
@@ -739,7 +761,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     written.environments = ['env-a', 'env-b'].map(name => ({ name, kind: 'claude', home: join(homes, name) }));
     await writeFile(file, JSON.stringify(written), { mode: 0o600 });
     const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'] }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'] }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'manual:*'] } }));
     const config = await loadMasterConfig(root);
     const item = requestedWork();
     // A reset in the future, on the hour, whenever the suite runs: a fixed date here held the account
@@ -830,7 +852,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     assert.equal(noticed.classify(dialog), dialog, 'a runtime Herdr found at a dialog did not exit');
     // A dispatcher wired without an account hold records the notice itself as the refusal, bounded, never the JSON.
     const bareNotice = new InstantExitError({ pane: 'pane-1', words: '', notice: { reason: `You've hit your weekly limit · resets ${resetsAt}`, resetsAt: resetsIso } }, exited.cause);
-    const bareTick = await runDispatchTick(masterConfig(join(credentialDirectory, 'coordinator.token')), emptyDispatchCursor(config), stubEffects(() => [item], [], { launchProducer: async () => { throw bareNotice; } }), () => clock);
+    const bareTick = await runDispatchTick(masterConfig(join(credentialDirectory, 'coordinator.token')), emptyDispatchCursor(config), stubEffects(() => [requestedWork(twoGroups)], [], { launchProducer: async () => { throw bareNotice; } }), () => clock);
     assert.equal(bareTick.refused.length, 2); assert.equal(bareTick.refused[0].reason, `the session exited within seconds of its launch on its provider's limit notice: You've hit your weekly limit · resets ${resetsAt}`);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(homes, { recursive: true, force: true }); }
 });
@@ -1110,7 +1132,7 @@ test('unit:non-exercising-evidence-reworked — evidence recorded as not exercis
     const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const finding = 'unit:auto-dispatch-binding still passed with the change removed: the mutation that drops the head binding from the request id left every assertion green';
     const unexercised = evidence('unit:auto-dispatch-binding', { id: 'ev-unexercised', trusted: false, unexercised: finding });
-    const item = requestedWork({ evidence: [unexercised] });
+    const item = requestedWork({ ...twoGroups, evidence: [unexercised] });
     const unit = item.autoDispatch!.producers.find(request => request.group === 'unit')!;
     assert.ok(unit, 'the untrusted pass leaves the unit request standing');
     // The dispatcher: the unit group is never launched again for this head, whatever its sessions did.
@@ -1123,7 +1145,7 @@ test('unit:non-exercising-evidence-reworked — evidence recorded as not exercis
       assert.ok(!log.some(entry => entry.includes(':unit:')), `no unit producer is launched (+${offset / 1000}s): ${JSON.stringify(log)}`);
       assert.match(tick.waiting.find(entry => entry.requestId === unit.id)!.reason, /does not exercise its criterion .*rework decision/);
     }
-    assert.ok(log.some(entry => entry.includes(':integration:')), 'the other group is launched as usual');
+    assert.ok(log.some(entry => entry.includes(':manual:')), 'the other group is launched as usual');
     // The loop: the rework decision is requested on the first cycle, its reason quoting the finding.
     const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
     const submitted = work({ evidence: [unexercised], observation: observation({ sha: H, baseSha: B }, { at: iso(0) }) });

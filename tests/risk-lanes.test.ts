@@ -18,8 +18,8 @@ import type { Observation, Work } from '../src/model/work.js';
 // lands with its required CI checks green and one approving review — the producer-run proofs and
 // manual attestations its criteria name are not required of it, and its reworks need no approver
 // decision; medium adds its producer-run proofs; high keeps the full path, manual attestations and
-// rework approval included. An e2e proof and an inherited bootstrap obligation are required in
-// every lane. The lane is decided by the shipped path policy in src/model/policy.ts from both
+// rework approval included. An inherited bootstrap obligation is required in every lane, and since
+// GY-1101 no lane requires an integration: or e2e: proof before merge: those run per release candidate. The lane is decided by the shipped path policy in src/model/policy.ts from both
 // endpoints of every renamed file, and is an input to the one landability verdict in
 // src/model/gates.ts, which decides from it which facts it requires.
 
@@ -128,9 +128,9 @@ test('unit:lane-sets-required-gates — the shipped required set of each lane', 
     ['low', false, false], ['medium', true, false], ['high', true, true],
   ] as [Lane, boolean, boolean][]) {
     assert.equal(laneRequiresProof(lane, 'unit:core-flow'), producer, `${lane} ${producer ? 'requires' : 'does not require'} producer-run unit proofs`);
-    assert.equal(laneRequiresProof(lane, 'integration:claim-safety'), producer, `${lane} ${producer ? 'requires' : 'does not require'} producer-run integration proofs`);
+    assert.equal(laneRequiresProof(lane, 'integration:claim-safety'), false, `${lane} does not require integration proofs before merge (GY-1101)`);
     assert.equal(laneRequiresProof(lane, 'manual:safety-attestation'), manual, `${lane} ${manual ? 'requires' : 'does not require'} manual attestations`);
-    assert.equal(laneRequiresProof(lane, 'e2e:user-journey'), true, `${lane} requires e2e proofs`);
+    assert.equal(laneRequiresProof(lane, 'e2e:user-journey'), false, `${lane} does not require e2e proofs before merge (GY-1101)`);
   }
 });
 
@@ -168,11 +168,11 @@ test('unit:lane-sets-required-gates — only a high-lane rework needs an approve
   assert.equal(reworkNeedsApprover(unknown), true, 'an unobserved change rides high and keeps its approver');
 });
 
-test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap obligation are required in every lane', () => {
+test('unit:lane-sets-required-gates — an inherited bootstrap obligation is required in every lane, and an e2e proof in none before merge', () => {
   for (const [paths, lane] of [[['tests/x.test.ts'], 'low'], [['src/model/a.ts', 'src/cli/b.ts'], 'medium'], [['auth/credentials/a.ts'], 'high']] as [string[], Lane][]) {
     const work = item(paths, ['e2e:user-journey']);
     assert.equal(verdict(work).lane, lane);
-    assert.equal(acceptance(work).reasons.some(reason => reason.includes('e2e:user-journey')), true, `${lane} keeps e2e proofs required`);
+    assert.equal(acceptance(work).reasons.some(reason => reason.includes('e2e:user-journey')), false, `${lane} runs e2e proofs per release candidate, not before merge`);
   }
   const defer = { reason: 'harness ships with this change', contractPaths: ['src/model/policy.ts'], declaredBy: 'operator', declaredAt: new Date().toISOString(), policyRevision: 1 };
   const source = {

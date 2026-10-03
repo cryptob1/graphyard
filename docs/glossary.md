@@ -65,7 +65,7 @@ The supervisor that launches sessions and reports their liveness.
 
 ## Risk lane
 
-Every item rides one — `low`, `medium` or `high` — decided by the shipped path policy (`src/model/policy.ts`) from the paths its change touches; the landability verdict takes it, decides from it which facts it requires, and reports it with its speed target. Low lands on its required CI checks and one approving review: its criteria's producer-run and `manual:` proofs are not required, and its reworks need no approver. Medium adds its producer-run proofs; high keeps the full path, attestations and rework approval included. An `e2e:` proof and an inherited obligation hold in every lane. See [risk lanes](how-graphyard-works.md#risk-lanes).
+Every item rides one — `low`, `medium` or `high` — decided by the shipped path policy (`src/model/policy.ts`) from the paths its change touches; the landability verdict takes it, decides from it which facts it requires, and reports it with its speed target. Low lands on its required CI checks and one approving review: its criteria's producer-run and `manual:` proofs are not required, and its reworks need no approver. Medium adds its `unit:` proofs; high keeps the full path, attestations and rework approval included. An inherited obligation holds in every lane; `integration:` and `e2e:` proofs run per release candidate, never before merge. See [risk lanes](how-graphyard-works.md#risk-lanes).
 
 ## Who decides
 

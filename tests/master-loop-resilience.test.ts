@@ -43,7 +43,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 69, branch: 'graphyard/gy-69-1', author: 'implementer' };
   return { id: 'work-69', key: 'GY-69', title: 'Master loop resilience', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
-    criteria: [{ id: 'AC-1', text: 'Retry', proofs: ['integration:producer-session-retry', 'unit:autonomous-session-prompts'] }],
+    criteria: [{ id: 'AC-1', text: 'Retry', proofs: ['manual:producer-session-retry', 'unit:autonomous-session-prompts'] }], producerProofs: ['manual:producer-session-retry'],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-69', branch: 'graphyard/gy-69-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 69 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
@@ -56,7 +56,7 @@ function work(overrides: Partial<Work> = {}): Work {
  */
 const requested = (overrides: Partial<Work> = {}) => {
   const item = work(overrides); reconcileAutoDispatch(item, [item], new Date());
-  const proven = ['integration:producer-session-retry', 'unit:autonomous-session-prompts'].map((proof, index) => ({ id: `twin-${index}`, proof, sha: H, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }));
+  const proven = ['manual:producer-session-retry', 'unit:autonomous-session-prompts'].map((proof, index) => ({ id: `twin-${index}`, proof, sha: H, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }));
   const twin = work({ ...overrides, evidence: proven }); reconcileAutoDispatch(twin, [twin], new Date());
   item.autoDispatch!.review = twin.autoDispatch!.review;
   return item;
@@ -83,7 +83,7 @@ const herdr = (calls: string[][], extra: (args: string[]) => unknown = () => und
   // The typed launch is accepted and its runtime seen ready at once (GY-121 startedAtOnce).
   return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
-const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
+const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*', 'integration:*', 'manual:producer-session-retry'] } });
 const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
 function masterConfig(credentialFile: string, overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
@@ -129,7 +129,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const item = requested();
-    const request = item.autoDispatch!.producers.find(entry => entry.group === 'integration')!;
+    const request = item.autoDispatch!.producers.find(entry => entry.group === 'manual')!;
     const calls: string[][] = [];
     const first = await launchProducer(root, item, request, config.producers[0], [], new Date().toISOString(), { run: herdr(calls) });
     assert.equal(first.attempt, 1);
@@ -179,7 +179,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     const unitWait = waiting.waiting.find(entry => entry.requestId === unit.requestId)!;
     assert.match(unitWait.reason, /producer session attempt 1 failed: the session finished \(done\) without trusted evidence .*; attempt 2 of 4 at /);
     assert.match(waiting.waiting.find(entry => entry.kind === 'review')!.reason, /reviewer session attempt 1 expired: .*attempt 2 of 4 at/);
-    assert.deepEqual(log.slice(2), ['producer:integration:producer-a'], 'nothing relaunches before its retry time; the freed profile takes the group that waited');
+    assert.deepEqual(log.slice(2), ['producer:manual:producer-a'], 'nothing relaunches before its retry time; the freed profile takes the group that waited');
     await runDispatchTick(config, cursor, effects, () => t0 + sessionRetryBaseMs + 1);
     assert.deepEqual(log.slice(3), ['review:GY-69:claude-reviewer', 'producer:unit:producer-a'], 'the same requests are launched again once due');
     assert.deepEqual(effects.producers.filter(record => record.requestId === unit.requestId).map(record => record.state), ['failed', 'pending']);

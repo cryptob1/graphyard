@@ -66,7 +66,7 @@ const observation = (work: Work, extra: Partial<Observation> = {}): Observation 
 
 async function created(title: string, extra: Record<string, unknown> = {}) {
   const n = ++serial;
-  const work = await engine.execute(operator, 'create', null, { title: `${title} ${n}`, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }], ...extra }, id());
+  const work = await engine.execute(operator, 'create', null, { title: `${title} ${n}`, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }], ...extra }, id());
   return engine.execute(operator, 'ready', work.id, {}, id());
 }
 async function claimed(title: string) {

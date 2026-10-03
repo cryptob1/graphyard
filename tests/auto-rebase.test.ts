@@ -154,7 +154,7 @@ test('integration:auto-rebase-conflict-guard — a base the control plane cannot
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
-const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:rebase', 'integration:rebase'] };
+const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:rebase', 'unit:rebase-docs'] };
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pullRequest = 700;
 before(async () => {
@@ -169,7 +169,7 @@ before(async () => {
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
-const definition = { plannedFiles: ['src/queue.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:rebase', 'integration:rebase'] }] };
+const definition = { plannedFiles: ['src/queue.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:rebase', 'unit:rebase-docs'] }] };
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 const events = async (work: Work, kind: string) => (await store.events(work.id)).filter(event => event.kind === kind).reverse();
 const gate = (work: Work, name: string) => work.gates.find(entry => entry.name === name)!;
@@ -193,7 +193,7 @@ function seen(work: Work, candidate: { sha: string; baseSha: string }, extra: Pa
 async function validated(work: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}) {
   let observed = await engine.observe(work.id, work.revision, seen(work, candidate, extra));
   observed = await engine.execute(producer, 'evidence', observed.id, { proof: 'unit:rebase', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/queue.ts', 'tests/'] }, randomUUID());
-  return engine.execute(producer, 'evidence', observed.id, { proof: 'integration:rebase', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['docs/'] }, randomUUID());
+  return engine.execute(producer, 'evidence', observed.id, { proof: 'unit:rebase-docs', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['docs/'] }, randomUUID());
 }
 async function onlyJob(work: Work) {
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
@@ -276,7 +276,7 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   assert.deepEqual([work.baseRefresh!.head, work.baseRefresh!.base, work.baseRefresh!.conflict], [refreshedHead, moved, null]);
   assert.equal(carry.approval.carried, true);
   assert.match(carry.approval.reason, /the base branch changed none of the 2 reviewed files/);
-  assert.deepEqual(carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:rebase', true], ['integration:rebase', true]]);
+  assert.deepEqual(carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:rebase', true], ['unit:rebase-docs', true]]);
 
   // The republished head is what everything binds to now, with no fresh round for any of it.
   work = await engine.observe(work.id, work.revision, seen(work, { sha: refreshedHead, baseSha: moved }, inFlight({ reviews: [] })));
@@ -285,7 +285,7 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   assert.deepEqual(work.evidence.map(entry => entry.id), before.evidence, 'no proof was requested or produced for the move');
   const ledger = await events(work, 'base.refreshed');
   assert.equal(ledger.length, 1);
-  assert.deepEqual(ledger[0].payload.details.carry, { approval: 'carried', evidence: { 'unit:rebase': 'carried', 'integration:rebase': 'carried' } });
+  assert.deepEqual(ledger[0].payload.details.carry, { approval: 'carried', evidence: { 'unit:rebase': 'carried', 'unit:rebase-docs': 'carried' } });
   const diagnostics = diagnose(work, await store.list(), Date.now());
   assert.equal(diagnostics.filter(entry => entry.kind === 'base-refresh-carried').length, 3);
   assert.equal(diagnostics.some(entry => entry.kind === 'base-refresh-required'), false);
@@ -329,7 +329,7 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   const carry = partial.baseRefresh!.carry!;
   assert.equal(carry.approval.carried, false);
   assert.match(carry.approval.reason, /the base branch changed reviewed files tests\/queue\.test\.ts; a fresh independent approval/);
-  assert.deepEqual(carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:rebase', false], ['integration:rebase', false]]);
+  assert.deepEqual(carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:rebase', false], ['unit:rebase-docs', false]]);
   assert.match(carry.evidence[0].reason, /changed tests\/queue\.test\.ts inside the scope of evidence/);
   assert.match(carry.evidence[1].reason, /changed docs\/queue\.md inside the scope of evidence/);
   partial = await engine.observe(partial.id, partial.revision, seen(partial, { sha: refreshedHead, baseSha: moved2 }, inFlight({ reviews: [] })));
@@ -337,7 +337,7 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   assert.equal(partial.stage, 'review');
   assert.deepEqual(gate(partial, 'acceptance').reasons, [
     'AC-1: unit:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
-    'AC-1: integration:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
+    'AC-1: unit:rebase-docs needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
   assert.equal(diagnose(partial, await store.list(), Date.now()).filter(entry => entry.kind === 'base-refresh-required').length, 3);
 });
 
@@ -382,7 +382,7 @@ test('integration:loop-acts-on-stale-base — an item that is only waiting for a
   const done = await runCycle(config, state, effects((await store.workSnapshot()).work));
   const acted2 = mine(done)[0];
   assert.equal(acted2.state, 'done');
-  assert.match(acted2.detail, new RegExp(`brought ${head.slice(0, 12)} onto base branch tip ${moved.slice(0, 12)} as ${refreshedHead.slice(0, 12)} with no rework round; kept the approval, unit:rebase, integration:rebase`));
+  assert.match(acted2.detail, new RegExp(`brought ${head.slice(0, 12)} onto base branch tip ${moved.slice(0, 12)} as ${refreshedHead.slice(0, 12)} with no rework round; kept the approval, unit:rebase, unit:rebase-docs`));
 });
 
 test('integration:parallel-candidates-survive-merge — merging one of five in-flight candidates forces no rework round, and no rebuild, on the other four: each keeps its head, its stage, its approval and every proof', async () => {

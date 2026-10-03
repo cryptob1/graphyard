@@ -1,4 +1,5 @@
 import { deliveryState, type Gate, type Work } from '../model.js';
+import { pendingReleaseOf } from './release-train.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern } from './ci-refusal.js';
@@ -12,12 +13,15 @@ import { formatAge, statusDuration, type StatusDuration } from './duration.js';
  */
 export const jargon = ['epoch', 'lease', 'candidate', 'policy revision', 'producer', 'attestation', 'trusted evidence'] as const;
 
-/** Where an item is, in the order work moves. Delivered work is `shipped`. */
-export const phases = ['not-started', 'needs-worker', 'building', 'review', 'checks', 'proof', 'merging', 'shipped'] as const;
+/**
+ * Where an item is, in the order work moves. Merged work waiting for a release that passes testing
+ * and goes live is `releasing` (GY-1101, model/release-train.ts); released work is `shipped`.
+ */
+export const phases = ['not-started', 'needs-worker', 'building', 'review', 'checks', 'proof', 'merging', 'releasing', 'shipped'] as const;
 export type Phase = typeof phases[number];
 export const phaseLabel: Record<Phase, string> = {
   'not-started': 'Not started', 'needs-worker': 'Needs a worker', building: 'Being built', review: 'In review',
-  checks: 'Automated checks', proof: 'Proving it works', merging: 'Merging', shipped: 'Shipped',
+  checks: 'Automated checks', proof: 'Proving it works', merging: 'Merging', releasing: 'Merged, awaiting release', shipped: 'Shipped',
 };
 export type Tone = 'stuck' | 'waiting' | 'working' | 'shipped';
 export interface PlainStatus { sentence: string; tone: Tone; phase: Phase; who: string | null; blocking: string | null }
@@ -108,7 +112,7 @@ function builder(work: Work, now: number) {
 
 /** Where the item is: nobody working on it is never "being built", whatever the stored stage says. */
 export function phaseOf(work: Work, now: number): Phase {
-  if (work.stage === 'done') return 'shipped';
+  if (work.stage === 'done') return pendingReleaseOf(work) ? 'releasing' : 'shipped';
   if (!work.ready || work.stage === 'backlog') return 'not-started';
   const handedIn = !!work.submission && !work.reworkRequested;
   if (!handedIn) return builder(work, now).active ? 'building' : 'needs-worker';
@@ -128,6 +132,16 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   const make = (sentence: string, tone: Tone, blocking: string | null = null, person: string | null = null): PlainStatus => ({ sentence, tone, phase, who: person, blocking });
   // Closed without delivery (src/model/closure.ts): terminal, never "shipped".
   if (work.closure) return make(`Closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''}: ${work.closure.reason}`, 'shipped');
+  if (phase === 'releasing') {
+    // A healthy resting state, never stuck: merging is never blocked by a release under test, and
+    // a release that fails its checks is fixed forward by new work, never by reopening this one.
+    const release = work.releaseTrain!.candidate;
+    const merged = link ? `Merged in ${link}` : 'Merged';
+    if (!release) return make(`${merged} — waiting for the next release to be cut`, 'waiting', 'Waiting for the next release');
+    if (release.uat === 'failed') return make(`${merged} — release ${release.id} failed its checks; a fix is on the way and the next release carries this too`, 'waiting', `Release ${release.id} failed its checks`);
+    if (release.uat === 'passed') return make(`${merged} — release ${release.id} passed its checks and is waiting to go live`, 'waiting', 'Waiting to go live');
+    return make(`${merged} — being tested in release ${release.id}`, 'waiting', `Being tested in release ${release.id}`);
+  }
   if (phase === 'shipped') {
     const state = deliveryState(work);
     const merged = link ? `Shipped in ${link}` : 'Shipped';
@@ -225,7 +239,7 @@ export function statusSince(work: Work, now: number): string {
  * so the number and the verdict cannot differ between two places that show the same item.
  */
 export function statusHeld(work: Work, now: number): StatusDuration {
-  return statusDuration(statusSince(work, now), now, phaseOf(work, now) === 'shipped');
+  return statusDuration(statusSince(work, now), now, ['shipped', 'releasing'].includes(phaseOf(work, now)));
 }
 
 /** Stuck items first, then the oldest in its phase; the order people should look at them. */
