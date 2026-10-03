@@ -5,7 +5,9 @@ import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
-import { decideScopeRequest, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
+import { decideScopeRequest, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
+import { impliedModuleCluster } from '../src/model/scope-companions.js';
+import { derivePlannedFiles } from '../src/model/work.js';
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -18,6 +20,11 @@ import { decideScopeRequest, plannedCompanions, scopeRefusalBlocker, type ScopeR
 //   - four of the nine asks were for tests/helpers/timing-baseline.json beside a test file the item
 //     already planned: the coverage floor in tests/ci-shards.test.ts fails the required test check
 //     without its entry, yet the rule refused it and each waited on the approver.
+//
+// GY-1116: The master loop filed 3 scope faults in 24 hours on 2 October 2026 (GY-1115, GY-1048,
+// GY-794). All three were promoted review follow-ups where promoteFollowUp planned at most one file,
+// derivePlannedFiles added only exact criterion paths, and the widening rule refused peer modules,
+// server wiring and importing tests.
 //
 // Each instance is replayed from the ledger (`graphyard events GY-N --kind scope,autoscope`) as the
 // item stood at the instant the loop recorded it. Against the base each subtest fails: the instance
@@ -35,6 +42,10 @@ interface Instance {
   refusedAt?: string;
   /** How the product settled it afterwards, from the ledger. */
   settled: string;
+  criteria?: { id: string; text: string; proofs: string[] }[];
+  origin?: any;
+  description?: string;
+  reason?: string;
 }
 const instances: Instance[] = [
   { id: 'scope-request|GY-471|2026-10-01T13:30:28.900Z', subject: 'GY-471', observedAt: '2026-10-01T13:30:28.900Z', epoch: 6, requestedAt: '2026-10-01T13:30:07.044Z',
@@ -63,22 +74,48 @@ const instances: Instance[] = [
     settled: 'rule refused 18:28:09, approver approved 18:30:05' },
   { id: 'scope-request|GY-1078|2026-10-01T18:47:06.594Z', subject: 'GY-1078', observedAt: '2026-10-01T18:47:06.594Z', epoch: 3, requestedAt: '2026-10-01T18:43:32.444Z', paths: ['.github/workflows/ci.yml'], refusedAt: '2026-10-01T18:46:47.975Z',
     plannedFiles: ['src/', 'tests/', 'docs/', 'web/item-page.ts'], settled: 'rule refused 18:46:47, approver approved 18:51:21' },
+  { id: 'scope-request|GY-1115|2026-10-02T17:33:45.766Z', subject: 'GY-1115', observedAt: '2026-10-02T17:33:45.766Z', epoch: 1, requestedAt: '2026-10-02T17:32:58.367Z',
+    paths: ['src/store/coordination-sql.ts', 'src/direct-merge.ts'],
+    plannedFiles: ['src/engine.ts', 'src/store/store.ts', 'tests/reconcile-contention.test.ts', 'tests/batch-deadlock.test.ts', 'tests/reconcile-scale.test.ts', 'tests/helpers/timing-baseline.json', 'docs/operations-reference.md', 'tests/docs-budget.test.ts'],
+    criteria: [
+      { id: 'AC-1', text: 'With 100 live items under continuous concurrent mutation (resyncs, heartbeats and webhook wakes on a share of them), one reconciliation tick against the real test Postgres completes within 30 s and evaluates every candidate or defers it. No batch is rerun more than twice within a tick.', proofs: ['unit:reconcile-tick-bounded-under-contention'] },
+      { id: 'AC-2', text: 'Concurrent wakeJob and wakeJobs calls, POST resync, and a reconciliation tick touching the same items produce no `deadlock detected` error across repeated runs: job and item rows are locked in one stable order.', proofs: ['unit:job-wake-reconcile-no-deadlock'] },
+      { id: 'AC-3', text: 'While a reconciliation tick runs, a request transaction (heartbeat or claim) acquires a pool connection within 1 s: reconciliation never holds more than a bounded share of the pool.', proofs: ['unit:reconcile-leaves-pool-headroom'] },
+      { id: 'AC-4', text: 'docs/operations-reference.md states the reconciliation tick\'s contention behaviour and its pool bound in at most three sentences, staying within the docs word budget.', proofs: ['manual:reconcile-contention-docs'] }
+    ],
+    reason: 'The reconcile batch\'s item row lock (reconcileItemLockSql) must skip rows a writer holds instead of waiting on them, and direct-merge\'s in-tick delivery must delete its job row after saving its item, so every transaction locks item rows before job rows (AC-2 stable lock order).',
+    settled: 'rule refused 17:34:36, loop widened 17:34:54' },
+  { id: 'scope-request|GY-1048|2026-10-02T18:23:14.929Z', subject: 'GY-1048', observedAt: '2026-10-02T18:23:14.929Z', epoch: 10, requestedAt: '2026-10-02T18:12:48.027Z',
+    paths: ['src/server/main.ts', 'src/store/locks.ts'],
+    plannedFiles: ['src/model/retro-synthesis.ts', 'src/retro-synthesis.ts', 'src/cli/work.ts', 'src/engine.ts', 'src/model/retro-prevention.ts', 'src/server/routes/interventions.ts', 'tests/retro-synthesis.test.ts', 'docs/deployment.md', 'src/model/retro-checks.ts', 'src/store/tables/work.ts'],
+    description: 'Follow-up 24 of GY-970\'s approved review: events_retro_id must not be built by plain CREATE INDEX inside the boot migration transaction (write-blocking on a ~1.26M-row events table). The index moves to a CREATE INDEX CONCURRENTLY run outside the transaction after store.init, started from the server entry src/server/main.ts; two replicas are kept from building it at once by a new id in the advisory-lock registry src/store/locks.ts.',
+    origin: { reviewFollowUps: { parent: 'GY-970', findings: [{ path: 'src/store/tables/work.ts', text: 'events_retro_id must not be built by plain CREATE INDEX inside the boot migration transaction (write-blocking on a ~1.26M-row events table). The index moves to a CREATE INDEX CONCURRENTLY run outside the transaction after store.init, started from the server entry src/server/main.ts; two replicas are kept from building it at once by a new id in the advisory-lock registry src/store/locks.ts.' }] } },
+    reason: 'Follow-up 24 of GY-970\'s approved review: events_retro_id must not be built by plain CREATE INDEX inside the boot migration transaction (write-blocking on a ~1.26M-row events table). The index moves to a CREATE INDEX CONCURRENTLY run outside the transaction after store.init, started from the server entry src/server/main.ts; two replicas are kept from building it at once by a new id in the advisory-lock registry src/store/locks.ts.',
+    settled: 'rule refused 18:24:33, approver approved 18:32:50' },
+  { id: 'scope-request|GY-794|2026-10-02T19:37:57.448Z', subject: 'GY-794', observedAt: '2026-10-02T19:37:57.448Z', epoch: 14, requestedAt: '2026-10-02T19:31:41.129Z',
+    paths: ['tests/store-locks.test.ts'],
+    plannedFiles: ['src/backup.ts', 'docs/deployment.md'],
+    description: 'The item\'s second follow-up names tests/store-locks.test.ts: add the case asserting a restore that keeps deadlocking runs exactly restoreDeadlockAttempts (5) transactions before rethrowing 40P01.',
+    origin: { reviewFollowUps: { parent: 'GY-443', findings: [{ path: 'src/backup.ts', text: 'Review finding 2 of GY-443 (PR #345) explicitly asks to add the five-attempt 40P01 restore case to tests/store-locks.test.ts: add the case asserting a restore that keeps deadlocking runs exactly restoreDeadlockAttempts (5) transactions before rethrowing 40P01' }] } },
+    reason: 'The item\'s second follow-up names tests/store-locks.test.ts: add the case asserting a restore that keeps deadlocking runs exactly restoreDeadlockAttempts (5) transactions before rethrowing 40P01',
+    settled: 'rule refused 20:19:38, approver approved 20:34:24' },
 ];
 
 /** The item as it stood when the loop observed it: the live attempt, its open request, and the rule's refusal when one had landed. */
 function standing(entry: Instance, observedAt = entry.observedAt): Work {
   const owner = `worker-${entry.subject}`;
   const reason = 'outside what this item\'s own criteria and the repository\'s documentation rule imply';
-  const request: ScopeRequestState = { epoch: entry.epoch, paths: entry.paths, reason: 'the change needs these files', requestedBy: owner, at: entry.requestedAt,
+  const request: ScopeRequestState = { epoch: entry.epoch, paths: entry.paths, reason: entry.reason ?? 'the change needs these files', requestedBy: owner, at: entry.requestedAt,
     ...(entry.refusedAt ? { decision: { state: 'refused' as const, reason, at: entry.refusedAt, decidedBy: 'graphyard', waitedMs: Date.parse(entry.refusedAt) - Date.parse(entry.requestedAt), paths: entry.paths, requestedBy: owner, requestedAt: entry.requestedAt, epoch: entry.epoch } } : {}) };
   return {
-    id: `work-${entry.subject}`, key: entry.subject, title: entry.subject, description: '', type: 'feature', priority: 2, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'The behaviour changes as described', proofs: ['unit:behaviour-changes'] }],
+    id: `work-${entry.subject}`, key: entry.subject, title: entry.subject, description: entry.description ?? '', type: 'feature', priority: 2, dependencies: [],
+    criteria: entry.criteria ?? [{ id: 'AC-1', text: 'The behaviour changes as described', proofs: ['unit:behaviour-changes'] }],
     policy: { checks: ['test'], review: true }, plannedFiles: entry.plannedFiles, stage: 'implementation', revision: 1, policyRevision: 1,
     createdAt: entry.requestedAt, updatedAt: observedAt, stageEnteredAt: entry.requestedAt, ready: true, epoch: entry.epoch,
     lease: { owner, epoch: entry.epoch, expiresAt: new Date(Date.parse(observedAt) + 10 * minute).toISOString() }, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null,
     blocker: entry.refusedAt ? `${scopeRefusalBlocker}: ${reason}` : null, gates: [], violations: [], scopeRequest: request,
+    ...(entry.origin ? { origin: entry.origin } : {}),
   } as unknown as Work;
 }
 /** What the loop's fault step records for the item: its own record, the attention master status derives, and the request line it reports. */
@@ -120,4 +157,74 @@ test('manual:fault-class-scope — a request the product does not settle still s
   const narrowing = standing(instances[8]);
   narrowing.scopeRequest!.remove = ['docs/'];
   assert.deepEqual(scopeFaults(narrowing, instances[8].observedAt).map(fault => fault.kind), ['scope-request']);
+});
+
+test('manual:fault-class-scope — GY-1116: peer modules, server wiring and importing tests are granted with no approver', () => {
+  const gy1116Asks = instances.filter(entry => ['GY-1115', 'GY-1048', 'GY-794'].includes(entry.subject));
+  assert.equal(gy1116Asks.length, 3);
+  for (const entry of gy1116Asks) {
+    const verdict = decideScopeRequest(standing(entry), { paths: entry.paths });
+    assert.equal(verdict.state, 'approved', `${entry.id}: ${verdict.reason}`);
+  }
+});
+
+test('manual:fault-class-scope — GY-1116: promoteFollowUp and derivePlannedFiles plan the implied module cluster up front', () => {
+  // Test promoteFollowUp / impliedModuleCluster:
+  const finding1048 = {
+    path: 'src/store/tables/work.ts',
+    text: 'events_retro_id must not be built by plain CREATE INDEX inside the boot migration transaction (write-blocking on a ~1.26M-row events table). The index moves to a CREATE INDEX CONCURRENTLY run outside the transaction after store.init, started from the server entry src/server/main.ts; two replicas are kept from building it at once by a new id in the advisory-lock registry src/store/locks.ts.'
+  };
+  const findingPaths1048 = [finding1048.path, ...namedPaths(finding1048.text)];
+  const cluster1048 = impliedModuleCluster(findingPaths1048, finding1048.text);
+  assert.ok(cluster1048.includes('src/server/main.ts'), 'cluster includes server/main.ts');
+  assert.ok(cluster1048.includes('src/store/locks.ts'), 'cluster includes store/locks.ts');
+
+  const finding794 = {
+    path: 'src/backup.ts',
+    text: 'Review finding 2 of GY-443 (PR #345) explicitly asks to add the five-attempt 40P01 restore case to tests/store-locks.test.ts'
+  };
+  const findingPaths794 = [finding794.path, ...namedPaths(finding794.text)];
+  const cluster794 = impliedModuleCluster(findingPaths794, finding794.text);
+  assert.ok(cluster794.includes('tests/store-locks.test.ts'), 'cluster includes tests/store-locks.test.ts');
+
+  // Test derivePlannedFiles planning the cluster:
+  const tree = new Set([
+    'src/backup.ts', 'tests/store-locks.test.ts', 'src/server/main.ts', 'src/store/locks.ts',
+    'src/store/tables/work.ts', 'src/store/store.ts', 'src/store/coordination-sql.ts', 'src/direct-merge.ts', 'docs/deployment.md'
+  ]);
+  const gy794 = instances.find(e => e.subject === 'GY-794')!;
+  const derived794 = derivePlannedFiles(standing(gy794), tree);
+  assert.ok(derived794.plannedFiles.includes('tests/store-locks.test.ts'), 'derived plannedFiles includes tests/store-locks.test.ts');
+
+  const gy1048 = instances.find(e => e.subject === 'GY-1048')!;
+  const derived1048 = derivePlannedFiles(standing(gy1048), tree);
+  assert.ok(derived1048.plannedFiles.includes('src/server/main.ts'), 'derived plannedFiles includes src/server/main.ts');
+  assert.ok(derived1048.plannedFiles.includes('src/store/locks.ts'), 'derived plannedFiles includes src/store/locks.ts');
+
+  const gy1115 = instances.find(e => e.subject === 'GY-1115')!;
+  const derived1115 = derivePlannedFiles(standing(gy1115), tree);
+  assert.ok(derived1115.plannedFiles.includes('src/store/coordination-sql.ts'), 'derived plannedFiles includes src/store/coordination-sql.ts');
+  assert.ok(derived1115.plannedFiles.includes('src/direct-merge.ts'), 'derived plannedFiles includes src/direct-merge.ts');
+
+  // Hardening tests from review findings:
+  // 1. Routine table schema change without migration evidence does not pull in server/main.ts or store/locks.ts:
+  const routineCluster = impliedModuleCluster(['src/store/tables/users.ts'], 'Add column email to users table');
+  assert.equal(routineCluster.includes('src/server/main.ts'), false, 'routine table schema does not include server/main.ts');
+  assert.equal(routineCluster.includes('src/store/locks.ts'), false, 'routine table schema does not include store/locks.ts');
+
+  // 2. Ordinary items do not treat description paths as criteria-backed implications:
+  const ordinaryImplied = impliedScopes([{ id: 'AC-1', text: 'Work item updates' }], [], undefined, 'See src/internal-helper.ts for details');
+  assert.equal(ordinaryImplied.some(i => i.scope === 'src/internal-helper.ts'), false, 'ordinary item description does not imply scope');
+
+  // Follow-up item does treat description paths as implications:
+  const followupImplied = impliedScopes([{ id: 'AC-1', text: 'Work item updates' }], [], { reviewFollowUps: { parent: 'GY-1', findings: [] } }, 'See src/internal-helper.ts for details');
+  assert.equal(followupImplied.some(i => i.scope === 'src/internal-helper.ts'), true, 'follow-up item description does imply scope');
+
+  // 3. plannedCompanions derives tokens from follow-up description and findings:
+  const companionsWithFollowup = plannedCompanions(
+    { plannedFiles: ['src/store/store.ts'], criteria: [{ id: 'AC-1', text: 'Base criteria' }], origin: { reviewFollowUps: { parent: 'GY-1', findings: [] } }, description: 'Needs wakeJob delivery' },
+    new Set(['src/store/store.ts', 'src/direct-merge.ts']),
+    []
+  );
+  assert.ok(companionsWithFollowup.some(c => c.path === 'src/direct-merge.ts'), 'plannedCompanions derives peer cluster from follow-up description');
 });

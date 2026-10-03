@@ -18,7 +18,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME, LANDABLE_CHECK };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -1584,8 +1584,9 @@ export class GitHub {
   async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]): Promise<TipDocs | undefined> {
     const required = new Set(work.policy.checks ?? []);
     const latest = new Map<string, string>();
-    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed') latest.set(check.name, check.conclusion ?? '');
-    const failed = [...latest.values()].filter(result => failedCheckConclusions.has(result)).length;
+    // A cancelled run never supersedes one that was not cancelled, nor counts as failing (GY-1109).
+    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed' && (check.conclusion !== 'cancelled' || !latest.has(check.name) || latest.get(check.name) === 'cancelled')) latest.set(check.name, check.conclusion ?? '');
+    const failed = [...latest.values()].filter(result => result !== 'cancelled' && failedCheckConclusions.has(result)).length;
     if (!failed) return undefined;
     // The counts only sharpen an ejection: a tip they cannot be read for is bisected as before, never left unobserved.
     try {
@@ -1658,6 +1659,7 @@ export class GitHub {
       pull: pr => this.request(`/pulls/${pr}`),
       blobAt: (path, ref) => this.blobAt(path, ref),
       blobContent: sha => this.blobContent(sha),
+      hasBlobContent: sha => this.hasBlobContent(sha),
       contains: (base, tip) => this.contains(base, tip),
       historySince: (base, tip) => this.historySince(base, tip),
     }, work, head, files, bound, speculative, branch, peers, budget);
@@ -1746,6 +1748,10 @@ export class GitHub {
     const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
     this.blobContents.set(sha, content);
     return content;
+  }
+  /** True when the blob bytes are already held in memory. */
+  hasBlobContent(sha: string): boolean {
+    return this.blobContents.has(sha);
   }
   /** Two fresh observations that must agree: the final check before a merge shares no cycle read (GY-806). */
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
@@ -2495,6 +2501,8 @@ export interface LandingGitHub {
    * cannot produce them keeps the conservative blob-identity comparison.
    */
   blobContent?(sha: string): Promise<Buffer | null>;
+  /** Whether the bytes of a blob by sha are already cached in memory. */
+  hasBlobContent?(sha: string): boolean;
   /** Whether `head` contains `base` by ancestry. */
   contains(base: string, head: string): Promise<boolean>;
   /** The commits `head` holds that `base` does not, or null when GitHub's list is truncated. */
@@ -2642,7 +2650,10 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
     const merged = threeWayMerge(baseContent, landingContent, headContent);
     if (merged.clean && merged.content !== null && merged.content.equals(landingContent)) file.mergeSha = file.baseSha;
     // The baseline lands as the merge result: judged by the lines it adds to what the commit holds (GY-1023).
-    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(files));
+    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) {
+      const inScopeTests = files.filter(f => inPlannedScope(plannedFiles, f.path) || f.status === 'added' || f.baseSha === null);
+      file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(inScopeTests));
+    }
   }
 }
 /**
@@ -2652,7 +2663,7 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
  * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
  * refuses rather than passes.
  */
-async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
+async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent' | 'hasBlobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
   // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
   // then asked a few at a time: in turn they held a final merge verification past its window.
   const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
@@ -2670,9 +2681,17 @@ async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobConten
   const found = await boundedMap(wanted, peerContainmentConcurrency, want => github.blobAt(want.path, base));
   wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
   // The timing baseline is judged by its lines, not its blob (GY-1023): two content reads from the same budget.
-  if (github.blobContent && budget.remaining >= 2) {
+  if (github.blobContent) {
     const read = github.blobContent.bind(github);
-    await judgeTimingCompanion(compared, async sha => { budget.remaining -= 1; const content = await read(sha).catch(() => null); return content && content.length <= mergeContentCap ? content.toString('utf8') : null; }, path => inPlannedScope(plannedFiles, path));
+    await judgeTimingCompanion(compared, async sha => {
+      const cached = github.hasBlobContent?.(sha);
+      if (!cached) {
+        if (budget.remaining < 1) return null;
+        budget.remaining -= 1;
+      }
+      const content = await read(sha).catch(() => null);
+      return content && content.length <= mergeContentCap ? content.toString('utf8') : null;
+    }, path => inPlannedScope(plannedFiles, path));
   }
   return compared;
 }
@@ -3167,6 +3186,41 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           continue;
         }
         const probe = classifyRerunRun(due, found);
+        if (probe.kind === 'cancelled') {
+          // A rerun attempt GitHub cancelled did not conclude the rerun (GY-1109): it keeps the hold
+          // and is rerun again on the cancelled allowance (at most cancelledRerunLimit times),
+          // without spending the single re-request meant for vanished runs.
+          const cancelledCount = Number(due.detail?.match(/cancelled:(\d+)/)?.[1] ?? 0);
+          if (cancelledCount < cancelledRerunLimit) {
+            try {
+              const again = await github.rerunFailedJobs(due.failedRunId);
+              const detail = `cancelled:${cancelledCount + 1}:${new Date().toISOString()}`;
+              const itemToUpdate: Work = work!;
+              work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
+                const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
+                if (!jobRow) return itemToUpdate;
+                const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+                const cur = all.find(w => w.id === itemToUpdate.id);
+                if (!cur) return itemToUpdate;
+                const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
+                if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
+                const current = cur.checkReruns![index];
+                const at = now.toISOString();
+                const next: CheckRerun = { ...current, runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail, probedAt: at, waiting: undefined };
+                cur.checkReruns = cur.checkReruns!.map((entry, pos) => pos === index ? next : entry);
+                await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [cur.id, JSON.stringify(cur)]);
+                await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [cur.id, 'github', 'check.rerun.requested', JSON.stringify({ details: next, at })]);
+                return cur;
+              });
+            } catch (error) {
+              const detail = `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}`;
+              work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'refused', detail });
+            }
+          } else {
+            work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'waiting', status: 'cancelled' });
+          }
+          continue;
+        }
         if (probe.kind !== 'missing') { work = await engine.recordCheckRerunProbe(work.id, job.token, due, probe); continue; }
         if (due.rerequestedAt) {
           work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun twice but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes of either request` });

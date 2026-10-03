@@ -7,6 +7,8 @@ import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
+import { impliedModuleCluster } from '../model/scope-companions.js';
+import { namedPaths, plannedFilesMax } from '../model/scope.js';
 import type { Services } from './routes.js';
 
 // Review follow-ups held on their parent until it ships (GY-845; model/machine-backlog.ts): a
@@ -28,6 +30,9 @@ export async function appendToItem(services: Services, db: Db, actor: Principal,
   if (added.length) {
     work.origin = { ...work.origin, reviewFollowUps: { parent, findings } };
     work.description = appendedDescription(work.description ?? '', added, heading);
+    const addedPaths = incoming.flatMap(f => [...(f.path ? [f.path] : []), ...namedPaths(f.text)]);
+    const cluster = impliedModuleCluster(addedPaths, incoming.map(f => f.text).join(' '));
+    work.plannedFiles = [...new Set([...(work.plannedFiles ?? []), ...addedPaths, ...cluster])].slice(0, plannedFilesMax);
     services.engine.evaluate(work, all, now);
     await recordDispatch(services, db, work, now);
     await save(db, work, actor.id, 'followups.appended', now, { parent, added: added.length, ...details });

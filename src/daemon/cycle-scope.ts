@@ -121,7 +121,12 @@ export async function scopeStep(cycle: Cycle) {
     if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
     try {
-      const findings = await effects.reviewFindings?.(item) ?? [];
+      const prFindings = await effects.reviewFindings?.(item) ?? [];
+      const itemFindings: ReviewFinding[] = (item.origin?.reviewFollowUps?.findings ?? []).map((f: any) => ({
+        ground: `review follow-up finding${f.path ? ` (${f.path})` : ''}`,
+        text: `${f.path ? `${f.path} ` : ''}${f.text}`,
+      }));
+      const findings = [...prFindings, ...itemFindings];
       const existing = await effects.basePaths?.(paths) ?? new Set<string>();
       const scoped = await automaticScopeGrounds(item, request, paths, findings, path => existing.has(path), effects.baseText, baseSuccessors(effects, item), effects.baseMentions, effects.baseMentions);
       // A path no rule grounds goes to the approver; the ones the rules do ground are granted now,

@@ -122,10 +122,25 @@ export interface ScopeImplication { scope: string; kind: 'criteria' | 'documenta
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
  * documentation the repository requires updating for the behaviour those criteria change.
+ * GY-1116: also includes paths named in follow-up findings and description.
  */
-export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes): ScopeImplication[] {
+export function impliedScopes(
+  criteria: readonly ScopeCriterion[],
+  documentation: readonly string[] = documentationScopes,
+  origin?: any,
+  description?: string | null,
+): ScopeImplication[] {
+  const isFollowUp = !!origin?.reviewFollowUps;
+  const followUpPaths = isFollowUp ? [
+    ...(origin?.reviewFollowUps?.findings ?? []).flatMap((finding: any) => [
+      ...(finding.path ? [finding.path] : []),
+      ...namedPaths(finding.text),
+    ]),
+    ...(description ? namedPaths(description) : []),
+  ] : [];
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
+    ...followUpPaths.map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
     ...documentation.map(scope => ({ scope, kind: 'documentation' as const, why: `${scope} is documentation this repository requires updating when behaviour changes` })),
   ];
 }
@@ -161,7 +176,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null; origin?: any; description?: string | null },
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
@@ -173,26 +188,27 @@ export function decideScopeRequest(
   if (request.remove?.length) return refused(`the request drops planned paths (${request.remove.join(', ')}); only additive scope is decided automatically, and narrowing containment is an operator requirements revision`);
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
-  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
+  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item), item.origin, item.description),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : []),
     // A change that adds a test file may record its timing line (GY-1023): the baseline is implied by the test.
     ...(addsTestFile(item) ? [{ scope: timingBaselinePath, kind: 'timing-companion' as const, why: `${timingBaselinePath} records the timing line of a test file this item adds or changes` }] : [])];
   // GY-955: a companion the change inevitably carries — the documentation-budget gate beside a
   // documentation path, the test file named for a criterion's proofs — is implied as well.
   const documentation = options.documentation ?? itemDocumentationPaths(item);
-  const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation); return why ? { scope: path, kind: 'companion', why } : null; };
+  const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation); return why ? { scope: path, kind: path === timingBaselinePath ? 'timing-companion' : 'companion', why } : null; };
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) ?? companion(path) }));
   const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
   if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
+  const companions = matched.filter(entry => entry.by!.kind === 'timing-companion').map(entry => entry.path);
+  const widening = paths.filter(path => !companions.includes(path));
   // An implied ask no fold can represent under the plannedFiles cap is refused, never applied or
   // routed: the schemas hold the same bound, and no narrower fold exists to grant instead (GY-630).
   // The refusal names the action that can carry it (GY-906): a requirements revision whose
   // plannedFiles can fold or split the ask under the cap — the plain union `master scope` posts is
   // refused by that same bound, so it can never carry an ask this refusal answered.
-  const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
+  const folded = collapsePlannedFiles(item.plannedFiles ?? [], widening, collapseArea(item)).plannedFiles;
   if (folded.length > plannedFilesMax)
     return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); decide it with graphyard master requirements GY-N FILE REASON, whose plannedFiles can fold or split the ask under the cap — a plain union of exact paths is refused by the same bound`);
-  const companions = matched.filter(entry => entry.by!.kind === 'timing-companion').map(entry => entry.path);
   return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}${companions.length ? `; ${companions.join(', ')} stays outside plannedFiles, so only the lines of this item's own test files may change there` : ''}`, paths, companions };
 }
 

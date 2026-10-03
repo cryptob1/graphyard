@@ -55,9 +55,10 @@ reviewed, and the item it was promoted to, if any.
 
 An operator (an admin, or an operator agent holding `intent:create`) promotes finding `INDEX` of
 `GY-N`'s batch (`POST /api/work/GY-N/promote`) to an ordinary work item of its own, in the
-backlog. It carries the finding as its criterion, plans the finding's file, depends on the
-approved item, and requires `manual:review-followup-addressed` — the finding is addressed in
-code, or declined with a recorded reason — which a producer session may hold once granted.
+backlog. It carries the finding as its criterion, plans the finding's file and its implied module
+cluster (peer modules, server wiring, and importing tests), depends on the approved item, and
+requires `manual:review-followup-addressed` — the finding is addressed in code, or declined with a
+recorded reason — which a producer session may hold once granted.
 
 A finding is promoted once: promotions of one finding are serialized, the batch marks it with
 the item it became, and repeating the command answers that item (`"duplicate": true`). The batch
