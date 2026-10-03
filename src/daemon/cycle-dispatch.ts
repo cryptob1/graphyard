@@ -18,6 +18,8 @@ import { credentialBlockedMarker } from '../worker-credential.js';
 import { attemptEndsNeedingRetry, attemptRetryHold, capBinding, capBindingPrefix, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
 import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
+import { decompositionHold, decompositionSettings } from '../decomposition.js';
+import { decompositionStep } from '../decomposition-step.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from './dispatch-failures.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
@@ -58,12 +60,32 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     });
   }
 
+  // 4-decompose. Splitting broad items before dispatch (GY-1126): an item about to be offered for
+  //     the first time that exceeds the size bounds (`run.decomposition`) gets one Pi session on the
+  //     research account that proposes child items; the control plane makes the split, and the
+  //     parent is never dispatched. The item waits only while that run is within its time limit; a
+  //     run that fails or keeps it whole is recorded and it is dispatched unchanged. It runs before
+  //     research, so a parent that is split is never researched, and only once `run.research` names
+  //     the account: an unconfigured loop dispatches as before.
+  const decomposing = new Set(offered.filter(item => decompositionHold(item, clock)).map(item => item.id));
+  if (effects.recordDecomposition && effects.research && config.run?.research) await isolate('dispatch', null, 'decomposition', async () => {
+    const research = researchSettings(config.run), settings = decompositionSettings(config.run);
+    const step = await decompositionStep({ items: offered.filter(item => !held885.has(item.id) && !decomposing.has(item.id)), clock, settings, config, cwd: effects.research!.cwd,
+      runner: effects.research!.runner ?? researchRunner(research), model: research.model, record: effects.recordDecomposition! });
+    for (const id of step.held) decomposing.add(id);
+    for (const action of step.actions) {
+      const item = offered.find(entry => entry.key === action.work)!, key = `decomposition:${item.id}:${action.state}`;
+      if (!detailChanged(state.actions[key], action.detail)) continue;
+      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: item.epoch, state: 'done', detail: action.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    }
+  });
+
   // 4-research. Research before build (GY-259): an item about to be offered whose requirements
   //     were never researched gets one cheap Pi session first, and waits only while that run is
   //     within its time limit. A run that fails or times out is recorded and the item is built
   //     without a brief; research never holds an item past its bound. It runs only once
   //     `run.research` names the research account: an unconfigured loop dispatches as before.
-  const held = new Set([...held885, ...new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id))]);
+  const held = new Set([...held885, ...decomposing, ...new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id))]);
   if (effects.recordResearch && effects.research && config.run?.research) await isolate('dispatch', null, 'research', async () => {
     const settings = researchSettings(config.run);
     const step = await researchStep({ items: offered.filter(item => !held.has(item.id)), clock, settings, config, cwd: effects.research!.cwd,

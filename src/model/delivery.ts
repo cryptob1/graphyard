@@ -24,7 +24,8 @@ export interface SmokeOutcome { evidenceId: string; result: 'pass' | 'fail'; sha
 // can have happened at. Every repository-clock comparison - window membership, weekly
 // bucketing, and intent-to-merge duration - reads those rather than re-deriving them,
 // because a reader has no way to recover the offset later.
-export interface Delivery { mergedAt: string; mergeSha: string; authorizationRevision: number; evidenceAsOf?: string; mergedAtRepository?: string; repositoryClockOffsetMs?: number; deployment?: DeploymentObservation; smoke?: SmokeOutcome }
+/** `children`: a split parent's delivery (GY-1126, src/decomposition.ts) is its children's merges; its own merge fields name the last of them. */
+export interface Delivery { mergedAt: string; mergeSha: string; authorizationRevision: number; evidenceAsOf?: string; mergedAtRepository?: string; repositoryClockOffsetMs?: number; deployment?: DeploymentObservation; smoke?: SmokeOutcome; children?: { key: string; mergeSha: string; mergedAt: string }[] }
 
 /** True when the policy asks for the post-deployment smoke proof. Older documents carry no flag. */
 export const deploySmokeRequired = (policy: Work['policy']) => !!policy.deploySmoke;

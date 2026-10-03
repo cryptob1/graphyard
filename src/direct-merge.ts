@@ -5,6 +5,7 @@ import { demand, type Principal, type Work } from './model.js';
 import type { Store } from './store.js';
 import { save, wakeJob } from './store.js';
 import { settleDelivered } from './model/actions.js';
+import { deliverSplitParent } from './decomposition.js';
 import { reconciliationRefusalPrefix } from './merge-queue.js';
 import { unauthorizedMergeViolation, type OperatorAuthorizedDelivery } from './engine.js';
 
@@ -101,6 +102,7 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
     // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).
     settleDelivered(work, all, now);
     await save(db, work, 'graphyard', 'direct-merge.delivered', now, { window: record.decision });
+    await deliverSplitParent(db, work, all, now);
     delivered.push(work);
   }
   if (delivered.length) for (const behind of all) if (behind.queue && behind.stage !== 'done') await wakeJob(db, behind.id);

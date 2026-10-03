@@ -63,7 +63,39 @@ export const diagnosisPayloadSchema = z.object({
 }).strict().refine(payload => !!payload.covering !== !!payload.fix, 'A diagnosis names exactly one answer: the covering item, or the fix item to file');
 export type DiagnosisPayload = z.infer<typeof diagnosisPayloadSchema>;
 
-export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', diagnose: 'graphyard_diagnose' } as const;
+/**
+ * What `graphyard_decompose` submits (GY-1126, src/decomposition.ts): the child items a broad item
+ * is split into, or none to keep it whole. A child names the parent's criteria by ID only — the
+ * control plane copies their text and proofs, so a split can drop or reword nothing — with the
+ * planned files it changes and the earlier children (by position) it must land after.
+ */
+export const decomposedChildSchema = z.object({
+  title: line(200), description: line(6000).optional(),
+  criteria: z.array(z.string().trim().regex(/^[A-Z]+-\d+$/)).min(1).max(20),
+  plannedFiles: z.array(line(500)).min(1).max(100),
+  after: z.array(z.number().int().min(0).max(9)).max(9).default([]),
+}).strict();
+export const decompositionPayloadSchema = z.object({ reason: line(2000), children: z.array(decomposedChildSchema).max(10) }).strict()
+  .refine(payload => payload.children.length !== 1, 'A split names at least two children; an empty list keeps the item whole');
+export type DecompositionPayload = z.infer<typeof decompositionPayloadSchema>;
+
+/**
+ * `run.decomposition` in .graphyard/master.json (GY-1126): the size bounds an item is judged
+ * against before its first dispatch, and the bound on one decomposition run. The run uses the
+ * research account and model (`run.research`); a loop without one splits nothing.
+ */
+export const decompositionSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxCriteria: z.number().int().min(1).max(50).default(4),
+  maxBroadScopes: z.number().int().min(0).max(20).default(2),
+  maxPlannedFiles: z.number().int().min(1).max(200).default(12),
+  maxEstimatedLines: z.number().int().min(100).max(100_000).default(1_500),
+  timeoutMinutes: z.number().int().min(1).max(60).default(10),
+  concurrency: z.number().int().min(1).max(16).default(4),
+}).strict();
+export type DecompositionSettings = z.infer<typeof decompositionSettingsSchema>;
+
+export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', diagnose: 'graphyard_diagnose', decompose: 'graphyard_decompose' } as const;
 
 /**
  * `run.diagnostician` in .graphyard/master.json (GY-439): the diagnostician runs headless on Pi

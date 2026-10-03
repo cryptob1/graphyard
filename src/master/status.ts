@@ -21,6 +21,7 @@ import { classified } from '../model/fault-classes.js';
 import { pendingFollowUpsReport } from '../model/followups-held.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
+import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
@@ -302,7 +303,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       mergeStep: mergeStep(work, batches.get(work.key) ?? null),
       // The review and proofs held by carry across a Graphyard-authored merge, each with its ground:
       // the verdict given before that merge, shown as carried rather than as freshly passed.
-      carried: carriedBindings(work, snapshot.work, new Date(now)) };
+      carried: carriedBindings(work, snapshot.work, new Date(now)),
+      // The split relation (GY-1126): a child's parent, or a parent's children and the run that split it.
+      split: splitRelation(work) };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Every delivery no valid execution authorized, apart by how it was judged: reconciled — the
@@ -363,6 +366,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // Review follow-ups held on a parent until it ships (GY-845), apart from the backlog they have not joined yet.
     pendingFollowUps: pendingFollowUpsReport(snapshot.work),
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
+    // Every split parent and its children's progress (GY-1126): the parent is delivered when they all are.
+    splits: splitReport(snapshot.work),
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) },
     // The shared project memory the loop keeps (GY-1125), as its cursor holds it; null while the cursor is unreadable.
     projectMemory: loop && 'projectMemory' in loop ? loop.projectMemory ?? null : null };
@@ -436,7 +441,7 @@ function deliveredRow(work: Work, now: number, baseBranch: string) {
   return { key: work.key, title: work.title, mergedAt, mergeSha, state: deliveryState(work)!,
     deployment: deployment ? { sha: deployment.sha, covers: deployment.covers, source: deployment.source, observedAt: deployment.observedAt } : null,
     smoke: smoke ? { result: smoke.result, sha: smoke.sha, producer: smoke.producer, at: smoke.at, executed: smoke.executed, skipped: smoke.skipped, url: smoke.url ?? null } : null,
-    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), mergeToProductionMs: mergeToProductionMs(work), rollback: rollbackGuidance(work, baseBranch) };
+    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), mergeToProductionMs: mergeToProductionMs(work), rollback: rollbackGuidance(work, baseBranch), split: splitRelation(work) };
 }
 /** Time from the accepted merge to the observed deployment covering it: merge-to-production latency. */
 export function mergeToProductionMs(work: Work): number | null {

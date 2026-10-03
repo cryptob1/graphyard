@@ -14,6 +14,7 @@ import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathSco
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
+import type { DecompositionRecord } from '../decomposition.js';
 import type { RepairAudit } from '../master/repair-lane.js';
 import type { Closure } from './closure.js';
 import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
@@ -57,9 +58,8 @@ export const createSchema = z.object({
   // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
   // created before the field existed carries none and is not system-driven.
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
-  // Research before build (GY-259): a feature item is researched unless this is false, and any
-  // other item only when it is true. See src/research.ts.
-  research: z.boolean().optional(),
+  // `research` (GY-259, src/research.ts): false skips a feature's research, true researches any item. `split` (GY-1126, src/decomposition.ts): false never splits it before first dispatch, true splits it even within the size bounds.
+  research: z.boolean().optional(), split: z.boolean().optional(),
   // A repair to Graphyard's own merge path (GY-406): allowed only when every plannedFiles entry is
   // inside the merge path, and it opens the audited repair lane (src/master/repair-lane.ts).
   repair: z.literal('merge-path').optional(),
@@ -173,8 +173,8 @@ export interface Work extends Create {
    * are kept in `humanRequests` (see model/human-request.ts).
    */
   humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[];
-  /** What the research step found before build, and the product questions it asked (src/research.ts). */
-  researchBrief?: ResearchRecord | null;
+  /** What the research step found before build (src/research.ts); the decomposition run before first dispatch and the split relation it recorded, set only by the control plane (src/decomposition.ts). */
+  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[];
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it ships (GY-845), model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */

@@ -10,6 +10,7 @@ import { carriedApproval } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
+import { isDelivered } from './closure.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -56,7 +57,10 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   const lane = itemLane(work);
   const speedTarget = laneSpeedTargets[lane];
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
-  add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`), ...(work.blocker ? [work.blocker] : [])]);
+  // A split parent (GY-1126) is never dispatched itself: it waits until every child is delivered, which delivers it (src/decomposition.ts).
+  const children = (work.children ?? []).filter(key => !all.some(w => w.key === key && isDelivered(w)));
+  add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`),
+    ...children.map(key => `Split into child items: ${key} is not delivered`), ...(work.blocker ? [work.blocker] : [])]);
   const candidate = work.candidate;
   const obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
