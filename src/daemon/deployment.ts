@@ -96,7 +96,7 @@ const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
  */
 const deploymentStatusHistory = 100;
 /** States of a deployment still on its way: it does not serve yet, so it supersedes nothing. */
-const inFlightStates = new Set(['pending', 'queued', 'in_progress']);
+const inFlightStates = new Set(['pending', 'queued', 'in_progress', 'waiting']);
 /**
  * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
  * has only a per-deployment status listing. A deployment whose status could not be read has no

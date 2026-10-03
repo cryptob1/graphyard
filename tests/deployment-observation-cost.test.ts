@@ -589,7 +589,7 @@ test('unit:deployment-observation-inactive-release — the newest production dep
 
     // A newer release still pending, queued or in progress does not serve yet: production still
     // serves the deactivated release behind it, through the whole deploy window.
-    for (const flight of ['pending', 'queued', 'in_progress']) {
+    for (const flight of ['pending', 'queued', 'in_progress', 'waiting']) {
       records = [production(4, mid), production(3, release)];
       status = { 4: { latest: flight, history: [flight] }, 3: deactivated };
       const window = await observe();
