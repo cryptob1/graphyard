@@ -49,6 +49,7 @@ import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -143,6 +144,7 @@ export interface DaemonEffects {
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each, and the reviews not yet classified: each holds its head's merge. */ mechanicalFixes?: () => Promise<MechanicalFixState>;
   /**
    * GY-1118: records a capped change request's non-blocking findings as the item's follow-up batch
    * (`POST /api/work/KEY/followups`), as the master's operator-agent identity, idempotent on `key`.
@@ -686,6 +688,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
+    mechanicalFixes: () => readMechanicalFixState(root),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

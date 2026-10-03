@@ -7,6 +7,7 @@ import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
@@ -225,8 +226,8 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, exhausted);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, exhausted, mechanical);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
@@ -251,7 +252,7 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -322,6 +323,10 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // settling it is a routine two-party decision, not a wait on a human master session (GY-161,
   // 2026-09-24: its first worker exited five minutes in, a new attempt took the item, and the
   // standing escalation would have refused the merge until somebody asked for the resolution).
+  // An otherwise-approved head whose approval raised findings classified mechanical (GY-971) returns
+  // to a worker-class bot round for one commit that fixes exactly those, before the fresh read.
+  const fix = mechanicalRework(work, mechanical);
+  if (fix) return { action: 'rework', ...fix };
   const lost = leaseLossDecision(work);
   if (lost) return lost;
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };

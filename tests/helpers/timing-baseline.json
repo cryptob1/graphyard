@@ -391,6 +391,7 @@
     "tests/master-supervision.test.ts": 8261,
     "tests/master-verification.test.ts": 18589,
     "tests/master.test.ts": 5066,
+    "tests/mechanical-findings.test.ts": 1000,
     "tests/merge-band-queue-depth.test.ts": 596,
     "tests/merge-base-ancestry.test.ts": 944,
     "tests/merge-binding-race.test.ts": 2911,

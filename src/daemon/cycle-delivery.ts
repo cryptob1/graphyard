@@ -13,6 +13,7 @@ import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { deploymentDetail } from './deployment.js';
+import { mechanicalMergeHold } from '../mechanical-findings.js';
 
 /** How many times one cycle re-reads and retries a guarded merge that lost a race to a concurrent write. */
 export const mergeRaceRetries = 3;
@@ -206,6 +207,10 @@ export async function mergeStep(cycle: Cycle) {
     const current = (await readFresh(again)).get(item.id);
     return current && current.stage === 'merge' && !mergedWithoutAuthorization(current) && !waitingInMergeQueue(current) && candidateKey('merge', current) === key ? current : null;
   };
+  // An approved head owed a mechanical-fix round (GY-971) is not merged ahead of it: the round's bot
+  // commit and fresh read replace it, and a review not yet classified is waited for the same way.
+  // A ledger that cannot be read holds nothing: the plan's fallback files its findings as follow-ups.
+  const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().catch(() => null) : null;
   for (const item of mergeCandidates) await isolate('merge', item, item.key, async () => {
     const key = candidateKey('merge', item);
     const previous = state.actions[key];
@@ -224,6 +229,12 @@ export async function mergeStep(cycle: Cycle) {
     if (awaitingObservation(previous, state.actions[`wake:observation:${item.id}`])) {
       if (!mergeObservationLanded(state.actions[`wake:observation:${item.id}`], item)) { await wakeObservationJob(cycle, item, 'guarded merge'); return; }
     } else if (!mergeRetryDue(previous, item, state.cycle, now())) return;
+    const held = mechanical && mechanicalMergeHold(item, mechanical, now());
+    if (held) {
+      const holdKey = `${candidateKey('escalation', item)}:mechanical`;
+      if (detailChanged(state.actions[holdKey], held)) performed.push(await record(state, holdKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: held, attempts: (state.actions[holdKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     // With automatic merging off the guarded merge runs for exactly the candidate an approver
     // agent approved (step 4c requested it). Until that approval is applied, the loop waits on the
     // approver rather than on a person, and says which decision it is waiting for.

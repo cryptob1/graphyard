@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { researchWorkerSection } from '../research.js';
+import { appliedMechanicalRework, mechanicalWorkerSection, readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
@@ -193,6 +194,23 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
 }
 
+/**
+ * GY-971. Whether this attempt is a mechanical-fix round: only a rework of a submitted candidate can
+ * be, and only when the item's most recently applied rework decision was that round's; the review
+ * ledger's plans are read only then. The decisions are read with the master's credential; one that
+ * cannot be read makes the attempt an ordinary rework, whose head the fresh read then refuses as a
+ * bot commit and whose findings it hands back to the reviewer.
+ */
+async function mechanicalRound(root: string, config: MasterConfig, work: Work, fetcher: typeof fetch = fetch) {
+  if (!work.submission || !work.candidate) return null;
+  try {
+    const response = await fetcher(`${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) return null;
+    const reviewId = appliedMechanicalRework(work, ((await response.json()) as { decisions?: Parameters<typeof appliedMechanicalRework>[1] }).decisions ?? []);
+    return reviewId === null ? null : { requests: await readMechanicalFixRequests(root), reviewId };
+  } catch { return null; }
+}
+
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
 
 /**
@@ -295,7 +313,9 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
   const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
   const memory = await readProjectMemory(root).catch(() => null);
-  const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base);
+  // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes.
+  const mechanical = await mechanicalRound(root, config, work);
+  const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical);
   // The worker loads its own role rules, never the master's: it may push its assigned branch.
   const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
   let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
@@ -369,7 +389,35 @@ export function autonomousSession(outcome: string, blocker: string) {
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
-export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null, memory?: ProjectMemory | null, baseSha?: string) {
+export function workerPrompt(
+  config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate'>>,
+  profile: Pick<WorkerProfile, 'principal'>,
+  epoch: number,
+  dependencies?: Pick<SharedDependencies, 'shared'> | null,
+  memoryOrMechanical?: ProjectMemory | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+  baseShaOrMechanical?: string | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+  mechanicalOpt?: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+) {
+  let memory: ProjectMemory | null = null;
+  let baseSha: string | undefined = undefined;
+  let mechanical: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null = null;
+
+  if (memoryOrMechanical && 'requests' in memoryOrMechanical) {
+    mechanical = memoryOrMechanical;
+  } else {
+    memory = (memoryOrMechanical as ProjectMemory | null) ?? null;
+  }
+
+  if (baseShaOrMechanical && typeof baseShaOrMechanical === 'object' && 'requests' in baseShaOrMechanical) {
+    mechanical = baseShaOrMechanical;
+  } else if (typeof baseShaOrMechanical === 'string') {
+    baseSha = baseShaOrMechanical;
+  }
+
+  if (mechanicalOpt) {
+    mechanical = mechanicalOpt;
+  }
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
@@ -383,6 +431,7 @@ export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<W
     + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
     + submissionPolicyRule
     + destructivePromptGuidance
+    + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     + resumedAttempt(work)
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide), which ends your lease and parks the item for the human, then stop. `
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
