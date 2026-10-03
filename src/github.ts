@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
+import { LANDABLE_CHECK, landableCarried, landableCheckCurrent, landableCheckRun, type LandableCheckRun } from './landable-check.js';
 import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
@@ -16,6 +17,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
+export { LANDABLE_CHECK };
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
@@ -23,7 +25,7 @@ import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, ty
 import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
-import { workerPushPermissions } from './worker-credential.js';
+import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -682,6 +684,8 @@ export class GitHub {
     clearTimeout(timer);
   }
   private preflightState: AppPermissionReport | null = null;
+  /** The wanted worker push permissions the last mint found ungranted (GY-1100); null until a mint. */
+  private pushShortfalls: PushPermissionShortfall[] | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
   // A rejected App credential is retried once a minute, not once per queued job: every request
@@ -909,7 +913,10 @@ export class GitHub {
       const app = typeof installation.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(this.config.appId);
       const installationUrl = typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId);
       const suspended = !!installation.suspended_at;
-      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl))];
+      // A push shortfall a mint met is kept current here, so accepting the permission clears it.
+      if (this.pushShortfalls) this.pushShortfalls = grantedPushPermissions(granted).missing;
+      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl)),
+        ...(this.pushShortfalls ?? []).map(shortfall => describePushShortfall(shortfall, app, installationUrl))];
       this.preflightState = { ...base, app, account: typeof installation.account?.login === 'string' ? installation.account.login : null, installationUrl, verifiedAt: base.observedAt, error: null, suspended, granted, missing, blockedFeatures: blockedFeatures(missing), attention };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'GitHub App permissions could not be read';
@@ -979,32 +986,51 @@ export class GitHub {
   }
   /**
    * A worker session's push credential (GY-999): an installation token narrowed to this one
-   * repository and to the two permissions pushing a branch and opening its pull request need. It
-   * is never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * repository and to the permissions pushing a branch and opening its pull request need. It is
+   * never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * It asks only for the wanted permissions the installation grants (GY-1100): the preflight's
+   * verified reading when there is one, else the installation read now. A wanted permission the
+   * installation lacks is left out and raised as permission attention instead of failing the mint;
+   * a 422 on a preflight reading re-reads the installation once, in case it changed since.
    */
   async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     const bypass = await this.workerPushBypass();
     demand(!bypass, bypass ?? '', 409);
-    const mint = (permissions: Record<string, string>) => fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
-      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
-    });
-    let response = await mint(workerPushPermissions);
-    this.record('/app/installations/access_tokens', response, false);
-    // An installation that has not accepted `workflows` refuses the whole request (422); the worker
-    // still gets the push credential it had before, and only a base sync carrying a workflow change
-    // is refused, never every launch (2026-10-02).
-    if (response.status === 422 && 'workflows' in workerPushPermissions) {
-      const { workflows: _omitted, ...withoutWorkflows } = workerPushPermissions as Record<string, string>;
-      response = await mint(withoutWorkflows);
-      this.record('/app/installations/access_tokens', response, false);
-    }
+    const cached = this.preflightState?.verifiedAt ? this.preflightState.granted : null;
+    let response = await this.requestPushToken(cached ?? await this.installationGrants());
+    if (response.status === 422 && cached) response = await this.requestPushToken(await this.installationGrants());
     const refused = await this.refusal(response, 'worker push credential');
     if (refused) throw refused;
     const result: any = await response.json();
     demand(typeof result?.token === 'string' && result.token.length >= 20 && Number.isFinite(Date.parse(result.expires_at)), 'GitHub returned no worker push token', 502);
     return { token: result.token, expiresAt: new Date(Date.parse(result.expires_at)).toISOString(), permissions: result.permissions && typeof result.permissions === 'object' ? result.permissions : {} };
+  }
+  /** The installation's granted permissions read now with the App JWT. */
+  private async installationGrants(): Promise<Record<string, string>> {
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    this.record('/app/installations', response, false);
+    const refused = await this.refusal(response, 'GET /app/installations');
+    if (refused) throw refused;
+    const installation: any = await response.json();
+    demand(installation?.permissions && typeof installation.permissions === 'object', 'GitHub returned an installation without permissions', 502);
+    return Object.fromEntries(Object.entries(installation.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string>;
+  }
+  private async requestPushToken(granted: Record<string, string>) {
+    const { permissions, missing } = grantedPushPermissions(granted);
+    demand(permissions.contents === 'write', `The App installation grants no Contents: write, so no worker push credential can be minted; accept it at ${this.preflightState?.installationUrl ?? installationSettingsUrl(this.config.installationId)}`, 502);
+    this.pushShortfalls = missing;
+    const report = this.preflightState;
+    if (report) {
+      report.attention = [...report.attention.filter(line => !line.includes(pushShortfallMarker)),
+        ...missing.map(shortfall => describePushShortfall(shortfall, report.app, report.installationUrl))];
+    }
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
+    });
+    this.record('/app/installations/access_tokens', response, false);
+    return response;
   }
   /**
    * Why this App's token may not be handed to a worker, or null (GY-1066). On an organization
@@ -1477,7 +1503,7 @@ export class GitHub {
       candidate: { sha: pr.head.sha, baseSha: candidateBase, pr: pr.number, branch: pr.head.ref, author: pr.user.login, ...(Number.isFinite(Date.parse(pr.created_at)) ? { createdAt: pr.created_at } : {}) },
       // Canonical oldest-to-newest ordering makes legacy consumers deterministic;
       // gates also compare immutable run IDs rather than trusting response order.
-      checks: checks.filter(c => c.name !== CHECK_NAME).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
+      checks: checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
         ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
@@ -2240,6 +2266,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = { name: CHECK_NAME, head_sha: audit.head, status: 'completed', conclusion: 'success', external_id: work.id,
       output: { title: 'Repair lane: merge-path repair', summary: `Repair-lane merge of ${work.key} at ${audit.head}, decision ${audit.decision} (requested by ${audit.requestedBy}, approved by ${audit.approver}) for the fault in ${audit.fault}; bypassing a normal guarded merge ${audit.bypassed.state} since ${audit.bypassed.since}` } };
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    await this.upsertLandable(landableCarried(work, audit.head, body.output.title, body.output.summary));
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: autoMergeMethod() });
   }
   /**
@@ -2256,7 +2283,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   /** Every check run on a commit, as the gates read a candidate's: what the main guard judges a merge commit by (GY-500). */
   async commitChecks(sha: string): Promise<{ name: string; result: string; appId: number; id?: number }[]> {
-    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME)
+    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME && check.name !== LANDABLE_CHECK)
       .map(check => ({ name: check.name, result: check.status === 'completed' ? check.conclusion : check.status, appId: check.app?.id, ...(Number.isSafeInteger(check.id) ? { id: check.id } : {}) }));
   }
   /**
@@ -2324,6 +2351,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary)) {
       await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
     }
+    await this.upsertLandable(landableCarried(work, revert.head, body.output.title, body.output.summary));
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: revert.head, method: autoMergeMethod() });
     const merged = await this.request(`/pulls/${revert.pr}`);
     return merged?.merged && typeof merged.merge_commit_sha === 'string' ? merged.merge_commit_sha : null;
@@ -2334,10 +2362,36 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * while the head stays authorized: a withdrawn head is dequeued, which discards the group.
    */
   async publishGroupCheck(work: Work, groupHead: string) {
+    const summary = `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}`;
+    // The group commit carries the authorized head's landability verdict too (GY-887): branch protection requires both.
+    await this.upsertLandable(landableCarried(work, groupHead, 'Landable', summary));
     const existing = (await this.pages(`/commits/${groupHead}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
     if (existing?.status === 'completed' && existing.conclusion === 'success' && existing.external_id === work.id) return;
     const body = { name: CHECK_NAME, head_sha: groupHead, status: 'completed', conclusion: 'success', external_id: work.id,
-      output: { title: 'All required gates passed', summary: `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}` } };
+      output: { title: 'All required gates passed', summary } };
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+  }
+  /**
+   * GY-887. Publishes the landability verdict as `graphyard/landable` on the candidate head
+   * (landable-check.ts): created on a new head, updated when the verdict or its reasons change, and
+   * left alone when the published run already says the same. Success is written only while the pull
+   * request still has that head on that base, as `publish` writes its own.
+   */
+  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}) {
+    const body = landableCheckRun(work, all, new Date());
+    if (!body) return;
+    const success = body.conclusion === 'success';
+    if (success) {
+      const pr = await this.request(`/pulls/${work.candidate!.pr}`);
+      requireCurrent(pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha, 'PR changed before the landability check was published; retry');
+    }
+    await this.upsertLandable(body, () => beforeWrite(success));
+  }
+  /** Creates or updates this App's `graphyard/landable` run on a head; an identical standing run is not rewritten. */
+  async upsertLandable(body: LandableCheckRun, beforeWrite: () => Promise<void> = async () => {}) {
+    const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
+    if (landableCheckCurrent(existing, body)) return;
+    await beforeWrite();
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
@@ -2355,11 +2409,15 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
-/** Required checks by name, deduplicated, without Graphyard's own merge check (GY-430). */
-function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+/**
+ * Required checks by name, deduplicated, without Graphyard's own merge check (GY-430) or its
+ * landability verdict (GY-887): the verdict is computed from these, so requiring itself would
+ * refuse every candidate forever once protection lists it.
+ */
+export function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
   const merged = new Map<string, { name: string; appId: number | null }>();
   for (const check of checks) {
-    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME) continue;
+    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME || check.name === LANDABLE_CHECK) continue;
     const appId = Number.isSafeInteger(check.appId) ? check.appId as number : null;
     const known = merged.get(check.name);
     // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
@@ -3133,6 +3191,12 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
         }
         else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+        // The landability verdict is recomputed from this observation's facts and published as its
+        // one required check on the head (GY-887); an unchanged verdict writes nothing.
+        if (!unpublishable && typeof github.publishLandable === 'function') {
+          const observed = work;
+          await github.publishLandable(observed, all.map(item => item.id === observed.id ? observed : item), success => guard(observed, success)());
+        }
         // A merge-path repair whose normal merge is stalled may take the audited repair lane (GY-406).
         if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work, new Date(), guard(work, true));
       }
