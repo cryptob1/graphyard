@@ -363,7 +363,10 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
   const row = item.actionQueue!.actions.find(entry => entry.kind === 'dispatch')!;
   assert.ok(row, 'a released item with nobody on it needs a dispatch, and the control plane keeps the row for it');
 
-  // Nobody polls. The queue alone cannot tell this from every executor being busy; presence can.
+  // Nobody polls. The queue alone cannot tell this from every executor being busy; presence can,
+  // once the control plane has listened for a whole liveness window (GY-1086) — before that an
+  // empty registry is a fleet not yet heard from. This one has been listening that long.
+  Object.assign(executorRegistry(engine), { since: new Date(Date.now() - executorLiveMs - 1) });
   const before = await ok(coordinator, 'GET', 'actions');
   assert.deepEqual(before.executors.live, []);
   assert.deepEqual(before.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']]);
