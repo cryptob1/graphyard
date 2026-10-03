@@ -12,8 +12,10 @@ export interface RequestProgress {
   requestId: string; sinceMs: number; group?: string;
   /** The head the request binds, when the reader carries it; a review reader names the commit no verdict can be obtained on. */
   sha?: string;
-  /** `verdict` is the session's recorded verdict state, as a status reader summarizes it: `DISMISSED`, `APPROVED`, or null. */
-  /** `settledMs` is how long ago a session that is no longer pending settled, when the reader knows. */
+  /**
+   * `verdict` is the session's recorded verdict state, as a status reader summarizes it: `DISMISSED`, `APPROVED`, or null.
+   * `settledMs` is how long ago a session that is no longer pending settled, when the reader knows.
+   */
   session: { state: string; attempt?: number; resolution?: string | null; verdict?: string | null; settledMs?: number | null } | null;
   retry?: { attempts: number; limit: number; nextAt: string | null; exhausted: boolean } | null;
   /**

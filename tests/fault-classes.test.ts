@@ -1001,6 +1001,22 @@ test('unit:recurring-class-item — daemonSummary reports faults under the polic
     const [attest] = livenessFaults([{ work, records: [settled(request, gy491At - 7 * 60_000, gy491At - 6 * 60_000, 'evidence does not exercise its criterion')] }], gy491At);
     assert.match(attest.text, /awaits the attest decision/);
     assert.match(attest.next!, /graphyard master decide GY-374 attest \{"proof":"manual:x"\} REASON/);
+    // Where a reader lacks closedAt (settledMs null), it still classifies as request-remedy.
+    const [noClosedAt] = classifyAttention(unansweredRequestAttention([{
+      key: 'GY-491',
+      dispatch: {
+        review: null,
+        producers: [{
+          requestId: gy491.records[0].requestId,
+          sinceMs: 8 * 60_000,
+          group: 'unit',
+          session: { state: 'completed', attempt: 1, resolution: 'evidence does not exercise its criterion', verdict: null, settledMs: null },
+          remedy: { decision: 'rework', proofs: ['unit:report-pool-isolated'] },
+          unexercised: ['unit:report-pool-isolated'],
+        }],
+      },
+    }]));
+    assert.deepEqual([noClosedAt.kind, noClosedAt.faultClass], ['request-remedy', 'decision']);
   });
 
   test('manual:fault-class-session-liveness — all three instances together raise no session-liveness fault; a request nothing answers still reads so', () => {
