@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
-import { storeAction, message, type DaemonState } from './state.js';
+import { storeAction, touchStanding, message, type DaemonState } from './state.js';
 import { detailChanged } from './decisions.js';
 
 /**
@@ -107,7 +107,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     if (detailChanged(state.actions[refusedKey], detail)) {
       storeAction(state, refusedKey, { kind: 'config', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[refusedKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
       await persist();
-    }
+    } else touchStanding(state, refusedKey, at());
     return { outcome: 'refused', reason, commit };
   };
   /** Completes the restarts one alignment owes, with the checkout already at the tip. */
