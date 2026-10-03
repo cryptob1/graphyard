@@ -27,6 +27,7 @@ import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagC
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 import { firstObservationOwed, observationBandLag, observationClaim, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
+import { observedReviewBody } from './review-cap.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -640,6 +641,17 @@ export class GitHub {
   private histories = new Map<string, Set<string> | null>();
   /** Settled terminal commit statuses per head commit sha and context name (GY-1060). */
   private terminalStatuses = new Map<string, { name: string; result: string; appId: 0; source: 'status' }>();
+  /** Last published landability check run body per head commit sha (GY-1050). Bounded by landableBodiesEntries. */
+  private landableBodies = new Map<string, LandableCheckRun>();
+  /** Bound on how many published landability bodies the cache retains (GY-1050). */
+  landableBodiesEntries = ancestryEntries;
+  private cacheLandableBody(sha: string, body: LandableCheckRun) {
+    this.landableBodies.delete(sha);
+    this.landableBodies.set(sha, body);
+    if (this.landableBodies.size > this.landableBodiesEntries) {
+      this.landableBodies.delete(this.landableBodies.keys().next().value!);
+    }
+  }
   /**
    * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
    * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
@@ -1566,6 +1578,7 @@ export class GitHub {
       // `reviews`, and review-conflict.ts must still read it as withdrawn rather than standing.
       dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
+        ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}),
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
@@ -1662,6 +1675,7 @@ export class GitHub {
       pull: pr => this.request(`/pulls/${pr}`),
       blobAt: (path, ref) => this.blobAt(path, ref),
       blobContent: sha => this.blobContent(sha),
+      hasBlobContent: sha => this.hasBlobContent(sha),
       contains: (base, tip) => this.contains(base, tip),
       historySince: (base, tip) => this.historySince(base, tip),
     }, work, head, files, bound, speculative, branch, peers, budget);
@@ -1750,6 +1764,10 @@ export class GitHub {
     const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
     this.blobContents.set(sha, content);
     return content;
+  }
+  /** True when the blob bytes are already held in memory. */
+  hasBlobContent(sha: string): boolean {
+    return this.blobContents.has(sha);
   }
   /** Two fresh observations that must agree: the final check before a merge shares no cycle read (GY-806). */
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
@@ -2431,22 +2449,42 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * left alone when the published run already says the same. Success is written only while the pull
    * request still has that head on that base, as `publish` writes its own.
    */
-  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}) {
+  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}, skipOnMoved = false): Promise<{ skipped: boolean } | void> {
     const body = landableCheckRun(work, all, new Date());
     if (!body) return;
     const success = body.conclusion === 'success';
+    // Check in-memory cache and standing run before making PR reads (GY-1050).
+    const cached = this.landableBodies.get(body.head_sha);
+    if (landableCheckCurrent(cached, body)) return;
+    const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
+    if (landableCheckCurrent(existing, body)) {
+      this.cacheLandableBody(body.head_sha, body);
+      return;
+    }
     if (success) {
       const pr = await this.request(`/pulls/${work.candidate!.pr}`);
-      requireCurrent(pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha, 'PR changed before the landability check was published; retry');
+      const current = pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha;
+      if (!current) {
+        if (skipOnMoved) return { skipped: true };
+        requireCurrent(false, 'PR changed before the landability check was published; retry');
+      }
     }
-    await this.upsertLandable(body, () => beforeWrite(success));
+    await beforeWrite(success);
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    this.cacheLandableBody(body.head_sha, body);
   }
   /** Creates or updates this App's `graphyard/landable` run on a head; an identical standing run is not rewritten. */
   async upsertLandable(body: LandableCheckRun, beforeWrite: () => Promise<void> = async () => {}) {
+    const cached = this.landableBodies.get(body.head_sha);
+    if (landableCheckCurrent(cached, body)) return;
     const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
-    if (landableCheckCurrent(existing, body)) return;
+    if (landableCheckCurrent(existing, body)) {
+      this.cacheLandableBody(body.head_sha, body);
+      return;
+    }
     await beforeWrite();
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    this.cacheLandableBody(body.head_sha, body);
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
@@ -2499,6 +2537,8 @@ export interface LandingGitHub {
    * cannot produce them keeps the conservative blob-identity comparison.
    */
   blobContent?(sha: string): Promise<Buffer | null>;
+  /** Whether the bytes of a blob by sha are already cached in memory. */
+  hasBlobContent?(sha: string): boolean;
   /** Whether `head` contains `base` by ancestry. */
   contains(base: string, head: string): Promise<boolean>;
   /** The commits `head` holds that `base` does not, or null when GitHub's list is truncated. */
@@ -2646,7 +2686,10 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
     const merged = threeWayMerge(baseContent, landingContent, headContent);
     if (merged.clean && merged.content !== null && merged.content.equals(landingContent)) file.mergeSha = file.baseSha;
     // The baseline lands as the merge result: judged by the lines it adds to what the commit holds (GY-1023).
-    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(files));
+    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) {
+      const inScopeTests = files.filter(f => inPlannedScope(plannedFiles, f.path) || f.status === 'added' || f.baseSha === null);
+      file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(inScopeTests));
+    }
   }
 }
 /**
@@ -2656,7 +2699,7 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
  * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
  * refuses rather than passes.
  */
-async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
+async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent' | 'hasBlobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
   // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
   // then asked a few at a time: in turn they held a final merge verification past its window.
   const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
@@ -2674,9 +2717,17 @@ async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobConten
   const found = await boundedMap(wanted, peerContainmentConcurrency, want => github.blobAt(want.path, base));
   wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
   // The timing baseline is judged by its lines, not its blob (GY-1023): two content reads from the same budget.
-  if (github.blobContent && budget.remaining >= 2) {
+  if (github.blobContent) {
     const read = github.blobContent.bind(github);
-    await judgeTimingCompanion(compared, async sha => { budget.remaining -= 1; const content = await read(sha).catch(() => null); return content && content.length <= mergeContentCap ? content.toString('utf8') : null; }, path => inPlannedScope(plannedFiles, path));
+    await judgeTimingCompanion(compared, async sha => {
+      const cached = github.hasBlobContent?.(sha);
+      if (!cached) {
+        if (budget.remaining < 1) return null;
+        budget.remaining -= 1;
+      }
+      const content = await read(sha).catch(() => null);
+      return content && content.length <= mergeContentCap ? content.toString('utf8') : null;
+    }, path => inPlannedScope(plannedFiles, path));
   }
   return compared;
 }
@@ -3193,18 +3244,27 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       if (!observation.merged) {
         const unpublishable = hold('check');
         if (unpublishable) held ??= unpublishable;
-        else if (typeof github.mergeQueueState === 'function') {
-          // The check and GitHub's queue move together (GY-258): an authorized, requested head is
-          // published as passed and handed to GitHub to merge; anything else is failed and taken out.
-          const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
-          if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
-        }
-        else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
-        // The landability verdict is recomputed from this observation's facts and published as its
-        // one required check on the head (GY-887); an unchanged verdict writes nothing.
-        if (!unpublishable && typeof github.publishLandable === 'function') {
-          const observed = work;
-          await github.publishLandable(observed, all.map(item => item.id === observed.id ? observed : item), success => guard(observed, success)());
+        else {
+          // The landability verdict is recomputed from this observation's facts and published as its
+          // one required check on the head (GY-887); an unchanged verdict writes nothing.
+          // Publishing before gateMerge ensures GitHub sees the required check satisfied at enqueue time (GY-1050).
+          // Recomputing with the live store snapshot covers peer changes since job start (GY-1050).
+          if (typeof github.publishLandable === 'function') {
+            const peers = await engine.store.list();
+            const target = work;
+            const landable = await github.publishLandable(target, peers.map(item => item.id === target.id ? target : item), success => guard(target, success)(), true);
+            if (landable?.skipped) {
+              await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed);
+              return true;
+            }
+          }
+          if (typeof github.mergeQueueState === 'function') {
+            // The check and GitHub's queue move together (GY-258): an authorized, requested head is
+            // published as passed and handed to GitHub to merge; anything else is failed and taken out.
+            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
+          }
+          else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
         }
         // A merge-path repair whose normal merge is stalled may take the audited repair lane (GY-406).
         if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work, new Date(), guard(work, true));
