@@ -17,17 +17,17 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`.
 
 ### Documentation policy
 
-`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged. An optional `"wordBudget":{"total":N,"perPage":N}` (`paths` narrows the counted Markdown pages) is checked against those paths: near the total, `master status` raises `docs` and the loop files a trim item; a queue overflow ejects the entry that crossed it. Without one, nothing is counted.
+`init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged. An optional `"wordBudget":{"total":N,"perPage":N}` (`paths` narrows counted Markdown pages) is checked: near the total, `master status` raises `docs` and the loop files a trim item; queue overflow ejects the crossing entry. Without one, nothing is counted.
 
 ### What the generated instructions authorize
 
-The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction as the session's own first request, on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, the reviewer's reminder, or its event wake of the master session) comes from the same launcher and is acted on without confirmation.
+The managed `AGENTS.md` section states that **every session Graphyard launches receives its instruction on the runtime's command line, never as pasted text**; the only later paste (the loop's single re-prompt, the reviewer's reminder, or its event wake) comes from the same launcher and is acted on without confirmation.
 
 Agents treat bracketed paste as untrusted data (prompt injection), so sessions start without anybody sending `go`; Claude Code also gets `--append-system-prompt-file`. The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key; the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600), smoke-tests provider and model and shows the result on the card. A subscription login shows a URL and code to finish in your browser; for Claude, paste the code its page shows (**Cancel** stops it; **Retry** on a failed card is admins-only). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key; ciphertext only relays) or start login. The host writes auth (0600), smoke-tests provider and model and shows the card. A subscription login shows a URL and code to finish in your browser; for Claude, paste the code shown (**Cancel** stops it; **Retry** on failed card is admins-only). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when configured; **change** edits roles. The shell steps below remain for scripted setups.
 
 ### Agent environments
 
@@ -72,9 +72,9 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--plan NAME` names the provider plan an account draws on (`none` clears). Otherwise it is inferred: one host and home share a plan, `pi-X` and `opencode-X` share a Z.AI plan, others stand alone. A plan's accounts group on the Accounts page and share one failover budget: one exhausted bars the rest.
+`--plan NAME` names the provider plan an account draws on (`none` clears). Otherwise inferred: one host and home share a plan, `pi-X` and `opencode-X` share Z.AI, others stand alone. A plan's accounts group on the Accounts page and share one failover budget: one exhausted bars the rest.
 
-`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Any registry write (CLI, dashboard or API) is refused when a field looks like a pasted key: a known prefix, a PEM block, a JWT, a z.ai key, or a long random letter-and-digit token. A model id built of words, numbers and short version parts is exempt.
+`--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Registry writes are refused when a field looks like a pasted key: known prefix, PEM block, JWT, z.ai key, or long random token. Model IDs of words, numbers and short versions are exempt.
 
 ### Add a role
 
