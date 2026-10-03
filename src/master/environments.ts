@@ -217,22 +217,42 @@ async function codexAccount(environment: AgentEnvironment, probe: EnvironmentPro
 async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
-  const keyFileName = (environment as any).keyFile ?? 'zai.key';
+  const keyFileName = (environment as any).keyFile ?? (environment as any).key?.file ?? 'zai.key';
   const fileKey = await readFile(resolve(environment.home, keyFileName), 'utf8').catch(() => null);
   const fallbackKey = keyFileName !== 'zai.key' ? await readFile(resolve(environment.home, 'zai.key'), 'utf8').catch(() => null) : null;
   const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
-  const authFileExists = await access(resolve(environment.home, 'auth.json')).then(() => true, () => false);
-  const opencodeAuthExists = await access(resolve(environment.home, 'opencode/auth.json')).then(() => true, () => false);
-  const key = zaiKey ?? fileKey?.trim() ?? fallbackKey?.trim() ?? auth?.ZAI_API_KEY ?? auth?.key ?? process.env.ZAI_API_KEY;
-  const loggedIn = !!key || authFileExists || opencodeAuthExists || (!!opencodeAuth && Object.keys(opencodeAuth).length > 0) || (!!auth && Object.keys(auth).length > 0);
-  if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
-  if (!key) return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+  const piKey = auth?.zai?.key ?? auth?.['z.ai']?.key ?? auth?.['zai-coding-plan']?.key ?? auth?.ZAI_API_KEY;
+  const key = zaiKey ?? piKey ?? fileKey?.trim() ?? fallbackKey?.trim();
+
+  const hasZaiKey = !!key;
+  const isZaiSpecific = (environment.kind as string) === 'pi'
+    || (environment as any).plan?.startsWith?.('zai')
+    || (environment as any).keyFile
+    || /zai|glm/i.test(environment.name);
+
+  if (isZaiSpecific) {
+    if (!hasZaiKey || probe.quota === false) {
+      return { loggedIn: hasZaiKey, usage: [], note: hasZaiKey ? 'quota not read' : null };
+    }
+  } else {
+    const hasOpencodeAuth = !!opencodeAuth && Object.values(opencodeAuth).some((v: any) => v && (typeof v === 'string' || v.key || v.apiKey || v.token));
+    const loggedIn = hasZaiKey || hasOpencodeAuth;
+    if (!loggedIn || probe.quota === false) {
+      return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
+    }
+    if (!hasZaiKey) {
+      return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+    }
+  }
   try {
     const response = await (probe.fetch ?? fetch)('https://api.z.ai/api/monitor/usage/quota/limit', {
       headers: { Authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(probe.timeoutMs ?? 5_000),
     });
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        return { loggedIn: false, usage: [], note: `unauthorized: provider returned ${response.status}` };
+      }
       if (response.status === 429) {
         const text = await response.text();
         const parsed = parseZaiUsage(text);
@@ -253,7 +273,7 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
 export async function checkAgentEnvironment(environment: AgentEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
   const planId = (environment as any).plan ?? (
-    environment.kind === 'opencode' || /zai|glm/i.test(environment.name)
+    environment.kind === 'opencode' || (environment.kind as string) === 'pi' || /zai|glm/i.test(environment.name)
       ? (/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)?.[1]
         ? `zai-${/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)![1].toLowerCase()}`
         : 'zai')
@@ -265,7 +285,7 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } =
     environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
     : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
-    : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe))
+    : environment.kind === 'opencode' || (environment.kind as string) === 'pi' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe))
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
 
   if (account.loggedIn && planId) {
