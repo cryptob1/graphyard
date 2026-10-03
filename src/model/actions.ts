@@ -207,7 +207,31 @@ export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
 }
 
 /**
- * Every row an executor may take now, oldest request first, so the queue is served fairly.
+ * Whether a row is what stands between its item and the merge: a `resync` or `merge` row on an item
+ * already at the merge stage. Every other gate has passed, so nothing but this row holds it.
+ */
+export const unblocksMerge = (work: Work, row: ActionRow) => work.stage === 'merge' && (row.kind === 'resync' || row.kind === 'merge');
+
+/**
+ * The order executors claim rows in (GY-1132): the item's priority first, then rows that unblock a
+ * merge before any other kind, then the oldest request, then the id so the order is total.
+ *
+ * Age alone let 34 dispatch rows, hours old and failing on every attempt for want of a worker,
+ * hold a P0 item's resync for 25 minutes. Age still decides among peers, so the row open longest
+ * among its priority and kind is taken first and none of them starves; a failed row waits out its
+ * `retryAt` (`claimable`), and the rows behind it are claimed meanwhile. `claimCandidatesSql`
+ * orders the items it finds by the same key, read from each item's first row in this order.
+ */
+export function claimOrder(a: { work: Work; row: ActionRow }, b: { work: Work; row: ActionRow }): number {
+  return (a.work.priority ?? 2) - (b.work.priority ?? 2)
+    || Number(!unblocksMerge(a.work, a.row)) - Number(!unblocksMerge(b.work, b.row))
+    || Date.parse(a.row.requestedAt) - Date.parse(b.row.requestedAt)
+    || a.row.id.localeCompare(b.row.id);
+}
+
+/**
+ * Every row an executor may take now, in claim order (`claimOrder`): priority, rows that unblock a
+ * merge, then the oldest request.
  *
  * A delivered item owes nothing an executor can run but the deployment that carries it: whatever
  * else it still holds is left over from before it was delivered, and running it is refused every
@@ -218,11 +242,11 @@ export function openActions(all: Work[], now: Date, kinds?: readonly NextActionK
     .filter(row => work.stage !== 'done' || row.kind === 'verify-deployment')
     .filter(row => claimable(row, now) && (!kinds || kinds.includes(row.kind)))
     .map(row => ({ work, row })))
-    .sort((a, b) => Date.parse(a.row.requestedAt) - Date.parse(b.row.requestedAt) || a.row.id.localeCompare(b.row.id));
+    .sort(claimOrder);
 }
 
 /**
- * Claim the oldest open row this executor can run, under a bounded lease.
+ * Claim the first open row this executor can run, in claim order, under a bounded lease.
  *
  * Called inside the coordination transaction, so two executors reading the same queue at the same
  * instant are serialized: the first writes the claim, the second sees it and takes the next row.
