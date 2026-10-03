@@ -149,6 +149,52 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
   </table>;
 }
 
+function ProjectMemorySection({ memory }: { memory?: any }) {
+  if (!memory || (!memory.decisions?.length && !memory.pitfalls?.length && !memory.changes?.length)) return null;
+  const count = (memory.decisions?.length ?? 0) + (memory.pitfalls?.length ?? 0) + (memory.changes?.length ?? 0);
+  return <details className="finished-sessions project-memory" data-project-memory open>
+    <summary>Shared project memory <span className="count">{count}</span></summary>
+    <div className="memory-content">
+      {memory.decisions?.length ? (
+        <div className="memory-block">
+          <h3>Recent decisions</h3>
+          <ul className="memory-list">
+            {memory.decisions.map((d: any) => (
+              <li key={d.id} data-decision={d.id}>
+                <span className="mono bold">{d.key}</span> ({d.action}): {d.reason} <span className="muted">· approved by {d.approvedBy}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {memory.pitfalls?.length ? (
+        <div className="memory-block">
+          <h3>Recurring pitfalls and remedies</h3>
+          <ul className="memory-list">
+            {memory.pitfalls.map((p: any) => (
+              <li key={p.faultClass} data-pitfall={p.faultClass}>
+                <span className="mono bold">{p.faultClass}</span> ({p.count} recurrence{p.count === 1 ? '' : 's'}): {p.remedy}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {memory.changes?.length ? (
+        <div className="memory-block">
+          <h3>Recent merges</h3>
+          <ul className="memory-list">
+            {memory.changes.map((c: any) => (
+              <li key={c.sha} data-change={c.sha}>
+                <span className="mono bold">{c.key}</span> (<span className="mono">{shortShas(c.sha)}</span>): {c.files?.join(', ') || 'no files'}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  </details>;
+}
+
 /**
  * The Workers page (GY-161, design/dashboard/Workers.dc.html): one table of the agent sessions
  * open now — the agent, its role in plain words, the item it works on, what it is doing, since
@@ -165,6 +211,7 @@ export default function WorkersPage({ work, observedAt, setSelected, status }: P
     <div className="page-heading"><div><h1>Workers</h1><p className="summary">{open} agent {open === 1 ? 'session' : 'sessions'} open.{stale ? ` ${stale} not seen recently.` : ''} {view.finished.length} ended.</p></div></div>
     {view.running.length ? <Table rows={view.running} label="Agent sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No agent session is open.</p>}
     <p className="muted workers-note">Roles: builds code · reviews code · proves requirements · approves decisions. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes is marked, never shown as live.</p>
+    <ProjectMemorySection memory={status?.projectMemory}/>
     <details className="finished-sessions"><summary>Ended <span className="count">{view.finished.length}</span></summary>
       {view.finished.length ? <Table rows={view.finished} label="Ended sessions" work={work} now={now} release={release} setSelected={setSelected}/> : <p className="muted">No session has ended yet.</p>}
     </details>
