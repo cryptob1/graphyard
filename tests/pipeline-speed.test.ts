@@ -84,7 +84,7 @@ async function submitted(title: string, plannedFiles?: string[], extra?: Record<
 }
 const scoped = (path: string, overrides: Partial<ScopeFile> = {}): ScopeFile => ({ path, status: 'modified', sha: sha40('5'), additions: 2, deletions: 2, binary: false, baseSha: sha40('4'), ...overrides });
 function observed(item: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
-  return { candidate: { ...candidate, pr: item.submission!.pr, branch: item.workspaces[0].branch, author: 'implementer' }, checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
+  return { candidate: { ...candidate, pr: item.submission!.pr, branch: (item.workspaces.find(entry => entry.epoch === item.submission!.epoch) ?? item.workspaces[0]).branch, author: 'implementer' }, checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
     // GY-883: a public API path keeps the item in the high lane, whose full path still demands the producer proofs and dispatch cadence this file measures.
     files: ['src/server/routes/pipeline-speed.ts'], scopeFiles: [scoped('src/server/routes/pipeline-speed.ts', { baseSha: undefined })], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
 }
@@ -434,23 +434,28 @@ test('integration:speed-metrics — the engine keeps every item\'s timeline thro
   const number = ++pr;
   const attempt = item.pipeline!.attempts[0];
   assert.deepEqual([attempt.epoch, attempt.owner, attempt.end], [1, implementer.id, null]); assert.equal(item.pipeline!.submittedAt, null);
-  // A blocked report is a hand-off; clearing it is not.
-  item = await engine.execute(implementer, 'blocked', item.id, { epoch: 1, reason: 'plannedFiles need widening' }, randomUUID());
+  // A null report is no hand-off; a blocked report is one, and ends its attempt (GY-1008).
   item = await engine.execute(implementer, 'blocked', item.id, { epoch: 1, reason: null }, randomUUID());
+  assert.deepEqual(item.pipeline!.interventions, { blocked: 0, requirements: 0 });
+  item = await engine.execute(implementer, 'blocked', item.id, { epoch: 1, reason: 'plannedFiles need widening' }, randomUUID());
   assert.deepEqual(item.pipeline!.interventions, { blocked: 1, requirements: 0 });
-  item = await engine.execute(implementer, 'submit', item.id, { epoch: 1, pr: number }, randomUUID());
+  assert.equal(item.pipeline!.attempts[0].end, 'released'); assert.ok(item.pipeline!.attempts[0].endedAt);
+  item = await engine.execute(operator, 'unblock', item.id, { reason: 'Widened' }, randomUUID());
+  item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
+  item = await engine.execute(implementer, 'workspace', item.id, { epoch: 2, host: 'machine-a', path: `/tmp/speed/${item.id}-2`, branch: `graphyard/${item.key.toLowerCase()}-2` }, randomUUID());
+  item = await engine.execute(implementer, 'submit', item.id, { epoch: 2, pr: number }, randomUUID());
   const firstSubmit = item.pipeline!.submittedAt!;
-  assert.equal(item.pipeline!.attempts[0].end, 'submitted'); assert.ok(item.pipeline!.attempts[0].endedAt);
+  assert.equal(item.pipeline!.attempts[1].end, 'submitted'); assert.ok(item.pipeline!.attempts[1].endedAt);
   item = await engine.observe(item.id, item.revision, observed(item, { sha: H, baseSha: B }));
   // Rework: the round counts, the resubmission keeps the first submission as the clock start.
   item = await engine.execute(operator, 'rework', item.id, { reason: 'Reviewer finding', previousWorkerStopped: true }, randomUUID());
   assert.equal(item.pipeline!.reworkRounds, 1);
   item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
-  item = await engine.execute(implementer, 'workspace', item.id, { epoch: 2, host: 'machine-a', path: `/tmp/speed/${item.id}-2`, branch: item.workspaces[0].branch }, randomUUID());
-  assert.equal(item.pipeline!.attempts.length, 2); assert.equal(item.pipeline!.attempts[1].epoch, 2);
-  item = await engine.execute(implementer, 'submit', item.id, { epoch: 2, pr: number }, randomUUID());
+  item = await engine.execute(implementer, 'workspace', item.id, { epoch: 3, host: 'machine-a', path: `/tmp/speed/${item.id}-3`, branch: item.workspaces.at(-1)!.branch }, randomUUID());
+  assert.equal(item.pipeline!.attempts.length, 3); assert.equal(item.pipeline!.attempts[2].epoch, 3);
+  item = await engine.execute(implementer, 'submit', item.id, { epoch: 3, pr: number }, randomUUID());
   assert.equal(item.pipeline!.submittedAt, firstSubmit); assert.notEqual(item.pipeline!.resubmittedAt, firstSubmit);
-  assert.equal(item.pipeline!.attempts[1].end, 'submitted');
+  assert.equal(item.pipeline!.attempts[2].end, 'submitted');
   // A requirements revision of an item under way is a hand-off too.
   item = await engine.execute(operator, 'requirements', item.id, { expectedPolicyRevision: item.policyRevision, reason: 'Add a proof', criteria: item.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })), dependencies: [], plannedFiles: item.plannedFiles, exclusiveResources: [], producerProofs: [] }, randomUUID());
   assert.deepEqual(item.pipeline!.interventions, { blocked: 1, requirements: 1 });
