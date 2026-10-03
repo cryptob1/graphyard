@@ -40,6 +40,10 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
     } else if (action.kind === 'merge') {
       next.state = item?.observation?.merged || item?.stage === 'done' ? 'done' : 'failed';
       next.detail = next.state === 'done' ? 'Resumed: Graphyard observed the merge' : 'Resumed: no merge was observed; the guarded merge may be attempted again';
+      // The guarded merge only asks GitHub to merge one exact head, so asking again is safe: a
+      // restart that interrupted it is a retry, never a merge fault (GY-1087: GY-999 counted at a
+      // restart and merged on the retry twelve minutes later).
+      if (next.state === 'failed') { resumed.push(storeAction(state, key, next, null)); continue; }
     } else if (action.kind === 'scope' && action.work) {
       // The decision lives on the item: either the control plane recorded one for the open
       // request or it did not, and an undecided request is simply asked again next cycle.
