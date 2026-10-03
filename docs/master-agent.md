@@ -50,17 +50,17 @@ another session's handle finished to free a slot.
 
 ### System invariants
 
-Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Faults per class; thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
+Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Fault thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
 ## Research and diagnosis
 
 With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows the recommendation, a differing answer reworks, failure never blocks; product questions need a human.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. Branch restores under 30m and restart-resumed merges are self-handled, not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; recurrences re-file. A diagnostician 429 waits for its reset, probing once. Branch restores under 30m and restart-resumed merges are self-handled, not `merge` faults.
 
 ## Machine-filed backlog
 
-Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then form or join its one follow-up item; closing it unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then form or join its one follow-up item; unshipped closure drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
@@ -74,7 +74,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once the loop stops relaunching.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` when relaunching stops.
 
 ### Proofs must exercise their criterion
 

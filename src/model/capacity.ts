@@ -39,7 +39,7 @@ export interface ExhaustionSignal {
 // usage limit in its own prose is working, and a long paragraph is never a provider banner.
 const exhaustionNotices: readonly RegExp[] = [
   /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
-  /\b(?:usage|weekly|daily|monthly|hourly|5[- ]hour|session|spend(?:ing)?|rate|token|request|plan) limit (?:has been |was |is )?(?:reached|exceeded|hit)\b/i,
+  /\b(?:usage|weekly|daily|monthly|hourly|5[- ]hour|session|spend(?:ing)?|rate|token|request|plan) limit (?:has been |was |is )?(?:reached|exceeded|hit|exhausted)\b/i,
   /\blimit reached\b.*\breset/i,
   /\bout of (?:extra )?(?:usage|credits|quota)\b/i,
   /\b(?:quota|credits?|balance) (?:has been |is |are )?(?:exceeded|exhausted|depleted|used up)\b/i,
@@ -126,6 +126,18 @@ export function detectExhaustion(output: string, now: number): ExhaustionSignal 
     return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
   }
   return null;
+}
+
+/**
+ * Whether the error a headless run ended on is its provider refusing for quota or rate (GY-1092):
+ * an HTTP 429, or any of the limit notices above. The text is the provider's own error — Pi's last
+ * `errorMessage` or a runtime's stderr, never the agent's prose — so the notice may sit anywhere in
+ * it (`429: {"message":"Weekly/Monthly Limit Exhausted. Your limit will reset at …"}`).
+ */
+export function providerLimit(error: string, now: number): ExhaustionSignal | null {
+  const text = error.replace(/\s+/g, ' ').trim();
+  if (!text || !(/(?:^|[^\d.])429(?:[^\d.]|$)/.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
+  return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
 }
 
 /** How an interrupted attempt's uncommitted work was kept, or that there was none to keep. */
