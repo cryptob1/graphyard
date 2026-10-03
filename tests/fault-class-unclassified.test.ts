@@ -118,17 +118,17 @@ test('manual:fault-class-unclassified — GY-73, GY-957: an append refused as a 
     const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const appendKey = `${followUpCreateKey('owner/project', 501, reviewId)}:append`;
     const held = new Set(['src/producer.ts — earlier']), receipts = new Map<string, { fingerprint: string; result: { key: string; added: number } }>();
-    const earlier = { id: 'GY-1071', followups: { findings: [{ path: 'src/producer.ts', text: 'src/producer.ts:40 — the env bound is undocumented' }, { path: 'src/x.ts', text: 'src/x.ts — a name hides its unit' }], reason: `Follow-ups named by approval ${reviewId} of GY-73 at ccc14e051e77` } };
+    const earlier = { id: 'GY-73', followups: { findings: [{ path: 'src/producer.ts', text: 'src/producer.ts:40 — the env bound is undocumented' }, { path: 'src/x.ts', text: 'src/x.ts — a name hides its unit' }], reason: `Follow-ups named by approval ${reviewId} of GY-73 at ccc14e051e77`, parent: true } };
     receipts.set(appendKey, { fingerprint: digest(earlier), result: { key: 'GY-1071', added: 2 } });
     for (const finding of earlier.followups.findings) held.add(finding.text);
     const sent: string[] = [];
-    const append = async (item: string, findings: { path: string | null; text: string }[], reason: string, key: string) => {
+    const append = async (item: string, findings: { path: string | null; text: string }[], reason: string, key: string, parent?: boolean) => {
       sent.push(key);
-      const fingerprint = digest({ id: item, followups: { findings, reason } }), receipt = receipts.get(key);
+      const fingerprint = digest({ id: item, followups: { findings, reason, ...(parent ? { parent: true } : {}) } }), receipt = receipts.get(key);
       if (receipt) { if (receipt.fingerprint !== fingerprint) throw new Error(`Graphyard refused the follow-ups for ${item} (409): Idempotency key reused with different input`); return receipt.result; }
       const added = findings.filter(finding => !held.has(finding.text));
       for (const finding of added) held.add(finding.text);
-      const result = { key: item, added: added.length };
+      const result = { key: parent ? 'GY-1071' : item, added: added.length };
       receipts.set(key, { fingerprint, result });
       return result;
     };
