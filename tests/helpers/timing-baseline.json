@@ -325,6 +325,7 @@
     "tests/flow-replay-play.test.ts": 709,
     "tests/flow-report-cache.test.ts": 2549,
     "tests/followup-key-reuse.test.ts": 1398,
+    "tests/followups-after-ship.test.ts": 2400,
     "tests/followup-migration.test.ts": 429,
     "tests/followup-promotion-on-demand.test.ts": 984,
     "tests/followups-batched-not-filed.test.ts": 938,
