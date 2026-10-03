@@ -27,7 +27,7 @@ With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's pattern scan groups refu
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval and proofs without rework, however long it waits for a runner (`check.rerun.waiting`); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). Its passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval and proofs, despite runner waits (`check.rerun.waiting`); one GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, failing rerun or refusal ejects (`check.rerun.*`). A cancelled run never fails: it reruns (≤3) or stays pending. A passing rerun, or any pass after a cancelled ejecting run, lifts it. `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
 
 ## Accepted evidence turns out to be wrong
 
