@@ -666,11 +666,10 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
  * that pair to one mask, and hiding the real directory hides every symlink to it.
  *
  * When `secretsBus` names a live socket, each session-bus socket is replaced by it instead of by
- * `/dev/null`. That socket is the keyring-only proxy (`graphyard-secrets-bus.socket`, filtered by
- * `xdg-dbus-proxy` in `graphyard-secrets-bus-filter.service`): a session reaches the read methods of
- * the keyring that holds the operator's GitHub login, so `git push` through `gh auth git-credential`
- * works, while systemd1 and every other bus name stay unreachable, so `systemd-run --user` is still
- * refused. A session with a GitHub credential of its own is given no `secretsBus` (GY-1039).
+ * `/dev/null`: the keyring-only proxy (`graphyard-secrets-bus.socket`, filtered in
+ * `graphyard-secrets-bus-filter.service`) reaches only the read methods of the keyring holding the
+ * operator's GitHub login, so `gh auth git-credential` works while systemd1 and every other bus name
+ * stay unreachable. A session with a GitHub credential of its own gets no `secretsBus` (GY-1039).
  */
 export const processLaunchMaskWords = (
   targets: { directories?: readonly string[]; busSockets?: readonly string[]; secretsBus?: string | null },
@@ -683,7 +682,6 @@ export const processLaunchMaskWords = (
   const proxy = targets.secretsBus && isAbsolute(targets.secretsBus) && isSocketPath(targets.secretsBus) ? canonical(targets.secretsBus) : '/dev/null';
   return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
 };
-/** Whether `path` is a socket; false when nothing is there. */
 export const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
 /** Where `graphyard-secrets-bus.socket` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
 export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
@@ -727,9 +725,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
-  const targets = hostProcessLaunchTargets();
-  // A session that carries its own GitHub credential never needs the operator's keyring (GY-1039).
-  const masks = processLaunchMaskWords(input.ownGitHubCredential ? { ...targets, secretsBus: null } : targets, [root, directory]);
+  const masks = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential ? { secretsBus: null } : {}) }, [root, directory]);
   const externalGitDir = gitDir !== root && !withinCheckout(gitDir, root) && isDirectoryPath(gitDir) ? [gitDir] : [];
   // A session with no admin of its own re-exposes the whole worktrees area; when the coordinator is
   // itself a linked worktree its own admin (HEAD, index) lies there, so it is bound read-only again
