@@ -11,6 +11,7 @@ import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextAc
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
 import { livenessCarry } from './liveness.js';
+import { decompositionHold } from '../decomposition.js';
 
 // The vocabulary lives in `action-kinds.ts`, the classification in `refusal-mapping.ts`, the
 // declared refusals in `refusal-catalogue.ts` and the accounting vocabulary in
@@ -142,6 +143,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       { kind: 'verify-deployment', mergeSha: work.delivery.mergeSha, mergedAt: work.delivery.mergedAt, state }, `delivery:${work.delivery.mergeSha}`);
     return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
   }
+
+  // A running decomposition holds dispatch: an item mid-split is not offered to workers.
+  if (decompositionHold(work, now.getTime())) return waits({ kind: 'session', on: 'decomposition', detail: `${key} is being split into child items before dispatch` }, 'ready', 'Splitting into child items before dispatch');
 
   // A split parent (GY-1126) waits on its children: it is delivered when the last of them is.
   const children = (work.children ?? []).filter(child => !all.some(entry => entry.key === child && isDelivered(entry)));

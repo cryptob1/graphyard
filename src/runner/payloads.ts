@@ -91,6 +91,7 @@ export const decompositionSettingsSchema = z.object({
   maxPlannedFiles: z.number().int().min(1).max(200).default(12),
   maxEstimatedLines: z.number().int().min(100).max(100_000).default(1_500),
   timeoutMinutes: z.number().int().min(1).max(60).default(10),
+  concurrency: z.number().int().min(1).max(16).default(4),
 }).strict();
 export type DecompositionSettings = z.infer<typeof decompositionSettingsSchema>;
 

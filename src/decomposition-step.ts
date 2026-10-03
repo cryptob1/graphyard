@@ -15,6 +15,8 @@ import { decompositionHold, decompositionRole, decompositionTool, decompositionW
 // ---------------------------------------------------------------------------
 
 export interface DecompositionStepAction { work: string; state: 'started' | 'done' | 'failed'; detail: string }
+/** How many decomposition sessions one loop process keeps in flight at once, unless `run.decomposition.concurrency` says otherwise. */
+export const decompositionConcurrency = 4;
 interface LiveDecomposition { run: Run<DecompositionPayload>; settled: Promise<void> }
 const live = new Map<string, LiveDecomposition>();
 /** Test seam: stop and forget every decomposition run. */
@@ -59,6 +61,7 @@ export interface DecompositionStepInput {
  */
 export async function decompositionStep(input: DecompositionStepInput): Promise<{ held: Set<string>; actions: DecompositionStepAction[] }> {
   const held = new Set<string>(), actions: DecompositionStepAction[] = [];
+  const limit = input.settings.concurrency ?? decompositionConcurrency;
   for (const work of input.items) {
     if (live.has(work.id)) { held.add(work.id); continue; }
     const record = work.decomposition;
@@ -73,6 +76,7 @@ export async function decompositionStep(input: DecompositionStepInput): Promise<
     }
     const bounds = decompositionWanted(work, input.settings);
     if (!bounds) continue;
+    if (live.size >= limit) { held.add(work.id); continue; }
     const timeoutMs = input.settings.timeoutMinutes * 60_000;
     try { await input.record(work, { event: 'started', runtime: input.runner.name, model: input.model, timeoutMs, bounds }); }
     catch (error) {

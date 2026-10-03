@@ -50,7 +50,13 @@ export interface DecompositionRecord {
 }
 
 /** The settings in force: `run.decomposition` over its defaults. */
-export const decompositionSettings = (run: { decomposition?: unknown } | undefined): DecompositionSettings => decompositionSettingsSchema.parse(run?.decomposition ?? {});
+export const decompositionSettings = (run: { decomposition?: unknown } | Record<string, unknown> | undefined): DecompositionSettings => {
+  if (!run) return decompositionSettingsSchema.parse({});
+  if ('decomposition' in run || 'research' in run || 'pi' in run) {
+    return decompositionSettingsSchema.parse((run as { decomposition?: unknown }).decomposition ?? {});
+  }
+  return decompositionSettingsSchema.parse(run);
+};
 
 /** A rough size of the change an item asks for, in lines: per criterion, per root-level directory, per narrower path. */
 export function estimatedLines(work: Pick<Work, 'criteria' | 'plannedFiles'>) {
@@ -201,6 +207,7 @@ export function applyDecompositionEvent(work: Work, input: DecompositionEvent, a
   }
   // A worker may have claimed it since the run started: a split then would race the attempt.
   demand(neverDispatched(work), `${work.key} was dispatched while it was being split; it is built whole`);
+  demand(work.split !== false, `${work.key} was opted out of splitting while it was being split; it is built whole`);
   const children = childItems(work, event.payload, now);
   work.decomposition = { ...record!, state: 'split', endedAt: at, reason: event.payload.reason };
   return children;
@@ -224,6 +231,15 @@ export function splitParentDelivery(child: Work, all: readonly Work[], now: Date
   if (!parent?.children?.length || parent.stage === 'done') return null;
   const children = parent.children.map(key => all.find(entry => entry.key === key));
   if (!children.every(entry => entry && isDelivered(entry) && entry.delivery)) return null;
+  const childCriteria = new Map<string, { text: string; proofs: readonly string[] }>();
+  for (const c of children as Work[]) {
+    for (const cr of c.criteria) childCriteria.set(cr.id, { text: cr.text, proofs: cr.proofs });
+  }
+  const covered = parent.criteria.every(pc => {
+    const cc = childCriteria.get(pc.id);
+    return cc && cc.text === pc.text && JSON.stringify(cc.proofs) === JSON.stringify(pc.proofs);
+  });
+  if (!covered) return null;
   const merges = (children as Work[]).map(entry => ({ key: entry.key, mergeSha: entry.delivery!.mergeSha, mergedAt: entry.delivery!.mergedAt }))
     .sort((left, right) => Date.parse(left.mergedAt) - Date.parse(right.mergedAt));
   const last = merges[merges.length - 1];

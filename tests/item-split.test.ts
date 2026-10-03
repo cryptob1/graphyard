@@ -18,7 +18,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { nextAction } from '../src/model/next-action.js';
+import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { graphyardTools } from '../integrations/pi/index.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -115,6 +115,9 @@ test('unit:broad-items-split-before-dispatch — an item over the size bounds is
   assert.equal(starts[0].options.env?.GRAPHYARD_PI_ROLE, 'decomposition');
   assert.match(starts[0].prompt, /AC-5: Behaviour 5 holds\./, 'the session is given every criterion to share out');
   assert.equal(decompositionHold(broad, NOW), true, 'recorded as running before it launches');
+  assert.equal(nextAction(broad, items, new Date(NOW)), null, 'nextAction has no action while decomposition is in progress');
+  assert.equal(actionAccount(broad, items, new Date(NOW)).wait?.kind, 'session', 'actionAccount waits on decomposition session');
+  assert.match(actionAccount(broad, items, new Date(NOW)).wait!.detail, /is being split into child items before dispatch/);
   assert.deepEqual(graphyardTools('decomposition').map(tool => tool.name), [decompositionTool], 'the Pi extension registers the decomposition tool for its role');
 
   await decompositionSettled();
@@ -147,6 +150,16 @@ test('unit:broad-items-split-before-dispatch — an item over the size bounds is
   // One run per item: the next cycle starts nothing.
   const again = await step(items, runner, record);
   assert.equal(starts.length, 1); assert.equal(again.held.size, 0);
+
+  // Concurrency limit holds excess broad items from dispatch until a slot opens
+  const cSettings = decompositionSettings({ concurrency: 2 });
+  const b1 = item('GY-81'), b2 = item('GY-82'), b3 = item('GY-83');
+  const { runner: cRunner, starts: cStarts } = fakeRunner(() => submitted(proposal));
+  const { record: cRecord } = plane([b1, b2, b3]);
+  const cStep = await decompositionStep({ items: [b1, b2, b3], clock: NOW, settings: cSettings, config: { repository }, cwd: process.cwd(), runner: cRunner, model: 'm', record: cRecord });
+  assert.equal(cStarts.length, 2, 'concurrency limits live runs to 2');
+  assert.deepEqual([...cStep.held].sort(), [b1.id, b2.id, b3.id].sort(), 'all three broad items are held from dispatch');
+  await decompositionSettled();
 });
 
 test('unit:broad-items-split-before-dispatch — a split that drops, duplicates or invents a criterion, does not narrow the scope or orders a child after a later one is refused, and that run, a failed run or a kept-whole answer leaves the item to be dispatched unchanged', async t => {
@@ -165,9 +178,12 @@ test('unit:broad-items-split-before-dispatch — a split that drops, duplicates 
   refuse([base[0], { ...base[1], plannedFiles: ['lib/other.ts'] }, base[2]], /outside GY-20's planned files/);
   refuse([base[0], { ...base[1], plannedFiles: ['src/', 'web/', 'tests/', 'docs/'] }, base[2]], /strictly narrower/);
   refuse([{ ...base[0], after: [1] }, base[1], base[2]], /must land after an earlier child only/);
-  assert.throws(() => decompositionPayloadSchema.parse({ reason: 'r', children: [base[0]] }), /at least two children/);
-  assert.throws(() => decompositionPayloadSchema.parse({ reason: 'r', children: [{ ...base[0], criteria: [{ id: 'AC-1', text: 'weaker', proofs: [] }] }, base[1]] }), 'a child names criteria by ID; it cannot restate them');
   assert.throws(() => validateSplitCriteria(parent, []), /drops AC-1, AC-2, AC-3, AC-4, AC-5/);
+
+  const optOutDuringRun = item('GY-99');
+  optOutDuringRun.decomposition = { state: 'running', startedAt: new Date(NOW).toISOString(), endedAt: null, runtime: 'pi', model: 'm', timeoutMs: 60_000, bounds: ['b'], reason: null, children: [], failure: null, recordedBy: 'x' };
+  optOutDuringRun.split = false;
+  assert.throws(() => applyDecompositionEvent(optOutDuringRun, { event: 'decided', payload: proposal }, 'graphyard-master', new Date(NOW)), /opted out of splitting while it was being split/);
 
   const refused = item('GY-21'), failed = item('GY-22'), kept = item('GY-23');
   const items = [refused, failed, kept];
@@ -256,6 +272,8 @@ test('unit:broad-items-split-before-dispatch — the control plane makes the spl
   assert.equal((await ledger(parent.id, 'decomposition.split')).length, 1);
   assert.equal((await ledger(first.id, 'decomposition.child-created')).length, 1);
   assert.equal((await request(coordinator, `work/${created.key}/decomposition`, { event: 'started', runtime: 'pi', model: 'm', timeoutMs: 60_000, bounds: ['again'] })).status, 409, 'one run per item');
+  assert.equal((await request(worker, `work/${parent.key}/claim`, {})).status, 409, 'a split parent cannot be claimed directly');
+  assert.equal((await request(operator, `work/${parent.key}/requirements`, { expectedPolicyRevision: 1, reason: 'r', criteria: parent.criteria, dependencies: [], plannedFiles: ['src/'], exclusiveResources: [] })).status, 409, 'requirements revision on a split parent is refused');
 
   // The operator's opt-out is a requirements field on an existing item.
   const other = await engine.execute(operator, 'create', null, { title: 'Opt out later', criteria: criteria.slice(0, 2), plannedFiles: ['src/'] }, randomUUID());

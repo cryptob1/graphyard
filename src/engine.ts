@@ -905,6 +905,7 @@ export class Engine {
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') {
+        demand(!work.children?.length, `${work.key} was split into child items; revise the child items directly rather than the parent`);
         if (actor.role !== 'operator-agent') admin(actor);
         const flag = flagPathRefusal(data.plannedFiles, 'plannedFiles'); demand(!flag, flag!, 422);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -1067,6 +1068,7 @@ export class Engine {
       }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
+        demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
         demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
