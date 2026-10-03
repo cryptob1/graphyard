@@ -309,6 +309,9 @@ test('manual:review-followups-triaged GY-1047.1: foldUnshippedFollowUps skips it
   assert.equal(unleasedFollowUp.closure?.kind, 'superseded');
   assert.equal(result.folded.length, 1);
   assert.equal(result.folded[0]!.work.key, 'GY-102');
+  // Leased follow-up is recorded as deferred so callers can defer finalizing migration:
+  assert.equal(result.deferred.length, 1);
+  assert.equal(result.deferred[0]!.key, 'GY-101');
 });
 
 test('manual:review-followups-triaged GY-1047.2: foldUnshippedFollowUps resolves parents via key map in O(n) time (finding 22)', () => {
@@ -333,6 +336,7 @@ test('manual:review-followups-triaged GY-1047.2: foldUnshippedFollowUps resolves
   const result = foldUnshippedFollowUps(all, 'migration-actor', now);
   assert.equal(result.folded.length, 10);
   assert.equal(result.parents.length, 10);
+  assert.equal(result.deferred.length, 0);
   for (const parent of parents) {
     assert.equal(parent.pendingFollowUps?.findings.length, 1);
   }
@@ -352,4 +356,38 @@ test('manual:review-followups-triaged GY-1047.3: followUpShipKey incorporates th
 
   // The keys for the first and second holds differ, ensuring the second ship does not replay the first receipt
   assert.notEqual(followUpShipKey(parentWithFirstHold as any), followUpShipKey(parentWithSecondHold as any));
+});
+
+test('manual:review-followups-triaged GY-1047.4: foldUnshippedFollowUps reports deferred leased items so callers can defer finalizing migration', () => {
+  const at = '2026-10-02T12:00:00.000Z', now = new Date(at);
+  const parent: Work = {
+    id: 'parent-1', key: 'GY-200', title: 'Parent', stage: 'build', type: 'task', priority: 2,
+    dependencies: [], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: true, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '',
+  } as unknown as Work;
+  const leasedFollowUp1: Work = {
+    id: 'followup-1', key: 'GY-201', title: 'Follow-up 1 under lease', stage: 'build', type: 'chore', priority: 2,
+    dependencies: ['parent-1'], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: true, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 1, lease: { owner: 'worker-1', epoch: 1, expiresAt: '2026-10-02T12:05:00.000Z' },
+    workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '',
+    origin: { reviewFollowUps: { parent: 'GY-200', findings: [{ path: 'src/a.ts', text: 'finding 1' }] } },
+  } as unknown as Work;
+  const leasedFollowUp2: Work = {
+    id: 'followup-2', key: 'GY-202', title: 'Follow-up 2 under lease', stage: 'build', type: 'chore', priority: 2,
+    dependencies: ['parent-1'], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: true, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 1, lease: { owner: 'worker-2', epoch: 1, expiresAt: '2026-10-02T12:05:00.000Z' },
+    workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '',
+    origin: { reviewFollowUps: { parent: 'GY-200', findings: [{ path: 'src/b.ts', text: 'finding 2' }] } },
+  } as unknown as Work;
+
+  const result = foldUnshippedFollowUps([parent, leasedFollowUp1, leasedFollowUp2], 'actor', now);
+  assert.equal(result.folded.length, 0);
+  assert.equal(result.deferred.length, 2);
+  assert.deepEqual(result.deferred.map(item => item.key), ['GY-201', 'GY-202']);
 });
