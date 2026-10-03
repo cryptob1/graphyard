@@ -1,5 +1,9 @@
+import { constants as cryptoConstants, createDecipheriv, generateKeyPairSync, privateDecrypt } from 'node:crypto';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import type { Work } from '../model.js';
-import { humanDecisionKinds, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
+import { humanDecisionKinds, type HumanChoice, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
+import { configHome } from '../install/secrets.js';
 import { scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
@@ -107,19 +111,75 @@ export const parkCommand: CliCommand = {
   name: 'park',
   scope: 'work',
   help: [
-    '  park GY-N EPOCH KIND NEEDED... -- REASON',
+    '  park GY-N EPOCH KIND NEEDED... [--choice LABEL]... -- REASON',
     '                                Record a decision only a human may make and end this attempt:',
     `                                KIND is ${humanDecisionKinds.join(', ')};`,
     '                                NEEDED is the exact thing the human must provide. The item',
-    '                                parks without a lease and nothing else waits on it',
+    '                                parks without a lease and nothing else waits on it. Each',
+    '                                --choice is a button the human presses (--choice-text asks for',
+    '                                their words too, --choice-secret for a value sealed to this',
+    '                                host); Decline is always offered. Without any, the kind\'s',
+    '                                defaults are offered',
   ],
   async run(context, work) {
     const { args, print } = context;
     const epoch = Number(args[0]), kind = args[1], separator = args.indexOf('--');
-    const needed = args.slice(2, separator < 0 ? args.length : separator).join(' ').trim();
+    const { needed, choices } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
     const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
-    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason }));
+    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
+    // A credential is sealed to this host when the human provides it, so the host's key goes with the request.
+    const sealTo = kind === 'credentials-for-people' || choices?.some(choice => choice.input === 'secret') ? await hostSealKey(context.individualHostId()).catch(() => undefined) : undefined;
+    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason, ...(choices ? { choices } : {}), ...(sealTo ? { sealTo } : {}) }));
+  },
+};
+
+const choiceFlags = { '--choice': 'none', '--choice-text': 'text', '--choice-secret': 'secret' } as const;
+/**
+ * NEEDED and the requester's choices from the words between KIND and `--`. Each choice flag takes
+ * the next word as its label; the choices become buttons in that order, each resuming the item.
+ */
+export function parkArgs(words: readonly string[]) {
+  const needed: string[] = [], choices: HumanChoice[] = [];
+  for (let index = 0; index < words.length; index++) {
+    const input = choiceFlags[words[index] as keyof typeof choiceFlags];
+    if (!input) { needed.push(words[index]); continue; }
+    const label = words[++index]?.trim();
+    if (!label || label.startsWith('--')) throw new Error(`${words[index - 1]} needs a LABEL, such as --choice "Approve up to €50/month"`);
+    choices.push({ id: `choice-${choices.length + 1}`, label, outcome: 'provided', input });
+  }
+  return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined };
+}
+
+/** This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600; the public half is returned. */
+export async function hostSealKey(hostId: string, home = configHome()) {
+  const path = join(home, 'seal', `${hostId}.pem`);
+  try { return (await readFile(`${path}.pub`, 'utf8')).trim(); } catch { /* first use on this host */ }
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, privateKey, { mode: 0o600, flag: 'wx' });
+  await chmod(path, 0o600);
+  await writeFile(`${path}.pub`, publicKey, { mode: 0o644 });
+  return publicKey.trim();
+}
+
+/** Open a value sealed to this host (server/waits.ts `sealToHost`). */
+export async function unsealOnHost(sealed: string, hostId: string, home = configHome()) {
+  const box = JSON.parse(Buffer.from(sealed, 'base64').toString('utf8')) as { key: string; iv: string; tag: string; data: string };
+  const key = privateDecrypt({ key: await readFile(join(home, 'seal', `${hostId}.pem`), 'utf8'), padding: cryptoConstants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(box.key, 'base64'));
+  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(box.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(box.tag, 'base64'));
+  return Buffer.concat([decipher.update(Buffer.from(box.data, 'base64')), decipher.final()]).toString('utf8');
+}
+
+/** The worker half of a sealed answer: print the value the human provided, on the host it was sealed to. */
+export const unsealCommand: CliCommand = {
+  name: 'unseal',
+  scope: 'work',
+  help: ['  unseal GY-N                  Print the value the human provided for the item\'s last', '                                answered request, on the host it was sealed to'],
+  async run(context, work) {
+    const answered = [...((work as Work).humanRequests ?? [])].reverse().find(request => request.answer?.sealed);
+    if (!answered) throw new Error(`${work.key} has no sealed answer`);
+    process.stdout.write(`${await unsealOnHost(answered.answer!.sealed!, context.individualHostId())}\n`);
   },
 };
 
@@ -149,13 +209,27 @@ export const answerHumanCommand: CliCommand = {
     // The request id is optional on the command line: an item has at most one open request.
     const request = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args[0] ?? '') ? args.shift()! : open.id;
     const declined = args.includes('--decline');
+    // The CLI keeps free words; the buttons are the page's (GY-738).
     const answer = args.filter(arg => arg !== '--decline').join(' ').trim();
     if (!answer) throw new Error('Use answer GY-N [REQUEST] [--decline] ANSWER...');
     return context.print(await workMutation(context, work)('answer', { request, outcome: declined ? 'declined' : 'provided', answer }));
+  },
+};
+/**
+ * The human operator's way into the dashboard (GY-738): a one-time link that opens a human
+ * session in the browser, so no token is ever pasted into the page. Run with the operator's own
+ * admin credential; the link is single use and expires in ten minutes.
+ */
+export const loginCommand: CliCommand = {
+  name: 'login',
+  help: ['  login                        Print a one-time link that signs the operator into the', '                                dashboard as a human (single use, expires in 10 minutes)'],
+  async run({ api, base, print }) {
+    const link = await api('sign-in-links', {}) as { code: string; principal: string; expiresAt: string };
+    return print({ signIn: `${base.replace(/\/+$/, '')}/#sign-in=${link.code}`, principal: link.principal, expiresAt: link.expiresAt, singleUse: true });
   },
 };
 /** A wait as a person reads it: minutes under an hour, then hours, then days. */
 export const waitedText = (ms: number) => ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))}m` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.round(ms / 86_400_000)}d`;
 
 /** The session commands the CLI registers beside the master's, in the order the help prints them. */
-export const sessionCommands: CliCommand[] = [scopeRequestCommand, parkCommand, humanRequestsCommand, answerHumanCommand];
+export const sessionCommands: CliCommand[] = [scopeRequestCommand, parkCommand, humanRequestsCommand, answerHumanCommand, unsealCommand, loginCommand];
