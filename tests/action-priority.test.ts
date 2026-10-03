@@ -8,7 +8,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { leaseLossReason, standingEscalations, type Escalation, type Principal, type Work } from '../src/model.js';
 import { actionIdleMs, idleActionable, queueSnapshot, reconcileActions } from '../src/model/actions.js';
-import { actionJudgment, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction, openAction } from '../src/model/next-action.js';
+import { actionJudgment, carriedAction, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction, openAction } from '../src/model/next-action.js';
 import { runExecutorTick, type ExecutorEffects } from '../src/auto-dispatch.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -401,3 +401,54 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   assert.deepEqual(both.map(entry => [entry.source, entry.trigger, entry.waitedMs]), [['carried', 'security-concern', 30_000]]);
   assert.match(both[0].resolve, /graphyard master escalation GY-3 security-concern/);
 });
+
+test('unit:delivered-escalation-not-owed — a delivered item with a standing lease-loss escalation yields no owed-decision row or attention item, while an open item with one does', () => {
+  const now = new Date(Date.parse(at) + 30_000);
+  const escalation: Escalation = { trigger: 'lease-loss', reason: 'Worker lost lease epoch 1', at, actor: 'graphyard' };
+
+  // Builds one delivered item and one open item, each with a standing lease-loss escalation.
+  const delivered = probe({
+    key: 'GY-10', id: 'id-GY-10', stage: 'done', ready: true,
+    escalation, escalations: [escalation],
+  });
+  const open = probe({
+    key: 'GY-11', id: 'id-GY-11', stage: 'build', ready: true,
+    escalation, escalations: [escalation],
+    gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
+  });
+
+  const work = [delivered, open];
+  for (const item of work) {
+    item.nextAction = nextAction(item, work, new Date(at));
+  }
+
+  // carriedAction and nextAction skipped standing escalations on the delivered item.
+  assert.equal(action(delivered), null);
+  assert.equal(carriedAction(delivered, null, work, now), null);
+
+  // The open item still raises its escalation beside the workable step.
+  assert.equal(action(open).kind, 'dispatch');
+  assert.deepEqual(action(open).carried.map((concern: any) => [concern.kind, concern.trigger]), [['escalation', 'lease-loss']]);
+
+  // Only the open item produces a row in humanNeededActions.
+  const owed = humanNeededActions(work, now);
+  assert.deepEqual(owed.map(entry => [entry.key, entry.source, entry.trigger]), [[open.key, 'carried', 'lease-loss']]);
+
+  // Only the open item produces an attention item in humanNeededAttention.
+  const attention = humanNeededAttention({ work, now: now.toISOString() });
+  assert.deepEqual(attention.map(item => item.subject), [open.key]);
+  assert.match(attention[0].text, /standing lease-loss escalation while it is worked/);
+
+  // A merged delivered item (merged pull request before stage transitions to done) is likewise skipped.
+  const mergedDelivered = probe({
+    key: 'GY-12', id: 'id-GY-12', stage: 'merge', ready: true,
+    observation: { merged: true } as any,
+    escalation, escalations: [escalation],
+  });
+  mergedDelivered.nextAction = nextAction(mergedDelivered, [mergedDelivered], new Date(at));
+  assert.equal(action(mergedDelivered), null);
+  assert.equal(carriedAction(mergedDelivered, null, [mergedDelivered], now), null);
+  assert.deepEqual(humanNeededActions([mergedDelivered], now), []);
+  assert.deepEqual(humanNeededAttention({ work: [mergedDelivered], now: now.toISOString() }), []);
+});
+
