@@ -1250,6 +1250,12 @@ export class GitHub {
    * `status`, which no policy check's trusted CI apps include. Every page of the combined status is
    * read, so a context past the first hundred is still seen. An error state is a failure; a settled
    * terminal status per head is cached to save re-reading; a read error is not swallowed.
+   *
+   * External CI retries (finding 24): settled terminal statuses are cached per head commit SHA
+   * (bounded by ancestryEntries) to satisfy findings 21 & 22 and avoid polling /commits/{sha}/status
+   * on every cycle. While external CI can mutate status on an existing SHA upon manual retry,
+   * standard Graphyard workflow upon retry is pushing a new commit (or empty commit), which yields a
+   * fresh SHA and bypasses the cache; cache churn and process restarts also clear the entry.
    */
   private async requiredStatuses(sha: string, required: { name: string; appId: number | null }[], policy: readonly string[], runs: { name: string; app?: { id?: number } }[], ciAppIds: readonly number[]): Promise<Observation['checks']> {
     const names = new Set(required.filter(check => check.appId === null && check.name !== CHECK_NAME && !policy.includes(check.name)
