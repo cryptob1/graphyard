@@ -23,9 +23,42 @@ export const handWatchPrefix = 'hand:';
 /** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
 const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
 
+/**
+ * GY-1142: Decision input signature — canonical serialization of the decision's action, binding, and derived input payload.
+ * When a decision's inputs have not changed since the last cycle, per-decision network calls to the control plane are skipped.
+ */
+export function decisionInputSignature(item: Work, decision: RoutineDecision): string {
+  return canonicalJson({
+    action: decision.action,
+    binding: decision.binding,
+    input: decisionInput(decision.action, item, decision.input ?? {}),
+  });
+}
+
+interface DecisionHistoryCacheEntry {
+  history: any[];
+  signature: string;
+}
+
+const decisionHistoryCache = new Map<string, DecisionHistoryCacheEntry>();
+
+export function resetDecisionCache() {
+  decisionHistoryCache.clear();
+}
+
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
+  // GY-1142: deduplicate per-item decision reads within a single cycle.
+  const cycleDecisions = new Map<string, Promise<{ decisions: any[] }>>();
+  const getWorkDecisions = async (item: Work) => {
+    let p = cycleDecisions.get(item.id);
+    if (!p) {
+      p = effects.decisions ? effects.decisions(item).catch(() => ({ decisions: [] })) : Promise.resolve({ decisions: [] });
+      cycleDecisions.set(item.id, p);
+    }
+    return p;
+  };
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
   //     used to wait for a master session to notice. The loop requests the decision with the
@@ -302,10 +335,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const attempts = (state.actions[key]?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     try {
-      const history = effects.decisions ? (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions : [];
+      const sig = decisionInputSignature(item, decision);
+      const cached = decisionHistoryCache.get(key);
+      let history: any[];
+      if (cached && cached.signature === sig) {
+        history = cached.history;
+      } else {
+        history = effects.decisions ? (await getWorkDecisions(item)).decisions : [];
+        decisionHistoryCache.set(key, { history, signature: sig });
+      }
       const applied = decision.action === 'merge' ? approvedMerge(item, history) : null;
       if (applied) {
         state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: applied.id, requestedAt: stamp, settledAt: stamp });
+        decisionHistoryCache.set(key, { history, signature: sig });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key} already holds an applied merge decision for candidate ${decision.binding.slice(0, 12)}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
@@ -338,6 +380,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         // A refusal recorded after this observation is settled once an observation shows it.
         const pending = !!decision.scope && scopeOutcomeAnswered(item, decision.scope, judged, clock) === 'pending';
         const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: pending ? null : stamp, scope: decision.scope ?? null });
+        decisionHistoryCache.set(key, { history, signature: sig });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${judged.id} for this widening was already refused by ${judged.refusal?.approver ?? 'its approver'}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         if (!pending) await noteScopeOutcome(item, watch, judged);
         return;
@@ -433,6 +476,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // the decision would leave the oldest-first queue and race the other waiters for the freed
       // account, and a re-key would hold or report the same spent session twice.
       const kept = prior ? { ...carriedSession(prior), capacity: prior.capacity, reportedExhaustion: prior.reportedExhaustion, heldExhaustion: prior.heldExhaustion } : {};
+      if (requested && !standing) {
+        history.push({ id: requested.id, action: decision.action, state: (requested as any).state ?? 'requested', input: decisionInput(decision.action, item, decision.input ?? {}), reason });
+      }
+      decisionHistoryCache.set(key, { history, signature: sig });
       const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: requested.id, requestedAt: prior?.requestedAt ?? stamp, ...kept, requests: prior ? prior.requests : (carried?.requests ?? 0) + 1, ended: (prior ?? carried)?.ended ?? [], observation: observed, scope: decision.scope ?? null });
       // A verdict measured from when the reviewer landed it to when the loop asked for the round it
       // needs. A base conflict has no verdict behind it, so it is not part of that measurement. It
@@ -496,9 +543,27 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const supervise = async (item: Work, decision: RoutineDecision, key: string, watch: ApprovalWatch) => {
     // Its approver is still being launched (GY-616): there is no session to judge yet.
     if (cycle.launcher.busy(approverLaunchKey(watch.decision))) return;
-    const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
-    const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
-    if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
+    const sig = decisionInputSignature(item, decision);
+    const cached = decisionHistoryCache.get(key);
+    let history: any[] | undefined;
+    let judged: any;
+    if (cached && cached.signature === sig) {
+      history = cached.history;
+      judged = history.find(entry => entry.id === watch.decision) ?? null;
+      if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
+      let step = approvalStep(watch, judged, await sessions(), clock);
+      if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
+      if (effects.decisions) {
+        history = (await getWorkDecisions(item)).decisions;
+        decisionHistoryCache.set(key, { history, signature: sig });
+        judged = history.find(entry => entry.id === watch.decision) ?? null;
+      }
+    } else {
+      history = effects.decisions ? (await getWorkDecisions(item)).decisions : undefined;
+      if (history !== undefined) decisionHistoryCache.set(key, { history, signature: sig });
+      judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
+      if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
+    }
     const step = approvalStep(watch, judged, await sessions(), clock);
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
     // A decision whose approver could not be launched for want of capacity is not a session that
@@ -641,19 +706,24 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // An applied widening clears the request it answered, and so does the approver's refusal, so
     // the item stops needing it at once: its outcome is noted and measured here, before the watch goes.
     if (item && watch.scope && !watch.settledAt && effects.decisions) {
-      const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision), () => undefined);
+      const judged = await getWorkDecisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision), () => undefined);
       if (judged?.state === 'applied' || judged?.state === 'refused') {
         if (scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
         watch.settledAt = stamp; await noteScopeOutcome(item, watch, judged);
       }
     }
     // Another current watch holds this decision: the request is not moved past, only re-keyed.
-    if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) { delete state.approvals[key]; return; }
+    if (Object.entries(state.approvals).some(([other, entry]) => other !== key && needed.has(other) && entry.decision === watch.decision)) {
+      delete state.approvals[key];
+      decisionHistoryCache.delete(key);
+      return;
+    }
     if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {
       try {
-        const standing = (await effects.decisions(item)).decisions.find(entry => entry.id === watch.decision);
+        const standing = (await getWorkDecisions(item)).decisions.find(entry => entry.id === watch.decision);
         if (standing?.state === 'requested') {
           await effects.withdraw(item, watch.decision, `${watch.work} moved past the ${watch.action} this decision asked for before any approver judged it, so its reason no longer describes the item`);
+          decisionHistoryCache.delete(key);
           await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'done', `Withdrew ${watch.action} decision ${watch.decision}: ${watch.work} no longer needs it and no approver had judged it`);
         }
       } catch (error) {
@@ -669,7 +739,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // after a few tries; the session name is this decision's alone, so it can refuse no other launch.
     // A registry session is not: its id is the only way to end it, and while it lives it holds the
     // role's slot, so the watch stays, past any bound, until the registry is told.
-    if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
+    if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) {
+      delete state.approvals[key];
+      decisionHistoryCache.delete(key);
+    }
   });
 
   // 4c'. Approver sessions no request of the loop's launched (GY-403). `master approver` records the
@@ -693,7 +766,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (!item) continue;
       let decision = record?.decision ?? null;
       if (!decision) {
-        const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => null) : null;
+        const history = effects.decisions ? await getWorkDecisions(item).then(result => result.decisions, () => null) : null;
         decision = history?.find(entry => approverSessionName(item, entry.id) === agent.name)?.id ?? null;
         // A delivered item's approver is closed whatever it judges; it is named for its session.
         if (!decision && item.stage === 'done') decision = agent.name;
@@ -713,7 +786,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (!record.work || !record.decision || seen.agents.some(agent => agent.name === record.agentName) || watched.some(watch => watch.decision === record.decision || watch.agentName === record.agentName)) continue;
       const item = snapshot.work.find(candidate => candidate.key === record.work);
       if (!item || item.stage === 'done' || !effects.decisions) continue;
-      const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === record.decision) ?? null, () => null);
+      const judged = await getWorkDecisions(item).then(result => result.decisions.find(entry => entry.id === record.decision) ?? null, () => null);
       if (judged?.state !== 'requested') continue;
       const watch = state.approvals[`${handWatchPrefix}${record.decision}`] = approvalWatchSchema.parse({ work: item.key, action: judged.action, decision: record.decision, requestedAt: stamp, agentName: record.agentName,
         launchedAt: record.launchedAt, launches: 1, account: record.account, runtime: record.runtime, session: record.session });
@@ -729,7 +802,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (!item) why = `${watch.work} is no longer open`;
       else if (item.stage === 'done') why = `${item.key} is delivered`;
       else if (effects.decisions) {
-        judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
+        judged = await getWorkDecisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
         if (judged === null) why = `${item.key} holds no decision ${watch.decision}`;
         else if (judged && !['requested', 'approved'].includes(judged.state)) why = `its decision is ${judged.state}`;
         if (judged) watch.action = judged.action;
@@ -771,11 +844,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A session gone on its own has no pane to close, only a registry session to end.
       if (!item) {
         if (watch.session && effects.endRegistrySession) await effects.endRegistrySession(watch.session, why!).then(() => { watch.session = null; }, () => { watch.closeAttempts += 1; });
-        if (!watch.session || !effects.endRegistrySession) delete state.approvals[key];
+        if (!watch.session || !effects.endRegistrySession) { delete state.approvals[key]; decisionHistoryCache.delete(key); }
         continue;
       }
       if (!listed) why ??= `approver session ${watch.agentName} is gone`;
-      if (await closeApprover(item, watch, why!) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
+      if (await closeApprover(item, watch, why!) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) { delete state.approvals[key]; decisionHistoryCache.delete(key); }
     }
     await effects.persist(state);
   });

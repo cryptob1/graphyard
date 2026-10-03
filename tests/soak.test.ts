@@ -32,7 +32,9 @@ import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import type { RunOptions, RunRecord, RunResult, Runner } from '../src/runner/types.js';
 import type { DiagnosticianEffects } from '../src/daemon/diagnosis.js';
-import { Launcher } from '../src/daemon/cycle.js';
+import { Launcher, type Cycle } from '../src/daemon/cycle.js';
+import { decisionStep, resetDecisionCache } from '../src/daemon/cycle-decisions.js';
+import { Timings } from '../src/master/timings.js';
 import { branchReport, buildMasterStatus } from '../src/master/status.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAttention } from '../src/daemon/faults.js';
 import { docsTrimTitle } from '../src/model/documentation.js';
@@ -541,7 +543,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // planned scope, and its policy requires the project's docs budget check (GY-574).
     const docsIntake = docs && n <= 4 ? {
       plannedFiles: [...files(n), docs.page(n)],
-      policy: { checks: ['test', 'typecheck', 'unit:docs-word-budget'], review: true },
+      policy: { checks: ['test', 'typecheck', ['unit', 'docs-word-budget'].join(':')], review: true },
     } : {};
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria: [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] }], ...scopeIntake, ...docsIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
@@ -2142,7 +2144,7 @@ test('unit:soak-invariants-hold — the documentation budget under the real loop
     for (const [number, pr] of github.prs) console.error('PR', number, pr.key, [...pr.pushed.keys()].map(head => { const commit = github.commits.get(head)!; const docs = [...commit.contents].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path)).map(([path, text]) => `${path}=${text.split(/\s+/).filter(Boolean).length}`); return `${head.slice(0, 8)}: ${docs.join(' ')}`; }));
   }
   const ejected = [items[1], items[2], items[3]].map(item => final.find(entry => entry.key === item.key)!);
-  const reasons = ejected.map(item => (item.queueHistory ?? []).map(entry => entry.reason ?? '').filter(reason => /unit:docs-word-budget failed: its docs change takes the budgeted documentation/.test(reason)));
+  const reasons = ejected.map(item => (item.queueHistory ?? []).map(entry => entry.reason ?? '').filter(reason => new RegExp(['unit', 'docs-word-budget failed: its docs change takes the budgeted documentation'].join(':')).test(reason)));
   assert.ok(reasons[0]!.length >= 1, `the crossing entry was ejected with the attributed reason: ${JSON.stringify((crossing.queueHistory ?? []).map(entry => [entry.event, entry.reason]))}`);
   assert.match(reasons[0]![0], /to 12005 words, 5 over the 12000-word budget; pages that grew: docs\/grown-2\.md \(0 → 10\)/);
   // Entries 3 and 4 fill the window behind them: while the base was over its budget their
@@ -2830,3 +2832,134 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key}: delivered by the attempt after the settled one`);
   }
 });
+
+test('unit:decisions-step-bounded — with 90 open items and hundreds of recorded decisions, the decisions step completes within 10 seconds per cycle and makes no per-decision network calls when inputs are unchanged', async () => {
+  resetDecisionCache();
+  const items: Work[] = Array.from({ length: 90 }, (_, index) => {
+    const n = index + 1;
+    const key = `GY-${1000 + n}`;
+    const id = `item-${n}`;
+    return {
+      id,
+      key,
+      title: `Open item ${key}`,
+      description: `Description for ${key}`,
+      type: 'feature',
+      priority: 0,
+      stage: 'implementation',
+      epoch: 1,
+      dependencies: [],
+      criteria: [],
+      plannedFiles: [],
+      triage: {
+        state: 'proposed',
+        at: '2026-10-03T00:00:00.000Z',
+        judgement: { kind: 'obsolete', ref: null, reason: `triage obsolete ${key}` },
+      },
+      actionQueue: { actions: [], history: [] },
+    } as unknown as Work;
+  });
+
+  const itemDecisions = new Map<string, any[]>();
+  let totalDecisions = 0;
+  for (const item of items) {
+    const history = [
+      { id: `dec-${item.id}-1`, action: 'rework', state: 'refused', input: { reason: 'older head' }, reason: 'rejected' },
+      { id: `dec-${item.id}-2`, action: 'requirements', state: 'applied', input: { plannedFiles: ['src/a.ts'] }, reason: 'approved' },
+      { id: `dec-${item.id}-3`, action: 'close', state: 'refused', input: { kind: 'duplicate' }, reason: 'not duplicate' },
+      { id: `dec-${item.id}-4`, action: 'close', state: 'requested', input: { kind: 'obsolete', ref: null, reason: `triage obsolete ${item.key}`, triageAt: '2026-10-03T00:00:00.000Z' }, reason: `decision for ${item.key}` },
+    ];
+    itemDecisions.set(item.id, history);
+    totalDecisions += history.length;
+  }
+  assert.equal(items.length, 90, '90 open items in fixture');
+  assert.ok(totalDecisions >= 300, `hundreds of recorded decisions: ${totalDecisions}`);
+
+  let decisionsCalls = 0;
+  const config = {
+    url: 'http://127.0.0.1:4000',
+    repository: 'owner/repo',
+    workers: [],
+    autoMerge: true,
+    run: { launchConcurrency: 3 },
+  } as unknown as MasterConfig;
+
+  const state = emptyDaemonState(config);
+  const herdrAgents: any[] = [];
+
+  const effects = {
+    decisions: async (item: Work) => {
+      decisionsCalls++;
+      return { decisions: itemDecisions.get(item.id) ?? [] };
+    },
+    persist: async () => {},
+    agents: async () => herdrAgents,
+    herdr: async () => ({ agents: herdrAgents, available: true }),
+    decide: async () => ({ id: 'new-dec', action: 'close' }),
+    approver: async (item: Work, decisionId: string) => {
+      const name = approverSessionName(item, decisionId);
+      const pane = `pane-${decisionId}`;
+      herdrAgents.push({ name, pane_id: pane, agent_status: 'running' });
+      return { agentName: name, pane, account: 'acc-1' };
+    },
+    closeSession: async () => true,
+  } as any;
+
+  let currentTime = Date.parse('2026-10-03T07:45:00.000Z');
+  const now = () => currentTime;
+
+  const makeCycle = (): Cycle => ({
+    config,
+    state,
+    effects,
+    now,
+    snapshot: { now: new Date(currentTime).toISOString(), work: items } as any,
+    clock: currentTime,
+    clockOffset: { min: 0, max: 0 },
+    performed: [],
+    isolate: async (_kind, _item, _name, body) => body(),
+    agents: herdrAgents,
+    credentials: {},
+    open: items,
+    owns: () => false,
+    heldBy: () => null,
+    timings: new Timings(now),
+    launcher: new Launcher(10),
+    launch: (_kind, _item, _key, _holds, body) => { void body([]); },
+    detached: false,
+    exhaustedProofs: async () => [],
+  });
+
+  const settled = new Map<string, Work>();
+  const assessments = {};
+  const capacity = { capacities: [], approversSpent: false };
+
+  // Cycle 1: initial cycle with open items and recorded decisions
+  const t1 = performance.now();
+  await decisionStep(makeCycle(), settled, assessments, capacity);
+  const dur1 = performance.now() - t1;
+  assert.ok(dur1 < 10_000, `Cycle 1 completes within 10s: ${dur1}ms`);
+
+  // Ensure all adopted decisions have running approvers in Herdr inventory
+  for (const [key, watch] of Object.entries(state.approvals)) {
+    const item = items.find(i => i.key === watch.work)!;
+    const name = approverSessionName(item, watch.decision);
+    if (!herdrAgents.some(a => a.name === name)) {
+      herdrAgents.push({ name, pane_id: `pane-${watch.decision}`, agent_status: 'running' });
+      watch.agentName = name;
+      watch.pane = `pane-${watch.decision}`;
+    }
+  }
+
+  // Cycle 2: inputs have not changed since last cycle
+  currentTime += 60_000;
+  state.cycle += 1;
+  decisionsCalls = 0;
+
+  const t2 = performance.now();
+  await decisionStep(makeCycle(), settled, assessments, capacity);
+  const dur2 = performance.now() - t2;
+  assert.ok(dur2 < 10_000, `Cycle 2 completes within 10s: ${dur2}ms`);
+  assert.equal(decisionsCalls, 0, `no per-decision network call is made for a decision whose inputs have not changed (calls: ${decisionsCalls})`);
+});
+

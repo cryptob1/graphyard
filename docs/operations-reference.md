@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
+Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. The decisions step completes within 10 s per cycle, skipping per-decision control-plane reads for decisions whose inputs have not changed since the last cycle. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
 
 ### Perpetual master loop
 
@@ -80,7 +80,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
 - **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a row a delta extends, an item's newest save, a delivery event or the revision a delivery cites, a row of an item merged but not done, or a row the flow projection has not read. Each batch appends a `ledger.compacted` event with counts per kind. Postgres reuses the space; only `VACUUM FULL` returns it to the volume.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1) every 10 minutes, in ≤2,000-row batches per phase, five a run. It never deletes other kinds, deltas, an item's newest save, delivery events, unmerged rows, or unread rows. Each batch appends a `ledger.compacted` event. Postgres reuses space; only `VACUUM FULL` returns it to disk.
 
 ## Bootstrap mode for a self-proving change
 
