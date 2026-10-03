@@ -9,7 +9,7 @@ The master acts without asking. Three decisions are human-only: goals and priori
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has an external blocker recorded in Graphyard, and every merge is verified against the deployed release or deployment-blocked.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked.
 
 1. `master status` on startup and events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -27,7 +27,7 @@ The loop launches, wakes and rotates the [master session](master-agent-sessions.
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
-`baseBreak`: tests (`graphyard-failed-tests:`) failing on the old base, passing on its tip, refresh, not rework; status names test and commits.
+`baseBreak`: tests (`graphyard-failed-tests:`) failing on old base, passing on tip, refresh, not rework; status names both.
 
 ### Session liveness is reconciled, not trusted
 
