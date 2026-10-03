@@ -15,7 +15,7 @@ export const registryHelp = [
   '              [--model-flag=FLAG] [--tools-flag=FLAG] [--login COMMAND] [--login-file PATH] [--env K=V]… --reason R',
   '  master registry model set NAME|@FILE [--provider P] [--id ID] [--input-cost USD]',
   '              [--output-cost USD] [--tier frontier|strong|fast] [--context TOKENS] --reason R',
-  '  master registry account set NAME|@FILE --runtime R --model M [--home PATH] [--host HOST]',
+  '  master registry account set NAME|@FILE --runtime R --model M [--plan PLAN] [--home PATH] [--host HOST]',
   '              [--max-sessions N] [--disable|--enable] [--note TEXT] [--key-file FILE --key-variable VAR|--no-key] --reason R',
   '                                --key-file names the provider key file in the login home (mode 0600) that a',
   '                                headless run reads into VAR at launch; the registry stores the reference only.',
@@ -103,7 +103,7 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     return api.write('agent-registry/models', { model, reason: values.reason });
   }
   if (collection === 'account') {
-    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, runtime: { type: 'string' }, model: { type: 'string' }, home: { type: 'string' }, host: { type: 'string' }, 'max-sessions': { type: 'string' }, disable: { type: 'boolean' }, enable: { type: 'boolean' }, note: { type: 'string' },
+    const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { reason: { type: 'string' }, runtime: { type: 'string' }, model: { type: 'string' }, plan: { type: 'string' }, home: { type: 'string' }, host: { type: 'string' }, 'max-sessions': { type: 'string' }, disable: { type: 'boolean' }, enable: { type: 'boolean' }, note: { type: 'string' },
       'key-file': { type: 'string' }, 'key-variable': { type: 'string' }, 'no-key': { type: 'boolean' } } });
     if (!positionals[0] || !values.reason) throw new Error('Use master registry account set NAME|@FILE --runtime R --model M [--home PATH] [--host HOST] --reason REASON');
     if (positionals[0].startsWith('@')) return api.write('agent-registry/accounts', { account: await fromFile(positionals[0]), reason: values.reason });
@@ -114,7 +114,8 @@ export async function registryCommand(master: Pick<MasterConfig, 'hostId'>, args
     if (!!values['key-file'] !== !!values['key-variable']) throw new Error('Name the key by both --key-file FILE (inside the login home) and --key-variable VAR (the variable the runtime reads it from)');
     const existingKey = existing?.credential.key;
     const key = values['no-key'] ? undefined : values['key-file'] ? { file: values['key-file'], variable: values['key-variable']! } : existingKey;
-    const account = { ...kept, name: positionals[0], ...defined({ runtime: values.runtime, model: values.model, note: values.note, maxSessions: number(values['max-sessions'], '--max-sessions'), enabled: values.disable ? false : values.enable ? true : undefined }),
+    const plan = values.plan === 'none' ? undefined : values.plan;
+    const account = { ...kept, name: positionals[0], ...(values.plan === 'none' ? { plan: undefined } : {}), ...defined({ runtime: values.runtime, model: values.model, plan, note: values.note, maxSessions: number(values['max-sessions'], '--max-sessions'), enabled: values.disable ? false : values.enable ? true : undefined }),
       // The credential stays where the runtime put it: the registry holds only where that is.
       credential: { host: values.host ?? existing?.credential.host ?? master.hostId, home: values.home ?? existing?.credential.home ?? null, ...(key ? { key } : {}) } };
     return api.write('agent-registry/accounts', { account, reason: values.reason });
