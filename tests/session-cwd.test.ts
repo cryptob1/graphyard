@@ -17,7 +17,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
-import { coordinatorCheckoutRefusal, readCoordinatorCheckout } from '../src/master/profiles.js';
+import { bwrapOnPath, coordinatorCheckoutRefusal, readCoordinatorCheckout, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { readApproverLaunches } from '../src/master/autonomy.js';
 import { orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
 import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, readEscalationSessions, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -122,8 +122,10 @@ const outsideCoordinator = (path: string, coordinatorRoot: string) => {
  * detached worktree of the head it judges at the path it was allocated. The fixture's origin is
  * not reachable, so the head is the commit the repository already holds.
  */
-const obtainsCode = (start: string, worktree: string, commit: string) => {
-  execFileSync('git', ['worktree', 'add', '--detach', '--quiet', worktree, commit], { cwd: start, stdio: 'ignore' });
+const obtainsCode = (start: string, worktree: string, commit: string, coordinatorRoot?: string) => {
+  const wrapper = (coordinatorRoot && process.platform === 'linux' && bwrapOnPath()) ? readOnlyMountWrapper({ coordinatorRoot, sessionDirectory: start }) : [];
+  const cmd = [...wrapper, 'git', 'worktree', 'add', '--detach', '--quiet', worktree, commit];
+  execFileSync(cmd[0], cmd.slice(1), { cwd: start, stdio: 'ignore' });
   return existsSync(join(worktree, 'src', 'loop.ts'));
 };
 
@@ -185,7 +187,7 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
       assert.ok(sessionCheckout, 'the launch files are written in a checkout of their own');
       assert.ok(outsideCoordinator(sessionCheckout!, root), 'the launch files live outside the coordinator checkout');
       assert.equal(resolve(pane!), resolve(sessionCheckout!), 'the pane opens exactly where the session checkout is');
-      assert.ok(obtainsCode(pane!, join(pane!, 'checkout'), head), 'the git fetch and git worktree add its request runs from where it starts reach the repository');
+      assert.ok(obtainsCode(pane!, join(pane!, 'checkout'), head, root), 'the git fetch and git worktree add its request runs from where it starts reach the repository');
       // The process-level folder the runtime starts in is the session checkout too: the launch's
       // cwd is what the folder-trust step records, and it records the checkout and only it.
       const projects = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')).projects as Record<string, { hasTrustDialogAccepted?: boolean }>;
@@ -215,7 +217,7 @@ test('unit:session-cwd-own-checkout — an approver session opens its pane and s
     const handed = tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT');
     assert.equal(handed, root, 'the approver tab hands the session the coordinator root');
     assert.equal(realpathSync(cliRoot(pane!, { GRAPHYARD_REPOSITORY_ROOT: handed! })), realpathSync(root), 'graphyard master commands run from where the approver starts resolve the coordinator installation');
-    assert.ok(obtainsCode(pane!, join(pane!, 'checkout'), fixture.head), 'git reads from where the approver starts reach the repository');
+    assert.ok(obtainsCode(pane!, join(pane!, 'checkout'), fixture.head, root), 'git reads from where the approver starts reach the repository');
     // The directory is owned while the session's launch record is kept: a reclaim pass past the grace leaves it.
     assert.equal((await readApproverLaunches(root)).at(-1)?.checkout, pane, 'the launch record names the approver checkout');
     assert.ok(await survivesReclaim(root, fixture.config, pane!), 'a reclaim pass past the orphan grace leaves the approver checkout');
@@ -279,7 +281,7 @@ test('unit:session-cwd-own-checkout — a producer session opens its pane and st
       const projects = JSON.parse(await readFile(join(home, '.claude.json'), 'utf8')).projects as Record<string, { hasTrustDialogAccepted?: boolean }>;
       assert.equal(projects[realpathSync(resolve(launched.checkout))]?.hasTrustDialogAccepted, true, 'the runtime starts in the producer checkout');
       assert.equal(projects[realpathSync(resolve(root))], undefined, 'the coordinator checkout is never recorded as the folder the runtime starts in');
-      assert.ok(obtainsCode(pane!, join(launched.checkout, 'checkout'), head), 'the git fetch and git worktree add its request runs from where it starts reach the repository');
+      assert.ok(obtainsCode(pane!, join(launched.checkout, 'checkout'), head, root), 'the git fetch and git worktree add its request runs from where it starts reach the repository');
     } finally { await rm(home, { recursive: true, force: true }); }
     await cleanup();
   } finally { await fixture.cleanup(); }

@@ -1,7 +1,8 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
@@ -540,13 +541,25 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
 /**
  * GY-866: a reviewer or producer session starts in its own session directory under the managed
  * worktree root, never in the coordinator checkout, and its request runs `git fetch` and
- * `git worktree add` from where it starts. The directory is made a worktree of the repository with
- * nothing checked out, so those commands reach the repository's Git directory from there without
- * the session starting among the coordinator's files. It runs right after allocation, while the
- * directory is still empty. A repository that cannot register one leaves the directory as allocated.
+ * `git worktree add` from where it starts. The directory points at the repository's Git directory,
+ * so those commands reach the repository from there without the directory itself being a registered
+ * linked worktree (which would cause confinement to bind only its own admin directory and leave
+ * .git/worktrees read-only, breaking subsequent `git worktree add`).
  */
 export async function anchorSessionCheckout(root: string, directory: string, run: ChildRun = defaultChildRun): Promise<void> {
-  try { await run('git', ['-C', root, 'worktree', 'add', '--detach', '--no-checkout', '--quiet', directory, 'HEAD']); } catch { /* the session still starts outside the coordinator checkout */ }
+  try {
+    let gitDir: string | null = null;
+    try {
+      const output = (await run('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+      if (output && !output.startsWith('{')) gitDir = output;
+    } catch {}
+    if (!gitDir) gitDir = await sharedGitDirectory(root);
+    if (!gitDir && existsSync(join(root, '.git'))) gitDir = resolve(root, '.git');
+    if (gitDir) {
+      await mkdir(join(gitDir, 'worktrees'), { recursive: true });
+      await writeFile(join(directory, '.git'), `gitdir: ${gitDir}\n`);
+    }
+  } catch { /* the session still starts outside the coordinator checkout */ }
 }
 
 /**
