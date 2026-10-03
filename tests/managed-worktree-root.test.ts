@@ -59,7 +59,7 @@ async function installation(run: Partial<MasterRun> = {}) {
   await saveReviewerProfile(root, { name: 'reviewer-a', agentName: 'review-a', kind: 'codex' });
   const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const verify = (id: string) => async () => ({ actor: { id, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
-  await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'codex', credentialFile: credential }, verify('proof-runner'));
+  await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'codex', credentialFile: credential, concurrency: 1 }, verify('proof-runner'));
   return { scratch, root, managed, git, cleanup: () => rm(scratch, { recursive: true, force: true }) };
 }
 

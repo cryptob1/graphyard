@@ -144,7 +144,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
 
     // Producer on Codex: the request comes after the sandbox flags and their values.
     const producerCredential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-codex', principal: 'proof-runner', agentName: 'produce-codex', kind: 'codex', credentialFile: producerCredential }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-codex', principal: 'proof-runner', agentName: 'produce-codex', kind: 'codex', credentialFile: producerCredential, concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const item = requested();
     const request = item.autoDispatch!.producers[0];
@@ -204,7 +204,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer') }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const ackMs = acknowledgementMs(config);
     assert.equal(ackMs, defaultAcknowledgementSeconds * 1000);
@@ -417,7 +417,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer') }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     // The interval is the master's own setting, adopted like every other owned run field.
     assert.ok((masterOwnedRunFields as readonly string[]).includes('acknowledgementSeconds'));
     await saveMasterSettings(root, { acknowledgementSeconds: 120 });
