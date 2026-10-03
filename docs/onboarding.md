@@ -93,7 +93,7 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions without a restart:
+Each candidate needs one review and one producer session per proof group; `"concurrency"` caps a profile's sessions without a restart (producer profiles and `run.reviewerProfile` default to 4):
 
 ```json
 "reviewers":[{"name":"claude-reviewer","agentName":"review-claude","kind":"claude","accounts":["claude-a","claude-b"],"concurrency":3}]
