@@ -13,6 +13,7 @@ import { hostSizing, recommendServerType, parseServerTypes } from '../src/instal
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
 import { workerConfinementRefusal } from '../src/master/profiles.js';
+import { sessionNameRefusal } from '../src/session-name.js';
 import { connectProvider } from '../src/fleet.js';
 import { createPiHome, writeProviderAuthFile } from '../src/master/connect-accounts.js';
 import { authenticate } from '../src/server/auth.js';
@@ -181,8 +182,25 @@ test('unit:host-install-plan — every installed worker profile passes the launc
     await applyHost(fixture, hostInputs({ workers: 3 }));
     const profiles = [...fixture.hostFiles.entries()].filter(([path]) => path.startsWith(`${CONFIG}/profiles/`)).map(([, file]) => JSON.parse(file.content));
     assert.deepEqual(profiles.map(profile => profile.kind).sort(), ['claude', 'codex', 'opencode']);
-    for (const profile of profiles) assert.equal(workerConfinementRefusal(profile), null, profile.name);
+    for (const profile of profiles) {
+      assert.equal(workerConfinementRefusal(profile), null, profile.name);
+      assert.equal(sessionNameRefusal(profile.agentName), null, profile.agentName);
+    }
     assert.equal(profiles.find(profile => profile.kind === 'opencode').environment.OPENCODE_PERMISSION, OPENCODE_WORKER_PERMISSION);
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — worker profiles for a repository with a long name generate bounded Herdr session names', async () => {
+  const repo = 'an-organization-with-a-very-long-name/and-an-equally-long-repository-name-for-testing';
+  const fixture = await harness({ repository: repo, provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    await applyHost(fixture, hostInputs({ repository: repo, workers: 3 }));
+    const profiles = [...fixture.hostFiles.entries()].filter(([path]) => path.includes('/profiles/')).map(([, file]) => JSON.parse(file.content));
+    assert.ok(profiles.length >= 3);
+    for (const profile of profiles) {
+      assert.equal(sessionNameRefusal(profile.agentName), null, profile.agentName);
+      assert.ok(profile.agentName.length <= 32);
+    }
   } finally { await fixture.cleanup(); }
 });
 

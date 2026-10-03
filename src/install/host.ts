@@ -10,6 +10,7 @@ import { packageVersion } from '../release.js';
 import { proposedConcurrency, proposedRuntimes } from '../model/registry-proposal.js';
 import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRoleName, FleetRuntime } from '../model/registry.js';
 import type { ProfileRegistration } from './index.js';
+import { suffixedSessionName } from '../session-name.js';
 
 /**
  * The self-contained Graphyard host (GY-717).
@@ -729,7 +730,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   const launchable = hostRuntimes.filter(runtime => runtime.kind !== 'pi');
   for (const [index, principal] of workerPrincipals(host.principals).entries()) {
     const runtime = launchable[index % launchable.length];
-    const profile = { name: `${runtime.kind}-${index + 1}`, principal: principal.id, agentName: `${ctx.installId}-${runtime.kind}-${index + 1}`, mode: 'launch', kind: runtime.kind, credentialFile: hostTokenFile(layout, principal.id), agentArgs: [], environment: runtime.kind === 'opencode' ? { OPENCODE_PERMISSION: OPENCODE_WORKER_PERMISSION } : {} };
+    const profile = { name: `${runtime.kind}-${index + 1}`, principal: principal.id, agentName: suffixedSessionName(ctx.installId, runtime.kind, String(index + 1)), mode: 'launch', kind: runtime.kind, credentialFile: hostTokenFile(layout, principal.id), agentArgs: [], environment: runtime.kind === 'opencode' ? { OPENCODE_PERMISSION: OPENCODE_WORKER_PERMISSION } : {} };
     const file = `${layout.profilesDirectory}/${profile.name}.json`;
     await remote.putFile(file, `${JSON.stringify(profile, null, 2)}\n`, 0o600, owner);
     const added = await asUser(remote, layout.checkout, 'node', [layout.cli, 'master', 'worker', 'add', file], { allowFailure: true });

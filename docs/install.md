@@ -60,9 +60,9 @@ At the printed `http://127.0.0.1:4311` the human registers and installs the App;
 
 ## Step 6: the first pull request
 
-Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`; **Verify** the required check.
+Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `Graphyard / merge` appears, rerun `--apply`, which requires it and `graphyard/landable`, both bound to the App. **Verify** both checks required on the base branch.
 
-`--plan` and `--apply` are idempotent; tokens never rotate.
+`--plan` and `--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
 
 ## Self-contained host
 

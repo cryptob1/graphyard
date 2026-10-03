@@ -149,8 +149,10 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     await db.query('COMMIT');
   };
   try {
+    // Count the runs, not the predicate's calls: retryDeadlocks asks it both before and after each
+    // rollback, so counting calls would stop at the third run, not the fifth the guide promises (GY-794).
     let attempts = 0;
-    await retryDeadlocks(restore, () => ++attempts < restoreDeadlockAttempts, () => db.query('ROLLBACK'));
+    await retryDeadlocks(() => { attempts++; return restore(); }, () => attempts < restoreDeadlockAttempts, () => db.query('ROLLBACK'));
     const missing = ledgerTables.filter(name => name !== 'graphyard_schema' && !backup.tables.some(t => t.name === name));
     return { restored, takenAt: backup.takenAt, fromVersion: backup.graphyardVersion, fromSchema: backup.schemaVersion, toSchema: schemaVersion, tablesLeftEmpty: missing };
   } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; }

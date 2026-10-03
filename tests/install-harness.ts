@@ -115,7 +115,7 @@ export function githubResponses(state: FakeState, repository = REPOSITORY, branc
 
 export const satisfiedProtection = (appId: number | null, reviewCount = 1) => ({
   // `strict` off is part of a satisfied branch: the merge queue supersedes "up to date".
-  required_status_checks: { strict: false, checks: [{ context: 'test', app_id: null }, { context: 'typecheck', app_id: null }, ...(appId ? [{ context: 'Graphyard / merge', app_id: appId }] : [])] },
+  required_status_checks: { strict: false, checks: [{ context: 'test', app_id: null }, { context: 'typecheck', app_id: null }, ...(appId ? [{ context: 'Graphyard / merge', app_id: appId }, { context: 'graphyard/landable', app_id: appId }] : [])] },
   enforce_admins: { enabled: true },
   // Conversation resolution off: the reviewer's verdict is the review gate, threads are its inputs.
   required_conversation_resolution: { enabled: false },
