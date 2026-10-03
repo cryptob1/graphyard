@@ -11,6 +11,7 @@ export const readsFlowAnalytics = (role: string | undefined) => role !== 'operat
 /** The most pages one read follows; a board past that is read as incomplete, never as all of it. */
 export const stepPagesLimit = 20;
 type StepRow = { workKey: string; observedAt: string | null; detail: string };
+type Coverage = { truncated?: boolean; statement?: string | null } | undefined;
 
 /**
  * Every recorded step move of the last week (since `since`, when given): the steps drill-down,
@@ -18,19 +19,25 @@ type StepRow = { workKey: string; observedAt: string | null; detail: string };
  * history alone is longer than a page is continued within it (`within:<key>:<rows read>`), so no
  * item's history is cut at the page bound. `complete` is false when the pages ran out before the
  * answer did, and the rows then cover only the items read in full: an item the read stopped inside
- * is left out whole, never taken as its whole history.
+ * is left out whole, never taken as its whole history. `coverage` is the drill-down's own statement
+ * when the read of recorded facts behind it stopped before the end of its window (null when it
+ * read all of it): the moves after that point were never examined, so an empty answer is not "no
+ * item changed step".
  */
-export async function readStepRows(api: (path: string) => Promise<any>, since?: string | null): Promise<{ rows: StepRow[]; complete: boolean }> {
+export async function readStepRows(api: (path: string) => Promise<any>, since?: string | null): Promise<{ rows: StepRow[]; complete: boolean; coverage: string | null }> {
   const rows: StepRow[] = [];
   let key: string | null = since ?? null;
+  let coverage: string | null = null;
+  const note = (reported: Coverage) => { if (reported?.truncated && coverage === null) coverage = String(reported.statement ?? 'The read of recorded step changes stopped before the end of its window.'); };
   const partial = () => {
     const inside = /(?:^|\s)within:(.+):\d+$/.exec(key ?? '')?.[1];
-    return { rows: inside ? rows.filter(row => row.workKey !== inside) : rows, complete: false };
+    return { rows: inside ? rows.filter(row => row.workKey !== inside) : rows, complete: false, coverage };
   };
   for (let page = 0; page < stepPagesLimit; page++) {
     const answer = await api(`analytics/flow/drilldown?window=7&metric=steps${key ? `&key=${encodeURIComponent(key)}` : ''}`);
     rows.push(...(Array.isArray(answer?.rows) ? answer.rows : []));
-    if (!answer?.truncated) return { rows, complete: true };
+    note(answer?.coverage);
+    if (!answer?.truncated) return { rows, complete: true, coverage };
     if (typeof answer.next !== 'string' || answer.next === key) return partial();
     key = answer.next;
   }
