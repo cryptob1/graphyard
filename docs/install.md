@@ -19,6 +19,7 @@ Node 24, a checkout of `OWNER/REPO`, `export GRAPHYARD_CLI=/abs/path/graphyard/b
 
 ### Providers
 
+- `railway`: `npm i -g @railway/cli`, `railway login`; `--domain`, `--workspace NAME`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--domain`, `--ssh-key NAME`. `manual:install-hetzner-live` producers also need `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in the repo-root `.env` (mode `0600`).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.

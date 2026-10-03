@@ -15,23 +15,23 @@ A criterion is `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `
 
 ## Review gate: verdicts, not threads
 
-The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed one resolved, follow-up (held on the item until it ships, then filed as backlog) or overridden — by its thread ID or a comment ID the prompt shows beside it; prose counts for nothing — or is withdrawn, and the relaunch's prompt names the threads it missed; the loop resolves those named, always by thread ID. A filing refused as a reused idempotency key links that key's item (same parent and approval), or files under an approval-and-body-hash key. Retries stop after 10 consecutive identical 4xx failures, raising one attention item naming step, error and item. After two rework rounds a bot's thread is advisory. Required conversation resolution is drift: `master protection --apply`.
+The gate is the reviewer's approval of the exact head plus required CI; threads are inputs: an approval names each listed thread resolved, follow-up or overridden by ID; prose counts for nothing; the loop resolves named threads by ID. Refused duplicate filings link the existing item or use an approval-and-body-hash key. Retries stop after 10 identical 4xx failures, raising one attention item. After two rework rounds bot threads are advisory. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass, as do `tests/helpers/timing-baseline.json` lines of tests the change touches; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and shipping items; carried files (another item's unlanded commits) never eject (GY-871). A worker cannot widen `plannedFiles`; a scope request or audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
+`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass, as do `tests/helpers/timing-baseline.json` lines of tests touched; every other file must match the bound base byte-for-byte. Deletions, reverts or rewrites are refused; carried files never eject. Workers cannot widen `plannedFiles`; scope requests or revisions can. Asks over 20 files in one directory become their deepest common directory (`tests/`); pending asks merge into one decision.
 
 `evaluateLandability` (`src/model/landability.ts`) is the single authority on whether a candidate can land: build and acceptance gates are its refusals, and the merge queue ejects an entry only for a reason it gives. Recomputed live, never stored; a newly landable head re-enters the queue. The control plane publishes the verdict as `graphyard/landable` on every candidate head (GY-887).
 
 ### Keep current with `graphyard sync`
 
-The landing check three-way merges the head onto its landing commit: out-of-scope changes that commit extended, or only the base made, pass; restoring the merge-base version, deleting or rewriting is refused. Each observation recomputes it, clearing stale refusals without a push.
+The landing check three-way merges the head onto its landing commit: out-of-scope changes that commit extended pass; deleting or rewriting is refused. Observations recompute it, clearing stale refusals.
 
-Before any push, `graphyard sync GY-N` merges `origin/BASE` (never rebases), regenerates and commits. `graphyard sync GY-N --restore` also restores every out-of-scope file to the base tip in one new commit naming them, so a plain push updates the PR; it never rewrites history and never needs a force push.
+Before pushing, `graphyard sync GY-N` merges `origin/BASE` (never rebases), regenerates and commits. `graphyard sync GY-N --restore` restores every out-of-scope file to the base tip in a commit naming them; it never rewrites history or force-pushes.
 
 ### Submit when your own criteria pass
 
-The full suite is CI's gate, not the worker's (GY-853): a worker builds, runs `graphyard verify GY-N` (its own criteria's proofs only) and submits when they pass, naming in the PR, not as a blocker, any sandbox-only full-suite failure outside `plannedFiles`. A proof whose own cases all passed in a run that still ended abnormally is `leftToCi`: `verify` exits 0 and `complete` reports `passing`, naming it. A failed, skipped or unexecuted case always blocks.
+The full suite is CI's gate, not the worker's: a worker builds, runs `graphyard verify GY-N` (its criteria proofs only) and submits when they pass, naming in the PR any sandbox-only full-suite failure outside `plannedFiles`. A proof whose own cases all passed in a run ending abnormally is `leftToCi`: `verify` exits 0 and `complete` reports `passing`. A failed, skipped or unexecuted case always blocks.
 
 ### Generated files never conflict
 

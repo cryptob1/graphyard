@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item until it ships, retrieved, promoted on demand. -->
+<!-- page: Operate Graphyard | 4 | pending findings filed when the approved item ships. -->
 # Review follow-ups
 
 An approval's FOLLOW-UP findings stay on the approved item until it ships (`pendingFollowUps`), then file as one backlog item: `Follow-ups from the approved review of GY-N (PR #M)` (`POST /api/work/GY-N/followups` with `{"ship":true}`).

@@ -5,7 +5,7 @@ The master (`coordinator`) routes, merges, verifies deployments and administers 
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop); Railway: `productionEnvironment`). Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Cycle: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop); Railway: `productionEnvironment`). Close finished sessions. Stop only when every in-scope item is Done or has an external blocker recorded in Graphyard, and every merge is verified against deployed release or deployment-blocked. Review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 When `daemon.liveness` is `stalled` or `absent`, run `systemctl --user restart graphyard-master` (`graphyard-master.service`; [supervision](onboarding.md#the-loop-must-be-supervised)), never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
 
@@ -38,9 +38,9 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Machine-filed backlog
 
-With `run.research`, each feature (or `"research": true`) revision gets a read-only Pi brief that build follows; a differing answer reworks, failure never blocks, product questions go to a human.
+With `run.research`, each feature (or `"research": true`) revision gets a read-only Pi brief that build follows; differing answers rework, failure never blocks, product questions go to a human.
 
-[Follow-ups](followups.md) stay on the item until `graphyard promote-followup`. Pi also triages machine-filed items (legacy follow-ups, faults), `triageConcurrency` (default 2) at once: release, approved close, or merge (`machineUntriaged`, `operatorBacklog`).
+[Follow-ups](followups.md) stay on the item until `graphyard promote-followup`. Pi also triages machine-filed items (`triageConcurrency`, default 2): release, approved close, or merge (`machineUntriaged`, `operatorBacklog`).
 
 ## Automatic dispatch at submit
 
@@ -63,7 +63,7 @@ A passing producer records `"exercise"` (`criterion`, `behaviour`, `result`, `ex
 
 The only admin-bypass merges (head-bound, App ruleset bypass):
 
-- A `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, on an approver's `master decide GY-N repair-merge REASON` naming the fault; audited (`repair.merged`), flagged until a normal merge.
-- The main guard's [revert](github.md#optimistic-merges) of a confirmed required-suite failure's culprit, unless a later merge touched its files (`optimistic.revert.*`), reopening it as rework.
+- A `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, on an approver's `master decide GY-N repair-merge REASON`; audited (`repair.merged`).
+- The main guard's [revert](github.md#optimistic-merges) of a confirmed required-suite failure's culprit (`optimistic.revert.*`), reopening it as rework.
 
-Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval lists each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
+Unresolved review threads are reviewer inputs, not merge blockers (`reviewThreads`); approval lists each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

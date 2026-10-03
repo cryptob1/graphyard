@@ -3,11 +3,7 @@
 
 ## Items, scope and human waits
 
-<<<<<<< HEAD
-An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` are refused). Automatic, grounded: documentation; files criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests pinning planned-file quotes or criterion labels; files defining a criterion's symbol or calling a rare one; planned files' successors (renames, copies, `Graphyard-Successor: OLD -> NEW` trailers, re-export barrels), also added to open items; companions: the docs-budget gate beside documentation, the timing baseline beside a test file, the test file the criteria's proofs live in (new when no base file holds them), tests importing a planned module or its barrel, single `web/` files a web-UI criterion describes. Paths are judged singly; the approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`--wait` reads the outcome). `master create`/`requirements` plan the first three companions up front. One decider per request (an executor holding `approve-scope`, else the loop); repeats get the standing decision. A request belongs to its attempt: when that ends (submit, release, lease lapse, rework, a requirements revision) an open or refused request closes with reason `attempt ended` (`scope.closed`); `master unblock GY-N` closes one whose attempt already ended, naming it in its history. A human-only decision needs `park GY-N EPOCH KIND NEEDED -- REASON`; the item waits under **Work → Needs you** for `graphyard answer GY-N …`.
-=======
-An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` are refused). Automatic, grounded: documentation; files criteria name; for items planning `docs/`, single `web/` and `browser-tests/` files; base files an unresolved reviewer or `run.awaitReviewers`-bot thread, or reviewer's current-head `CHANGES_REQUESTED` review, names literally (unnegated; rechecked every two minutes); tests pinning planned-file quotes or criterion labels; files defining a criterion's symbol or calling a rare one; planned files' successors (renames, copies, `Graphyard-Successor: OLD -> NEW` trailers, re-export barrels), also added to open items; companions: the docs-budget gate beside documentation, the timing baseline beside a test file, the test file the criteria's proofs live in (new when no base file holds them), tests importing a planned module or its barrel, single `web/` files a web-UI criterion describes. Paths are judged singly; the approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`--wait` reads the outcome). `master create`/`requirements` plan the proofs' test file, the baseline and the docs-budget gate up front. One decider per request (an executor holding `approve-scope`, else the loop); repeats get the standing decision. A request belongs to its attempt: when that ends (submit, release, lease lapse, rework, a requirements revision) an open or refused request closes with reason `attempt ended` (`scope.closed`) and the next attempt asks afresh; `master unblock GY-N` closes one whose attempt already ended, naming it in the unblock's history. A human-only decision needs `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON`; it waits under [Needs you](dashboard.md#needs-you).
->>>>>>> refs/remotes/origin/main
+An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` refused). Automatic, grounded: documentation; files criteria name; single `web/` or `browser-tests/` for items planning `docs/`; base files an unresolved reviewer or bot thread names literally; tests pinning quotes or labels; defining or rare symbols; successors (renames, copies, trailers, barrels); companions: the docs-budget gate, timing baseline, proofs test file, importing tests. Other paths are approver-judged (`--allow-broad-scope` needs a reason); workers keep leases (`--wait` reads the outcome). One decider per request; repeats get the standing decision. Open or refused requests close on attempt end (`scope.closed`, reason `attempt ended`); `master unblock GY-N` closes one whose attempt ended. A human-only decision needs `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON`, waiting under [Needs you](dashboard.md#needs-you).
 
 ## Conflict avoidance
 
@@ -19,7 +15,9 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval of the current head dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base in one push (`baseRefresh.restore`: `restored` once GitHub shows it, else `unpublished`; twice, `escalated`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`). Another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
+**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto base in one push (`baseRefresh.restore`: `restored` on GitHub, else `unpublished`; twice, `escalated`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`). Carried files (`Carried from another item's tip`) are neither rework nor ejection.
+
+#### A contaminated branch
 
 Listed under `branches.contaminated`:
 
@@ -45,7 +43,7 @@ Permission flows read `GET /api/github/installation`, recording `record.json` un
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); the last and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their own credential; `master executors restart` moves them to the current release. A verified deployment moves a clean detached checkout to the base tip (else `upgrade` attention), restarting executors, then the loop, on runtime changes; `releaseLag` flags lag past 10 minutes.
+Each item has one typed action (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard-executor@N` units claim rows under their credential; `master executors restart` moves them to the current release. A verified deployment moves a clean checkout to the base tip (else `upgrade` attention), restarting on runtime changes; `releaseLag` flags lag past 10 minutes.
 
 A `resync` completes only on an observation newer than its claim: `POST /api/work/:id/resync` with `{ since }` wakes the observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, it fails (`no observation newer than the claim was saved`) and backs off, stalling after thirty minutes for a scheduled job, else three failures.
 
@@ -53,7 +51,7 @@ A `resync` completes only on an observation newer than its claim: `POST /api/wor
 
 ## Resources and disk
 
-`resources` reports bounded resources (`resourceRegistry`; [remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `run.worktreeRemovalLimit` per cycle; `.graphyard/worktree-reclaim.jsonl`), idle `/tmp` test entries and `tsx-<uid>`, and agentless launch [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention fires below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot`.
+`resources` reports bounded resources (`resourceRegistry`; [remedies](operations-reference.md#control-plane-resources)). The loop removes clean finished worktrees after `run.reclaimIdleHours`, idle `/tmp` test entries and `tsx-<uid>`, and agentless launch [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention fires below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot`.
 
 ## Recovery
 
@@ -61,7 +59,7 @@ A dead supervisor fences its item; `containment` lists surviving processes' pid,
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-Faults carry `faultClass` (`faults`); a recurring class files one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes; sandbox or `workflows`-permission refusals are `configuration`; scope requests count past 15 minutes open or refused with no approver. Recurring-class and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`) whose fix approval releases or closes as duplicate. Restores owed under 30 minutes and restart-resumed merges are not `merge` faults.
+Faults carry `faultClass` (`faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`), not reopened by moving hashes; sandbox or `workflows`-permission refusals are `configuration`; scope requests count past 15 minutes open or refused with no approver. Recurring-class and `invariant:` faults get a read-only diagnostician (`run.diagnostician`) whose fix approval releases or closes as duplicate. Restores owed under 30 minutes are not `merge` faults.
 
 ## Pipeline speed
 
