@@ -1,6 +1,8 @@
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { planeVerdict, probeWrites, readDatabaseCapacity, readGitHubBudget } from '../../master-resources.js';
-import { defineRoutes } from '../routes.js';
+import { defineRoutes, parseJson } from '../routes.js';
+import { demand } from '../../model.js';
+import { humanSignIn } from '../auth.js';
 
 /**
  * The plane's own health; no token required. Health names the release, schema generation and
@@ -94,4 +96,13 @@ export const healthRoutes = defineRoutes('health', [
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     return verdict.healthy || !url.searchParams.has('strict') ? body : send(503, body);
   } },
+  // Opening a sign-in link (GY-738) is the other route answered without a token: the link is the credential.
+  {
+    method: 'POST', path: '/api/sign-in',
+    async handle(context) {
+      const { code } = ((await parseJson(context, 4_096, '{}')) ?? {}) as { code?: unknown };
+      demand(typeof code === 'string' && code.length > 0 && code.length <= 200, 'A sign-in code is required', 400);
+      return humanSignIn(context.services).redeem(code as string);
+    },
+  },
 ]);
