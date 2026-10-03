@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
-import { CHECK_NAME, GitHub, gateMerge } from '../src/github.js';
+import { CHECK_NAME, LANDABLE_CHECK, GitHub, gateMerge } from '../src/github.js';
 import { masterConfigSchema, mergeExecutor, type MasterConfig } from '../src/master.js';
 import { mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, applyProtection } from '../src/protection.js';
 import { queueRef, type MergeEnqueueRequest, type QueueSpeculation } from '../src/merge-queue.js';
@@ -92,7 +92,9 @@ test('unit:authorized-head-enqueued — an authorized head gets Graphyard / merg
   const inQueue = fakeGitHub({ mode: 'queued' });
   assert.equal((await gateMerge(inQueue.github, item, requested(item))).action.kind, 'hold');
   assert.equal(inQueue.named('enqueuePullRequest').length, 0);
-  assert.deepEqual(inQueue.checks().map(body => [body.head_sha, body.conclusion]), [[head, 'success'], [groupHead, 'success']]);
+  assert.deepEqual(inQueue.checks().filter(body => body.name === CHECK_NAME).map(body => [body.head_sha, body.conclusion]), [[head, 'success'], [groupHead, 'success']]);
+  // The group commit carries the landability verdict too, which branch protection also requires (GY-887).
+  assert.deepEqual(inQueue.checks().filter(body => body.name === 'graphyard/landable').map(body => [body.head_sha, body.conclusion]), [[groupHead, 'success']]);
 
   // No authorization for the head: failure is published and nothing is enqueued.
   const refused = work({ gates: [{ name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], mergeAuthorization: null, stage: 'review' });
@@ -199,14 +201,14 @@ test('unit:no-graphyard-merge-call — the merge step requests the merge and Git
 test('unit:protection-configures-merge-queue — master protection plans and applies the base branch merge queue with Graphyard / merge required from the App', async () => {
   const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
   const protection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true },
-    required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+    required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: 1234 }, { context: LANDABLE_CHECK, app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
   const open = [work({ policy: { checks: ['test'], review: true } })];
 
   const ruleset = mergeQueueRuleset(config);
   assert.equal(ruleset.name, mergeQueueRulesetName);
   assert.deepEqual(ruleset.conditions.ref_name.include, ['refs/heads/main']);
   assert.ok(ruleset.rules.some(rule => rule.type === 'merge_queue'), 'the plan carries a merge queue');
-  assert.deepEqual(ruleset.rules.find(rule => rule.type === 'required_status_checks')?.parameters, { strict_required_status_checks_policy: false, required_status_checks: [{ context: CHECK_NAME, integration_id: 1234 }] });
+  assert.deepEqual(ruleset.rules.find(rule => rule.type === 'required_status_checks')?.parameters, { strict_required_status_checks_policy: false, required_status_checks: [{ context: CHECK_NAME, integration_id: 1234 }, { context: LANDABLE_CHECK, integration_id: 1234 }] });
 
   const missing = protectionPlan(protection, config, open, []);
   assert.equal(missing.consistent, false);
@@ -214,7 +216,7 @@ test('unit:protection-configures-merge-queue — master protection plans and app
   assert.ok(missing.changes.some(change => /merge queue required check Graphyard \/ merge/.test(change)));
   assert.deepEqual(missing.mergeQueue?.ruleset, ruleset, 'the protection plan includes the merge-queue configuration');
 
-  const configured = protectionPlan(protection, config, open, [{ type: 'merge_queue', parameters: {} }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: CHECK_NAME, integration_id: 1234 }] } }]);
+  const configured = protectionPlan(protection, config, open, [{ type: 'merge_queue', parameters: {} }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: CHECK_NAME, integration_id: 1234 }, { context: LANDABLE_CHECK, integration_id: 1234 }] } }]);
   assert.equal(configured.consistent, true, configured.changes.join('; '));
   // A same-named check from another App does not satisfy the queue.
   assert.equal(protectionPlan(protection, config, open, [{ type: 'merge_queue' }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: CHECK_NAME, integration_id: 999 }] } }]).consistent, false);

@@ -19,6 +19,7 @@ import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { classified } from '../model/fault-classes.js';
+import { pendingFollowUpsReport } from '../model/followups-held.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
 
@@ -361,6 +362,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
+    // Review follow-ups held on a parent until it ships (GY-845), apart from the backlog they have not joined yet.
+    pendingFollowUps: pendingFollowUpsReport(snapshot.work),
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) } };
 }

@@ -56,11 +56,11 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows the recommendation, a differing answer reworks, failure never blocks; product questions need a human.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. A branch restore owed under 30 minutes and a restart-resumed merge are self-handled, not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. Branch restores under 30 minutes and restart-resumed merges are self-handled, not `merge` faults.
 
 ## Machine-filed backlog
 
-Approved items record follow-up findings directly, not as filed items; an operator promotes one with `graphyard promote-followup` ([follow-ups](followups.md)). Machine-filed legacy follow-ups and faults are triaged by Pi (`run.research`, `triageConcurrency` default 2); untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then form or join its one follow-up item; closing it unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 

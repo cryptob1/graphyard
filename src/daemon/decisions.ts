@@ -3,7 +3,7 @@ import { type Work, type AgentReview, reviewProviderOf, standingEscalations, lea
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
-import { baseRefreshConflict, checkRerunHeld, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -286,9 +286,9 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only
-  // check's through the app protection binds it to, or any app.
+  // check's through the app protection binds it to, or any app with the CI apps preferred (GY-1060).
   const failed = requiredChecksOf(work).filter(required => {
-    const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, null);
+    const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
     return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
