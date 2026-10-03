@@ -14,9 +14,11 @@ import { server } from '../src/server.js';
 import { GitHub, processJob } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
 import { createHash } from 'node:crypto';
-import { Refusal, type Principal, type Work } from '../src/model.js';
-import { approverSessionName, assessContainment, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { Refusal, isClosed, type Principal, type Work } from '../src/model.js';
+import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus } from '../src/master/dispatch.js';
 import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
+import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
@@ -42,12 +44,16 @@ import { fleet, requested } from './helpers/review-fleet.js';
 import { reclaimResources, readReclaimReports, settleTmpReclaim } from '../src/master-resources.js';
 import { heldOpenPaths, reclaimTmpDirectories, writeTempOwner, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, type TmpReclaimReport } from '../src/tmp-reclaim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { expandTypedCommand } from './helpers/launch-shell.js';
 import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
-import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
+import { followUpEntries, followUpParent, hasShipped } from '../src/model/machine-backlog.js';
+import { repeatedClientErrorLimit } from '../src/retry-stop.js';
+import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, clock, protectionOnlyCheck, statusContext, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
 import { itemLane, lanes, laneSpeedTargets } from '../src/model/policy.js';
@@ -123,7 +129,7 @@ const basePlan = {
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted.
   leftovers: 8,
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6,
+  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, slowObservationMs: 10 * minute,
   /** GY-500: the item whose first head breaks main after its optimistic merge, and the items that change shared infrastructure and so queue. */
   breaksMain: 10, infrastructure: new Set([13, 14]),
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
@@ -186,6 +192,103 @@ const blockedMergeItem = 6;
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
+/** GY-845: the FOLLOW-UP findings one approval of item `n` names: one every approval repeats, one of its own. */
+const followUpFindings = (n: number, review: number) => [{ path: file(n), text: `${file(n)} — the finding every approval of item ${n} repeats` }, { path: file(n), text: `${file(n)} — the finding approval ${review} names` }];
+
+// ---------------------------------------------------------------------------
+// The failover day (GY-417): the dispatch path is the real `dispatchWork` on a real master root,
+// with one launch profile whose preferred account's OpenCode runtime never comes up. Everything the
+// launcher reads outside Herdr is real — the credential homes, the account ledger beside the
+// coordinator's credential file, the launch records — and Herdr is this world.
+// ---------------------------------------------------------------------------
+
+/** What one real dispatch recorded, sampled the way master status reads it between cycles. */
+interface LaunchSample { key: string; failures: Awaited<ReturnType<typeof readAccountStartFailures>>; attention: Awaited<ReturnType<typeof workerLaunchStatus>> }
+type Dispatched = Awaited<ReturnType<typeof dispatchWork>>;
+/** The failover day's inputs and outputs, threaded through `simulateDay` and back to the test. */
+interface Failover { root: string; master: MasterConfig; world: FailoverWorld; dispatches: Dispatched[]; samples: LaunchSample[] }
+
+/**
+ * The Herdr side of the failover day: the panes the real `dispatchWork` creates live in the same
+ * SimulatedHerdr the loop reads. An account whose runtime is in `broken` draws the echoed launch
+ * command for ever — the runtime never comes up, and the launcher closes its pane at the start
+ * bound; any other account's runtime reports ready at once. `healthyEverywhere` ends the broken
+ * run, so a later launch starts on the preferred account and clears its failure count.
+ */
+class FailoverWorld {
+  /** The runtime kind of every `pane run`, in order: the launches the world actually served. */
+  kinds: string[] = [];
+  /** Panes of runtimes in the broken set that the launcher closed at the start bound. */
+  closedBrokenPanes = 0;
+  launched = 0;
+  readonly herdr = new SimulatedHerdr(() => clock.now());
+  private readonly typed = new Map<string, string>();
+  private readonly kindsByPane = new Map<string, string>();
+  private panes = 0;
+  /** The launcher's own start clock: its waits at the start bound pass here, not on the day's. */
+  now = clock.now();
+  constructor(private broken: Set<string>) {}
+  healthyEverywhere() { this.broken.clear(); }
+  wait = (ms: number) => { this.now += ms; };
+  bounds() { return { clock: () => this.now, wait: this.wait }; }
+  run = (command: string, args: string[]): string => {
+    if (command !== 'herdr') throw new Error(`Unexpected command ${command}`);
+    const json = (result: unknown) => JSON.stringify({ result });
+    const kind = (pane: string) => this.kindsByPane.get(pane);
+    const healthy = (pane: string) => { const runtime = kind(pane); return !!runtime && !this.broken.has(runtime); };
+    if (args[0] === 'tab' && args[1] === 'create') {
+      const pane = this.herdr.open(`pending-${++this.panes}`, 'unknown');
+      this.herdr.agents.get(pane)!.agent = null;
+      return json({ root_pane: { pane_id: pane, tab_id: `wS:t${this.panes}` } });
+    }
+    if (args[0] === 'pane' && args[1] === 'run') {
+      const runtime = expandTypedCommand(args[3]).kind;
+      this.kindsByPane.set(args[2], runtime); this.typed.set(args[2], args[3]); this.kinds.push(runtime);
+      return '';
+    }
+    if (args[0] === 'pane' && args[1] === 'read') return healthy(args[2]) ? `${kind(args[2])} ready\n` : `vish@host ~/code/project ❯ ${this.typed.get(args[2]) ?? ''}\n`;
+    if (args[0] === 'pane' && args[1] === 'list') return json({ panes: this.herdr.paneList() });
+    if (args[0] === 'pane' && args[1] === 'close') {
+      if (kind(args[2]) && this.broken.has(kind(args[2])!)) this.closedBrokenPanes += 1;
+      this.herdr.close(args[2]);
+      return json({});
+    }
+    if (args[0] === 'agent' && args[1] === 'get') {
+      if (!healthy(args[2])) return JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
+      // A runtime that came up is what Herdr now lists in the pane, as the loop reads it.
+      const agent = this.herdr.agents.get(args[2]);
+      if (agent) { agent.agent = kind(args[2])!; agent.agent_status = 'idle'; }
+      return json({ agent: { pane_id: args[2], agent: kind(args[2]), agent_status: 'idle' } });
+    }
+    if (args[0] === 'agent' && args[1] === 'rename') { const agent = this.herdr.agents.get(args[2]); if (agent) agent.name = args[3]; return json({ agent }); }
+    if (args[0] === 'agent' && args[1] === 'list') return json({ agents: this.herdr.list() });
+    return json({});
+  };
+}
+
+/** The failover day's coordinator: a real master root with an OpenCode and a Claude account logged in, and one launch profile naming them in that order. */
+async function failoverInstalled() {
+  const root = await temporaryDirectory('soak-master'), credentials = await temporaryDirectory('soak-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
+  const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository, baseBranch: 'main', githubAppId: 1234 }));
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wS' }, coordinatorStatus as typeof fetch);
+  const homes = await temporaryDirectory('soak-homes');
+  const opencodeHome = join(homes, 'opencode-a');
+  await mkdir(join(opencodeHome, 'opencode'), { recursive: true });
+  await writeFile(join(opencodeHome, 'opencode/auth.json'), JSON.stringify({ 'zai-coding-plan': { type: 'api', key: 'k' } }), { mode: 0o600 });
+  const claudeHome = join(homes, 'claude-b');
+  await mkdir(claudeHome, { recursive: true });
+  await writeFile(join(claudeHome, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'claude-b-token', refreshToken: 'r', expiresAt: Date.now() + 5 * 3_600_000, subscriptionType: 'max' } }), { mode: 0o600 });
+  const credentialFile = join(credentials, 'worker.token');
+  await writeFile(credentialFile, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const profile: WorkerProfile = { name: 'soak-failover', principal: 'worker-one', agentName: 'soak-worker-failover', mode: 'launch', kind: 'opencode', credentialFile, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a', 'claude-b'] };
+  const base = await loadMasterConfig(root);
+  // The day's loop configuration, on the coordinator's real credential and Herdr workspace, with the one launch profile.
+  await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...soakConfig, url: base.url, credentialFile: base.credentialFile, herdrWorkspace: base.herdrWorkspace,
+    environments: [{ name: 'opencode-a', kind: 'opencode', home: opencodeHome }, { name: 'claude-b', kind: 'claude', home: claudeHome }], workers: [profile] });
+  return { root, master: await loadMasterConfig(root), profile };
+}
 
 /**
  * The diagnostician's answer, derived the way a read-only session would from the evidence the
@@ -321,12 +424,15 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; containment?: { failUntil: number; slowUntil: number }; plan?: Partial<typeof basePlan>; github806?: boolean }) {
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+  /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
+  failover?: Failover }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
   const plan = { ...basePlan, ...options.plan };
-  const config: MasterConfig = options.queued
+  const failover = options.failover;
+  const config: MasterConfig = failover ? failover.master : options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { optimistic: false, parallelTips: options.queued.window } })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
     : soakConfig;
@@ -353,7 +459,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   const github = new SimulatedGitHub({ repository, baseBranch: 'main', appId: 1234, ciAppId: 15368, reviewerApps, ciMs: 5 * minute, reviewMs: 3 * minute, firstPullRequest: 100 * ++days, ...(docs ? { docs: { budget: docs.budget, pages: docs.pages } } : {}) },
     [...Array.from({ length: plan.items }, (_, index) => file(index + 1)), 'README.md']);
-  const herdr = new SimulatedHerdr(() => clock.now());
+  const herdr = failover ? failover.world.herdr : new SimulatedHerdr(() => clock.now());
   // GY-453: approvers as headless Pi runs in the real run registry on disk, the loop restarting
   // (detaching every run) after every other cycle a run is live, and adopting them on the next.
   const headless = options.headless ? { pi: new SimulatedPi(), root: await temporaryDirectory('soak-runs'), applied: [] as string[], submitted: [] as string[],
@@ -518,7 +624,38 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   const attempts = new Map<string, number>();
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
-  const dispatch: DaemonEffects['dispatch'] = async (work, profile) => {
+  const dispatch: DaemonEffects['dispatch'] = failover ? async (work, profile, free, snapshot) => {
+    // An earlier day's item still open in the shared store goes the simulated way: the day's own
+    // five are what the real launch path and its ledger are judged on.
+    if (!items.some(item => item.id === work.id)) return simulatedDispatch(work, profile, free, snapshot);
+    // The real dispatch path (GY-417): the launcher claims through the engine, launches through
+    // the world's Herdr, and falls forward to the profile's next account when the preferred
+    // account's runtime never comes up. The day's fourth dispatch finds the account healthy, so
+    // the same account starts and clears its run of failures.
+    const principal = principalOf(profile), world = failover.world;
+    world.launched += 1;
+    if (world.launched === 4) world.healthyEverywhere();
+    let epoch = 0, branch = '';
+    const result = await dispatchWork(failover.root, work, profile, free, world.run, snapshot.work,
+      async () => {
+        const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
+        epoch = claimed.epoch; branch = `graphyard/${work.key.toLowerCase()}-${epoch}`;
+        const path = await temporaryDirectory('soak-launch');
+        await engine.execute(principal, 'workspace', work.id, { epoch, host: 'soak-host', path, branch }, id());
+        return { epoch, path, base: github.tip };
+      },
+      async (_root, _key, claimedEpoch) => { await engine.execute(principal, 'release', work.id, { epoch: claimedEpoch }, id()); },
+      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true });
+    failover.dispatches.push(result);
+    failover.samples.push({ key: work.key, failures: await readAccountStartFailures(failover.master), attention: await workerLaunchStatus(failover.root, failover.master) });
+    // The launched session works its request in the pane the launcher created and submits like
+    // any session of the day; the world's tick renews its lease and pushes its head.
+    const attempt = (attempts.get(work.key) ?? 0) + 1; attempts.set(work.key, attempt);
+    sessions.push({ work: work.id, key: work.key, branch, profile, epoch, attempt, pane: result.pane!, pushAt: clock.now() + plan.workMs, diesAt: null, exitsAt: null, dispatchAt: clock.now(), state: 'working', syncs: 0,
+      scopeAt: null, misreadAt: null, misread: false, credentialAt: null });
+    return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
+  } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
+  async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
@@ -560,7 +697,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await engine.execute(principal, 'scope', work.id, { epoch, paths: ask.slice(at, at + 50), reason: `Item ${n}: the ${ask.length === 1 ? 'file' : 'files'} this change touches` }, id());
     // The pane is the session's own coordinate: the loop records it on the implementation handle.
     return { key, epoch, pane, agentName: profile.agentName };
-  };
+  }
   const lowerFence = async (session: Session) => {
     if (session.settlementToken) await engine.execute(principalOf(session.profile), 'settle', session.work, { epoch: session.epoch, settlementToken: session.settlementToken }, id());
   };
@@ -682,6 +819,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const pending: (() => Promise<void>)[] = [];
+  const wakes: { key: string; at: number }[] = [];
   const approverPanes: string[] = [], approverWorks: string[] = [];
   /** A headless approver's verdict, applied as the approver identity; each run's launch is counted once it is. */
   const applyVerdict = (workId: string, run: string) => async (result: RunResult<DecidePayload>): Promise<Applied[]> => {
@@ -805,8 +943,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // only its own items: an earlier day's half-finished item (a rework decision nobody adopted)
   // would otherwise be dispatched, pushed and refused here for its linked pull request. The
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
-  // for every earlier day's delivered work.
-  const ownItems = options.reassigned || options.headless || options.credentialBlocked || options.containment ? new Set(items.map(item => item.id)) : null;
+  // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well.
+  const ownItems = options.reassigned || options.headless || options.credentialBlocked || options.containment || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -884,6 +1022,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // A rework refused on a stale observation wakes the item's observation job (GY-710) through
+    // the server's own resync endpoint, as `master run` wires it.
+    wakeObservation: work => { wakes.push({ key: work.key, at: clock.now() }); return api(principals.coordinator, 'POST', `work/${work.id}/resync`, {}); },
     reclaimResources: (work, agents) => reclaimResources(reclaimRoot, { reviewers: [], producers: [] }, { work, agents }, { closePane: pane => { herdr.close(pane); }, tmpRoot, tmpPass }),
     // What the loop's reclaim path needs to end an attempt on the record (GY-852): the partial
     // work kept on its branch, and the capacity report that ends the lease in the same transaction.
@@ -962,7 +1103,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // ---- GY-811: the containment day. The work snapshot takes 6 s to read, as it does on a loaded
   // ---- plane, so its own bound is wider than the 5 s tolerance and cannot settle; the loop bounds its clock with the light
   // ---- timed HEAD / instead, which fails, then answers slowly, then answers fast as the day goes on.
-  const fenced = { drift: 0, probes: [] as { cycle: number; elapsed: number; phase: 'fail' | 'slow' | 'fast' }[], assessable: new Set<number>(), liveOnly: new Set<number>(), bare: new Set<number>(),
+  const fenced = { drift: 0, probes: [] as { cycle: number; elapsed: number; phase: 'fail' | 'slow' | 'fast' }[], assessable: new Set<number>(), liveOnly: new Set<number>(), graced: new Set<number>(), bare: new Set<number>(),
     settled: [] as { key: string; epoch: number; elapsed: number }[], assessed: [] as { key: string; epoch: number; elapsed: number; refusals: string[] }[] };
   if (options.containment) {
     const phases = options.containment;
@@ -972,9 +1113,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await slowRead(3_000);
       const result = await read();
       await slowRead(3_000);
-      // What this cycle's reclaim step will see: a quarantine it may assess, only live ones, or none.
+      // What this cycle's reclaim step will see: a quarantine that could settle (past its grace
+      // window), one still in its grace window, only live ones, or none.
       const at = Date.parse(result.now), local = containmentQuarantines(result.work, config.hostId);
-      if (local.some(item => containmentPhase(item, at)?.state !== 'live')) fenced.assessable.add(cycles);
+      if (local.some(item => containmentPhase(item, at)?.state === 'lapsed')) fenced.assessable.add(cycles);
+      else if (local.some(item => containmentPhase(item, at)?.state === 'grace')) fenced.graced.add(cycles);
       else if (local.length) fenced.liveOnly.add(cycles);
       else fenced.bare.add(cycles);
       return result;
@@ -1105,6 +1248,85 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const restoreLines: string[] = [];
   // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
+  // A stale rework (GY-710). The loop restarts just after a changes request on a rework item is
+  // observed, and is down for three minutes; the observation fleet is busy and reads that item
+  // again only ten minutes on, unless the loop wakes its job. So when the loop is back, the only
+  // observation of the request is stale: its rework waits, and the loop wakes the observation job.
+  let loopDownUntil = 0;
+  const restarts = new Map<string, number>();
+  const restartLog: { key: string; kind: 'rework' | 'merge'; at: number }[] = [];
+  const restartOnVerdict = async (now: number) => {
+    const rework = new Set([...plan.rework].map(n => items[n - 1].id));
+    const requested = (await store.list()).find(item => rework.has(item.id) && item.candidate && !restarts.has(item.candidate.sha)
+      && !!item.observation?.reviews.some(review => review.sha === item.candidate!.sha && review.state === 'CHANGES_REQUESTED'));
+    if (!requested) return false;
+    restarts.set(requested.candidate!.sha, now); restartLog.push({ key: requested.key, kind: 'rework', at: now }); loopDownUntil = now + 3 * minute;
+    return true;
+  };
+  // A stale merge (GY-710): the same restart just as an item reaches the merge stage, for the
+  // first `staleMerge` items to get there. When the loop is back the merge gate refuses its
+  // observation as stale; the loop wakes the job and merges once that observation lands.
+  const staleMerges: string[] = [];
+  const restartOnMerge = async (now: number) => {
+    if (staleMerges.length >= (options.staleMerge ?? 0)) return false;
+    const merging = (await store.list()).find(item => item.stage === 'merge' && item.candidate && !restarts.has(item.candidate.sha) && item.gates.every(gate => gate.passed));
+    if (!merging) return false;
+    restarts.set(merging.candidate!.sha, now); staleMerges.push(merging.key); restartLog.push({ key: merging.key, kind: 'merge', at: now }); loopDownUntil = now + 3 * minute;
+    return true;
+  };
+  const busyFleet = async (now: number) => {
+    for (const item of (await store.list()).filter(entry => entry.candidate && restarts.has(entry.candidate.sha))) {
+      const since = restarts.get(item.candidate!.sha)!, readAt = since + plan.slowObservationMs;
+      if (now >= readAt || wakes.some(wake => wake.key === item.key && wake.at >= since)) continue;
+      await store.pool.query('UPDATE jobs SET available_at=GREATEST(available_at, $2) WHERE work_id=$1', [item.id, new Date(readAt)]);
+    }
+  };
+  // GY-845: the loop's follow-up steps, as reconcileReviews runs them every pass over the real
+  // routes: each approval of a parent posts its FOLLOW-UP findings to the parent (one finding every
+  // approval repeats, one of its own), and the ship step files each delivered parent's held
+  // findings as its one follow-up item. One parent's ship is refused with an unchanged 4xx all day,
+  // which must stop after repeatedClientErrorLimit attempts; one extra parent holds findings and is
+  // closed without shipping. A follow-up item open while its parent has not shipped is a violation.
+  const followUpDay = { approvals: new Map<string, number[]>(), ships: new Map<string, number>(), runs: {} as ShipRuns, events: [] as string[], closed: null as Work | null, early: [] as string[] };
+  const followUpPost = async (key: string, body: unknown, idempotency: string) => {
+    const response = await fetch(`${url}/api/work/${encodeURIComponent(key)}/followups`, { method: 'POST', headers: { Authorization: `Bearer ${token(principals.operatorAgent)}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotency }, body: JSON.stringify(body) });
+    const result = await response.json() as any;
+    if (!response.ok) throw new Error(`Graphyard refused the follow-ups of ${key} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    return result;
+  };
+  const followUpShip: ShipFollowUps = async (parent, key) => {
+    followUpDay.ships.set(parent, (followUpDay.ships.get(parent) ?? 0) + 1);
+    if (options.followUps && parent === items[options.followUps.refused - 1].key) throw new Error(`Graphyard refused to file the held follow-ups of ${parent} (403): soak: this parent's filing is refused`);
+    return { key: (await followUpPost(parent, { ship: true, reason: `${parent} shipped; its held review follow-ups become its follow-up item` }, key)).key };
+  };
+  async function followUpsTick() {
+    if (!options.followUps) return;
+    if (!followUpDay.closed) {
+      const closed = await api(principals.operator, 'POST', 'work', { title: 'Soak follow-up parent closed unshipped', plannedFiles: ['src/soak/closed-parent.ts'], criteria: [{ id: 'AC-1', text: 'Never shipped', proofs: [PROOF] }] }) as Work;
+      await followUpPost(closed.key, { findings: followUpFindings(0, 0), reason: 'soak: an approval of a parent that will close unshipped', parent: true }, id());
+      await api(principals.operator, 'POST', `work/${closed.key}/close`, { kind: 'obsolete', reason: 'soak: the parent closes without shipping' });
+      followUpDay.closed = closed;
+    }
+    for (const pr of github.prs.values()) {
+      const n = numberOf(pr);
+      if (!options.followUps.parents.includes(n)) continue;
+      const seen = followUpDay.approvals.get(pr.key) ?? [];
+      for (const review of pr.reviews.filter(entry => entry.state === 'APPROVED' && !seen.includes(entry.id))) {
+        seen.push(review.id); followUpDay.approvals.set(pr.key, seen);
+        await followUpPost(pr.key, { findings: followUpFindings(n, review.id), reason: `soak: approval ${review.id} of ${pr.key}`, parent: true }, `followups:${review.id}`);
+      }
+    }
+    // One listing per pass, read again only when a ship changed something: the store carries every
+    // earlier day's items, so a listing per step slowed this day past its bound.
+    let all = await store.list();
+    const shipped = await shipHeldFollowUps(all, followUpShip, followUpDay.runs, new Date(clock.now()));
+    followUpDay.events.push(...shipped);
+    if (shipped.length) all = await store.list();
+    for (const item of all) {
+      const parent = followUpParent(item), of = parent && all.find(entry => entry.key === parent);
+      if (of && !isClosed(item) && item.stage !== 'done' && !hasShipped(of)) followUpDay.early.push(`${item.key} is open while its parent ${parent} has not shipped (${of.stage})`);
+    }
+  }
   /** GY-806: the check_run deliveries, the jobs they woke, and any woken job claimed after a polled one or left unobserved. */
   const webhook = { deliveries: 0, woken: 0, refreshes: 0, skipped: 0, late: [] as string[], unobserved: [] as string[] };
   // GY-806: the real adapter's immutable path and its persisted layer, read every cycle as an observation
@@ -1232,11 +1454,16 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       engine.directMergeEnvironment = { since: new Date(now).toISOString(), until: new Date(now + minute).toISOString(), reason: 'Soak: an operator merges one pull request by hand', setBy: 'environment', enabledAt: new Date(now).toISOString(), source: 'environment', event: null };
       outside = { key: byHand.key, sha: github.mergeOutside(byHand, now).sha, at: now };
     }
-    if (!deploying) {
+    if (!deploying && now >= loopDownUntil) {
       for (const act of pending.splice(0)) await act();
       // A watched run that ended has its verdict applied before the world moves on.
       if (headless) await Promise.all([...headless.settling].filter(([directory]) => headless.pi.processes.get(directory)!.state !== 'live').map(([directory, settled]) => { headless.settling.delete(directory); return settled; }));
+      // GY-845: the follow-up steps run once the approvers have judged, never between the cycle that
+      // requested a decision and its approval: a held finding moves the parent's revision, so a
+      // release, unblock or unpinned resolve bound to the earlier revision would be refused as raced.
+      await followUpsTick();
       await engine.reconcile();
+      await busyFleet(now);
       // GY-806: CI's check_run webhooks, delivered as the route delivers them. The pass claims every
       // webhook-woken job that is due before any polled one, and re-observes each within the minute.
       // Only the day that asserts them runs them (`github806`): every other scenario keeps main's pass.
@@ -1346,6 +1573,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const live = herdr.byName(config.masterAgentName!);
         if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
       }
+      if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
+      if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       master.cycleOf = cycles;
       try {
         if (headless) for (const run of await adoptHeadlessRuns(state, effects, () => {}, 'cycle')) {
@@ -1443,7 +1672,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, lanesSeen, laneApplications, approverWorks, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size } };
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, followUpDay, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
+    wakes, staleMerges, restartLog };
 }
 
 /**
@@ -1480,6 +1710,15 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
+  // the union gate, the batch verdicts and the window view read a protection-only check all day.
+  // A final observation taken before CI reported on its head carries no runs and is not judged.
+  assert.ok(final.every(item => item.observation?.requiredChecks?.some(check => check.name === protectionOnlyCheck && check.appId === null)
+    && (!item.observation.checks.length || item.observation.checks.some(run => run.name === protectionOnlyCheck && run.result === 'success')))
+    && final.filter(item => item.observation!.checks.length).length >= basePlan.items - 1, `every delivery passed the protection-only ${protectionOnlyCheck} check`);
+  assert.ok(final.every(item => item.observation?.requiredChecks?.some(check => check.name === statusContext && check.appId === null)
+    && (!item.observation.checks.length || item.observation.checks.some(run => run.name === statusContext && run.source === 'status' && run.result === 'success'))),
+    `every delivery passed the status-sourced ${statusContext} context`);
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
@@ -1641,6 +1880,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
     assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
   }
   assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
+  // GY-887: the landability verdict rode every observation as the one `graphyard/landable` run per
+  // head, written only when the verdict changed, at a bounded request cost, and every head GitHub
+  // merged carried its success.
+  const landableHeads = [...github.landable.entries()];
+  const landableRequests = (kind: string) => github.landableRequests.filter(request => request.kind === kind).length;
+  assert.ok(landableHeads.length >= basePlan.items, `every candidate head carried the landability verdict (${landableHeads.length} heads)`);
+  assert.deepEqual(landableHeads.filter(([, runs]) => runs.length !== 1).map(([head]) => head), [], 'one standing graphyard/landable run per head, updated in place');
+  assert.deepEqual(landableHeads.filter(([, runs]) => runs[0].writes > 5).map(([head, runs]) => `${head.slice(0, 12)} ${runs[0].writes}`), [], 'no head is rewritten in a loop: only a changed verdict is written');
+  assert.equal(landableRequests('post'), landableHeads.length, 'each head\'s run was created once');
+  assert.ok(github.landableRequests.length <= 2 * cycles, `publishing the verdict costs a bounded number of requests (${github.landableRequests.length} over ${cycles} cycles)`);
+  for (const merge of github.merges) {
+    const head = github.prs.get(merge.pr)!.head;
+    assert.equal(github.landable.get(head)?.[0]?.body.conclusion, 'success', `${merge.key}'s merged head ${head.slice(0, 12)} carried a landable success`);
+  }
   // The diagnostician (GY-439) rode the same day. The three held-job windows recur past the
   // threshold, so the loop files the class's one recurring item and diagnoses it within the cycle
   // that files it, and the day's own churn (the dead workers' leases, the delivery budget) recurs
@@ -1925,6 +2178,33 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
     assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for it is left open`);
   }
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
+});
+
+// Keep restart-induced stale observations in their own day, trimmed to six items so it adds
+// little to the soak file's runtime: pausing the whole loop changes which heads need speculative
+// tips, so the baseline day's CI-flake schedule stays intact.
+test('unit:soak-invariants-hold — stale rework and stale merges each wake the observation job once and proceed once it lands, without storms or cursor growth', { timeout: 300_000 }, async () => {
+  const rework = new Set([2, 4]);
+  const day = await simulateDay({ hours: 6, staleRework: true, staleMerge: 2,
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework, deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } } });
+  const { items, final, wakes, restartLog, staleMerges, state, violations, failures, lost } = day;
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}`), [], 'all four items are delivered after the restarts');
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.equal(final.reduce((total, item) => total + (item.pipeline?.reworkRounds ?? 0), 0), rework.size, 'every rework round completes');
+  // Each rework the restart left on a stale observation woke its item's observation job.
+  const reworkKeys = [...rework].map(n => items[n - 1].key);
+  assert.deepEqual(restartLog.filter(entry => entry.kind === 'rework').map(entry => entry.key), reworkKeys, `one stale rework per rework item: ${JSON.stringify(restartLog)}`);
+  assert.equal(staleMerges.length, 2, 'two merges were left on a stale observation');
+  // Every stale observation the restarts left — rework or merge — woke its item's job exactly once
+  // after that restart, and the item was still delivered: no wake storm, no growth of state.actions.
+  for (const [index, entry] of restartLog.entries()) {
+    const until = restartLog.slice(index + 1).find(next => next.key === entry.key)?.at ?? Infinity;
+    assert.equal(wakes.filter(wake => wake.key === entry.key && wake.at >= entry.at && wake.at < until).length, 1, `${entry.key} (${entry.kind}): one observation wake: ${JSON.stringify(wakes)}`);
+  }
+  assert.equal(wakes.length, restartLog.length, `no wake beyond the stale observations: ${JSON.stringify(wakes)}`);
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('wake:observation:')).length <= wakes.length, 'one wake entry per item woken');
 });
 
 test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is acted on, never retried for good: a stuck candidate is re-reviewed and then reworked while the queue moves, a lost carried review is re-reviewed at once, and every invariant holds', { timeout: 600_000 }, async () => {
@@ -2234,6 +2514,107 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
 });
 
+test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
+  // GY-417: account failover and the failure ledger repeat per dispatch, so the real loop runs a
+  // day whose every dispatch goes through `dispatchWork` on a master root whose OpenCode account's
+  // runtime never comes up: each launch falls forward to the Claude account, is recorded, and is
+  // bounded — the failed pane is closed at the start bound and the claim is released. The fourth
+  // dispatch finds the account healthy: it starts, and the ledger and its attention item clear.
+  const { root, master, profile } = await failoverInstalled();
+  const world = new FailoverWorld(new Set(['opencode']));
+  const { final, violations, failures, lost, reportedDispatches, sessions, failover } = await simulateDay({
+    hours: 3, failover: { root, master, world, dispatches: [], samples: [] },
+    plan: { items: 5, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 5, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 5 } },
+  });
+  assert.ok(failover, 'the day ran the failover scenario');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all five items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the real launches');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.equal(reportedDispatches, sessions.length, 'each settled dispatch launch was reported to a cycle');
+  assert.equal(world.launched, 5, 'every item of the day was dispatched through the real path');
+  assert.deepEqual(world.kinds, ['opencode', 'claude', 'opencode', 'claude', 'opencode', 'claude', 'opencode', 'opencode'],
+    `three launches fell forward to the second account, the last two started on the preferred one: ${world.kinds.join(', ')}`);
+  assert.equal(world.closedBrokenPanes, 3, 'each runtime that never started had its pane closed at the start bound');
+  assert.equal(failover.dispatches.length, 5);
+
+  // Every fallback dispatch named the account that failed and the one that took the launch.
+  for (const [index, dispatched] of failover.dispatches.entries()) {
+    if (index < 3) {
+      assert.ok(dispatched.fallback!.note.startsWith('opencode-a failed to start: ') && dispatched.fallback!.note.endsWith('; launched on claude-b'), dispatched.fallback!.note);
+      assert.equal(dispatched.account!.environment, 'claude-b');
+    } else {
+      assert.equal(dispatched.fallback, null, 'a dispatch whose preferred account starts records no fallback');
+      assert.equal(dispatched.account!.environment, 'opencode-a');
+    }
+  }
+
+  // The ledger grew one failure per launch across items, raised exactly one attention item at
+  // three in a row — three items, still one item, never more — and cleared on the healthy start.
+  const counts = failover.samples.map(sample => sample.failures['opencode-a']?.failures ?? 0);
+  assert.deepEqual(counts, [1, 2, 3, 0, 0], `one consecutive failure per launch across items: ${counts.join(', ')}`);
+  const raised = failover.samples.map(sample => sample.attention.items.length);
+  assert.deepEqual(raised, [0, 0, 1, 0, 0], `one attention item, exactly at three consecutive failures: ${raised.join(', ')}`);
+  assert.equal(new Set(failover.samples.map(sample => sample.key)).size, 5, 'the failing launches ran on different items');
+  const attention = failover.samples[2].attention.items[0];
+  assert.equal(attention.subject, 'opencode-a never starts');
+  assert.ok(attention.text.includes('failed to start 3 launches in a row'), attention.text);
+  assert.ok(attention.text.includes('opencode-a (runtime opencode)'), attention.text);
+  const row = failover.samples[2].attention.rows[profile.name];
+  assert.ok(row.fallback!.startsWith('opencode-a failed to start: ') && row.fallback!.endsWith('; launched on claude-b'), row.fallback!);
+  assert.equal(failover.samples[3].attention.rows[profile.name].fallback, null, 'the healthy start turned the row\'s fallback off');
+
+  // The last dispatch record and the ledger agree: the account started, nothing is held against it.
+  const record = (await readProfileLaunchRecords(root, [profile]))[profile.name];
+  assert.equal(record.account, 'opencode-a');
+  assert.equal(record.runtime, 'opencode');
+  assert.deepEqual(record.failedAccounts, []);
+  assert.deepEqual(await readAccountStartFailures(master), {}, 'the healthy start cleared the account\'s run of failures');
+});
+
+test('unit:soak-invariants-hold — review follow-ups across a day: approvals of unshipped parents (re-approvals during rework included) are held on them, each delivered parent gets exactly one follow-up item, a parent closed unshipped drops its findings, a refused ship stops at the bound, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-845: the follow-up filing and the ship step run every pass, so they belong in this world.
+  // Item 1's first head is spent by its producer and reworked, so it is approved twice; item 2 is
+  // sent back by its reviewer first; item 3's optimistic merge breaks main, so it is delivered,
+  // reverted and reopened before it ships, and approved again; item 4's ship is refused all day.
+  const parents = [1, 2, 3, 4], refused = 4, reverted = 3;
+  const { items, final, violations, failures, followUpDay } = await simulateDay({
+    hours: 3, followUps: { parents, refused },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([2]), deaths: new Set(), breaksMain: reverted, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds, follow-ups-per-parent included, across the approvals, the ships and the close');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(followUpDay.early, [], 'no follow-up item was ever open while its parent had not shipped');
+  const all = await store.list();
+  const followUpsOf = (key: string) => all.filter(item => followUpParent(item) === key);
+  for (const n of [1, reverted]) assert.ok((followUpDay.approvals.get(items[n - 1].key) ?? []).length >= 2, `item ${n} was re-approved during its rework: ${JSON.stringify([...followUpDay.approvals])}`);
+  assert.ok(final.find(item => item.key === items[reverted - 1].key)!.optimisticMerges?.some(merge => merge.revert?.state === 'merged'), 'item 3\'s first merge was reverted, reopening it');
+  for (const n of parents) {
+    const key = items[n - 1].key, approvals = followUpDay.approvals.get(key) ?? [];
+    assert.ok(approvals.length >= 1, `${key} was approved`);
+    if (n === refused) {
+      assert.equal(followUpDay.ships.get(key), repeatedClientErrorLimit, `the refused ship of ${key} is attempted exactly up to the stop`);
+      assert.ok(followUpDay.runs[key]?.stoppedAt, 'and then stopped');
+      assert.equal(followUpDay.events.filter(line => line.includes(`on ${key} stopped retrying`)).length, 1, 'one stop line, never repeated');
+      assert.deepEqual(followUpsOf(key), [], 'its findings stay held on it');
+      assert.equal(final.find(item => item.key === key)!.pendingFollowUps?.findings.length, approvals.length + 1);
+      continue;
+    }
+    assert.equal(followUpDay.ships.get(key), 1, `${key}'s held findings were shipped once`);
+    const filed = followUpsOf(key);
+    assert.equal(filed.length, 1, `${key} has exactly one follow-up item`);
+    assert.deepEqual(filed[0]!.dependencies, [], 'depending on nothing: its parent has landed');
+    assert.deepEqual(followUpEntries(filed[0]!).map(entry => entry.text).sort(), [...new Set(approvals.flatMap(review => followUpFindings(n, review).map(entry => entry.text)))].sort(), 'holding the deduplicated union of every approval\'s findings');
+  }
+  for (const n of [5, 6]) assert.deepEqual(followUpsOf(items[n - 1].key), [], 'an item without follow-up findings gets none');
+  const closed = all.find(item => item.key === followUpDay.closed!.key)!;
+  assert.ok(isClosed(closed) && closed.pendingFollowUps?.dropped?.reason, 'the parent closed unshipped dropped its findings with a recorded reason');
+  assert.deepEqual(followUpsOf(closed.key), [], 'and never got a follow-up item');
+  // The day's follow-up items are closed here, so a later day's backlog is its own.
+  for (const item of all.filter(entry => followUpParent(entry) && !isClosed(entry))) await api(principals.operator, 'POST', `work/${item.key}/close`, { kind: 'obsolete', reason: 'soak: the follow-up day ends' });
+});
+
 test('unit:soak-invariants-hold — automatic reviews over hours of dispatch ticks, items and heads: the default reviewer concurrency is never exceeded, every settled reviewer\'s pane is closed within one cycle, a pane Herdr will not close is retried a bounded number of times and reported, no pending session\'s pane is closed, and every invariant holds', { timeout: 180_000 }, async () => {
   // GY-1072: the automatic profile runs automaticReviewerConcurrency sessions, and reconcileReviews
   // sweeps settled reviewers' panes on every dispatch tick. Sixteen items each go through two heads
@@ -2412,8 +2793,9 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   assert.deepEqual(lost, [], 'no lease was lost: a dead worker lapses and its fence waits for the loop');
   assert.deepEqual(final.filter(item => item.containmentQuarantine).map(item => item.key), [], 'no fence outlives the day');
 
-  // Probe volume is bounded: at most one timed read a cycle, exactly one in each cycle with an
-  // assessable quarantine, and none in a cycle whose quarantines are all live or that has none.
+  // Probe volume is bounded: at most one timed read a cycle, exactly one in each cycle with a
+  // quarantine past its grace window, and none in a cycle whose quarantines are all live or still in
+  // grace, or that has none (GY-1044).
   const perCycle = new Map<number, number>();
   for (const probe of fenced.probes) perCycle.set(probe.cycle, (perCycle.get(probe.cycle) ?? 0) + 1);
   assert.deepEqual([...perCycle.values()].filter(count => count > 1), [], 'never more than one timed read in a cycle');
@@ -2421,6 +2803,7 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   assert.deepEqual([...fenced.assessable].filter(cycle => !perCycle.has(cycle)), [], 'every cycle with an assessable quarantine read the clock');
   assert.ok(fenced.liveOnly.size > 30, `many cycles held only live workers' fences, and read no clock (${fenced.liveOnly.size})`);
   assert.ok(fenced.bare.size > 0, 'cycles with no fence at all read no clock');
+  assert.ok(fenced.graced.size > 0, `cycles whose fences were at most in their grace window read no clock (${fenced.graced.size})`);
   const lastSettled = Math.max(...fenced.settled.map(entry => entry.elapsed));
   assert.deepEqual(fenced.probes.filter(probe => probe.elapsed > lastSettled).map(probe => probe.elapsed / minute), [], `no read after the last fence settled, for the rest of the day's ${cycles} cycles`);
   for (const phase of ['fail', 'slow', 'fast'] as const) assert.ok(fenced.probes.some(probe => probe.phase === phase), `the fences stood through ${phase} reads`);
@@ -2437,11 +2820,13 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     const settled = fenced.settled.filter(entry => entry.key === key);
     assert.equal(settled.length, 1, `${key}: the dead attempt's fence settled exactly once: ${JSON.stringify(fenced.settled)}`);
     assert.ok(settled[0].elapsed >= slowUntil && settled[0].elapsed <= slowUntil + 3 * minute, `${key}: it settled within the first cycles of fast reads (+${Math.round(settled[0].elapsed / minute)} min)`);
-    // Each cause of the standing fence was escalated once: the round trip a read measured changes
-    // every cycle, and a new number for the same cause is no new escalation.
+    // Each cause of the standing fence was escalated once: the round trip a read measured, and
+    // whether the timed or the snapshot read measured it, change from cycle to cycle, and neither
+    // is a new cause (GY-1044) — the failing and the slow reads are one unbounded clock.
     const escalated = escalations.filter(detail => detail.startsWith(`${key}: containment quarantine from epoch 1 `));
-    assert.ok(escalated.length >= 2 && escalated.length <= 4, `${key}: the standing fence was escalated once per cause, not once per cycle: ${escalated.length}`);
-    assert.equal(new Set(escalated.map(unmeasured)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
+    assert.ok(escalated.length >= 1 && escalated.length <= 3, `${key}: the standing fence was escalated once per cause, not once per cycle: ${escalated.length}`);
+    assert.ok(escalated.some(detail => /control-plane clock took \d+ms round trip/.test(detail)), `${key}: the unbounded clock was escalated: ${JSON.stringify(escalated)}`);
+    assert.equal(new Set(escalated.map(containmentRefusalCause)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
     assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key}: delivered by the attempt after the settled one`);
   }
 });

@@ -41,6 +41,8 @@ GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo
 
 A runtime ready (no prompt, or banner shown: `the claude runtime is on screen while Herdr reports it unknown`) within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`); else, refused with the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. One back at its shell fails immediately (`Automatic producer launch for GY-N refused N time(s)`). Failure releases supervisor, pane and claim.
 
+OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)).
+
 #### First-run consent prompts
 
 A runtime stopped at a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (especially **credential** or **payment**) escalates. A held worker is in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item stays dispatchable.

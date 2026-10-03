@@ -14,6 +14,15 @@ Graphyard decides whether work advances; runtimes such as Herdr run sessions.
 
 A card stops at its first refusing gate, naming what is missing.
 
+## Shared project memory
+
+Every worker, reviewer and producer Graphyard launches starts with a project-memory digest for its role in its first request, within 500 words:
+- Approved decisions with the approver's reason, and operator answers that provided what was asked.
+- Recurring fault classes with their sanctioned remedies.
+- Merges to main after the session's base, with their files (the last 24 hours when the base is not a remembered merge).
+
+The loop updates it only from decisions it sees applied (never a refusal), answered human requests, recurring fault classes and merges — never from an agent's claim — and keeps it in its cursor and `.graphyard/project-memory.json`. `graphyard master status` reports it as `projectMemory`, and the Workers page shows it.
+
 ## Risk lanes
 
 `src/model/policy.ts` puts each item in a **risk lane** by changed paths (renames by both endpoints); `master status` shows its p50 target.

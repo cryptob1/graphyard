@@ -1,11 +1,11 @@
-<!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item, retrieved, promoted on demand. -->
+<!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item until it ships, retrieved, promoted on demand. -->
 # Review follow-ups
 
-An approval's FOLLOW-UP findings stay on the approved item until promoted.
+An approval's FOLLOW-UP findings stay on the approved item until it ships (`pendingFollowUps`), then file as one backlog item: `Follow-ups from the approved review of GY-N (PR #M)` (`POST /api/work/GY-N/followups` with `{"ship":true}`).
 
 ## Recorded on the item and the pull request
 
-The loop records new findings, by path and text (`POST /api/work/GY-N/followups`; `followups.recorded` names PR and head), and replies to and resolves each follow-up thread. Open legacy follow-up items still take findings ([backlog](master-agent.md#machine-filed-backlog)).
+The loop records new findings deduplicated by path and text (`followups.recorded` names PR and head), and replies to and resolves each follow-up thread on GitHub. An item closed without shipping drops its findings.
 
 ## Retrieving a batch
 

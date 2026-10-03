@@ -7,7 +7,7 @@ The master (`coordinator`) routes, merges, verifies deployments and administers 
 
 Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop); Railway: `productionEnvironment`). Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-When `daemon.liveness` is `stalled` or `absent`, run `systemctl --user restart graphyard-master` (`graphyard-master.service`; [supervision](onboarding.md#the-loop-must-be-supervised)), never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level).
+When `daemon.liveness` is `stalled` or `absent`, run `systemctl --user restart graphyard-master` (`graphyard-master.service`; [supervision](onboarding.md#the-loop-must-be-supervised)), never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
 
 ### System-driven items
 

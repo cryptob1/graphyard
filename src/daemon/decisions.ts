@@ -1,7 +1,7 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
-import { baseRefreshConflict, checkRerunHeld, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -94,6 +94,54 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   const age = now - Date.parse(observation.at);
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
+}
+
+/**
+ * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once
+ * and waits for that observation to land, rather than for whatever the job's cadence brings round.
+ * One wake stands until an observation newer than it lands; a wake that brought none within this
+ * bound (the job failed, or the server lost it) is sent again. During a GitHub pause the job can
+ * observe nothing, so no wake is sent.
+ */
+export const observationWakeRetryMs = 5 * 60_000;
+export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number, pause: GitHubPause | null): boolean {
+  if (pause || !work.submission) return false;
+  const woken = wokenAt ? Date.parse(wokenAt) : Number.NaN;
+  if (!Number.isFinite(woken)) return true;
+  const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN;
+  // The woken observation landed and is already stale again: this refusal is a new one.
+  if (Number.isFinite(observed) && observed > woken) return true;
+  return now - woken >= observationWakeRetryMs;
+}
+
+/** The merge gate's refusal of an item whose last observation is missing or older than two minutes (model/gates.ts). */
+export const staleObservationMergeReason = 'GitHub observation missing or older than two minutes';
+/** The guarded merge's refusal (engine.ts) when the authorization it checks — the observation's two-minute bound among it — no longer holds. */
+export const staleMergeRefusal = /Merge authorization is no longer current/;
+/**
+ * GY-710. Why the guarded merge waits for a fresh observation, or null when it may be asked. The
+ * merge keeps its two-minute bound: a candidate the merge gate refuses for a stale observation is
+ * not asked at all — the refusal would only restate it — and waits for the woken observation.
+ */
+export function mergeObservationWait(work: Work): string | null {
+  const gate = work.gates.find(entry => entry.name === 'merge');
+  if (!gate || gate.passed || !gate.reasons.includes(staleObservationMergeReason)) return null;
+  const seen = work.observation ? `the last GitHub observation (taken at ${work.observation.at} of head ${work.observation.candidate.sha.slice(0, 12)})` : 'no GitHub observation of the item';
+  return `${work.key}: the guarded merge waits for a fresh GitHub observation — the merge gate refuses ${seen}, which is missing or older than two minutes`;
+}
+/** GY-710. Whether the last guarded merge was refused for a stale observation and the wake that refusal sent stands. */
+export function awaitingObservation(previous: { state: string; detail: string } | undefined, wake: { state: string } | undefined): boolean {
+  return previous?.state === 'failed' && staleMergeRefusal.test(previous.detail) && wake?.state === 'done';
+}
+/**
+ * GY-710. Whether the observation a stale merge refusal woke has landed — an observation newer than
+ * the wake — with every gate passing: the merge is asked again at once, the attempt following the
+ * observation rather than the retry backoff (`mergeRetryDue`).
+ */
+export function mergeObservationLanded(wake: { state: string; at: string } | undefined, work: Work): boolean {
+  if (wake?.state !== 'done' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
+  const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN, woken = Date.parse(wake.at);
+  return Number.isFinite(observed) && Number.isFinite(woken) && observed > woken;
 }
 
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
@@ -257,9 +305,9 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only
-  // check's through the app protection binds it to, or any app.
+  // check's through the app protection binds it to, or any app with the CI apps preferred (GY-1060).
   const failed = requiredChecksOf(work).filter(required => {
-    const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, null);
+    const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
     return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);

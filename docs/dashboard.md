@@ -1,9 +1,15 @@
-<!-- page: Operate Graphyard | 3 | pages and markers. -->
+<!-- page: Operate Graphyard | 3 | pages. -->
 # Reading the dashboard
 
 ## Work: one classification
 
-One group per open item: **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving or Blocked past `overdueAfterMs`, default 30 minutes); `master status`: the master's in `board.owed`.
+Each open item is in one group: **Needs you** (only you may decide), **Blocked**, **Moving**, **Up next** or **Backlog**; a tile counts and filters one group.
+
+`GET /api/board` serves the groups: `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue`. `master status` lists the master's as `board.owed`.
+
+## Needs you
+
+`graphyard login` prints the operator's single-use, ten-minute sign-in link; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`; a refused answer keeps the form.
 
 ## Workers
 
@@ -17,7 +23,7 @@ Running rows offer **Copy local**, `herdr agent attach w1V:pJD`, and **Copy remo
 
 ## The status sentence
 
-Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served.
+Rows show **Build, Validate, Test, Review, Prove, Merge, Deploy**; merged reads *Merged*, *Live* once production serves it. Moving and Blocked rows past thirty minutes turn overdue.
 
 ## An item page
 

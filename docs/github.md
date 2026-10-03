@@ -9,7 +9,7 @@ Control-plane App (`src/github-permissions.ts`):
 | --- | --- | --- |
 | Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
-| Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` on the exact candidate commit (the required check) |
+| Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit (the required checks) |
 | Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
@@ -28,7 +28,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Require the check
 
-Require `Graphyard / merge` from the control-plane App on the base branch: `strict` **off**, admin-enforced, no force pushes or deletion (`master browser protection` reconciles). It needs green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted evidence, a mergeable non-draft PR, and queue head or [optimistic lane](#optimistic-merges). Restrict other merge identities; lease-less workers still push.
+Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on the base branch: `strict` **off**, admin-enforced, no force pushes or deletion; `master protection --apply` and `master browser protection` reconcile both. The gate requires green `GITHUB_CI_APP_IDS` and protection checks, current-head approval, trusted evidence, a mergeable non-draft PR, and queue head or [optimistic lane](#optimistic-merges). Restrict other merge identities; lease-less workers still push.
 
 ## Merge queue
 
@@ -40,11 +40,11 @@ The speculative tip, pushed onto the candidate branch once and `refs/graphyard/q
 
 Reviews and proofs bind head, base and policy revision. On a moved base all carry if the patch-id held; else the approval carries if no reviewed file changed, as do proofs with disjoint `scopeFiles`. Republishing the same head and patch keeps them; a person's approval never carries.
 
-The reviewer App re-posts a carried approval missing from the PR; a newer observed approval re-binds the carry (`review.carry-refreshed`). With none, `mergerefused` clears the carried approval (`mergeRefusal.action: rereview`), requests a fresh review and yields the head until re-approved. The same refusal past 10 minutes raises an attention naming reason and next step; the loop then clears the carried approval or requests rework (`mergeRefusal.action: rework`), approver-judged in the high [risk lane](how-graphyard-works.md#risk-lanes), direct otherwise. Each action fires once per recovery phase (a re-bound carry opens one).
+The reviewer App re-posts a carried approval onto the tip; a newer observed approval re-binds the carry (`review.carry-refreshed`). With none usable, `mergerefused` clears the carried approval (`mergeRefusal.action: rereview`), requests a fresh review and yields the head until re-approved. The same refusal past 10 minutes raises an attention; the loop then clears the carried approval or requests rework (`mergeRefusal.action: rework`), approver-judged in the high [risk lane](how-graphyard-works.md#risk-lanes) (refusal lifts with `merge.refusal.lifted`), direct otherwise. Each action fires once per recovery phase (a re-bound carry opens one).
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass (`1` batches); a failing tip ejects its entry once those ahead pass, rebuilding later ones. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (default 4; `POST /api/merge-queue`) tips test at once, merging in order once all tips through theirs pass (`1` batches); a failing tip ejects its entry once those ahead pass, rebuilding later ones. Failing only `unit:docs-word-budget` ejects the entry whose change crossed the budget (the first at which the running total exceeds it), naming words over and pages that grew ([development](development.md#documentation)).
 
 ### Optimistic merges
 

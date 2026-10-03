@@ -19,10 +19,9 @@ Node 24, a checkout of `OWNER/REPO`, `export GRAPHYARD_CLI=/abs/path/graphyard/b
 
 ### Providers
 
-- `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--domain`, `--ssh-key NAME`.
+- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--domain`, `--ssh-key NAME`. `manual:install-hetzner-live` producers also need `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in the repo-root `.env` (mode `0600`).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose`: local Docker; evaluation only.
+- `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
 ## Step 1: plan and approve
 
@@ -50,7 +49,7 @@ The human installs the App at the printed `http://127.0.0.1:4311`; **Verify** *A
 
 ## Step 5: first pull request
 
-Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun `--apply`; **Verify** the base branch requires it. `--plan`/`--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
+Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun `--apply` to require it and `graphyard/landable`. **Verify** both checks required on the base branch. `--plan`/`--apply` are idempotent (`"satisfied"`, `drift`); tokens never rotate.
 
 ## Upgrading an existing installation
 
