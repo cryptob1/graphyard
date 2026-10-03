@@ -124,7 +124,7 @@ Reconcile reads each live item once per pass, not per batch, and locks only its 
 
 ### Server startup readiness
 
-The server listens before startup validation finishes. `GET /healthz` reports liveness throughout and a boolean `readiness` field that turns true once startup validation completes.
+The server listens before startup validation finishes. `GET /healthz` reports liveness throughout and a boolean `readiness` field that turns true once startup validation completes, while `GET /healthz?ready` answers 503 until then for readiness probes.
 
 ### Concurrent reconciliation
 
