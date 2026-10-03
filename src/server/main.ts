@@ -19,8 +19,14 @@ import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 
+export interface MainOptions {
+  port?: number;
+  host?: string;
+  tickIntervalMs?: number;
+}
+
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
-export async function main() {
+export async function main(options: MainOptions = {}) {
   try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   // An unparseable generated-files declaration refuses start-up with a clear message instead of
   // silently exempting nothing; the regression guard runs with exactly this parsed set.
@@ -62,6 +68,49 @@ export async function main() {
   for (const line of http.services.delegationLimits.attention) console.error(`Delegation limits: ${line}`);
   console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared; the regression guard exempts nothing'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); production observation ${provider ? `via ${provider.description}` : build.commit ? 'from the build identity only; set RAILWAY_API_TOKEN or RAILWAY_TOKEN to read the deployment list' : 'unavailable: set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA'}`);
+
+  (http.services as any).readiness = false;
+  let startupValidationComplete = false;
+  let readinessResolvers: Array<() => void> = [];
+  const waitForReadiness = () => startupValidationComplete ? Promise.resolve() : new Promise<void>(resolve => readinessResolvers.push(resolve));
+  const resolveReadiness = () => {
+    startupValidationComplete = true;
+    (http.services as any).readiness = true;
+    for (const r of readinessResolvers) r();
+    readinessResolvers = [];
+  };
+
+  const [appHandler] = http.listeners('request') as ((req: any, res: any) => void)[];
+  http.removeAllListeners('request');
+  http.on('request', async (req, res) => {
+    if (!startupValidationComplete) {
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      if (req.method === 'POST' && url.pathname.startsWith('/api/') && url.pathname !== '/api/github/webhook') {
+        if (req.headers['x-wait-for-readiness'] === 'true' || url.searchParams.get('wait') === 'true') {
+          await waitForReadiness();
+        } else {
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Retry-After', '1');
+          res.writeHead(503);
+          res.end(JSON.stringify({ error: 'startup validation in progress; please retry shortly', retryable: true }));
+          return;
+        }
+      }
+    }
+    appHandler(req, res);
+  });
+
+  const host = options.host ?? process.env.HOST ?? '127.0.0.1';
+  const port = options.port !== undefined ? options.port : Number(process.env.PORT ?? 4310);
+  await new Promise<void>((resolve, reject) => {
+    http.once('error', reject);
+    http.listen(port, host, () => {
+      http.removeListener('error', reject);
+      console.log(`Graphyard listening on port ${(http.address() as any)?.port ?? port}; GitHub ${github ? 'connected' : 'not configured'}`);
+      resolve();
+    });
+  });
+
   mark('production.load'); await production.load().catch(error => console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'));
   // One-time materialization of the deployment allowlist. Operators manage proof authority
   // inside Graphyard from here on; a later environment edit no longer changes authority.
@@ -72,8 +121,24 @@ export async function main() {
   const delivery = new Delivery(validation);
   console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
   mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
-  mark('validation.expireArtifacts'); await validation.expireArtifacts();
-  mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
+
+  let startupValidationRunning = false;
+  const runStartupValidation = async () => {
+    if (startupValidationComplete || startupValidationRunning) return;
+    startupValidationRunning = true;
+    try {
+      mark('validation.expireArtifacts'); await validation.expireArtifacts();
+      mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
+      resolveReadiness();
+    } catch (error) {
+      console.error('startup validation failed', error instanceof Error ? error.message : 'unknown');
+    } finally {
+      startupValidationRunning = false;
+    }
+  };
+
+  void runStartupValidation();
+
   // The production watch runs beside the tick, never in it: a deploy used to hold the tick for
   // minutes while it re-compared every delivery (GY-186), and observations and merges stalled behind it.
   // Incidents it raises land in the ledger and in /api/status, and are announced here once each.
@@ -88,7 +153,12 @@ export async function main() {
   // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
   const observing = github ? startObservationWorkers(engine, github) : null;
   console.log(`Observation workers: ${observing?.concurrency ?? 0}`);
+  const tickIntervalMs = options.tickIntervalMs ?? 2000;
   const reconciliation = startReconciliation(async step => {
+    if (!startupValidationComplete) {
+      await step('validation.startup', () => runStartupValidation());
+      if (!startupValidationComplete) return;
+    }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
     await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
@@ -110,10 +180,18 @@ export async function main() {
       const preflight = await step('github.preflight', () => github.preflightIfDue());
       if (preflight) await announcePreflight(preflight);
     }
-  }, 2000);
-  http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
-  const shutdown = () => { reconciliation.stop(); watching.stop(); observing?.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
+  }, tickIntervalMs);
+
+  const close = async () => {
+    reconciliation.stop(); watching.stop(); observing?.stop();
+    process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    await Promise.resolve(githubCache?.close());
+    await store.close();
+  };
+  const shutdown = () => { close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+  return { http, store, engine, validation, reconciliation, watching, observing, runStartupValidation, isReady: () => startupValidationComplete, close };
 }
 
 export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;
