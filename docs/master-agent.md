@@ -27,7 +27,7 @@ The loop launches, wakes and rotates its [master session](master-agent-sessions.
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
-Unproduced `manual:` proofs are the loop's: one `attest` decision per proof and head (base, policy revision), independent approver launched, withdrawn on a head change; status: `loopDecisions.attestations`, not needs-human.
+Unproduced `manual:` proofs are the loop's: one `attest` decision per proof, head, base and policy revision, an independent approver launched, withdrawn on head change (`loopDecisions.attestations`, not needs-human).
 
 ### Session liveness is reconciled, not trusted
 
@@ -86,7 +86,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming proof, criterion and surviving mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When all remaining unit or integration proofs are such findings, the next action is `request-rework`, naming proof, criterion and surviving mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
