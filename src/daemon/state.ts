@@ -474,7 +474,11 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  const resolved = entries.filter(([, action]) => action.state === 'done' || action.state === 'failed');
+  // A row holding a standing failing run is that fault's only record (GY-1086): a refusal written
+  // once while it stands (upgrade:refused, a dirty checkout) went oldest, was retired by this bound
+  // within the hour, and its next refusal opened a new instance — six in a day for one cause. It is
+  // kept while its run stands; endFailingRuns ends a run the window no longer sees attempted.
+  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
@@ -524,6 +528,15 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
   if (fault) noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
   state.actions[key] = entry;
   return entry;
+}
+/**
+ * A refusal that still stands, observed again with the same detail (GY-1086): its row is not
+ * rewritten — the run it opened is the one fault — but its time moves, so neither the cursor
+ * bound nor the recurrence window takes it for a run that has ended and opens it again.
+ */
+export function touchStanding(state: DaemonState, key: string, at: string) {
+  const row = state.actions[key];
+  if (row && row.state === 'failed') row.at = at;
 }
 /** The action key a recurring class's filing is recorded under. */
 export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
