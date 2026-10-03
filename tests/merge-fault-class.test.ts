@@ -197,7 +197,8 @@ test('unit:base-conflict-class-quiet-after-refresh — an entry refreshed behind
     stage: 'merge',
     candidate: { sha: tip, baseSha: newBase, pr: 600, branch } as Work['candidate'],
     submission: { epoch: 1, pr: 600 } as Work['submission'],
-    queue: { sequence: 1, enqueuedAt: at, policyRevision: 2, speculation: null, refreshedLanding: newBase } as unknown as Work['queue'],
+    queue: { sequence: 1, enqueuedAt: at, policyRevision: 2, speculation: { ref: 'refs/heads/graphyard-queue/gy-1131', tip, base: newBase, baseTree: newBase, predecessors: [], policyRevision: 2, publishedAt: at, merge: null, reviewedHead: head, trigger: 'landing-refresh',
+      landing: { landing: newBase, since: base, head, policyRevision: 2, at, outcome: 'refreshed', landedFiles: ['src/a.ts'], overlap: ['src/a.ts'] } } } as unknown as Work['queue'],
     observation: { candidate: { sha: tip, baseSha: newBase, pr: 600, branch }, merged: false, prState: 'open', checks: [], reviews: [], files: ['src/a.ts'], scopeFiles: [], at, baseTip: newBase } as unknown as Work['observation'],
   });
   const faultsQuiet = cycleFaults(emptyDaemonState(config()), [refreshed], now, { config: config() }).filter(fault => fault.kind === 'base-conflict');

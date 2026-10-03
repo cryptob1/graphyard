@@ -6,8 +6,9 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
+import { save, wakeJob } from './store/store.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
-import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, decideCarry, bindingApproval, evidenceBindsCandidate, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
+import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { LANDABLE_CHECK, landableCarried, landableCheckCurrent, landableCheckRun, type LandableCheckRun } from './landable-check.js';
 import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
 import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timingBaselinePath } from './model/timing-companion.js';
@@ -18,7 +19,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME, LANDABLE_CHECK };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, queueLandingRefreshNeeded, nextQueueSequence, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, landingOverlap, landingRefreshNeeded, nextQueueSequence, queueHistoryLimit, type LandingRefresh, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -2032,7 +2033,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * that prediction, and the approval, the proofs and the checks stand on the commit they were
    * given for.
    */
-  async publishSpeculativeTip(work: Work, placement: QueuePlacement, beforeWrite: () => Promise<void> = async () => {}): Promise<QueueSpeculation> {
+  async publishSpeculativeTip(work: Work, placement: QueuePlacement, beforeWrite: () => Promise<void> = async () => {}, trigger: NonNullable<QueueSpeculation['trigger']> = 'queue-head'): Promise<QueueSpeculation> {
     demand(work.candidate && work.queue && placement.predictedBase, 'A queued candidate with a predicted base is required');
     const pr = await this.request(`/pulls/${work.candidate!.pr}`);
     requireCurrent(pr.head.sha === work.candidate!.sha && pr.base.ref === this.config.base && pr.state === 'open' && pr.draft === false,
@@ -2051,7 +2052,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const rebound = tipCarried && (placement.position > 0 || await this.contains(placement.predictedBase!, pr.head.sha)) ? tipCarried : null;
     // The re-bound record keeps its carry (see keptTipCarry) and names the entries now ahead of it.
     if (rebound) return { ...rebound, ...(rebound.tipTree ? {} : { tipTree: await this.tipTree(rebound.tip) }), predecessors: placement.predecessors,
-      carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() }, trigger: 'queue-head' };
+      carriedBase: { sha: placement.predictedBase!, tree: baseTree, at: new Date().toISOString() }, trigger };
     const reviewedHead = await this.ownReviewedHead(work, pr.head.sha);
     // The approval of the tip being replaced is read now, before anything is written and outside
     // any coordination transaction (GY-519): the item's stored observation can predate the
@@ -2076,8 +2077,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     try { merged = await this.mergeOnScratch(work.key, reviewedHead, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`); }
     catch (error) {
       // A conflicting tip still leaves the branch at the item's own reviewed head, never at the
-      // earlier tip and the predecessors it carries.
-      if (error instanceof SpeculativeConflict && reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
+      // earlier tip and the predecessors it carries. A landing refresh (GY-1131) writes nothing on
+      // a conflict: its head stays the one the conflict is recorded against, until the rework.
+      if (error instanceof SpeculativeConflict && trigger === 'queue-head' && reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
       throw error;
     }
     const tip = merged ?? reviewedHead;
@@ -2090,9 +2092,52 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // an earlier tip with no commit produced: the carry is then decided on the files that changed
     // between the replaced tip's bound base and the predicted base, listed here from GitHub.
     const baseChanges = merged || tip === work.candidate!.sha ? undefined : await this.changedFiles(work.candidate!.baseSha, placement.predictedBase!);
-    return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead, trigger: 'queue-head',
+    return { ref, tip, tipTree: await this.tipTree(tip), base: placement.predictedBase!, baseTree, predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge, reviewedHead, trigger,
       ...(observedApproval ? { observedApproval } : {}),
       ...(baseChanges !== undefined ? { baseChanges } : {}) };
+  }
+  /**
+   * GY-1131. Verifies one waiting queue entry behind a landing that moved the base branch tip
+   * (`landingRefreshNeeded` says which). The landed diff is listed first: an entry none of whose
+   * reviewed files it changed is recorded skipped and nothing is written. Otherwise the entry's own
+   * reviewed head is merged onto the new tip on the scratch branch, exactly as the GY-375 test merge
+   * does it, and a clean merge is published as the entry's speculative tip by `publishSpeculativeTip`
+   * itself: the pull request's head re-read and bound first, one push of the branch, the queue ref,
+   * and the same carry record the engine decides the approval and proofs from. A head that already
+   * is a Graphyard-published tip (an earlier refresh, or a tip the window built) is verified by the
+   * GY-375 test merge alone and nothing is pushed: each push replaces the head and costs a CI run,
+   * so one own head is refreshed once and the window's own tip rebuilds it at its turn, keeping the
+   * churn bound (`refresh-churn`, model/invariants.ts) and the CI economy of GY-292. A confirmed
+   * conflict writes nothing and is returned for the record, which asks for the rework at once.
+   */
+  async refreshWaitingEntry(work: Work, needed: { landing: string; since: string; head: string; reviewedFiles: string[] }, beforeWrite: () => Promise<void> = async () => {}): Promise<{ record: LandingRefresh; speculation: QueueSpeculation | null }> {
+    demand(work.queue && work.candidate?.sha === needed.head, 'A queued candidate at the verified head is required');
+    const landedFiles = await this.changedFiles(needed.since, needed.landing).catch(() => null);
+    const overlap = landingOverlap(needed.reviewedFiles, landedFiles);
+    const record = (outcome: LandingRefresh['outcome'], conflict: string | null = null): LandingRefresh => ({ landing: needed.landing, since: needed.since, head: needed.head,
+      policyRevision: work.policyRevision, at: new Date().toISOString(), outcome, landedFiles, overlap, ...(conflict ? { conflict } : {}) });
+    if (!overlap.length) return { record: record('skipped'), speculation: null };
+    const conflictRecord = (found: string) => {
+      const head = needed.head.slice(0, 12), tip = needed.landing.slice(0, 12);
+      return record('conflict', `Candidate ${head} cannot be brought onto base branch tip ${tip} without resolving a conflict, which is content nobody reviewed or proved: ${found}. Found when ${tip} landed on ${overlap.join(', ')}, before this entry's turn. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${head} do not survive the resolution.`);
+    };
+    const speculation = work.queue!.speculation;
+    if (speculation && speculation.tip === needed.head && speculation.policyRevision === work.policyRevision) {
+      await beforeWrite();
+      const conflict = await this.testMerge(work.key, speculation.reviewedHead ?? await this.ownReviewedHead(work, needed.head), needed.landing);
+      return { record: conflict ? conflictRecord(conflict) : record('verified'), speculation: null };
+    }
+    // The publisher re-reads the base branch and refuses a tip that moved past the landing.
+    const placement: QueuePlacement = { id: work.id, key: work.key, position: 1, size: 1, sequence: work.queue!.sequence, enqueuedAt: work.queue!.enqueuedAt, waitMs: 0,
+      predecessors: [], predictedBase: needed.landing, tip: null, base: { sha: needed.landing, tree: work.observation?.baseTree ?? null }, binding: null, current: false, publishable: true, reasons: [] };
+    try {
+      const refreshed = record('refreshed');
+      return { record: refreshed, speculation: { ...await this.publishSpeculativeTip(work, placement, beforeWrite, 'landing-refresh'), landing: refreshed } };
+    }
+    catch (error) {
+      if (!(error instanceof SpeculativeConflict)) throw error;
+      return { record: conflictRecord(error.message), speculation: null };
+    }
   }
   /**
    * The approval of the pull request's current head from its reviews as GitHub holds them right
@@ -2231,122 +2276,14 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * is a push that `on: push` workflows and branch rulesets see. A ruleset refusal fails the job
    * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
-  lastTestMergeSha?: string | null;
-
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
     try {
-      this.lastTestMergeSha = await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
+      await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
       return null;
     } catch (error) {
-      this.lastTestMergeSha = null;
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
     }
-  }
-  /**
-   * GY-1131. The queue verifies and refreshes waiting entries when work lands behind them
-   * instead of conflict-ejecting them at their turn.
-   *
-   * After each landing that moves the base branch tip, the control plane scratch test-merges
-   * queued entries whose turn has not come (position > 0) and whose reviewed files overlap the
-   * landed diff, bounded to at most once per entry per landing.
-   *
-   * - Clean test merge: pushed to the entry's branch as a speculative tip under the single-push
-   *   head-binding rule. Approval, proofs, and queue position survive refresh.
-   * - Confirmed conflict: requests rework immediately at landing time, names the conflict and the
-   *   tip that caused it, moves the entry to the back of the queue, letting the next entry head the
-   *   queue instead of discovering the conflict at its turn.
-   */
-  async refreshQueueOnLanding(
-    all: Work[],
-    landingBase: string,
-    previousBase?: string,
-    landedDiff?: readonly string[] | null,
-    beforeWrite: () => Promise<void> = async () => {}
-  ): Promise<{ refreshed: Work[]; conflicts: Work[] }> {
-    const diff = landedDiff ?? (previousBase && landingBase && previousBase !== landingBase ? await this.changedFiles(previousBase, landingBase).catch(() => null) : null) ?? [];
-    const refreshed: Work[] = [];
-    const conflicts: Work[] = [];
-    for (const work of all) {
-      const needed = queueLandingRefreshNeeded(work, all, diff, landingBase);
-      if (!needed) continue;
-      const candidate = work.candidate!;
-      const reviewedHead = await this.ownReviewedHead(work, candidate.sha);
-      await beforeWrite();
-      const conflict = await this.testMerge(work.key, reviewedHead, landingBase);
-      if (conflict) {
-        work.reworkRequested = true;
-        work.baseRefresh = {
-          from: { sha: candidate.sha, baseSha: candidate.baseSha },
-          base: landingBase,
-          baseTree: await this.commitTree(landingBase),
-          policyRevision: work.policyRevision,
-          at: new Date().toISOString(),
-          head: null,
-          conflict: `Candidate ${candidate.sha.slice(0, 12)} cannot be brought onto base branch tip ${landingBase.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate.sha.slice(0, 12)} do not survive the resolution.`,
-          merge: null,
-          carry: null,
-          trigger: 'conflict confirmed',
-        };
-        const nextSeq = Math.max(0, ...all.map(w => Math.max(w.queueSequence ?? 0, w.queue?.sequence ?? 0))) + 1;
-        work.queue!.sequence = nextSeq;
-        work.queueSequence = nextSeq;
-        work.queue!.refreshedLanding = landingBase;
-        if (work.observation) {
-          work.observation.baseTip = landingBase;
-        }
-        conflicts.push(work);
-      } else {
-        const merged = this.lastTestMergeSha;
-        const tip = merged ?? reviewedHead;
-        const branch = candidate.branch;
-        if (tip !== candidate.sha) await this.updateBranch(branch, tip);
-        await this.publishRef(queueRef(work.key), tip);
-        const merge = merged ? await this.describeMerge(reviewedHead, merged, candidate.baseSha, landingBase) : null;
-        const baseChanges = merged ? merge?.baseChanges ?? null : await this.changedFiles(candidate.baseSha, landingBase).catch(() => null);
-        const carry = decideCarry({
-          from: { sha: reviewedHead, baseSha: candidate.baseSha },
-          to: { sha: tip, baseSha: landingBase },
-          policyRevision: work.policyRevision,
-          at: new Date().toISOString(),
-          merge,
-          predecessor: { key: null, validated: true },
-          reviewedFiles: needed.reviewedFiles,
-          approval: bindingApproval(work),
-          proofs: (work.criteria ?? []).flatMap(ac => ac.proofs).map(proof => ({
-            proof,
-            evidence: (work.evidence ?? []).find(e => e.proof === proof && e.trusted && (e.sha === reviewedHead || e.sha === candidate.sha || evidenceBindsCandidate(work, e))),
-          })),
-          app: this.controlPlaneLogin ? await this.controlPlaneLogin().then(l => `control-plane (${l})`, () => 'control-plane') : 'control-plane',
-        });
-        const tipTree = await this.tipTree(tip);
-        work.queue!.speculation = {
-          ref: queueRef(work.key),
-          tip,
-          ...(tipTree ? { tipTree } : {}),
-          base: landingBase,
-          baseTree: await this.commitTree(landingBase),
-          predecessors: work.queue!.speculation?.predecessors ?? [],
-          policyRevision: work.policyRevision,
-          publishedAt: new Date().toISOString(),
-          reviewedHead,
-          trigger: 'landing-refresh',
-          merge,
-          carry,
-          ...(baseChanges !== undefined ? { baseChanges } : {}),
-        };
-        candidate.sha = tip;
-        candidate.baseSha = landingBase;
-        if (work.observation) {
-          work.observation.candidate.sha = tip;
-          work.observation.candidate.baseSha = landingBase;
-          work.observation.baseTip = landingBase;
-        }
-        work.queue!.refreshedLanding = landingBase;
-        refreshed.push(work);
-      }
-    }
-    return { refreshed, conflicts };
   }
   /**
    * Merges `base` onto `head` on the item's scratch branch and returns the merge commit, or null
@@ -3012,6 +2949,50 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
   }
 }
 /**
+ * Verifies one waiting queue entry behind a landing (GY-1131) and records the outcome under this
+ * job's own lease: a published tip is bound as any speculative tip is, carrying the approval and
+ * proofs by the same rule, and a skip or a conflict is recorded against the landing.
+ */
+async function refreshLanding(engine: Engine, github: GitHub, work: Work, needed: NonNullable<ReturnType<typeof landingRefreshNeeded>>, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
+  const held = hold('merge-queue');
+  if (held) return { work, published: false, held };
+  const { record, speculation } = await github.refreshWaitingEntry(work, needed, guard(work, false));
+  if (speculation) return { work: await engine.bindSpeculativeTip(work.id, work.revision, speculation, job.token), published: speculation.tip !== work.candidate!.sha, held: null };
+  // A recorded conflict requeues the job so the next observation evaluates the passed-over entry at once.
+  return { work: await recordLandingRefresh(engine, work, record, job.token), published: record.outcome === 'conflict', held: null };
+}
+/**
+ * Records a landing verification that published nothing (GY-1131), under the job's lease and the
+ * revision it was decided from. A skip, or a clean test merge of a head that already is a tip
+ * (`verified`), only names the landing, so it is never examined again. A
+ * conflict is recorded as the base refresh conflict it is, bound to this head and the landed tip:
+ * the build gate refuses the head, the loop asks the approver for its rework at once (decisions.ts
+ * `neededDecision`), and the entry moves to the back of the queue, passed over by every entry behind.
+ */
+async function recordLandingRefresh(engine: Engine, work: Work, record: LandingRefresh, token: string): Promise<Work> {
+  return engine.store.transaction(async (db, now) => {
+    requireCurrent((await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [work.id, token, now])).rows[0], 'Integration job lease expired or superseded');
+    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const current = all.find(item => item.id === work.id);
+    requireCurrent(current && current.revision === work.revision && current.stage !== 'done' && current.queue && !current.observation?.merged
+      && current.candidate?.sha === record.head && current.policyRevision === record.policyRevision, 'Queue entry changed while the landing was verified; retry');
+    const entry = current!, candidate = entry.candidate!, at = now.toISOString();
+    entry.queue!.landingRefresh = record;
+    if (record.outcome === 'conflict') {
+      entry.baseRefresh = { from: { sha: candidate.sha, baseSha: candidate.baseSha }, base: record.landing,
+        baseTree: entry.observation?.baseTip === record.landing ? entry.observation.baseTree ?? '' : '', policyRevision: entry.policyRevision, at,
+        head: null, conflict: record.conflict ?? null, merge: null, carry: null, trigger: 'conflict confirmed' };
+      const sequence = nextQueueSequence(all);
+      entry.queue!.sequence = sequence; entry.queueSequence = sequence;
+      entry.queueHistory = [...(entry.queueHistory ?? []), { at, event: 'requeued' as const, sequence, reason: record.conflict ?? undefined, tip: record.landing }].slice(-queueHistoryLimit);
+    }
+    await save(db, entry, 'graphyard', `queue.landing-${record.outcome}`, now, record);
+    // Every entry behind re-reads its place: the conflicting one no longer stands ahead of them.
+    if (record.outcome === 'conflict') for (const other of all) if (other.queue && other.stage !== 'done') await wakeJob(db, other.id);
+    return entry;
+  });
+}
+/**
  * Answers one in-flight candidate that GitHub reports conflicting with the base branch tip. The
  * queue owns its own entries, so this is every other submitted candidate. Since GY-375 nothing is
  * written to the candidate's branch: a test merge on a scratch branch either disproves GitHub's
@@ -3297,9 +3278,6 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       observed = true;
       // A peer git shows landed while its item records it unlanded is delivered now (GY-744).
       await engine.reconcileLanded(observation, all, peer => github.observe(peer, all));
-      if (previous?.baseTip && observation.baseTip && previous.baseTip !== observation.baseTip) {
-        await github.refreshQueueOnLanding(all, observation.baseTip, previous.baseTip);
-      }
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A required check that failed on this candidate is rerun once before it counts (GY-516): the
       // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
@@ -3389,6 +3367,16 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // refresh runs before any review is dispatched and the job requeues onto the new head.
       if (baseRefreshNeeded(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
+        work = refreshed.work; held ??= refreshed.held;
+        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
+      }
+      // A landing that moved the base tip under a waiting queue entry's files is verified now, not
+      // at the entry's turn (GY-1131): a clean merge is published as its tip and the job requeues
+      // onto it; a conflict is recorded, asking for the rework while the entries behind pass it.
+      const landing = !observation.merged && typeof github.refreshWaitingEntry === 'function'
+        ? landingRefreshNeeded(work, all.map(item => item.id === work!.id ? work! : item), Date.now(), engine.parallelTips) : null;
+      if (landing) {
+        const refreshed = await refreshLanding(engine, github, work, landing, job, guard, hold);
         work = refreshed.work; held ??= refreshed.held;
         if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }

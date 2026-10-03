@@ -49,8 +49,14 @@ export interface QueueSpeculation {
    * being republished. The carry decided at publication carries it exactly as an observed approval.
    */
   observedApproval?: ObservedApproval | null;
-  /** Why the tip was built (GY-375, GY-1131): queue-head, or landing-refresh behind a landing. */
+  /**
+   * Why the tip was built (GY-375): the queue head is the one candidate brought onto the base
+   * unasked, and since GY-1131 a waiting entry is brought onto a base tip that a landing moved
+   * under files it changed (`landing-refresh`, see `landingRefreshNeeded`).
+   */
   trigger?: 'queue-head' | 'landing-refresh';
+  /** GY-1131: for a `landing-refresh` tip, the landing it was published behind. */
+  landing?: LandingRefresh | null;
 }
 /** An approval GitHub held at one moment, as the publisher read it: the reviewer, its id and the head it approved. */
 export interface ObservedApproval { reviewer: string; reviewId?: number; sha: string }
@@ -182,8 +188,31 @@ export interface QueueEntry {
    * ordinary batch plan resume. Recorded on the head member's entry with the queue history.
    */
   batchDissolved?: { at: string; members: string[] } | null;
-  /** The base branch tip this entry was refreshed/verified for after a landing (GY-1131). */
-  refreshedLanding?: string | null;
+  /** GY-1131: the last landing this waiting entry was verified behind, and what that verification found. */
+  landingRefresh?: LandingRefresh | null;
+}
+/**
+ * GY-1131. What the control plane did for a waiting queue entry after a landing moved the base
+ * branch tip under it: nothing, because the files the landing changed and the files the entry's
+ * reviewer read are disjoint (`skipped`); a clean merge onto the new tip published as the entry's
+ * speculative tip (`refreshed`); a clean test merge of a head that already is a Graphyard tip, which
+ * pushes nothing (`verified`); or a conflict the merge confirmed (`conflict`), which asks for the
+ * entry's rework at once. One record per entry per landing: a landing it names is never examined again.
+ */
+export interface LandingRefresh {
+  /** The base branch tip the landing produced, which the entry was verified behind. */
+  landing: string;
+  /** The base the landed diff was listed from: the last landing the entry was verified behind, or its bound base. */
+  since: string;
+  /** The entry's head when it was verified; a refreshed entry's new head is the speculation's tip. */
+  head: string;
+  policyRevision: number; at: string;
+  outcome: 'skipped' | 'refreshed' | 'verified' | 'conflict';
+  /** The files the landing changed, or null when GitHub could not list them (the entry is then merged, not skipped). */
+  landedFiles: string[] | null;
+  /** The entry's reviewed files the landing changed too. */
+  overlap: string[];
+  conflict?: string | null;
 }
 /** The published tip that replaces a queued entry's head on the next observation, or null when the head is the tip. */
 export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): string | null {
@@ -353,7 +382,8 @@ export interface QueueEjection {
   check?: { name: string; runId: number | null; tip: string; speculation: QueueSpeculation | null } | null;
 }
 export interface QueueHistoryEntry {
-  at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved' | 'lifted'; sequence: number; reason?: string; tip?: string;
+  /** `requeued` (GY-1131): a landing conflict moved the entry to the back of the queue, `tip` naming the landed base tip. */
+  at: string; event: 'enqueued' | 'predicted' | 'ejected' | 'dissolved' | 'lifted' | 'requeued'; sequence: number; reason?: string; tip?: string;
   /** For a lifted ejection (GY-1095): the check whose rerun passed on the same tip, and that run. */
   check?: string; runId?: number | null;
   /** For a prediction: the entries the tip was published behind, and the item's own reviewed head it was built from. For a speculative-conflict ejection: the entries the conflicting merge was predicted behind (GY-321). */
@@ -729,9 +759,8 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
 /** The unresolved conflict a base refresh reported for exactly this candidate and branch head, or null. */
 export function baseRefreshConflict(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): string | null {
   const refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
-  if (!refresh?.conflict || !candidate) return null;
-  if (observation?.baseTip && refresh.base !== observation.baseTip) return null;
-  return refresh.from.sha === candidate.sha && refresh.policyRevision === work.policyRevision ? refresh.conflict : null;
+  if (!refresh?.conflict || !candidate || !observation) return null;
+  return refresh.from.sha === candidate.sha && refresh.base === observation.baseTip && refresh.policyRevision === work.policyRevision ? refresh.conflict : null;
 }
 
 /**
@@ -753,34 +782,46 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
 }
 
 /**
- * GY-1131. The landing refresh a waiting queue entry needs after a landing moves the base branch tip.
- * After each landing that moves the base tip, the control plane scratch test-merges every queued entry
- * whose turn has not come (position > 0) and whose reviewed files overlap the landed diff, bounded to
- * at most once per entry per landing. An entry whose reviewed files do not overlap the landed diff is skipped.
+ * GY-1131. The landing verification one waiting queue entry owes, or null. Since GY-292 only the
+ * entries inside the parallel-tip window (`window` positions, the head first) are built onto the
+ * base they will land on; every entry behind waited unverified until its turn, so work landing onto
+ * its files surfaced as a base conflict that ejected it to a full rework when its turn came. Now an
+ * entry whose turn has not come and that no tip of the window holds is verified when the observed
+ * base branch tip moves past the base it is bound to: the landed diff (from the last landing it was
+ * verified behind, or its bound base) is listed, and an entry whose reviewed files overlap it is
+ * merged onto the new tip on a scratch branch (GY-375) and published, or its conflict recorded. At
+ * most once per entry per landing: a landing its record names is never examined again.
  */
-export function queueLandingRefreshNeeded(
-  work: Work,
-  all: Work[],
-  landedDiff: readonly string[],
-  landingBase: string,
-  now: number = Date.now()
-): { head: string; landingBase: string; reviewedFiles: string[] } | null {
-  if (!work.queue || work.stage === 'done' || work.observation?.merged) return null;
-  if (!work.submission || work.reworkRequested) return null;
-  const candidate = work.candidate;
-  if (!candidate) return null;
+export function landingRefreshNeeded(work: Work, all: Work[], now: number, window = 1): { landing: string; since: string; head: string; reviewedFiles: string[] } | null {
+  const queue = work.queue, candidate = work.candidate, observation = work.observation;
+  if (!queue || work.stage === 'done' || !work.submission || work.reworkRequested || work.blocker || !candidate || !observation) return null;
+  if (observation.merged || observation.prState !== 'open' || observation.draft !== false) return null;
+  if (observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
+  const landing = observation.baseTip;
+  if (!landing || candidate.baseSha === landing) return null;
+  const last = latestLandingRefresh(work);
+  if (last && last.landing === landing && last.policyRevision === work.policyRevision) return null;
+  // A conflict already recorded for this head waits for the rework it asked for.
+  if (baseRefreshConflict(work)) return null;
   const placement = queuePlacement(work, all, now);
-  if (!placement || placement.position === 0) return null;
-  if (work.queue.refreshedLanding === landingBase) return null;
-  if (work.baseRefresh?.base === landingBase && work.baseRefresh.from.sha === candidate.sha) return null;
-  if (candidate.baseSha === landingBase && work.queue.speculation?.base === landingBase) return null;
-  const reviewed = reviewedFilesOf(work, candidate.sha)
-    ?? (work.queue.speculation?.reviewedHead ? reviewedFilesOf(work, work.queue.speculation.reviewedHead) : null)
-    ?? work.observation?.files
-    ?? work.plannedFiles
-    ?? [];
-  if (!reviewed.some(path => landedDiff.includes(path))) return null;
-  return { head: candidate.sha, landingBase, reviewedFiles: reviewed };
+  if (!placement || placement.position === 0 || placement.position < window) return null;
+  const since = last && last.head === candidate.sha && last.policyRevision === work.policyRevision ? last.landing : candidate.baseSha;
+  const speculation = queue.speculation;
+  const reviewedHead = speculation?.tip === candidate.sha && speculation.policyRevision === work.policyRevision ? speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha : candidate.sha;
+  const reviewedFiles = reviewedFilesOf(work, reviewedHead) ?? observation.files;
+  return { landing, since, head: candidate.sha, reviewedFiles };
+}
+/** GY-1131. The newest landing verification on record for a queued entry: a skip or conflict, or the landing its published tip was built behind. */
+export function latestLandingRefresh(work: Pick<Work, 'queue'>): LandingRefresh | null {
+  const recorded = work.queue?.landingRefresh ?? null, published = work.queue?.speculation?.landing ?? null;
+  if (!recorded || !published) return recorded ?? published;
+  return Date.parse(published.at) > Date.parse(recorded.at) ? published : recorded;
+}
+/** GY-1131. The entry's reviewed files the landing changed too; every file when the landed diff could not be listed. */
+export function landingOverlap(reviewedFiles: readonly string[], landedFiles: readonly string[] | null): string[] {
+  if (landedFiles === null) return [...reviewedFiles];
+  const landed = new Set(landedFiles);
+  return reviewedFiles.filter(path => landed.has(path));
 }
 
 /**
@@ -908,9 +949,12 @@ export function keptTipCarry(work: Pick<Work, 'candidate' | 'queue'>, speculatio
  * holds its place until its reconciliation exits it (see `unpublishableEntry`).
  */
 const validatingStages: readonly Work['stage'][] = ['test', 'acceptance', 'merge'];
-export function validatedQueueEntry(work: Pick<Work, 'queue' | 'stage' | 'violations' | 'reworkRequested' | 'observation'>): boolean {
+export function validatedQueueEntry(work: Pick<Work, 'queue' | 'stage' | 'violations' | 'reworkRequested' | 'observation'> & Partial<Pick<Work, 'candidate' | 'baseRefresh' | 'policyRevision'>>): boolean {
   if (!work.queue) return false;
   if (work.observation?.merged) return true;
+  // A head whose merge onto the base tip conflicts (GY-1131: found when the work landed behind it)
+  // can never land as it stands: it is passed over at once, never left to head the queue.
+  if (work.candidate && work.policyRevision !== undefined && baseRefreshConflict(work as Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>)) return false;
   return validatingStages.includes(work.stage) && !work.reworkRequested && !work.violations.length;
 }
 export function predictQueue(all: Work[], now: number): QueuePlacement[] {
@@ -1191,7 +1235,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
     const refusal = refusedReconciliation(work);
     return refusal ? `Pull request was merged without a valid merge execution and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
   }
-  if (!work.submission || (work.reworkRequested && !work.baseRefresh?.conflict)) return 'Implementation returned to the worker for a new attempt';
+  if (!work.submission || work.reworkRequested) return 'Implementation returned to the worker for a new attempt';
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
   if (work.blocker) return `Queued work was blocked: ${work.blocker}`;
   if (work.violations.length) return `Queued work has an open violation: ${work.violations[0]}`;
