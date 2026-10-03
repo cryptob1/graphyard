@@ -51,7 +51,7 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
  * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
  * changes are in the admin Edit menu.
  */
-export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves }: Dashboard & { item: Work }) {
+export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
   // The same duration and the same threshold the card carries; this view is another view of it.
@@ -127,8 +127,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={why}/></p>
       <p className="next-line"><span className="next-label">Who acts next:</span> <strong>{actor.who}</strong>{actor.does && actor.does !== steps.label ? <> — {actor.does}</> : null}</p>
       {showSteps && <StepsDetail steps={steps}/>}
-      {waitingOnYou.map(row => <RequestCard key={row.request.id} row={row} refusal={humanOnlyRefusal(row.rule, status?.actor ?? {})} busy={busy} open={() => {}}
-        answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })}/>)}
+      {waitingOnYou.map(row => <RequestCard key={row.request.id} row={row} refusal={humanOnlyRefusal(row.rule, status?.actor ?? {})} busy={busy} open={() => {}} signIn={signOut}
+        answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}
       {item.violations.map(v => <div className="notice danger" key={v}>{shortShas(v)}</div>)}
       {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
       {failedDelivery && postDeployment}
@@ -168,6 +168,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <details className="more-details" aria-label="Technical details"><summary>Technical details</summary>
       <h3>About this item</h3>
       <p>{item.description}</p>
+      {!!item.pendingFollowUps?.findings.length && <><h3>Pending follow-ups ({item.pendingFollowUps.findings.length})</h3><p className="muted">{item.pendingFollowUps.dropped ? item.pendingFollowUps.dropped.reason : item.pendingFollowUps.filed ? `Filed as ${item.pendingFollowUps.filed.item} once this item shipped.` : 'Review findings beyond the criteria, held here until this item ships; then they become its one follow-up item.'}</p><ul className="pending-follow-ups">{item.pendingFollowUps.findings.map((finding, index) => <li key={index}>{finding.text}</li>)}</ul></>}
       <dl className="facts">
         <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>
       </dl>

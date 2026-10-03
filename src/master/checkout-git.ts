@@ -27,7 +27,8 @@ export const checkoutGitDirectory = (root: string): string => {
 };
 /**
  * Why the checkout's `.git` is a file that names no Git directory, or null: a pointer that cannot be
- * parsed, or whose admin or common directory is missing, would otherwise leave the confinement
+ * parsed, whose admin or common directory is missing, or whose worktree admin has no readable
+ * `commondir`, would otherwise leave the confinement
  * protecting the pointer file itself and re-exposing nothing, so every launch refuses on it instead
  * (GY-957, review follow-up).
  */
@@ -39,7 +40,12 @@ const resolveCheckoutGitDirectory = (root: string): { directory: string } | { pr
   if (!admin) return { problem: `its .git at ${gitPath} is a file but not a readable "gitdir: <path>" pointer` };
   if (!isDirectoryPath(admin)) return { problem: `its .git pointer names ${admin}, which is not a directory` };
   let common: string;
-  try { common = readFileSync(join(admin, 'commondir'), 'utf8').trim(); } catch { return { directory: admin }; }
+  // No readable `commondir`: only a whole Git directory — `--separate-git-dir` or a submodule, which
+  // carries its own object store — is the directory itself. A linked-worktree admin without one
+  // refuses, since binding only the admin would leave the real common directory writable (GY-1054).
+  try { common = readFileSync(join(admin, 'commondir'), 'utf8').trim(); } catch {
+    return isDirectoryPath(join(admin, 'objects')) ? { directory: admin } : { problem: `its worktree admin ${admin} has no readable commondir naming its common Git directory` };
+  }
   const directory = common ? resolve(admin, common) : admin;
   return isDirectoryPath(directory) ? { directory } : { problem: `its worktree admin ${admin} names the common Git directory ${directory}, which is not a directory` };
 };

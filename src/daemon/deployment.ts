@@ -21,8 +21,10 @@ export function deploymentDetail(observation: DeploymentObservation) {
  * newer than the release production serves cost nothing extra and never stop the read short of it
  * (a per-attempt read bound left deliveries pending behind 20 failed attempts). Nothing below this
  * bound scales with how much has been delivered — containment is derived locally — so the cycle's
- * deployment step costs the same on the first delivery as on the five hundredth. A configured
- * `--deployment-url` costs zero GitHub requests.
+ * deployment step costs the same on the first delivery as on the five hundredth. The listing is the
+ * production environment's alone; when it is empty, one unfiltered page is read to name a
+ * misconfigured environment, inside the same bound. A configured `--deployment-url` costs zero
+ * GitHub requests.
  */
 export const deploymentPageSize = 100;
 export const deploymentListingPages = 5;
@@ -85,30 +87,35 @@ export const productionEnvironmentRecord = (environment: unknown, production: st
 
 /** GitHub's node ids are opaque base64-like tokens; anything else is not sent inside a query. */
 const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
+/** How many of a deployment's statuses the batched read asks for, to tell whether it ever reached success. */
+const deploymentStatusHistory = 20;
 /**
  * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
  * has only a per-deployment status listing. A deployment whose status could not be read has no
- * entry (`undefined`); one with no status yet is `pending`.
+ * entry (`undefined`); one with no status yet is `pending`. `succeeded` says whether any of its
+ * statuses is `success`: Railway marks each production deployment `inactive` minutes after it
+ * succeeds, even while it is still the newest one and so the release production serves.
  */
-async function deploymentStates(repository: string, deployments: any[], run: ChildRun): Promise<{ states: (string | undefined)[]; failure: string | null }> {
+async function deploymentStates(repository: string, deployments: any[], run: ChildRun): Promise<{ states: (string | undefined)[]; succeeded: boolean[]; failure: string | null }> {
   const ids = deployments.map(deployment => typeof deployment?.node_id === 'string' && deploymentNodeId.test(deployment.node_id) ? deployment.node_id : null);
   const readable = ids.filter((id): id is string => id !== null);
-  if (!readable.length) return { states: [], failure: 'GitHub listed it without a node id' };
+  if (!readable.length) return { states: [], succeeded: [], failure: 'GitHub listed it without a node id' };
   let nodes: any[];
   try {
-    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } } } }`;
+    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } statuses(first: ${deploymentStatusHistory}) { nodes { state } } } } }`;
     const answer = JSON.parse(await run('gh', ['api', 'graphql', '-f', `query=${query}`]));
     nodes = Array.isArray(answer?.data?.nodes) ? answer.data.nodes : [];
-  } catch (error) { return { states: [], failure: message(error) }; }
+  } catch (error) { return { states: [], succeeded: [], failure: message(error) }; }
   const byId = new Map(readable.map((id, index) => [id, nodes[index]]));
+  // A node that answers for another deployment is not this one's status.
+  const answers = deployments.map((deployment, index) => {
+    const node = ids[index] === null ? undefined : byId.get(ids[index]!);
+    return !node || (node.databaseId !== undefined && node.databaseId !== deployment.id) ? undefined : node;
+  });
   return {
     failure: null,
-    states: deployments.map((deployment, index) => {
-      const node = ids[index] === null ? undefined : byId.get(ids[index]!);
-      // A node that answers for another deployment is not this one's status.
-      if (!node || (node.databaseId !== undefined && node.databaseId !== deployment.id)) return undefined;
-      return typeof node.latestStatus?.state === 'string' ? node.latestStatus.state.toLowerCase() : 'pending';
-    }),
+    states: answers.map(node => node === undefined ? undefined : typeof node.latestStatus?.state === 'string' ? node.latestStatus.state.toLowerCase() : 'pending'),
+    succeeded: answers.map(node => Array.isArray(node?.statuses?.nodes) && node.statuses.nodes.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success')),
   };
 }
 
@@ -118,7 +125,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   let requests = 0;
   const unavailable = (reason: string): DeploymentObservation => boundDeployment({ source: 'unavailable', sha: null, at, reason, deployed: [], pending: delivered.map(item => item.key), requests, derived: 0, retained: 0, containment: options.retained ?? null });
   if (!delivered.length) return { source: 'unavailable', sha: null, at, reason: 'No delivered work is awaiting deployment verification', deployed: [], pending: [], requests, derived: 0, retained: 0, containment: options.retained ?? null };
-  let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable';
+  let sha: string | null = null, source: DeploymentObservation['source'] = 'unavailable', inactive: string | null = null;
   if (config.run.deploymentUrl) {
     let payload: any;
     try {
@@ -130,21 +137,27 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     if (typeof value !== 'string' || !/^[0-9a-f]{7,40}$/i.test(value)) return unavailable(`Deployment endpoint did not report a commit at ${config.run.deploymentShaField}`);
     sha = value.toLowerCase(); source = 'endpoint';
   } else {
-    // Not filtered by ref: a platform that deploys the base branch (Railway) records each release
-    // with its commit SHA as the ref, so `ref=main` saw only the CI reporting environment's records,
-    // and on 2026-09-24 GY-159 stayed pending behind a release production had already served. The
-    // listing is read page by page, newest first, until a release answers or a bound is reached.
+    // Filtered by environment, not by ref: a platform that deploys the base branch (Railway) records
+    // each release with its commit SHA as the ref, so `ref=main` saw only the CI reporting
+    // environment's records, and on 2026-09-24 GY-159 stayed pending behind a release production had
+    // already served. Unfiltered, the reporting environment's per-branch records (100+ an hour) pushed
+    // every production record past the read bound, and on 2026-10-02 a release production had served
+    // for minutes was refused. The production environment's listing is read page by page, newest
+    // first, until a release answers or a bound is reached.
     const releaseAncestry = localAncestry(options.root, config.baseBranch, run);
     let production: string;
     try { production = config.run.productionEnvironment ?? productionEnvironmentFromEnv(); } catch (error) { return unavailable(message(error)); }
     let listed = 0, exhausted = false;
+    // Whether a production deployment newer than the one being read has been listed: a release
+    // Railway marked inactive is served only while nothing newer was deployed to production.
+    let newerProduction = false;
     // Environments named like production under another identity, reported when no release is found
     // so an unconfigured Railway installation is told the name to configure rather than left pending.
     const namesake = new Set<string>();
     for (let page = 1; page <= deploymentListingPages && !sha && !exhausted; page++) {
       let deployments: any[];
       requests++;
-      try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentPageSize}&page=${page}`])); }
+      try { deployments = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?environment=${encodeURIComponent(production)}&per_page=${deploymentPageSize}&page=${page}`])); }
       catch (error) {
         if (page === 1) return unavailable(`No deployment endpoint is configured and GitHub deployments are unavailable: ${message(error)}`);
         return unavailable(`No release was found in the first ${listed} GitHub deployment(s), and page ${page} of the listing could not be read: ${message(error)}`);
@@ -153,6 +166,8 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       listed += deployments.length;
       exhausted = deployments.length < deploymentPageSize;
       const candidates: any[] = [];
+      // The production records in listing order, each marked as a release candidate or not.
+      const records: { deployment: any; candidate: boolean }[] = [];
       for (const deployment of deployments) {
         // CI proof reporting records deployments too; it is never a release.
         if (deployment?.environment === ciReportingEnvironment) continue;
@@ -165,25 +180,52 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         }
         // A release is the base branch or a commit on it; another branch's deployment is not.
         const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
+        let candidate = true;
         if (ref && ref !== config.baseBranch) {
-          if (typeof deployment.sha !== 'string' || ref.toLowerCase() !== deployment.sha.toLowerCase()) continue;
-          if (await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) !== true) continue;
+          candidate = typeof deployment.sha === 'string' && ref.toLowerCase() === deployment.sha.toLowerCase()
+            && await releaseAncestry.contains(deployment.sha.toLowerCase(), `refs/remotes/origin/${config.baseBranch}`) === true;
         }
-        candidates.push(deployment);
+        records.push({ deployment, candidate });
+        if (candidate) candidates.push(deployment);
       }
-      if (!candidates.length) continue;
+      if (!candidates.length) { newerProduction ||= records.length > 0; continue; }
       requests++;
       const states = await deploymentStates(config.repository, candidates, run);
       // Newest first: the first success is the release. An attempt whose status cannot be read may
       // be the newest success, so no older release is taken past it: the observation is
-      // unavailable, and every delivery stays pending.
-      for (const [index, deployment] of candidates.entries()) {
-        const state = states.states[index];
-        if (state === undefined) return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves${states.failure ? `: ${states.failure}` : ''}`);
-        if (state === 'success' && typeof deployment.sha === 'string') { sha = deployment.sha.toLowerCase(); source = 'github-deployment'; break; }
+      // unavailable, and every delivery stays pending. A deployment that reached success and was
+      // later marked inactive is the release only when it is the newest production deployment of
+      // all: Railway deactivates it minutes after success though production still serves it, while
+      // GitHub deactivates it when a newer deployment succeeds. Behind any newer production record
+      // — a successful one, a failed attempt, one whose status is unread or not a release — an
+      // inactive deployment is never taken, so a superseded or rolled-back release is not served.
+      for (const { deployment, candidate } of records) {
+        if (candidate) {
+          const index = candidates.indexOf(deployment);
+          const state = states.states[index];
+          if (state === undefined) return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves${states.failure ? `: ${states.failure}` : ''}`);
+          if (typeof deployment.sha === 'string' && (state === 'success' || (state === 'inactive' && states.succeeded[index] && !newerProduction))) {
+            sha = deployment.sha.toLowerCase(); source = 'github-deployment';
+            if (state === 'inactive') inactive = `${production} deployment ${deployment.id} reached success and was later marked inactive with no newer ${production} deployment, so it is the release production serves`;
+            break;
+          }
+        }
+        newerProduction = true;
       }
     }
-    if (!listed) return unavailable('No deployment endpoint is configured and the repository records no GitHub deployment for the managed base branch');
+    if (!listed) {
+      // The production environment records nothing: one unfiltered page names any environment
+      // called production under another identity, so an unconfigured Railway installation is told
+      // the name to configure rather than left pending.
+      requests++;
+      try {
+        const recent = JSON.parse(await run('gh', ['api', `repos/${config.repository}/deployments?per_page=${deploymentPageSize}&page=1`]));
+        for (const deployment of Array.isArray(recent) ? recent : []) {
+          if (typeof deployment?.environment === 'string' && deployment.environment !== production && deployment.environment.endsWith(` / ${production}`) && namesake.size < 5) namesake.add(deployment.environment);
+        }
+      } catch { /* the names are only a hint; the observation is unavailable either way */ }
+      if (!namesake.size) return unavailable(`No deployment endpoint is configured and the repository records no GitHub deployment to the ${production} environment`);
+    }
     // What lies past the listing bound is unread — a rollback to an older release included — so no
     // release is asserted, the last one observed neither: the observation is unavailable and says why.
     if (!sha && !exhausted) return unavailable(`None of the newest ${listed} GitHub deployment(s) is a successful ${production} release of the managed base branch, and older ones are past the ${deploymentListingPages}-page read bound, so the release production serves is not known`);
@@ -213,6 +255,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   // A base branch this checkout could not fetch is said out loud: containment was then derived
   // from whatever objects are here, and a delivery git could not place stays pending, never deployed.
   const stale = ancestry.fetchFailure;
-  return deploymentObservationSchema.parse({ source, sha, at, reason: stale ? `Containment was derived without a fresh base branch: ${stale}` : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
+  const reasons = [inactive, stale ? `Containment was derived without a fresh base branch: ${stale}` : null].filter(Boolean);
+  return deploymentObservationSchema.parse({ source, sha, at, reason: reasons.length ? reasons.join('; ') : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
     requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
 }

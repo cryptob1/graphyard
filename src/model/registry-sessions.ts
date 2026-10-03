@@ -274,6 +274,19 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
   const plans = groupAccountsByPlan({ accounts: registry.accounts }, now);
   return { revision: registry.revision, updatedAt: registry.updatedAt, configured: registry.roles.length > 0, host, runtimes: registry.runtimes, models: registry.models, accounts, roles, plans,
     sessions: registry.sessions.slice(-30), refusals: registry.refusals, lastMutation: registry.lastMutation,
-    attention: [...roles.filter(role => role.blocked).map(role => role.blocked!), ...unassigned, ...missing] };
+    attention: [...roles.flatMap(role => roleAttention(role, live)), ...unassigned, ...missing] };
+}
+
+/**
+ * What a blocked role raises as fleet attention (GY-950). A role at its concurrency limit whose
+ * live sessions all carry work is waiting for a slot — each waiting item already names its own
+ * dispatch wait — so it raises nothing. Only the sessions holding a slot with no work (a master
+ * session never carries work, so it is always accounted for) are raised, by id, to be ended.
+ */
+function roleAttention(role: FleetRoleView, live: FleetSession[]): string[] {
+  if (!role.blocked) return [];
+  if (!role.concurrency || role.live < role.concurrency) return [role.blocked];
+  const idle = role.role === 'master' ? [] : live.filter(session => session.role === role.role && !session.work);
+  return idle.length ? [`role ${role.role} is at its concurrency limit (${role.live} of ${role.concurrency} live) with ${idle.length} session${idle.length === 1 ? '' : 's'} carrying no work: ${idle.map(session => `${session.id} (${session.account})`).join(', ')}`] : [];
 }
 
