@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { observeAccount } from '../src/fleet.js';
 import {
   supportedProviderPlans,
   providerUsageAdapters,
@@ -137,7 +141,7 @@ test('unit:provider-usage-adapters — each supported provider plan has a usage 
   assert.equal(getCachedPlanUsage(testPlan, now + 70_000, 60_000), null, 'cache expires after TTL');
 });
 
-test('unit:accounts-page-groups-by-plan — accounts that draw on one plan are grouped under it on the Accounts page with a bar per window, and dispatch failover reads the same plan-level usage so accounts sharing a plan share one budget', () => {
+test('unit:accounts-page-groups-by-plan — accounts that draw on one plan are grouped under it on the Accounts page with a bar per window, and dispatch failover reads the same plan-level usage so accounts sharing a plan share one budget', async () => {
   // Setup registry with multiple accounts sharing and not sharing plans:
   // - claude-1 (Claude plan)
   // - codex-1 (Codex plan)
@@ -257,4 +261,31 @@ test('unit:accounts-page-groups-by-plan — accounts that draw on one plan are g
   const skippedOpencode = choice.skipped.find(s => s.account === 'opencode-a');
   assert.ok(skippedOpencode, 'opencode-a was skipped');
   assert.match(skippedOpencode.reason, /plan/i, 'skip reason mentions plan exhaustion');
+
+  // 4. Test Pi accounts route through Z.AI usage probe and share plan budget
+  clearPlanUsageCache();
+  const piRuntime = initial.runtimes.find(r => r.name === 'pi')!;
+  const fakeHome = await temporaryDirectory('pi-probe-test');
+  await writeFile(join(fakeHome, 'zai.key'), 'test-zai-key\n');
+  const piAccountWithHome = {
+    ...piAccount,
+    credential: { host: HOST, home: fakeHome, key: { file: 'zai.key', variable: 'ZAI_API_KEY' } },
+  };
+  const piZaiQuotaResponse = {
+    code: 200,
+    data: {
+      limits: [
+        { type: 'TOKENS_LIMIT', unit: 3, percentage: 35, nextResetTime: now + 3 * hour },
+        { type: 'TIME_LIMIT', unit: 5, percentage: 88, nextResetTime: now + 5 * day },
+      ],
+    },
+  };
+  const mockFetch = (async () => new Response(JSON.stringify(piZaiQuotaResponse))) as typeof fetch;
+  const observation = await observeAccount(piAccountWithHome as any, piRuntime, { fetch: mockFetch, now: () => now, cacheMs: 0 });
+  assert.equal(observation.quota.loggedIn, true);
+  assert.equal(observation.quota.state, 'available');
+  assert.equal(observation.quota.usage.length, 2);
+  const cachedZai = getCachedPlanUsage('zai-a', now);
+  assert.ok(cachedZai, 'shared plan zai-a cache populated from Pi probe');
+  assert.equal(cachedZai?.windows.length, 2);
 });

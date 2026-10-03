@@ -324,7 +324,7 @@ export function clearPlanUsageCache(): void {
 
 export function detectPlanKind(text: string, runtime = '', model = ''): ProviderPlanKind {
   const lower = `${text} ${runtime} ${model}`.toLowerCase();
-  if (lower.includes('z.ai') || lower.includes('zai') || lower.includes('glm')) return 'zai';
+  if (lower.includes('z.ai') || lower.includes('zai') || lower.includes('glm') || /\bpi\b/.test(lower) || lower.includes('opencode')) return 'zai';
   if (lower.includes('codex') || lower.includes('openai') || lower.includes('chatgpt')) return 'codex';
   if (lower.includes('cursor')) return 'cursor';
   if (lower.includes('muse')) return 'muse';
@@ -363,7 +363,7 @@ export function deriveAccountPlan(
   if (match) {
     const suffix = match[1];
     const sharesSuffix = allAccounts.find(o => o.name !== account.name && new RegExp(`^(?:pi|opencode)[-_]${suffix}$`, 'i').test(o.name));
-    if (sharesSuffix) {
+    if (sharesSuffix || account.credential?.key?.variable === 'ZAI_API_KEY' || account.runtime === 'pi' || account.runtime === 'opencode') {
       return { planId: `zai-${suffix.toLowerCase()}`, planName: `Z.AI (${suffix})`, planKind: 'zai' };
     }
   }

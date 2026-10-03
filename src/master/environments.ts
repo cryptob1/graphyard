@@ -217,10 +217,14 @@ async function codexAccount(environment: AgentEnvironment, probe: EnvironmentPro
 async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
-  const fileKey = await readFile(resolve(environment.home, 'zai.key'), 'utf8').catch(() => null);
+  const keyFileName = (environment as any).keyFile ?? 'zai.key';
+  const fileKey = await readFile(resolve(environment.home, keyFileName), 'utf8').catch(() => null);
+  const fallbackKey = keyFileName !== 'zai.key' ? await readFile(resolve(environment.home, 'zai.key'), 'utf8').catch(() => null) : null;
   const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
-  const key = zaiKey ?? fileKey?.trim() ?? auth?.ZAI_API_KEY ?? auth?.key ?? process.env.ZAI_API_KEY;
-  const loggedIn = !!key || (!!opencodeAuth && Object.keys(opencodeAuth).length > 0) || (!!auth && Object.keys(auth).length > 0);
+  const authFileExists = await access(resolve(environment.home, 'auth.json')).then(() => true, () => false);
+  const opencodeAuthExists = await access(resolve(environment.home, 'opencode/auth.json')).then(() => true, () => false);
+  const key = zaiKey ?? fileKey?.trim() ?? fallbackKey?.trim() ?? auth?.ZAI_API_KEY ?? auth?.key ?? process.env.ZAI_API_KEY;
+  const loggedIn = !!key || authFileExists || opencodeAuthExists || (!!opencodeAuth && Object.keys(opencodeAuth).length > 0) || (!!auth && Object.keys(auth).length > 0);
   if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
   if (!key) return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
   try {
@@ -236,7 +240,7 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
           return { loggedIn: true, usage: parsed.windows, note: parsed.reason };
         }
       }
-      return { loggedIn: response.status !== 401 && response.status !== 403, usage: [], note: `provider returned ${response.status}` };
+      return { loggedIn: true, usage: [], note: `provider returned ${response.status}` };
     }
     const body = await response.json();
     const parsed = parseZaiUsage(body);
