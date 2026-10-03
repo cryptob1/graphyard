@@ -15,6 +15,7 @@ import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
+import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import { restoreAndReport } from './sync-restore.js';
 import { pushViaControlPlane } from './sync-push.js';
 import { defineCommands, workMutation } from './registry.js';
@@ -225,25 +226,25 @@ export const workspaceCommands = defineCommands([
       await mutate('workspace', { epoch, host: hostId, path, branch });
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
+      // GY-1078: an abandoned session worktree of this item still holding the branch — checked out
+      // on a rework, or stopped mid-rebase, mid-am or mid-bisect of it, which git lists as detached —
+      // is reclaimed first; one with a live lease or uncommitted changes is named and left alone.
+      // Every failure carries git's own stderr, so the loop's record says why.
+      let reclaimed: ReclaimedHolder[] = [];
       try {
-        if (work.submission && exists) {
-          const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).split('\0\0');
-          for (const record of records) {
-            const fields = record.split('\0'); const priorPath = fields.find(field => field.startsWith('worktree '))?.slice(9);
-            if (priorPath && fields.includes(`branch refs/heads/${branch}`)) execFileSync('git', ['-C', priorPath, 'checkout', '--detach', '--quiet'], { stdio: ['ignore', 'ignore', 'inherit'] });
-          }
-        }
-        execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
-        if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
+        if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, Date.parse(status.now ?? '') || Date.now(), { checkouts: !!work.submission });
+        for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
+        gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
+        if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
       }
-      catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
+      catch (error) { throw new Error(`Git worktree creation failed: ${error instanceof Error ? error.message : String(error)}. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.`); }
       // A checkout whose lockfile the reachable install does not match gets its own install now,
       // so the session never starts on the wrong dependency versions. The lease is kept alive
       // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
       // heartbeat means this epoch is no longer held: npm is stopped there and the command fails
       // rather than reporting a worktree ready for work nobody may do.
       const dependencies = await installUnderLease(path, () => mutate('heartbeat', { epoch }), `${work.key} epoch ${epoch}`);
-      return print({ path, branch, epoch, dependencies });
+      return print({ path, branch, epoch, dependencies, ...(reclaimed.length ? { reclaimed } : {}) });
     },
   },
   {
