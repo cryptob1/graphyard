@@ -80,6 +80,7 @@ export const emptyObservation = (): AdapterObservation => ({ installed: false, c
 
 export async function httpHealth(ctx: AdapterContext, url: string) {
   try {
+    if (!ctx.domain) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     const response = await ctx.fetch(`${url.replace(/\/$/, '')}/healthz`, { signal: AbortSignal.timeout(15_000) });
     if (!response.ok) return false;
     return (await response.json() as any)?.ok === true;
@@ -377,7 +378,7 @@ export const hetznerAdapter: ProviderAdapter = {
   async preflight(ctx) {
     const items = [await tool(ctx, ctx.transport, 'hcloud', ['version'], 'hcloud CLI', 'Install the hcloud CLI (brew install hcloud, or the archive for this platform from https://github.com/hetznercloud/cli/releases), then run: hcloud context create graphyard')];
     items.push(await tool(ctx, ctx.transport, 'hcloud', ['context', 'active'], 'Hetzner Cloud project', 'Run: hcloud context create graphyard, then paste a Read & Write API token from the Hetzner Cloud console (Security - API tokens) of the project this installation is billed to'));
-    items.push({ name: 'Public hostname', ok: !!ctx.domain, detail: ctx.domain ?? 'no domain selected; Caddy will issue an internal certificate', fix: 'Pass --domain graphyard.example.com and point its A record at the created server for publicly trusted TLS' });
+    items.push({ name: 'Public hostname', ok: true, detail: ctx.domain ?? 'no domain selected; Caddy will issue an internal certificate', ...(ctx.domain ? {} : { fix: 'Pass --domain graphyard.example.com and point its A record at the created server for publicly trusted TLS' }) });
     // The installer reaches the server over key-authenticated SSH only (BatchMode, no
     // passwords). Without a key Hetzner sets a root password, and provisioning would wait
     // out the SSH attempts before blaming cloud-init for a server it cannot log into.

@@ -46,7 +46,7 @@ Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN`, with `GRAPHYARD_URL`, on the `
 
 ### Production deployment observation
 
-On each new serving commit (`GRAPHYARD_BUILD_SHA`) unserved merges are recorded (`delivery.deployment-contained`, `production.deployment-pending`); one unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+On each new serving commit (`GRAPHYARD_BUILD_SHA`) unserved merges are recorded (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 

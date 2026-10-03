@@ -24,7 +24,7 @@ Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `hcloud context create graphyard` (`brew install hcloud` first); needs `--domain` and `--ssh-key NAME`.
+- `hetzner`: `hcloud context create graphyard` (`brew install hcloud` first); needs `--ssh-key NAME` (`--domain` optional; Caddy issues an internal certificate without it).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host`, `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 

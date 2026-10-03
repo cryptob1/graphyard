@@ -236,6 +236,14 @@ test('unit:host-install-plan — a re-apply that cannot read the host\'s existin
   } finally { await fixture.cleanup(); }
 });
 
+test('unit:host-install-plan — a missing database password on a host with existing Postgres data refuses to regenerate', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  fixture.hostFiles.set('/var/lib/graphyard/owner-project/postgres/PG_VERSION', { content: '16\n', mode: 0o600 });
+  try {
+    await assert.rejects(applyHost(fixture, hostInputs()), /missing on a host with existing Postgres data/);
+  } finally { await fixture.cleanup(); }
+});
+
 test('unit:host-install-plan — a private managed repository that cannot be cloned fails the install with the reason', async () => {
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
     extraResponses: [{ match: 'clone --quiet', result: { stdout: '', stderr: "remote: Repository not found.\nfatal: repository 'https://github.com/owner/project.git/' not found", code: 128 } }] });
@@ -643,5 +651,11 @@ test('unit:host-size-and-price-confirmed — --target hetzner shows the recommen
     assert.ok(lines.some(line => line.includes('master init')));
     assert.ok(fixture.hostFiles.has('/etc/systemd/system/graphyard-server.service'));
     assert.match(fixture.hostFiles.get('/opt/graphyard/owner-project/compose.yaml')!.content, /\/mnt\/graphyard\/postgres/);
+
+    // Hetzner without a domain plans Caddy's internal certificate and preflight passes.
+    const withoutDomain = await buildPlan(await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'hetzner', selfContained: true, sshKey: 'graphyard-key', workers: 1, confirmPrice: 19.52 }, fixture.deps, 'plan'));
+    assert.equal(withoutDomain.preflight.find(item => item.name === 'Public hostname')?.ok, true);
+    assert.equal(withoutDomain.preflight.find(item => item.name === 'Public hostname')?.detail, 'no domain selected; Caddy will issue an internal certificate');
+    assert.ok(withoutDomain.preflight.every(item => item.ok), JSON.stringify(withoutDomain.preflight.filter(item => !item.ok)));
   } finally { await fixture.cleanup(); }
 });

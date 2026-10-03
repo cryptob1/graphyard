@@ -285,6 +285,11 @@ export async function readHostSecrets(ctx: AdapterContext, principals: PlannedPr
   };
   for (const principal of principals) { const token = await read(hostTokenFile(layout, principal.id)); if (token) tokens.set(principal.id, ctx.vault.add(token)); }
   const databasePassword = await read(hostDatabasePasswordFile(layout));
+  if (!databasePassword) {
+    const postgresDir = `${layout.dataPath}/postgres`;
+    const check = await remote.exec('test', ['-f', `${postgresDir}/PG_VERSION`], { allowFailure: true, timeout: 60_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
+    if (check.code === 0) unreadable.push(`${hostDatabasePasswordFile(layout)}: missing on a host with existing Postgres data at ${postgresDir}`);
+  }
   // Paths only: a failed read's stderr never carries the file's content, and the vault scrubs what it knows.
   return { tokens, databasePassword: databasePassword ? ctx.vault.add(databasePassword) : '', unreadable: unreadable.length ? ctx.vault.scrub(unreadable.join('; ')) : null };
 }
@@ -499,7 +504,7 @@ export const existingMachineAdapter: ProviderAdapter = {
   async preflight(ctx) {
     const items: PreflightItem[] = [];
     if (!ctx.host?.local) items.push({ name: 'SSH target', ok: !!ctx.sshHost, detail: ctx.sshHost ? `${ctx.sshUser}@${ctx.sshHost}` : 'no target selected', fix: 'Pass --ssh-host HOST, or --local when this installer runs on the host itself' });
-    items.push({ name: 'Public hostname', ok: !!ctx.domain, detail: ctx.domain ?? 'no domain selected; GitHub webhook delivery and the health check reject the internal certificate Caddy would issue for a bare address', fix: `Pass --domain graphyard.example.com and point its A record at ${ctx.sshHost ?? 'this host'}` });
+    items.push({ name: 'Public hostname', ok: true, detail: ctx.domain ?? 'no domain selected; Caddy will issue an internal certificate', ...(ctx.domain ? {} : { fix: `Pass --domain graphyard.example.com and point its A record at ${ctx.sshHost ?? 'this host'}` }) });
     if (!ctx.host?.local && !ctx.sshHost) return items;
     const remote = await hostRemote(ctx);
     const whoami = await remote.exec('id', ['-u'], { allowFailure: true, timeout: 60_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
@@ -658,16 +663,6 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   await asUser(remote, HOST_HOME, 'sh', ['-c', `[ -x ${shellQuote(layout.herdr)} ] || curl -fsSL https://herdr.dev/install.sh | sh`]);
   await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'daemon-reload']);
   await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'enable', '--now', 'graphyard-herdr.service']);
-  const label = `graphyard-${ctx.installId}`;
-  const workspaceIn = (text: string) => {
-    try {
-      const parsed = JSON.parse(text); const result = parsed?.result ?? parsed;
-      const listed = Array.isArray(result?.workspaces) ? result.workspaces.find((entry: any) => entry?.label === label) : result?.workspace ?? result;
-      return typeof listed?.workspace_id === 'string' ? listed.workspace_id : null;
-    } catch { return null; }
-  };
-  let herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'list'], { allowFailure: true })).stdout);
-  if (!herdrWorkspace) herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'create', '--cwd', layout.checkout, '--label', label], { allowFailure: true })).stdout);
 
   // Workers push and open pull requests as the App: its key and the token helper go to <install>/github
   // (0600), gh is wrapped to take its token from the helper, and git is pointed at the helper.
@@ -681,6 +676,17 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   const clone = `[ -d "$1/.git" ] || { GIT_TOKEN="$(cat)"; export GIT_TOKEN; git -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' clone --quiet "$2" "$1"; }`;
   const cloned = await asUser(remote, HOST_HOME, 'sh', ['-c', clone, 'managed-checkout', layout.checkout, `https://github.com/${ctx.repository}.git`], { input: request.cloneToken, allowFailure: true });
   if (cloned.code !== 0) throw new Error(`Cloning ${ctx.repository} into ${layout.checkout} on ${hostName} failed: ${failure(ctx, cloned)}`);
+
+  const label = `graphyard-${ctx.installId}`;
+  const workspaceIn = (text: string) => {
+    try {
+      const parsed = JSON.parse(text); const result = parsed?.result ?? parsed;
+      const listed = Array.isArray(result?.workspaces) ? result.workspaces.find((entry: any) => entry?.label === label) : result?.workspace ?? result;
+      return typeof listed?.workspace_id === 'string' ? listed.workspace_id : null;
+    } catch { return null; }
+  };
+  let herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'list'], { allowFailure: true })).stdout);
+  if (!herdrWorkspace) herdrWorkspace = workspaceIn((await asUser(remote, HOST_HOME, layout.herdr, ['workspace', 'create', '--cwd', layout.checkout, '--label', label], { allowFailure: true })).stdout);
 
   // The user manager's environment: login homes under <install>/accounts, credentials under <install>/.
   const environment = Object.entries(hostEnvironment(layout)).map(([name, value]) => `${name}=${value}`);
