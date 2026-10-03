@@ -46,7 +46,7 @@ A closure decides no gate, ends no lease, and stops no process. A profile's conc
 that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
-`blocked` frees the slot; routine [classes](protocol/leases.md#blocked-work-unblocks-itself) self-clear: `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision`; `genuine`/`human-only` need someone.
+`blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
 
 ### System invariants
 
