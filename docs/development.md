@@ -3,13 +3,7 @@
 
 ## Where a new feature goes
 
-- CLI command: `src/cli/` module (`defineCommands`), generated help.
-- HTTP route: `src/server/routes/` module (`defineRoutes`).
-- Schema or gate rule: `src/model/`; commands via `src/engine.ts`, GitHub I/O `src/github.ts`.
-- Table: `defineTable` in `src/store/tables/` (migrations, backups derive).
-- Dashboard view: `web/pages/` page listed in `index.tsx`.
-- Managed `AGENTS.md` text: `src/repository-setup.ts` or `src/master.ts` templates.
-- Protocol topic: `docs/protocol/` page starting `<!-- page: Agent protocol | N | summary -->`.
+CLI commands in `src/cli/`, routes in `src/server/routes/`, rules in `src/model/`, tables in `src/store/tables/`, views in `web/pages/`, `AGENTS.md` text in `src/repository-setup.ts`, protocol topics in `docs/protocol/`.
 
 `tests/hotspots.test.ts` holds each assembler to a size budget.
 
@@ -27,7 +21,7 @@ npm ci && npm run build && npm test
 
 ## Documentation
 
-`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page: link, never restate. Page over cap fails CI; total over only warns; at 97% the loop files one trim item.
+`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page. A page over its cap fails CI; the total only warns, and at 97% the loop files one trim item.
 
 ## Trusted contracts
 

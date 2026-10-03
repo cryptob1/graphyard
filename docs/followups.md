@@ -1,15 +1,15 @@
-<!-- page: Operate Graphyard | 4 | recorded on item until ship, retrieved, promoted. -->
+<!-- page: Operate Graphyard | 4 | held until ship, promoted. -->
 # Review follow-ups
 
 An approval's FOLLOW-UP findings (beyond criteria) are recorded on the item and held until it ships (`pendingFollowUps`), then filed as its one follow-up item; an operator may promote sooner.
 
 ## Recorded on the item and the pull request
 
-The loop records them on the item (`POST /api/work/GY-N/followups`; `followups.recorded`): new findings added (retries duplicate nothing); each thread gets a reply and is resolved; thread-less findings use `Follow-up finding:`; held until ship.
+The loop records them (`POST /api/work/GY-N/followups`; `followups.recorded`) idempotently, replying to and resolving each thread.
 
 ## Filed once the item ships
 
-When delivered (and merge passes required suite), held findings are filed as `Follow-ups from the approved review of GY-N (PR #M)` (`POST /api/work/GY-N/followups` with `{"ship":true}`). Triage judges it in [backlog](master-agent.md#machine-filed-backlog); unshipped items drop on close.
+On delivery, held findings are filed as `Follow-ups from the approved review of GY-N (PR #M)` (`{"ship":true}`), triaged in the [backlog](master-agent.md#machine-filed-backlog).
 
 ## Retrieving a batch
 

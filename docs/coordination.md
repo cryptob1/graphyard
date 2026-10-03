@@ -11,7 +11,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 `plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue), `sync` integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
-Before `worktree GY-N EPOCH` adds the worktree it frees the branch: rework checkouts detach; abandoned session checkouts under `.graphyard/worktrees` abort operations and get removed (`reclaimed`). Leased, dirty, unreadable, or external checkouts are kept. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
+`worktree GY-N EPOCH` frees the branch first, removing abandoned session checkouts (`reclaimed`); leased, dirty or external ones are kept. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
 
 ## Review gate: verdicts, not threads
 

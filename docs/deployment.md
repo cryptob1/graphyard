@@ -17,6 +17,8 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (default 1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (default 2)
 
+Installers derive these from the principals; an unset one is `delegationLimits` drift.
+
 ### CI producer
 
 [CI proofs](github.md#proofs-in-ci) publish via one principal (refused `manual:*`, `e2e:*`):

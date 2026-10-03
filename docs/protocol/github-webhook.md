@@ -13,4 +13,4 @@
 
 ## Automatic dispatch records
 
-`autoDispatch` holds each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) request (`producers`/`review`) with its SHA, base, policy revision and `state`. Approval/trusted evidence → `satisfied`; head/base/policy change, rework, closed PR → `cancelled`. Transitions append `dispatch.requested`/`dispatch.satisfied`/`dispatch.cancelled`; resolved → `autoDispatch.history`. No gate moves.
+`autoDispatch` holds each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) request bound to its candidate; transitions append `dispatch.requested`, `dispatch.satisfied` (approval or trusted evidence) or `dispatch.cancelled` (candidate changed); no gate moves.

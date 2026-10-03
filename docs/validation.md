@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 2 | test cases, runners. -->
 # E2E validation
 
-An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`. Operator (`admin`): definitions, identities, candidates. Runner (`worker` + registration): polls `dispatch`, acks, heartbeats. Builder/collector (`producer` + registration): attest source → artifacts; verify, publish (refused if it attested build).
+An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`. `admin` defines; runners (`worker`) poll, ack and heartbeat; builders and collectors (`producer`) attest and publish, never both for one build.
 
 ## Test cases
 
@@ -9,7 +9,7 @@ An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](
 
 ## Candidates, requests, reports
 
-`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Builders attest source/artifacts; operators create candidates from build attestations.
+`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Operators create candidates from build attestations.
 
 Requests bind observed targets; new manifests supersede. Runners `ack` within 30 s, heartbeat every 20 s until `collection-authority`. Pass: whole-run `matched` target, verified artifacts, settled execution. Recover: `cancel`, `settle` (stop evidence), `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
 

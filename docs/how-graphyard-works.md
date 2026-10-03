@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## Shared project memory
 
-Workers, reviewers and producers start with a role-scoped memory digest (≤500 words): decisions, answers, recurring fault classes with remedies, and recent main merges with files. Updated from applied records (never agent claims), kept in cursor and `.graphyard/project-memory.json`; `master status` reports `projectMemory`.
+Sessions start with a role-scoped digest (≤500 words) of decisions, recurring faults and recent merges, built from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
 
 ## Risk lanes
 
@@ -42,8 +42,4 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub and merges; webhooks wake jobs.
 
-- Gates check `(PR, head SHA, base SHA)` under current policy; changes invalidate evidence.
-- Claims bump the epoch; old-epoch or expired-lease commands refuse.
-- Evidence belongs to its producer; latest trusted record per proof/candidate wins.
-- Append-only history; retries replay 24h.
-- Merges only the authorized candidate; merge is not [delivery](delivery.md).
+Gates bind `(PR, head SHA, base SHA)` and policy; claims bump the epoch; the latest trusted record per proof wins; history is append-only; merge is not [delivery](delivery.md).

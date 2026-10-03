@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 5 | loop, dispatch, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked; never implements, reviews or proves. Human-only: goals, priorities, money, third-party accounts, people's credentials ([who decides](glossary.md#who-decides)); the rest it does itself or via an approver agent, never asking a human to run what an agent may.
+The master (`coordinator`) routes and administers GitHub unasked; never implements, reviews or proves. Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); the rest it does itself or via an approver agent, never asking a human to run what an agent may.
 
 ## Operate
 
-Cycle: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; close finished sessions; verify deployment (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)). Stop only when in-scope items are Done or externally blocked, and merges verified or deployment-blocked. Findings, rework, idle workers and proof setup never stop the loop. `controlPlane.production` flags main ahead of production.
+Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 `master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
 
@@ -15,7 +15,24 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane closes sessions, not the master.** Each dispatch tick (`run.dispatchIntervalSeconds`, default 10, at most 30) sweeps handles: one missed by two consecutive sweeps closes (unobserved ones get 3 minutes; other hosts' handles are left to their loop). `dispatch.sessionReconcile` reports closures: **vanished**, **ended** (agentless or terminal; `idle`, `done`, `blocked` are not), **superseded** (a review or proof for an outdated head) and **duplicate**. A closure decides no gate, ends no lease and stops no process; `sessions.unseen` lists stale handles. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes`, 12h coordination) a session raises attention. For a finished or dead session do nothing (`graphyard master run --once` sweeps); never mark another session's handle finished to free a slot.
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
+
+- **Vanished**: missing from two consecutive listings.
+- **Ended**: agentless pane or terminal state. `idle`, `done` and
+  `blocked` are deliberately not terminal.
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+  way as any other. Implementation sessions are left to the lease.
+- **Duplicate**: the older of two sessions for one role and head.
+
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+another session's handle finished to free a slot.
+
+`blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
 
 ### System invariants
 

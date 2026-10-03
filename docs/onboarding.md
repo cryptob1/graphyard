@@ -1,4 +1,4 @@
-<!-- page: Start here | 3 | machines, accounts, master, first PR. -->
+<!-- page: Start here | 3 | machines, accounts, first PR. -->
 # Onboard a repository
 
 ## 1. Install the control plane
@@ -37,7 +37,7 @@ Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-mo
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: key or login. The host's executor writes a 0600 auth file and smoke-tests it. Strong accounts join worker, reviewer; cheap ones approver, producer; **change** edits roles.
+Settings › **Agents** › **Connect an account** (key or login): the executor writes and smoke-tests a 0600 auth file.
 
 ### Configure the fleet
 
@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--plan NAME` groups accounts under one shared provider quota (`none` clears; inferred when omitted). `--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run. Registry writes (CLI, dashboard, API) refuse pasted keys (known prefix, PEM, JWT, z.ai key, random token); word-and-version model ids are exempt.
+`--plan NAME` groups accounts under one shared provider quota (`none` clears; inferred when omitted). `--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run. Registry writes refuse pasted keys.
 
 ### Add a role
 
@@ -81,7 +81,7 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Per candidate: one review, one producer session per proof group; profile `"concurrency"` caps sessions without a restart. Adding workers: with worker count `W`, `G` proof groups need `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots over ≥2 producer principals; watch `longestWaitMs`.
+Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots (profile `"concurrency"`, applied without a restart); watch `longestWaitMs`.
 
 ## 3. Start the master
 

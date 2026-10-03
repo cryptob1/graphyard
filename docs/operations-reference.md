@@ -27,7 +27,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Flaky CI check
 
-[Rerun](github.md#merge-queue) of a check failing on tip or head keeps position, approval, proofs; second failure, concluded failing rerun or refusal ejects; a passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
+A failing check is [rerun](github.md#merge-queue) once in place (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure ejects, and a passing rerun on that tip lifts the ejection.
 
 ## Accepted evidence turns out to be wrong
 
@@ -117,4 +117,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile reads each live item once per pass, locking its batch rows; contended batches defer to the next tick (warnings past 5 s); stale snapshots retry after two seconds.
+Each pass locks its batch rows; contended batches defer a tick.

@@ -9,7 +9,7 @@ One group per open item (a tile counts and filters it): **Needs you** (yours alo
 
 ## Needs you
 
-`graphyard login` prints the operator's single-use, ten-minute sign-in link; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`; a refused answer keeps the form.
+`graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
 
 ## Workers
 
@@ -19,7 +19,7 @@ Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Co
 
 ## Settings › Agents
 
-**Can launch now?**: per role, yes, or why and when. **Accounts**: grouped under provider plans; first applicable chip: Disabled, No role, Spent, Launch failing (failed smoke test, role hold, start failure within the hour), Unavailable, Working, Idle. **Account details**: **old probe** past an hour; **probe failed** after a failed smoke test. Operator identity ids sit behind **Identifiers**.
+**Can launch now?** per role; **Accounts** by provider plan, each with one state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle).
 
 ## The status sentence
 
@@ -31,4 +31,4 @@ Below the summary: **What is left**; **Requirements** (✓/○); **Pull request*
 
 ## Insights
 
-**Flow**, landed/day, merges/hour, median wait, time spent, [optimistic merges](github.md#optimistic-merges). **Show details**: shipping pulse (`POST /api/production-observations` or `master verify-deployment`), flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**.
+**Flow** (landed/day, merges/hour, waits, [optimistic merges](github.md#optimistic-merges)); **Show details**: shipping pulse (`POST /api/production-observations`), flow analytics. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); `GRAPHYARD_INTERVENTION_PATTERNS=1` files repeats as `bug` items), **Validation**, **Releases**.

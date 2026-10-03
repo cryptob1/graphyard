@@ -36,9 +36,9 @@ Once gated, a speculative tip pushed onto the candidate branch once and `refs/gr
 
 ### Bindings and carry
 
-Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. On republication, the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch; never a person's, a moved head or changed patch.
+Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs; a republished Graphyard tip of the same head and patch keeps its approval.
 
-Before merging, a carried review missing from the PR re-posts the tip's reviewed head's latest approval (`review.carry-refreshed`); with none usable, `mergerefused` clears it and requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention; the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), judged in the high risk lane, applied in low/medium; refusing rework lifts the refusal (`merge.refusal.lifted`). Each action fires once per recovery phase: never retried for good.
+A carried review missing from the PR is re-posted before merging (`review.carry-refreshed`), else `mergerefused` requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention; the loop then clears carried approvals or requests rework (`mergeRefusal.action: rework`; refusing it emits `merge.refusal.lifted`), once per recovery phase.
 
 ### Parallel tips
 
@@ -50,7 +50,7 @@ Before merging, a carried review missing from the PR re-posts the tip's reviewed
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`.github/workflows/ci.yml`: build, docs check, Node and browser suites), under ten minutes. Soak/timing-budget files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance/recovery and the Helm chart run only in `.github/workflows/release-candidate.yml`, on one pinned SHA: each [release candidate](delivery.md#release-candidates), or a dispatched `sha`/`rc-*` tag.
+Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes. Soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run in `.github/workflows/release-candidate.yml` on each [release candidate](delivery.md#release-candidates).
 
 ### Proofs in CI
 

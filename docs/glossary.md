@@ -63,7 +63,7 @@ Role | Held by | May | Never
 
 ## Who decides
 
-The master directly applies non-weakening intent. `graphyard master decide GY-N ACTION REASON`, applied by a separate approver's `graphyard master approve GY-N DECISION REASON`: requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, merges with automatic merging off. Approver ≠ requester, assignee, evidence producer, grantee. Reviewers, producers, merge gate decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
+The master directly applies non-weakening intent. `graphyard master decide GY-N ACTION REASON`, applied by a separate approver's `graphyard master approve GY-N DECISION REASON`: requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, repair-lane merges, triage closures, merges with automatic merging off. The approver is never the requester, assignee or grantee; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
 
 ## Diagram legend
 
