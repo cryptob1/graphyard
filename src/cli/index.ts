@@ -7,6 +7,7 @@ import { workCommands } from './work.js';
 import { policyCommands } from './policy.js';
 import { validationCommands } from './validation.js';
 import { deliveryCommands } from './delivery.js';
+import { releaseCommands } from './release.js';
 import { runnerCommands } from './runner.js';
 import { scenarioCommands } from './scenarios.js';
 import { grantsCommands } from './grants.js';
@@ -21,7 +22,7 @@ import { workspaceCommands } from './workspace.js';
  */
 export const commands: readonly CliCommand[] = [
   ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
-  ...validationCommands, ...deliveryCommands, ...runnerCommands, ...scenarioCommands,
+  ...validationCommands, ...deliveryCommands, ...releaseCommands, ...runnerCommands, ...scenarioCommands,
   ...grantsCommands, ...operatorAgentCommands, ...operatorCommands, ...leaseCommands, ...workspaceCommands,
 ];
 

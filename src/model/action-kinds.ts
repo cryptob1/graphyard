@@ -1,4 +1,5 @@
 import type { ProducerGroup } from './dispatch.js';
+import { endedRuntimeStates } from './sessions.js';
 
 /**
  * The action vocabulary: the kinds themselves, the typed inputs each carries, and where the
@@ -146,6 +147,8 @@ export const workerSlotWaitBoundMs = 30 * 60_000;
  * capacity. A configuration fault (no launch profiles configured or only existing profiles), an unavailable credential, or a
  * profile cooling off after a failed launch is not a wait and stalls on the standard threshold.
  */
+const terminatedAgentStates = new Set([...endedRuntimeStates, 'terminated', 'exited-error']);
+
 export function workerSlotWait(reason: string): boolean {
   const match = reason.match(/^no worker profile can take \S+: (.+)$/);
   if (!match) return false;
@@ -157,7 +160,8 @@ export function workerSlotWait(reason: string): boolean {
   let busyLaunchProfiles = 0;
   for (const [, , r] of entries) {
     if (r === 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process') continue;
-    if (/^(\S+ )?agent \S+ is \S+$/.test(r)) {
+    const statusMatch = r.match(/^(\S+ )?agent \S+ is (\S+)$/);
+    if (statusMatch && !terminatedAgentStates.has(statusMatch[2])) {
       busyLaunchProfiles++;
       continue;
     }
