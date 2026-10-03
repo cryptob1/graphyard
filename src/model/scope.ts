@@ -121,10 +121,24 @@ export interface ScopeImplication { scope: string; kind: 'criteria' | 'documenta
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
  * documentation the repository requires updating for the behaviour those criteria change.
+ * GY-1116: also includes paths named in follow-up findings and description.
  */
-export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes): ScopeImplication[] {
+export function impliedScopes(
+  criteria: readonly ScopeCriterion[],
+  documentation: readonly string[] = documentationScopes,
+  origin?: any,
+  description?: string | null,
+): ScopeImplication[] {
+  const followUpPaths = [
+    ...(origin?.reviewFollowUps?.findings ?? []).flatMap((finding: any) => [
+      ...(finding.path ? [finding.path] : []),
+      ...namedPaths(finding.text),
+    ]),
+    ...(description ? namedPaths(description) : []),
+  ];
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
+    ...followUpPaths.map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
     ...documentation.map(scope => ({ scope, kind: 'documentation' as const, why: `${scope} is documentation this repository requires updating when behaviour changes` })),
   ];
 }
@@ -159,7 +173,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; origin?: any; description?: string | null },
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
@@ -171,7 +185,7 @@ export function decideScopeRequest(
   if (request.remove?.length) return refused(`the request drops planned paths (${request.remove.join(', ')}); only additive scope is decided automatically, and narrowing containment is an operator requirements revision`);
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
-  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
+  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item), item.origin, item.description),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : [])];
   // GY-955: a companion the change inevitably carries — the documentation-budget gate beside a
   // documentation path, the test file named for a criterion's proofs — is implied as well.

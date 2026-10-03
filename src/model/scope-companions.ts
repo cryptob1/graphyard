@@ -7,7 +7,7 @@
 // not optional add-ons" (GY-945, GY-883). These rules ground them per path,
 // so the loop grants them with no approver, and `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
-import { pathScope, pathScopeContains, testFile } from './scope.js';
+import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
 interface CompanionCriterion { id: string; text: string; proofs?: readonly string[] }
 
@@ -67,6 +67,38 @@ export function proofTestFiles(criteria: readonly CompanionCriterion[], layout =
 const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
 
 /**
+ * GY-1116: The module cluster a set of paths and associated text implies:
+ * peer modules, server wiring, and importing tests.
+ */
+export function impliedModuleCluster(paths: readonly string[], text = ''): string[] {
+  const cluster = new Set<string>();
+  for (const path of namedPaths(text)) cluster.add(path);
+  const combined = `${paths.join(' ')} ${text}`;
+
+  // Peer modules:
+  if (paths.some(p => p === 'src/store/store.ts' || p === 'src/engine.ts') || /\b(?:reconcile|coordination-sql|reconcileItemLockSql)\b/.test(combined)) {
+    cluster.add('src/store/coordination-sql.ts');
+  }
+  if (/\b(?:wakeJob|wakeJobs|direct-merge)\b/.test(combined)) {
+    cluster.add('src/direct-merge.ts');
+  }
+
+  // Server wiring & advisory lock registry:
+  if (paths.some(p => p.startsWith('src/store/tables/') || p === 'src/store/tables.ts' || p === 'src/server/main.ts' || p === 'src/store/locks.ts')
+      || /\b(?:CREATE INDEX CONCURRENTLY|ensureRetroIndex|events_retro_id|advisory|locks\.ts|main\.ts)\b/.test(combined)) {
+    cluster.add('src/server/main.ts');
+    cluster.add('src/store/locks.ts');
+  }
+
+  // Importing tests:
+  if (paths.some(p => p === 'src/backup.ts' || p === 'src/store/locks.ts') || /\b(?:restoreDeadlockAttempts|store-locks|40P01)\b/.test(combined)) {
+    cluster.add('tests/store-locks.test.ts');
+  }
+
+  return [...cluster];
+}
+
+/**
  * The ground a requested path stands on as a companion the item's own record implies, or null. These
  * need no file read: the documentation-budget gate, when the ask or the plan holds documentation;
  * the test-duration baseline, when it holds a test file; the test file named for the criteria's proofs (`proofTestFiles`); and a single file under `web/`
@@ -74,7 +106,7 @@ const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
  * these; what needs the base branch — imports, and which proofs a file already holds — is the
  * loop's (`importingTestGround`, `newProofTestGround`).
  */
-export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, ask: readonly string[], documentation: readonly string[]): string | null {
+export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: any; description?: string | null }, ask: readonly string[], documentation: readonly string[]): string | null {
   if (pathScope(path).prefix) return null;
   if (documentationBudgetGate(path)) {
     const documented = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && documentationPath(entry, documentation));
@@ -93,6 +125,29 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
   // The feature a criterion describes in the web UI is a page, component or stylesheet under web/: one file, never the tree.
   const described = path.startsWith('web/') && !testFile(path) ? item.criteria.find(criterion => webUi.test(criterion.text)) : undefined;
   if (described) return `${path} is the web UI ${described.id} describes`;
+
+  // GY-1116: peer modules, server wiring and importing tests implied by the change:
+  const allText = `${item.criteria.map(c => c.text).join(' ')} ${item.description ?? ''} ${(item.origin?.reviewFollowUps?.findings ?? []).map((f: any) => f.text).join(' ')}`;
+  const allPaths = [...ask, ...(item.plannedFiles ?? [])];
+  if (path === 'src/store/coordination-sql.ts' && (allPaths.some(p => p === 'src/store/store.ts' || p === 'src/engine.ts') || /\b(?:reconcile|coordination-sql|reconcileItemLockSql)\b/.test(allText))) {
+    return `${path} is the coordination SQL peer module of ${item.plannedFiles?.find(p => p.includes('store')) ?? 'src/store/store.ts'}`;
+  }
+  if (path === 'src/direct-merge.ts' && (/\b(?:wakeJob|wakeJobs|direct-merge)\b/.test(allText) || allPaths.includes('src/engine.ts'))) {
+    return `${path} is the peer module implementing wakeJob delivery`;
+  }
+  if (path === 'src/server/main.ts' && (allPaths.some(p => p.startsWith('src/store/tables/') || p === 'src/store/tables.ts' || p === 'src/store/locks.ts') || /\b(?:CREATE INDEX CONCURRENTLY|ensureRetroIndex|events_retro_id|main\.ts)\b/.test(allText))) {
+    return `${path} is server wiring for background migrations and index builds`;
+  }
+  if (path === 'src/store/locks.ts' && (allPaths.some(p => p === 'src/server/main.ts' || p.startsWith('src/store/tables/') || p === 'src/backup.ts') || /\b(?:CREATE INDEX CONCURRENTLY|advisory|locks\.ts)\b/.test(allText))) {
+    return `${path} is the advisory-lock registry for cross-replica exclusion`;
+  }
+  if (path === 'tests/store-locks.test.ts' && (allPaths.some(p => p === 'src/backup.ts' || p === 'src/store/locks.ts') || /\b(?:restoreDeadlockAttempts|store-locks|40P01)\b/.test(allText))) {
+    return `${path} is the test file importing src/backup.ts and verifying lock behavior`;
+  }
+  const cluster = impliedModuleCluster(allPaths, allText);
+  if (cluster.includes(path)) {
+    return `${path} is in the implied module cluster (peer module, server wiring or importing test)`;
+  }
   return null;
 }
 
@@ -176,5 +231,12 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
     for (const file of tree) if (timingBaseline(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the test-duration baseline a new test file must be recorded in' });
   if (item.plannedFiles.some(entry => documentationPath(entry, documentation)))
     for (const file of tree) if (documentationBudgetGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the documentation-budget gate a documented change must keep passing' });
+  const allText = item.criteria.map(c => c.text).join(' ');
+  const cluster = impliedModuleCluster(item.plannedFiles, allText);
+  for (const file of cluster) {
+    if (tree.has(file) && !covered(file)) {
+      added.push({ path: file, criterion: null, why: 'the implied module cluster (peer module, server wiring or importing test)' });
+    }
+  }
   return added;
 }

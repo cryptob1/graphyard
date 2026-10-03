@@ -281,15 +281,33 @@ export interface PlannedFilesDerivation {
  * description mentions in prose is not a requirement and adds nothing — and only exact files
  * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
-export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null }, tree: ReadonlySet<string>): PlannedFilesDerivation {
+export function derivePlannedFiles(
+  item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: any; description?: string | null },
+  tree: ReadonlySet<string>,
+): PlannedFilesDerivation {
   const planned = [...new Set(item.plannedFiles ?? [])];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria));
   const added: PlannedFilesDerivation['added'] = [];
+  const followUpPaths = [
+    ...(item.origin?.reviewFollowUps?.findings ?? []).flatMap((finding: any) => [
+      ...(finding.path ? [finding.path] : []),
+      ...namedPaths(finding.text),
+    ]),
+    ...(item.description ? namedPaths(item.description) : []),
+  ];
   for (const criterion of item.criteria) for (const path of namedPaths(criterion.text)) {
     if (!tree.has(path) || planned.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path)) continue;
     added.push({ path, criterion: criterion.id });
   }
-  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria }, tree, itemDocumentationPaths(item))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
+  for (const path of followUpPaths) {
+    if (!tree.has(path) || planned.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path)) continue;
+    added.push({ path, criterion: 'FOLLOWUP' });
+  }
+  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria }, tree, itemDocumentationPaths(item))) {
+    if (!added.some(entry2 => entry2.path === entry.path) && !planned.some(entry2 => pathScopeContains(entry2, entry.path))) {
+      added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
+    }
+  }
   return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
 }
 export function plannedFilesRefusal(missing: readonly string[], base: string) {
