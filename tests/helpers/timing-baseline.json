@@ -248,6 +248,7 @@
     "tests/batch-deadlock.test.ts": 2660,
     "tests/blast-radius.test.ts": 346,
     "tests/blocked-session.test.ts": 1063,
+    "tests/blocker-self-unblock.test.ts": 2200,
     "tests/board-api.test.ts": 3100,
     "tests/bootstrap-policy.test.ts": 3098,
     "tests/candidate-markup.test.ts": 283,
