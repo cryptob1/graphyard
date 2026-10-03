@@ -15,7 +15,7 @@ import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
-import { launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
 
@@ -672,7 +672,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
-  const agents = (herdr ?? []).filter(agent => !released?.some(entry => entry.pane === agent.pane_id && entry.agentName === agent.name));
+  // A released pane is matched by its (pane, name) pair, as the reconcile pass matched it, in the
+  // inventory and in the recorded handles alike (GY-1075): `observeSessions` above read the
+  // inventory before the close, so a running handle on that pane still says running until a later
+  // tick's report closes it, and a profile of one session could not take the freed name this tick.
+  const releasedPanes = new Set((released ?? []).map(entry => `${entry.pane}\0${entry.agentName}`));
+  const isReleased = (pane: string | null | undefined, name: string | null | undefined) => !!pane && !!name && releasedPanes.has(`${pane}\0${name}`);
+  const agents = (herdr ?? []).filter(agent => !isReleased(agent.pane_id, agent.name));
   const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
   // The sessions this tick has started join the inventory at once, so two requests in one tick
   // never both take a profile's last slot. A launcher that does not report its session name is
@@ -691,10 +697,11 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
    * session this host has not listed yet — or one another host launched — holds its profile's slot
    * as surely as a listed pane does, and the record outlives a restart of this loop. A session the
    * sweep above judged over holds nothing: that is what makes a name busy only while a live session
-   * has it, rather than until somebody ends the record by hand (GY-113 AC-2).
+   * has it, rather than until somebody ends the record by hand (GY-113 AC-2). Nor does one on a pane
+   * the review reconcile closed this tick.
    */
   const held = () => snapshot.work.flatMap(item => (item.sessions ?? [])
-    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)))
+    .filter(handle => handle.state === 'running' && !!handle.agentName && !settledHandles.has(sessionHandleKey(item.id, handle.id)) && !isReleased(handle.pane, handle.agentName))
     .map(handle => ({ name: handle.agentName! })));
   // The launchers still see the runtime's own inventory unfiltered: a name the runtime lists at all
   // cannot be taken again, whatever state it is in, and that check is theirs to make.
@@ -919,7 +926,13 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             delete cursor.failures[review.id]; delete cursor.capacity.review;
             tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}), ...(skippedWaits.has(review.id) ? { reason: skippedWaits.get(review.id) } : {}) });
           }
-        } catch (error) { if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error); }
+        } catch (error) {
+          // A request a settled session already answered waits on the control plane reading that
+          // verdict (GY-1083): no launch was refused, so no failure counts against the request.
+          const answered = answeredByPendingReview(error, review);
+          if (answered?.answered) wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); the control plane settles the request once it reads that verdict`);
+          else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
+        }
         await persist();
       }
     }

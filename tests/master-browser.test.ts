@@ -139,7 +139,7 @@ class StubGitHub {
     const path = args[args.indexOf('api') + 1];
     if (path === 'user') return JSON.stringify({ login: 'operator-cli' });
     if (path.endsWith('/protection')) return JSON.stringify({ required_pull_request_reviews: { required_approving_review_count: this.protection.required_approving_review_count, require_last_push_approval: this.protection.require_last_push_approval, dismiss_stale_reviews: this.protection.dismiss_stale_reviews },
-      required_status_checks: { strict: this.protection.strict, checks: this.protection.hasCheck ? [{ context: 'Graphyard / merge', app_id: 1234 }] : [] }, enforce_admins: { enabled: this.protection.enforce_admins }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+      required_status_checks: { strict: this.protection.strict, checks: this.protection.hasCheck ? [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] : [] }, enforce_admins: { enabled: this.protection.enforce_admins }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
     throw new Error(`stub API has no route ${path}`);
   };
 }
