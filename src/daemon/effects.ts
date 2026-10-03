@@ -235,14 +235,14 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    */
   sessionOutput?: (agent: HerdrAgent) => string | null | Promise<string | null>;
   /**
-   * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the
-   * prompt's non-destructive answer into the session's pane; `promptSession` then gives it the one
-   * instruction to carry on with a safe alternative. A loop wired without them never answers a
-   * prompt, and fails an attempt blocked on one once it has stood for `blockedPromptFailMs`.
+   * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the prompt's
+   * non-destructive answer into the session's pane; `promptSession` then gives it the one instruction to carry on
+   * with a safe alternative. Without them a prompt is never answered, and the attempt fails after `blockedPromptFailMs`.
    */
   answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
+  blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
@@ -558,7 +558,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // that follows lands in the runtime's input rather than in the closing menu.
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
-    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
+    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
