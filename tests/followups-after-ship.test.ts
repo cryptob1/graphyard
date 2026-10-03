@@ -10,7 +10,7 @@ import { fileFollowUpThreads, followUpItem, type AppendFollowUpFindings, type Cr
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
 import { repeatedClientErrorLimit } from '../src/retry-stop.js';
 import { followUpEntries, followUpParent, openFollowUpItem, overdueTriage, type TriageJudgement } from '../src/model/machine-backlog.js';
-import { pendingFollowUpsReport } from '../src/model/followups-held.js';
+import { foldUnshippedFollowUps, followUpShipKey, pendingFollowUpsReport } from '../src/model/followups-held.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { clearTriageRuns, triageSettled, triageStep, triageTool } from '../src/triage.js';
 import { researchSettings } from '../src/research.js';
@@ -270,4 +270,86 @@ test('unit:one-open-followup-any-stage — three approvals of a parent whose fol
   assert.deepEqual(after.map(item => item.key), [existing.key], 'still one open follow-up item');
   assert.equal(followUpEntries(after[0]!).at(-1)?.text, 'src/d.ts — recorded on the parent');
   assert.equal((await reload(parent.key)).pendingFollowUps?.filed?.item, existing.key);
+});
+
+test('manual:review-followups-triaged GY-1047.1: foldUnshippedFollowUps skips items with an active lease so worker attempts are not ended without notice (findings 4 & 13)', () => {
+  const at = '2026-10-02T12:00:00.000Z', now = new Date(at);
+  const unshippedParent: Work = {
+    id: 'parent-1', key: 'GY-100', title: 'Parent', stage: 'build', type: 'task', priority: 2,
+    dependencies: [], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: true, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '',
+  } as unknown as Work;
+  const leasedFollowUp: Work = {
+    id: 'followup-1', key: 'GY-101', title: 'Follow-up under lease', stage: 'build', type: 'chore', priority: 2,
+    dependencies: ['parent-1'], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: true, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 1, lease: { owner: 'worker-1', epoch: 1, expiresAt: '2026-10-02T12:05:00.000Z' },
+    workspaces: [{ host: 'host-1', path: '/tmp/w', branch: 'b', epoch: 1, at, createdBy: 'worker-1' }],
+    candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
+    observation: null, blocker: null, gates: [], violations: [], description: '1. Finding with no thread: src/a.ts — fix needed',
+    origin: { reviewFollowUps: { parent: 'GY-100', findings: [{ path: 'src/a.ts', text: 'src/a.ts — fix needed' }] } },
+  } as unknown as Work;
+  const unleasedFollowUp: Work = {
+    id: 'followup-2', key: 'GY-102', title: 'Follow-up not leased', stage: 'backlog', type: 'chore', priority: 2,
+    dependencies: ['parent-1'], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: false, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '1. Finding with no thread: src/b.ts — fix needed',
+    origin: { reviewFollowUps: { parent: 'GY-100', findings: [{ path: 'src/b.ts', text: 'src/b.ts — fix needed' }] } },
+  } as unknown as Work;
+
+  const result = foldUnshippedFollowUps([unshippedParent, leasedFollowUp, unleasedFollowUp], 'migration-actor', now);
+  // Leased follow-up is skipped:
+  assert.equal(leasedFollowUp.stage, 'build');
+  assert.equal(leasedFollowUp.closure, undefined);
+  // Unleased follow-up is folded:
+  assert.equal(unleasedFollowUp.stage, 'done');
+  assert.equal(unleasedFollowUp.closure?.kind, 'superseded');
+  assert.equal(result.folded.length, 1);
+  assert.equal(result.folded[0]!.work.key, 'GY-102');
+});
+
+test('manual:review-followups-triaged GY-1047.2: foldUnshippedFollowUps resolves parents via key map in O(n) time (finding 22)', () => {
+  const at = '2026-10-02T12:00:00.000Z', now = new Date(at);
+  const parents = Array.from({ length: 10 }, (_, i) => ({
+    id: `parent-${i}`, key: `GY-${100 + i}`, title: `Parent ${i}`, stage: 'review', type: 'task', priority: 2,
+    dependencies: [], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: true, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '',
+  } as unknown as Work));
+  const followUps = Array.from({ length: 10 }, (_, i) => ({
+    id: `followup-${i}`, key: `GY-${200 + i}`, title: `Follow-up ${i}`, stage: 'backlog', type: 'chore', priority: 2,
+    dependencies: [`parent-${i}`], criteria: [], plannedFiles: ['src/a.ts'], policy: { checks: ['test'], review: true },
+    ready: false, revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: `1. Finding: src/${i}.ts`,
+    origin: { reviewFollowUps: { parent: `GY-${100 + i}`, findings: [{ path: `src/${i}.ts`, text: `src/${i}.ts — fix` }] } },
+  } as unknown as Work));
+
+  const all = [...parents, ...followUps];
+  const result = foldUnshippedFollowUps(all, 'migration-actor', now);
+  assert.equal(result.folded.length, 10);
+  assert.equal(result.parents.length, 10);
+  for (const parent of parents) {
+    assert.equal(parent.pendingFollowUps?.findings.length, 1);
+  }
+});
+
+test('manual:review-followups-triaged GY-1047.3: followUpShipKey incorporates the hold timestamp to prevent receipt replay on re-held findings after ship (findings 1, 9, 16, 18, 23, 25)', () => {
+  const parentWithoutHold = { key: 'GY-500', pendingFollowUps: null };
+  assert.equal(followUpShipKey(parentWithoutHold), 'followups-after-ship:GY-500');
+
+  const t1 = '2026-10-02T10:00:00.000Z';
+  const parentWithFirstHold = { key: 'GY-500', pendingFollowUps: { at: t1, findings: [{ path: 'src/a.ts', text: 'finding 1' }] } };
+  assert.equal(followUpShipKey(parentWithFirstHold as any), `followups-after-ship:GY-500:${t1}`);
+
+  const t2 = '2026-10-02T14:30:00.000Z';
+  const parentWithSecondHold = { key: 'GY-500', pendingFollowUps: { at: t2, findings: [{ path: 'src/b.ts', text: 'finding 2' }] } };
+  assert.equal(followUpShipKey(parentWithSecondHold as any), `followups-after-ship:GY-500:${t2}`);
+
+  // The keys for the first and second holds differ, ensuring the second ship does not replay the first receipt
+  assert.notEqual(followUpShipKey(parentWithFirstHold as any), followUpShipKey(parentWithSecondHold as any));
 });
