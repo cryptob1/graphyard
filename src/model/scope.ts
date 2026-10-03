@@ -196,19 +196,20 @@ export function decideScopeRequest(
   // GY-955: a companion the change inevitably carries — the documentation-budget gate beside a
   // documentation path, the test file named for a criterion's proofs — is implied as well.
   const documentation = options.documentation ?? itemDocumentationPaths(item);
-  const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation); return why ? { scope: path, kind: 'companion', why } : null; };
+  const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation); return why ? { scope: path, kind: path === timingBaselinePath ? 'timing-companion' : 'companion', why } : null; };
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) ?? companion(path) }));
   const outside = matched.filter(entry => !entry.by).map(entry => entry.path);
   if (outside.length) return refused(`${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} outside what this item's own criteria and the repository's documentation rule imply; an operator decides scope the item does not already carry`);
+  const companions = matched.filter(entry => entry.by!.kind === 'timing-companion').map(entry => entry.path);
+  const widening = paths.filter(path => !companions.includes(path));
   // An implied ask no fold can represent under the plannedFiles cap is refused, never applied or
   // routed: the schemas hold the same bound, and no narrower fold exists to grant instead (GY-630).
   // The refusal names the action that can carry it (GY-906): a requirements revision whose
   // plannedFiles can fold or split the ask under the cap — the plain union `master scope` posts is
   // refused by that same bound, so it can never carry an ask this refusal answered.
-  const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
+  const folded = collapsePlannedFiles(item.plannedFiles ?? [], widening, collapseArea(item)).plannedFiles;
   if (folded.length > plannedFilesMax)
     return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); decide it with graphyard master requirements GY-N FILE REASON, whose plannedFiles can fold or split the ask under the cap — a plain union of exact paths is refused by the same bound`);
-  const companions = matched.filter(entry => entry.by!.kind === 'timing-companion').map(entry => entry.path);
   return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}${companions.length ? `; ${companions.join(', ')} stays outside plannedFiles, so only the lines of this item's own test files may change there` : ''}`, paths, companions };
 }
 
