@@ -18,6 +18,7 @@ import { Refusal, isClosed, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus } from '../src/master/dispatch.js';
 import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
+import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
@@ -52,7 +53,7 @@ import { queuePlacement } from '../src/merge-queue.js';
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
 import { followUpEntries, followUpParent, hasShipped } from '../src/model/machine-backlog.js';
 import { repeatedClientErrorLimit } from '../src/retry-stop.js';
-import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, clock, protectionOnlyCheck, statusContext, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
 import { itemLane, lanes, laneSpeedTargets } from '../src/model/policy.js';
@@ -1098,7 +1099,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // ---- GY-811: the containment day. The work snapshot takes 6 s to read, as it does on a loaded
   // ---- plane, so its own bound is wider than the 5 s tolerance and cannot settle; the loop bounds its clock with the light
   // ---- timed HEAD / instead, which fails, then answers slowly, then answers fast as the day goes on.
-  const fenced = { drift: 0, probes: [] as { cycle: number; elapsed: number; phase: 'fail' | 'slow' | 'fast' }[], assessable: new Set<number>(), liveOnly: new Set<number>(), bare: new Set<number>(),
+  const fenced = { drift: 0, probes: [] as { cycle: number; elapsed: number; phase: 'fail' | 'slow' | 'fast' }[], assessable: new Set<number>(), liveOnly: new Set<number>(), graced: new Set<number>(), bare: new Set<number>(),
     settled: [] as { key: string; epoch: number; elapsed: number }[], assessed: [] as { key: string; epoch: number; elapsed: number; refusals: string[] }[] };
   if (options.containment) {
     const phases = options.containment;
@@ -1108,9 +1109,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await slowRead(3_000);
       const result = await read();
       await slowRead(3_000);
-      // What this cycle's reclaim step will see: a quarantine it may assess, only live ones, or none.
+      // What this cycle's reclaim step will see: a quarantine that could settle (past its grace
+      // window), one still in its grace window, only live ones, or none.
       const at = Date.parse(result.now), local = containmentQuarantines(result.work, config.hostId);
-      if (local.some(item => containmentPhase(item, at)?.state !== 'live')) fenced.assessable.add(cycles);
+      if (local.some(item => containmentPhase(item, at)?.state === 'lapsed')) fenced.assessable.add(cycles);
+      else if (local.some(item => containmentPhase(item, at)?.state === 'grace')) fenced.graced.add(cycles);
       else if (local.length) fenced.liveOnly.add(cycles);
       else fenced.bare.add(cycles);
       return result;
@@ -1666,6 +1669,15 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
+  // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
+  // the union gate, the batch verdicts and the window view read a protection-only check all day.
+  // A final observation taken before CI reported on its head carries no runs and is not judged.
+  assert.ok(final.every(item => item.observation?.requiredChecks?.some(check => check.name === protectionOnlyCheck && check.appId === null)
+    && (!item.observation.checks.length || item.observation.checks.some(run => run.name === protectionOnlyCheck && run.result === 'success')))
+    && final.filter(item => item.observation!.checks.length).length >= basePlan.items - 1, `every delivery passed the protection-only ${protectionOnlyCheck} check`);
+  assert.ok(final.every(item => item.observation?.requiredChecks?.some(check => check.name === statusContext && check.appId === null)
+    && (!item.observation.checks.length || item.observation.checks.some(run => run.name === statusContext && run.source === 'status' && run.result === 'success'))),
+    `every delivery passed the status-sourced ${statusContext} context`);
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
@@ -1827,6 +1839,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
     assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
   }
   assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
+  // GY-887: the landability verdict rode every observation as the one `graphyard/landable` run per
+  // head, written only when the verdict changed, at a bounded request cost, and every head GitHub
+  // merged carried its success.
+  const landableHeads = [...github.landable.entries()];
+  const landableRequests = (kind: string) => github.landableRequests.filter(request => request.kind === kind).length;
+  assert.ok(landableHeads.length >= basePlan.items, `every candidate head carried the landability verdict (${landableHeads.length} heads)`);
+  assert.deepEqual(landableHeads.filter(([, runs]) => runs.length !== 1).map(([head]) => head), [], 'one standing graphyard/landable run per head, updated in place');
+  assert.deepEqual(landableHeads.filter(([, runs]) => runs[0].writes > 5).map(([head, runs]) => `${head.slice(0, 12)} ${runs[0].writes}`), [], 'no head is rewritten in a loop: only a changed verdict is written');
+  assert.equal(landableRequests('post'), landableHeads.length, 'each head\'s run was created once');
+  assert.ok(github.landableRequests.length <= 2 * cycles, `publishing the verdict costs a bounded number of requests (${github.landableRequests.length} over ${cycles} cycles)`);
+  for (const merge of github.merges) {
+    const head = github.prs.get(merge.pr)!.head;
+    assert.equal(github.landable.get(head)?.[0]?.body.conclusion, 'success', `${merge.key}'s merged head ${head.slice(0, 12)} carried a landable success`);
+  }
   // The diagnostician (GY-439) rode the same day. The three held-job windows recur past the
   // threshold, so the loop files the class's one recurring item and diagnoses it within the cycle
   // that files it, and the day's own churn (the dead workers' leases, the delivery budget) recurs
@@ -2699,8 +2725,9 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   assert.deepEqual(lost, [], 'no lease was lost: a dead worker lapses and its fence waits for the loop');
   assert.deepEqual(final.filter(item => item.containmentQuarantine).map(item => item.key), [], 'no fence outlives the day');
 
-  // Probe volume is bounded: at most one timed read a cycle, exactly one in each cycle with an
-  // assessable quarantine, and none in a cycle whose quarantines are all live or that has none.
+  // Probe volume is bounded: at most one timed read a cycle, exactly one in each cycle with a
+  // quarantine past its grace window, and none in a cycle whose quarantines are all live or still in
+  // grace, or that has none (GY-1044).
   const perCycle = new Map<number, number>();
   for (const probe of fenced.probes) perCycle.set(probe.cycle, (perCycle.get(probe.cycle) ?? 0) + 1);
   assert.deepEqual([...perCycle.values()].filter(count => count > 1), [], 'never more than one timed read in a cycle');
@@ -2708,6 +2735,7 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
   assert.deepEqual([...fenced.assessable].filter(cycle => !perCycle.has(cycle)), [], 'every cycle with an assessable quarantine read the clock');
   assert.ok(fenced.liveOnly.size > 30, `many cycles held only live workers' fences, and read no clock (${fenced.liveOnly.size})`);
   assert.ok(fenced.bare.size > 0, 'cycles with no fence at all read no clock');
+  assert.ok(fenced.graced.size > 0, `cycles whose fences were at most in their grace window read no clock (${fenced.graced.size})`);
   const lastSettled = Math.max(...fenced.settled.map(entry => entry.elapsed));
   assert.deepEqual(fenced.probes.filter(probe => probe.elapsed > lastSettled).map(probe => probe.elapsed / minute), [], `no read after the last fence settled, for the rest of the day's ${cycles} cycles`);
   for (const phase of ['fail', 'slow', 'fast'] as const) assert.ok(fenced.probes.some(probe => probe.phase === phase), `the fences stood through ${phase} reads`);
@@ -2724,11 +2752,13 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     const settled = fenced.settled.filter(entry => entry.key === key);
     assert.equal(settled.length, 1, `${key}: the dead attempt's fence settled exactly once: ${JSON.stringify(fenced.settled)}`);
     assert.ok(settled[0].elapsed >= slowUntil && settled[0].elapsed <= slowUntil + 3 * minute, `${key}: it settled within the first cycles of fast reads (+${Math.round(settled[0].elapsed / minute)} min)`);
-    // Each cause of the standing fence was escalated once: the round trip a read measured changes
-    // every cycle, and a new number for the same cause is no new escalation.
+    // Each cause of the standing fence was escalated once: the round trip a read measured, and
+    // whether the timed or the snapshot read measured it, change from cycle to cycle, and neither
+    // is a new cause (GY-1044) — the failing and the slow reads are one unbounded clock.
     const escalated = escalations.filter(detail => detail.startsWith(`${key}: containment quarantine from epoch 1 `));
-    assert.ok(escalated.length >= 2 && escalated.length <= 4, `${key}: the standing fence was escalated once per cause, not once per cycle: ${escalated.length}`);
-    assert.equal(new Set(escalated.map(unmeasured)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
+    assert.ok(escalated.length >= 1 && escalated.length <= 3, `${key}: the standing fence was escalated once per cause, not once per cycle: ${escalated.length}`);
+    assert.ok(escalated.some(detail => /control-plane clock took \d+ms round trip/.test(detail)), `${key}: the unbounded clock was escalated: ${JSON.stringify(escalated)}`);
+    assert.equal(new Set(escalated.map(containmentRefusalCause)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
     assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key}: delivered by the attempt after the settled one`);
   }
 });
