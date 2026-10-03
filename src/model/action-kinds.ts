@@ -127,11 +127,53 @@ export function describeObservationJob(job: ObservationJobState | null | undefin
 export const observationWaitBoundMs = 30 * 60_000;
 
 /**
+ * How long a dispatch may wait for an available worker profile before a `dispatch` waiting for a
+ * slot is stalled rather than waiting (GY-1108).
+ *
+ * When all launch profiles are occupied by active agent sessions (working, done or idle awaiting
+ * teardown) or reserved by concurrent dispatches, the attempt has nowhere to place the work until
+ * a running session finishes and its slot frees. The bound matches the liveness rule for any wait
+ * on an external event (`livenessWaitBoundMs`, src/model/liveness.ts): a wait that outlasts it
+ * stalls again.
+ */
+export const workerSlotWaitBoundMs = 30 * 60_000;
+
+/**
+ * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
+ *
+ * When every healthy profile is reserved by another dispatch, or configured launch profiles are busy
+ * with active agent sessions (alongside any profiles dedicated to unsupervised observation), the refusal is a wait for
+ * capacity. A configuration fault (no launch profiles configured or only existing profiles), an unavailable credential, or a
+ * profile cooling off after a failed launch is not a wait and stalls on the standard threshold.
+ */
+export function workerSlotWait(reason: string): boolean {
+  const match = reason.match(/^no worker profile can take \S+: (.+)$/);
+  if (!match) return false;
+  const detail = match[1];
+  if (detail.startsWith('every healthy profile is reserved by another dispatch')) return true;
+  if (detail === 'no launch profile is configured') return false;
+  const entries = [...detail.matchAll(/([a-zA-Z0-9._-]+) \(([^)]+)\)/g)];
+  if (!entries.length) return false;
+  let busyLaunchProfiles = 0;
+  for (const [, , r] of entries) {
+    if (r === 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process') continue;
+    if (/^(\S+ )?agent \S+ is \S+$/.test(r)) {
+      busyLaunchProfiles++;
+      continue;
+    }
+    return false;
+  }
+  return busyLaunchProfiles > 0;
+}
+
+/**
  * The bound of a failure reason that names a handoff still in progress — the attempt did its part
  * and waits for the effect another component is bound to deliver — or null for any other reason.
  * A run of such failures is a stall only once it outlasts the bound (`actionStall`); a held job, a
  * failed job or a missing one is not in progress, and stalls on the ordinary threshold.
  */
 export function handoffWaitBound(reason: string): number | null {
-  return reason.includes(`${resyncUnobservedPrefix}; ${observationJobScheduled};`) ? observationWaitBoundMs : null;
+  if (reason.includes(`${resyncUnobservedPrefix}; ${observationJobScheduled};`)) return observationWaitBoundMs;
+  if (workerSlotWait(reason)) return workerSlotWaitBoundMs;
+  return null;
 }
