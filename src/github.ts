@@ -748,8 +748,8 @@ export class GitHub {
    * What one provider response says about the budget. A 304 costs nothing — GitHub does not charge
    * a conditional read it answers from the caller's own ETag — so it is counted as a request made
    * and not as budget spent, which is the whole reason an unchanged candidate is cheap to observe.
-   * Only installation requests report the budget this class is spending; App-level calls
-   * (`/app`, token refresh) are counted as requests against a different allowance.
+   * Only installation REST requests report and charge the budget this class is spending; App-level
+   * calls (`/app`, token refresh) and GraphQL are counted as requests against their own allowances.
    */
   private record(path: string, response: Response, tracked: boolean, now = Date.now(), charged = true, token: string | null = null, method = 'GET') {
     const resource = response.headers.get('x-ratelimit-resource');
@@ -769,6 +769,9 @@ export class GitHub {
     if (response.status === 304 || !charged || response.status === 429 || response.status === 403 && remaining === 0) return;
     // A measured stretch is an observation job the pace started; every other request is spend the pace must leave room for.
     if (tracked && token !== null) this.budgets.charge(token, now, !!meter);
+    // The billable ledger is the REST core allowance the limit reads (GY-1052): GraphQL spends its
+    // own point budget and App-level calls their own allowance, so neither is charged against it.
+    if (!tracked || path === '/graphql' || resource && resource !== 'core') return;
     const charge = { at: now, kind: requestKind(path), endpoint: requestEndpoint(method, path) };
     this.charges.push(charge);
     this.chargeLedger?.charge(now, charge.endpoint, charge.kind);
@@ -1100,9 +1103,13 @@ export class GitHub {
   }
   private async apiRequest(path: string, method = 'GET', body?: unknown): Promise<any> {
     if (method === 'GET' && immutableRead(path)) return this.immutableRequest(path);
-    // A ref this adapter moves itself ends the shared base-ref read (GY-806): the next observation reads the new tip.
-    if (method !== 'GET' && /\/(git\/refs|merges$|pulls\/\d+\/merge$)/.test(path)) this.sharedRef = null;
-    return this.send(path, method, body, true);
+    // A ref this adapter moves itself ends the shared base-ref read (GY-806), a head-bound GraphQL
+    // merge included (GY-1052): the next observation reads the new tip. It ends once the write has
+    // answered too, so an observation that read the ref while the write was in flight is not shared on.
+    const movesRef = method !== 'GET' && (/\/(git\/refs|merges$|pulls\/\d+\/merge$)/.test(path) || path === '/graphql' && (body as { query?: unknown } | undefined)?.query === headBoundMergeMutation);
+    if (movesRef) this.sharedRef = null;
+    try { return await this.send(path, method, body, true); }
+    finally { if (movesRef) this.sharedRef = null; }
   }
   /**
    * A commit by SHA or a compare of two exact SHAs (GY-806): asked of GitHub once, then served from
@@ -2967,6 +2974,18 @@ async function boundedMap<T, R>(items: T[], limit: number, run: (item: T) => Pro
  * other item is woken at once by a webhook naming it, so its timer is only a backstop.
  */
 export const headObservationSeconds = 20;
+/**
+ * The merge band: the items observed every `headObservationSeconds`, an authorized merge-stage item
+ * or the merge-queue head. One definition serves the release's cadence and the poll skip
+ * (GY-1052), so a skip never defers an item the release would observe at the merge cadence. It is
+ * narrower than the claim band (`max(mergeBatchSize, parallelTips)`), which orders claims only:
+ * entries behind the head poll at the active cadence, and a skip defers them no longer than that.
+ */
+async function inMergeBand(work: Work | undefined, queue: () => Promise<Work[]>, now = Date.now()) {
+  if (!work || work.stage !== 'merge') return false;
+  if (mergeAuthorized(work)) return true;
+  return !!work.queue && queuePlacement(work, await queue(), now)?.position === 0;
+}
 export const idleObservationSeconds = 300;
 /**
  * How old an observation may be and still serve the merge gate: the freshness the publication
@@ -3123,14 +3142,25 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
   // A job an observation webhook made due is claimed ahead of all of it by `takeJob` itself (GY-806).
   const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
-  const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
+  // One instant places the queue for both the claim order and the skip's band (GY-1052), so the two
+  // never disagree about an entry whose placement turns on a deadline.
+  const placedAt = Date.now();
+  const job = await engine.store.takeJob(observationClaimOrder(all, band, placedAt, budgetTight(github.budget?.())), observationHeadCount(all, band));
   if (!job) return false;
   const viaWebhook = job.webhook === true;
   // A poll of an item a webhook-driven observation refreshed within its poll interval is skipped
   // (GY-806): nothing is asked of GitHub, and the job is due again when that interval ends. A job
   // woken by a state change or a webhook is never skipped. The refresh is the job row's, so the
   // replica that claims the poll need not be the one that made the refresh.
-  const refreshedUntil = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until ? new Date(job.refreshed_until).getTime() : null;
+  // The band is read again at skip time (GY-1052): an item that entered the merge band since the
+  // refresh is observed at the merge cadence, not left until the longer interval the refresh used.
+  // A skip re-reads the claimed item after the claim, so an item that entered the band between
+  // the pre-claim snapshot and `takeJob` is not deferred for one more interval. The re-read is
+  // targeted: the item by its id, and the live queue entries only when its queue position decides.
+  const skippable = !job.woken && !viaWebhook && job.refreshed && job.refreshed_until
+    && !await inMergeBand(all.find(entry => entry.id === job.work_id), async () => all, placedAt);
+  const refreshedUntil = skippable && !await inMergeBand(await engine.store.workItem(job.work_id), () => engine.store.queuedWork(), placedAt)
+    ? new Date(job.refreshed_until!).getTime() : null;
   if (refreshedUntil !== null) {
     await engine.store.deferJob(job.work_id, job.token, new Date(refreshedUntil).toISOString(), `poll skipped: a webhook refreshed this item; next poll ${new Date(refreshedUntil).toISOString()}`, null);
     return true;
@@ -3361,7 +3391,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     // unchanged candidate, never shortens it.
     // An authorized head GitHub may merge at any moment is observed at the same cadence, so the
     // record before its merge always carries a fresh observation to attribute the delivery from.
-    const head = !settled && !held && work?.stage === 'merge' && (mergeAuthorized(work) || queuePlacement(work, await engine.store.list(), Date.now())?.position === 0);
+    const head = !settled && !held && await inMergeBand(work, () => engine.store.queuedWork());
     const cadence = schedule.cadence && (head ? { ...schedule.cadence, band: 'merge' as const, ms: headObservationSeconds * 1000 }
       : { ...schedule.cadence, band: schedule.cadence.band === 'merge' ? 'active' as const : schedule.cadence.band, ms: Math.max(idleObservationSeconds * 1000, schedule.cadence.ms) });
     if (cadence && work) github.recordObservation?.(work.id, { requests, uncached, band: cadence.band, cadenceMs: cadence.ms });

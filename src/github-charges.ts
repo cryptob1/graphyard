@@ -66,7 +66,8 @@ SELECT $1, $2, to_timestamp(m / 1000.0), e, k, n FROM unnest($3::bigint[], $4::t
 ON CONFLICT (installation, instance, minute, endpoint) DO UPDATE SET requests = github_charges.requests + EXCLUDED.requests`,
       [this.installation, this.instance, batch.map(entry => entry.minute), batch.map(entry => entry.endpoint), batch.map(entry => entry.kind), batch.map(entry => entry.requests)]);
       written = true;
-      const since = new Date(Math.floor((now - windowMs) / 60_000) * 60_000 + 60_000);
+      // The minute the window starts in is counted whole (GY-1052): at most a minute over, never under the hour.
+      const since = new Date(Math.floor((now - windowMs) / 60_000) * 60_000);
       const rows = (await this.pool.query(`SELECT endpoint, kind, sum(requests)::int AS requests, count(DISTINCT instance)::int AS instances FROM github_charges
 WHERE installation=$1 AND instance<>$2 AND minute >= $3 GROUP BY GROUPING SETS ((endpoint, kind), ())`, [this.installation, this.instance, since])).rows;
       this.others = rows.filter(row => row.endpoint !== null).map(row => ({ endpoint: String(row.endpoint), kind: String(row.kind), requests: Number(row.requests) }));
@@ -89,9 +90,10 @@ WHERE installation=$1 AND instance<>$2 AND minute >= $3 GROUP BY GROUPING SETS (
       }
     }
   }
-  /** Stop the timer and write what is queued. */
+  /** Stop the timer, finish a sync already running and write what is queued, a batch it failed included. */
   async close() {
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (this.syncing) await this.syncing;
     if (this.pending.size) await this.sync();
   }
 }
