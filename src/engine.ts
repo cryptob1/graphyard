@@ -586,10 +586,13 @@ export class Engine {
    * within the visibility bound (GY-1096), read by the integration job outside any transaction:
    * `waiting` (queued or running) keeps holding the failure and names the runner-queue wait,
    * `failed` is the rerun concluding failing, `rerequested` is the one further request made for a
-   * rerun not found at all, and `refused` or `expired` let the failure stand.
+   * rerun not found at all, and `refused` or `expired` let the failure stand. `recancelled` is a
+   * rerun asked again after GitHub cancelled its attempt (GY-1109), spending the cancelled allowance
+   * named in `detail`; it is written like every other outcome, under the item's lock and over the
+   * revision it read, so a heartbeat that committed meanwhile is never overwritten (GY-1124).
    */
   async recordCheckRerunProbe(id: string, jobToken: string, rerun: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome:
-    { kind: 'waiting'; status: string } | { kind: 'failed'; conclusion: string } | { kind: 'rerequested'; runId: number; attempt?: number } | { kind: 'refused' | 'expired'; detail: string }) {
+    { kind: 'waiting'; status: string } | { kind: 'failed'; conclusion: string } | { kind: 'rerequested'; runId: number; attempt?: number } | { kind: 'recancelled'; runId: number; attempt?: number; detail: string } | { kind: 'refused' | 'expired'; detail: string }) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
@@ -602,6 +605,7 @@ export class Engine {
       const next: CheckRerun = outcome.kind === 'waiting' ? { ...current, probedAt: at, waiting: current.waiting?.status === outcome.status ? current.waiting : { status: outcome.status, at } }
         : outcome.kind === 'failed' ? { ...current, state: 'failed', probedAt: at, detail: `its workflow run concluded ${outcome.conclusion}`, resolvedAt: at }
         : outcome.kind === 'rerequested' ? { ...current, runId: outcome.runId, ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), probedAt: at, rerequestedAt: at, waiting: undefined }
+        : outcome.kind === 'recancelled' ? { ...current, runId: outcome.runId, ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), detail: outcome.detail, probedAt: at, waiting: undefined }
         : { ...current, state: outcome.kind, probedAt: at, detail: outcome.detail, resolvedAt: at };
       work.checkReruns = work.checkReruns!.map((entry, position) => position === index ? next : entry).slice(-checkRerunLimit);
       // A wait whose status is unchanged is not a new fact: it refreshes the probe without a ledger entry.
@@ -614,7 +618,7 @@ export class Engine {
       this.evaluate(work, all, now);
       await this.recordEjection(db, work, all, queuedBefore, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, 'github', `check.rerun.${outcome.kind}`, now, next);
+      await save(db, work, 'github', `check.rerun.${outcome.kind === 'recancelled' ? 'requested' : outcome.kind}`, now, next);
       return work;
     }, { itemLock: id });
   }
@@ -2273,8 +2277,24 @@ export class Engine {
    * the batch is deferred — its items owed to the next pass — and this pass continues, so
    * sustained writes cannot starve the server steps that follow reconciliation. Between batches
    * the locks are released and the event loop runs, so a renewal waits at most one batch.
+   *
+   * Passes never overlap in one engine (GY-1124): the kept view is shared engine state, and a
+   * batch mutates its documents before it commits, so a second pass must neither evaluate against
+   * that uncommitted state nor have its view cleared by the first pass's failure. A call made while
+   * a pass runs waits for it and then runs one fresh pass, shared by every caller that arrived in
+   * the meantime, so a request that reconciles after its own write (`resyncWork`) still sees it.
    */
-  async reconcile() {
+  reconcile(): Promise<void> {
+    if (!this.reconcileRunning) {
+      this.reconcileRunning = this.reconcilePass().finally(() => { this.reconcileRunning = null; });
+      return this.reconcileRunning;
+    }
+    this.reconcileQueued ??= this.reconcileRunning.catch(() => {}).then(() => { this.reconcileQueued = null; return this.reconcile(); });
+    return this.reconcileQueued;
+  }
+  private reconcileRunning: Promise<void> | null = null;
+  private reconcileQueued: Promise<void> | null = null;
+  private async reconcilePass() {
     const tickStarted = performance.now();
     const fleet = this.reconcileView;
     let all: Work[] = [], candidates: string[] = [], next = 0, contended = 0, documentsRead = 0, evaluated = 0, full = false, wroteFace = false;

@@ -138,6 +138,34 @@ test('unit:per-item-locking a heartbeat committing between renewClaimedAction re
   }
 });
 
+test('unit:per-item-locking a cancelled rerun asked again while a heartbeat renews the item keeps the renewal', { timeout: 60_000 }, async () => {
+  const work = await claimed(workers[5]);
+  const failedRunId = 9_001, at = new Date().toISOString();
+  const rerun = { sha: 'a'.repeat(40), check: 'test', failedRunId, state: 'requested', at, runId: 7_001, attempt: 1, detail: 'cancelled:0' };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document, '{checkReruns}', jsonb_build_array($2::jsonb)) WHERE id=$1", [work.id, JSON.stringify(rerun)]);
+  const token = randomUUID();
+  await store.pool.query("INSERT INTO jobs(work_id, token, locked_until) VALUES($1, $2, now() + interval '90 seconds') ON CONFLICT (work_id) DO UPDATE SET token=$2, locked_until=now() + interval '90 seconds'", [work.id, token]);
+  // The heartbeat starts once the probe has read the item and is evaluating it, before it writes.
+  const original = engine.evaluate.bind(engine);
+  let renewal: Promise<Work> | undefined;
+  engine.evaluate = (item: Work, all: Work[], now: Date) => {
+    if (item.id === work.id && !renewal) renewal = heartbeat(workers[5], work);
+    return original(item, all, now);
+  };
+  try {
+    const recorded = await engine.recordCheckRerunProbe(work.id, token, rerun, { kind: 'recancelled', runId: 7_002, attempt: 2, detail: `cancelled:1:${at}` });
+    assert.ok(renewal, 'the heartbeat ran while the probe held the item');
+    const renewed = await renewal!;
+    assert.equal(recorded.checkReruns![0].runId, 7_002, 'the rerun asked again is recorded');
+    const stored = (await store.list()).find(item => item.id === work.id)!;
+    assert.equal(stored.lease!.expiresAt, renewed.lease!.expiresAt, 'the renewal survived the rerun write');
+    assert.equal(stored.checkReruns![0].runId, 7_002, 'and the rerun write survived the renewal');
+    assert.match(stored.checkReruns![0].detail ?? '', /^cancelled:1:/);
+  } finally {
+    engine.evaluate = original;
+  }
+});
+
 test('unit:per-item-locking commands that read fleet state still serialise on the fleet lock', { timeout: 60_000 }, async () => {
   const holder = hold({ fleetLock: true });
   await holder.taken;

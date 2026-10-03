@@ -120,7 +120,7 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) share one pace per token. Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, review requests 15+ min stale, never-observed, due, waits, sessions. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
-Heartbeats lock only their item; other commands lock the fleet, then the item. Reconcile rereads rows whose `xmin` moved, evaluating those, everything after a non-renewal change, and all every `GRAPHYARD_RECONCILE_FULL_MS` (default 10000). Contended batches back off, then defer; deferrals and ticks over 5 s warn.
+Heartbeats lock only their item; other commands lock fleet, then item. Reconcile rereads and evaluates rows whose `xmin` moved, all after a non-renewal change, and all every `GRAPHYARD_RECONCILE_FULL_MS` (10000). Passes never overlap. Contended batches back off, then defer; deferrals and ticks over 5 s warn.
 
 ### Concurrent reconciliation
 
