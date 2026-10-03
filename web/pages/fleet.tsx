@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { capabilityTiers, fleetRoles, looksLikeSecret, quotaStates, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
+import { capabilityTiers, fleetRoles, groupAccountsByPlan, looksLikeSecret, quotaStates, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
 import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
@@ -120,17 +120,78 @@ export const policyText = (policy: RolePolicy | undefined) => {
 export const StatusChip = ({ status }: { status: AccountStatus }) =>
   <span className={`status-chip tone-${chipTones[status.chip]}`} data-chip={status.chip}>{status.label}</span>;
 
-/** Every registry account in one table: its one status, why, when it is back, and what it serves (GY-978 AC-1). */
+/** Every registry account in one table, grouped under its provider plan with usage bars per window (GY-1121). */
 export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number }) {
+  const plans = fleet.plans && fleet.plans.length > 0
+    ? fleet.plans
+    : groupAccountsByPlan({ accounts: fleet.accounts }, now);
+  const seen = new Set<string>();
+
   return <table className="flow-data agents-table" aria-label="Accounts at a glance"><thead><tr><th>Account</th><th>Status</th><th>Why</th><th>Back</th><th>Roles</th><th>Runs</th></tr></thead>
-    <tbody>{fleet.accounts.map(account => { const status = accountStatus(account, fleet, now); return <tr key={account.name} data-account-row={account.name} data-status={status.chip}>
-      <th scope="row">{account.name}</th>
-      <td data-label="Status"><StatusChip status={status}/></td>
-      <td data-label="Why" className="why">{status.reason}</td>
-      <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
-      <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
-      <td data-label="Runs">{account.runtime} · {account.model}</td>
-    </tr>; })}</tbody></table>;
+    {plans.map(plan => <tbody key={plan.id || plan.name} data-plan-group={plan.name}>
+      <tr className="plan-header-row" data-plan={plan.name}>
+        <th colSpan={6} className="plan-header">
+          <div className="plan-header-content">
+            <span className="plan-name" data-plan-name={plan.name}>{plan.name}</span>
+            <div className="plan-usage" data-plan-usage={plan.name}>
+              {plan.usage.reported && plan.usage.windows.length > 0 ? (
+                plan.usage.windows.map(win => (
+                  <div
+                    key={win.window}
+                    className="usage-bar-container"
+                    data-window={win.window}
+                    title={`${win.window}: ${win.percent}% used${win.resetsAt ? `, resets ${when(win.resetsAt)}` : ''}`}
+                  >
+                    <span className="usage-window-label">{win.window}</span>
+                    <div className="usage-bar-track" role="progressbar" aria-valuenow={win.percent} aria-valuemin={0} aria-valuemax={100} aria-label={`${win.window} usage`}>
+                      <div
+                        className={`usage-bar-fill ${win.percent >= 90 ? 'danger' : win.percent >= 75 ? 'warn' : 'ok'}`}
+                        style={{ width: `${Math.min(100, Math.max(0, win.percent))}%` }}
+                      />
+                    </div>
+                    <span className="usage-window-stats">
+                      {win.percent}% used{win.resetsAt ? ` · resets ${countdown(win.resetsAt, now)}` : ''}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <span className="usage-not-reported" data-not-reported>
+                  {plan.usage.reason || `usage not reported by ${plan.name}`}
+                </span>
+              )}
+            </div>
+          </div>
+        </th>
+      </tr>
+      {plan.accounts.map(accountName => {
+        seen.add(accountName);
+        const account = fleet.accounts.find(entry => entry.name === accountName);
+        if (!account) return null;
+        const status = accountStatus(account, fleet, now);
+        return <tr key={account.name} data-account-row={account.name} data-status={status.chip}>
+          <th scope="row">{account.name}</th>
+          <td data-label="Status"><StatusChip status={status}/></td>
+          <td data-label="Why" className="why">{status.reason}</td>
+          <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
+          <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
+          <td data-label="Runs">{account.runtime} · {account.model}</td>
+        </tr>;
+      })}
+    </tbody>)}
+    {fleet.accounts.filter(a => !seen.has(a.name)).length > 0 && <tbody>
+      {fleet.accounts.filter(a => !seen.has(a.name)).map(account => {
+        const status = accountStatus(account, fleet, now);
+        return <tr key={account.name} data-account-row={account.name} data-status={status.chip}>
+          <th scope="row">{account.name}</th>
+          <td data-label="Status"><StatusChip status={status}/></td>
+          <td data-label="Why" className="why">{status.reason}</td>
+          <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
+          <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
+          <td data-label="Runs">{account.runtime} · {account.model}</td>
+        </tr>;
+      })}
+    </tbody>}
+  </table>;
 }
 
 /** Per role: can it launch now, and when it cannot, why and the earliest time it can (GY-978 AC-2). */
@@ -333,10 +394,11 @@ export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, '
         <label>Audit reason<input name="reason" required placeholder="Recording the model and its price"/></label>
         <button disabled={busy}>Save model</button>
       </form>
-      <form className="grant-form" aria-label="Add or change an account" onSubmit={submit(() => 'agent-registry/accounts', form => ({ account: { name: field(form, 'name'), runtime: field(form, 'runtime'), model: field(form, 'model'), credential: { host: field(form, 'host'), home: optional(form, 'home'), ...(optional(form, 'keyFile') ? { key: { file: field(form, 'keyFile'), variable: field(form, 'keyVariable') } } : {}) }, maxSessions: amount(form, 'maxSessions') }, reason: field(form, 'reason') }))}>
+      <form className="grant-form" aria-label="Add or change an account" onSubmit={submit(() => 'agent-registry/accounts', form => ({ account: { name: field(form, 'name'), runtime: field(form, 'runtime'), model: field(form, 'model'), plan: optional(form, 'plan'), credential: { host: field(form, 'host'), home: optional(form, 'home'), ...(optional(form, 'keyFile') ? { key: { file: field(form, 'keyFile'), variable: field(form, 'keyVariable') } } : {}) }, maxSessions: amount(form, 'maxSessions') }, reason: field(form, 'reason') }))}>
         <label>Account<input name="name" required placeholder="claude-b"/></label>
         <label>Runtime<select name="runtime" required>{fleet.runtimes.map(runtime => <option key={runtime.name}>{runtime.name}</option>)}</select></label>
         <label>Model<select name="model" required>{fleet.models.map(model => <option key={model.name}>{model.name}</option>)}</select></label>
+        <label>Provider plan (optional)<input name="plan" placeholder="Claude, Codex, Z.AI, etc."/></label>
         <label>Host that holds the login<input name="host" required defaultValue={fleet.accounts[0]?.host ?? ''} placeholder="build-host-1"/></label>
         <label>Login home on that host<input name="home" placeholder="/home/agent/.coding_agents/claude-b"/></label>
         <label>API key file in that home (a name, never the key)<input name="keyFile" placeholder="zai.key"/></label>
