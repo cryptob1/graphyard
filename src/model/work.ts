@@ -100,7 +100,7 @@ export interface Candidate { sha: string; baseSha: string; pr: number; branch: s
 export interface ScopeFile {
   path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
   previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
-  baseSha?: string | null; previousBaseSha?: string | null;
+  baseSha?: string | null; previousBaseSha?: string | null; /** Timing-baseline companion verdict (GY-1023), from both versions' contents. */ companion?: { allowed: boolean; detail: string };
 }
 export interface Observation {
   clockOffset?: { min: number; max: number };
