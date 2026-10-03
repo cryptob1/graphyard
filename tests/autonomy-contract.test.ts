@@ -151,7 +151,10 @@ test('unit:every-role-carries-autonomy-contract — worker, reviewer, producer, 
 
 test('unit:every-runtime-non-interactive-or-refused — every kind agentKindSchema accepts has a no-approval launch recipe or is refused before launch, naming the runtime', async () => {
   const kinds = agentKindSchema.options;
-  for (const kind of ['pi', 'gemini', 'copilot', 'qwen']) assert.ok(nonInteractiveLaunch[kind], `${kind} has a recipe`);
+  for (const kind of ['pi', 'gemini', 'copilot', 'qwen', 'agy']) assert.ok(nonInteractiveLaunch[kind], `${kind} has a recipe`);
+  // Antigravity takes its first request interactively and approves tools through one flag.
+  assert.equal(launchRequestContracts.agy('REQ'), '--prompt-interactive REQ');
+  assert.deepEqual(nonInteractiveLaunch.agy.args, ['--dangerously-skip-permissions']);
   assert.deepEqual(Object.keys(nonInteractiveLaunch).filter(kind => !(kinds as readonly string[]).includes(kind)), [], 'every recipe is for an accepted kind');
   const directory = await temporaryDirectory('autonomy-refused');
   try {
