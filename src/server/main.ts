@@ -80,33 +80,47 @@ export async function main(options: MainOptions = {}) {
   // mutation that could act on unvalidated state is refused with a retryable 503, and the
   // observation workers and production watch are not started. A failed attempt is logged and the
   // reconciliation tick retries it.
-  let ready = false, validating = false, prepared = false;
+  let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
+  let validationTask: Promise<void> | null = null;
   const services: typeof http.services & { readiness?: boolean } = http.services;
   services.readiness = false;
   const runStartupValidation = async () => {
-    if (ready || validating) return;
+    if (ready || validating || closing) return;
     validating = true;
-    try {
-      if (!prepared) {
-        mark('production.load'); await production.load().catch(error => console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'));
-        // One-time materialization of the deployment allowlist. Operators manage proof authority
-        // inside Graphyard from here on; a later environment edit no longer changes authority.
-        mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
-        if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
-        mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
-        prepared = true;
+    const task = (async () => {
+      try {
+        if (!prepared) {
+          mark('production.load'); await production.load().catch(error => { if (!closing) console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'); });
+          if (closing) return;
+          // One-time materialization of the deployment allowlist. Operators manage proof authority
+          // inside Graphyard from here on; a later environment edit no longer changes authority.
+          mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
+          if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
+          if (closing) return;
+          mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
+          prepared = true;
+        }
+        if (closing) return;
+        mark('validation.expireArtifacts'); await validation.expireArtifacts();
+        if (closing) return;
+        mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
+        if (closing) return;
+        ready = true; services.readiness = true;
+        startBackground();
+      } catch (error) {
+        if (!closing) console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
+      } finally {
+        validating = false;
+        validationTask = null;
       }
-      mark('validation.expireArtifacts'); await validation.expireArtifacts();
-      mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
-      ready = true; services.readiness = true;
-      startBackground();
-    } catch (error) {
-      console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
-    } finally { validating = false; }
+    })();
+    validationTask = task;
+    await task;
   };
   const startBackground = () => {
+    if (closing) return;
     // The production watch runs beside the tick, never in it: a deploy used to hold the tick for
     // minutes while it re-compared every delivery (GY-186), and observations and merges stalled behind it.
     // Incidents it raises land in the ledger and in /api/status, and are announced here once each.
@@ -162,7 +176,8 @@ export async function main(options: MainOptions = {}) {
   void runStartupValidation();
 
   const close = async () => {
-    reconciliation.stop(); watching?.stop(); await observing?.stop();
+    closing = true;
+    reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null;
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
     await Promise.resolve(githubCache?.close());

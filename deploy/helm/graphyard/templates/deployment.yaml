@@ -51,7 +51,7 @@ spec:
             {{- include "graphyard.configEnvFrom" . | nindent 12 }}
           readinessProbe:
             # /healthz?ready answers 503 until startup validation completes; liveness stays plain /healthz.
-            httpGet: { path: /healthz?ready, port: http }
+            httpGet: { path: "/healthz?ready", port: http }
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:

@@ -237,3 +237,19 @@ test('unit:startup-validation-failure-retried — a startup validation failure i
     Validation.prototype.reconcile = origReconcile;
   }
 });
+
+test('close during startup validation stops cleanly without launching background work', async () => {
+  const origExpire = Validation.prototype.expireArtifacts;
+  const origReconcile = Validation.prototype.reconcile;
+  try {
+    Validation.prototype.expireArtifacts = async () => new Promise<number>(resolve => setTimeout(() => resolve(0), 5000));
+    const instance = await main({ port: 0 });
+    assert.equal(instance.isReady(), false);
+    await instance.close();
+    assert.equal(instance.isReady(), false);
+  } finally {
+    Validation.prototype.expireArtifacts = origExpire;
+    Validation.prototype.reconcile = origReconcile;
+  }
+});
+
