@@ -367,7 +367,7 @@ test('unit:deployment-source-is-a-release — failed attempts never hide the rel
     let unreadable: number | null = null, broken = false;
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const page = /\/deployments\?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
+      const page = /\/deployments\?(?:environment=[^&]*&)?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
       if (page) { const size = Number(page[1]), number = Number(page[2]); return listing(listed.slice((number - 1) * size, number * size)); }
       const asked = statusRead(args);
       if (asked) {
@@ -424,7 +424,7 @@ test('unit:deployment-source-is-a-release — records that are not releases neve
     const pages: number[] = [], statuses: string[] = [];
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const page = /\/deployments\?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
+      const page = /\/deployments\?(?:environment=[^&]*&)?per_page=(\d+)&page=(\d+)$/.exec(args[1]);
       if (page) { const size = Number(page[1]), number = Number(page[2]); pages.push(number); return listing(listed.slice((number - 1) * size, number * size)); }
       const asked = statusRead(args);
       if (asked) { statuses.push(...asked.map(String)); return statusAnswer(asked, () => 'success'); }
@@ -438,4 +438,158 @@ test('unit:deployment-source-is-a-release — records that are not releases neve
     assert.equal(observation.requests, 3, 'two listing pages and one status read');
     assert.ok(observation.requests! <= maxDeploymentRequests);
   } finally { delete process.env.GRAPHYARD_PRODUCTION_ENVIRONMENT; await rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+/** GitHub's deployment listing as the API pages it, honouring the `environment=` filter unless told to ignore it. */
+function pagedListing(records: { id: number; environment: string }[], options: { honourFilter: boolean; listings: string[] }) {
+  return (path: string) => {
+    const page = /\/deployments\?(?:environment=([^&]*)&)?per_page=(\d+)&page=(\d+)$/.exec(path);
+    if (!page) return null;
+    options.listings.push(path);
+    const environment = page[1] === undefined ? null : decodeURIComponent(page[1]);
+    const size = Number(page[2]), number = Number(page[3]);
+    const shown = environment !== null && options.honourFilter ? records.filter(record => record.environment === environment) : records;
+    return listing(shown.slice((number - 1) * size, number * size));
+  };
+}
+
+test('unit:deployment-observation-environment-filter — 600 CI reporting deployments newer than production\'s release do not hide it: the observation reads the production environment\'s listing, and the unfiltered listing reproduces the 2026-10-02 refusal', async () => {
+  const fixture = await deliveredHistory(3);
+  try {
+    await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const release = fixture.shas[2];
+    // As on 2026-10-02: the graphyard-reporting environment's per-branch CI records, 100+ an hour,
+    // all newer than the successful production release (deployment 6804095387 of 14ebe09097).
+    const records = [...Array.from({ length: 600 }, (_, index) => ({ id: 20_000 + index, sha: 'b'.repeat(40), ref: `graphyard/gy-${index}-1`, environment: 'graphyard-reporting' })),
+      { id: 6804095387, sha: release, ref: release, environment: 'graphyard / production' }];
+    const listings: string[] = [], statuses: number[][] = [];
+    const options = { honourFilter: true, listings };
+    const page = pagedListing(records, options);
+    const run = (command: string, args: string[]) => {
+      if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const listed = page(args[1]);
+      if (listed !== null) return listed;
+      const asked = statusRead(args);
+      if (asked) { statuses.push(asked); return statusAnswer(asked, () => 'success'); }
+      throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
+    };
+    const configured = config(fixture.token, { run: { productionEnvironment: 'graphyard / production' } });
+    const observe = () => observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+
+    const observation = await observe();
+    assert.equal(observation.source, 'github-deployment');
+    assert.equal(observation.sha, release, 'the production release behind 600 reporting records');
+    assert.deepEqual(observation.pending, []);
+    assert.deepEqual(listings, ['repos/owner/project/deployments?environment=graphyard%20%2F%20production&per_page=100&page=1'], 'one page of the production environment\'s listing');
+    assert.deepEqual(statuses, [[6804095387]]);
+    assert.equal(observation.requests, 2);
+
+    // The old code path read the unfiltered listing: a GitHub that ignores the filter serves exactly
+    // that, and the observation refuses as master verify-deployment GY-1046 was refused at 08:12.
+    listings.length = 0; statuses.length = 0; options.honourFilter = false;
+    const unfiltered = await observe();
+    assert.equal(unfiltered.source, 'unavailable');
+    assert.equal(unfiltered.sha, null);
+    assert.deepEqual(unfiltered.deployed, []);
+    assert.match(unfiltered.reason!, /^None of the newest 500 GitHub deployment\(s\) is a successful graphyard \/ production release of the managed base branch, and older ones are past the 5-page read bound/);
+    assert.equal(listings.length, deploymentListingPages);
+    assert.deepEqual(statuses, [], 'no reporting record is ever asked about');
+
+    // The filter is the configured whole identity: unconfigured, the production environment's listing
+    // is empty, and one unfiltered page names the Railway environment to configure (a hint only:
+    // here the release is within that page).
+    listings.length = 0; options.honourFilter = true; records.splice(0, 550);
+    const unconfigured = await observeDeployment(config(fixture.token), fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    assert.equal(unconfigured.source, 'unavailable');
+    assert.match(unconfigured.reason!, /deployments to 'graphyard \/ production' are not the 'production' environment — name the one production serves with graphyard master config productionEnvironment='graphyard \/ production'/);
+    assert.deepEqual(listings, ['repos/owner/project/deployments?environment=production&per_page=100&page=1', 'repos/owner/project/deployments?per_page=100&page=1']);
+    assert.equal(unconfigured.requests, 2);
+    assert.ok(unconfigured.requests! <= maxDeploymentRequests);
+    // With nothing named like production anywhere, the reason says the environment records nothing.
+    const empty = await observeDeployment(config(fixture.token), fixture.delivered, (command, args) => command === 'git' ? run(command, args) : '[]', fetch, () => clock, { root: fixture.checkout });
+    assert.match(empty.reason!, /records no GitHub deployment to the production environment/);
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+test('unit:deployment-observation-inactive-release — the newest production deployment that reached success and was later marked inactive is the served release; one superseded by a newer success, or behind a failed, unreadable or other-branch attempt, stays fail-closed', async () => {
+  const fixture = await deliveredHistory(3);
+  try {
+    await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const [old, mid, release] = fixture.shas;
+    type Status = { latest: string; history: string[] } | null;
+    let records: { id: number; sha: string; ref: string; environment: string }[] = [];
+    let status: Record<number, Status> = {};
+    const run = (command: string, args: string[]) => {
+      if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      const listed = pagedListing(records, { honourFilter: true, listings: [] })(args[1]);
+      if (listed !== null) return listed;
+      const asked = statusRead(args);
+      if (asked) {
+        assert.match(args[3], /statuses\(first: \d+\) \{ nodes \{ state \} \}/, 'the read asks for each deployment\'s status history');
+        // GitHub lists a deployment's statuses newest first.
+        return JSON.stringify({ data: { nodes: asked.map(id => { const value = status[id]; return value ? { databaseId: id, latestStatus: { state: value.latest.toUpperCase() }, statuses: { nodes: value.history.map(state => ({ state: state.toUpperCase() })) } } : null; }) } });
+      }
+      throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
+    };
+    const configured = config(fixture.token, { run: { productionEnvironment: 'graphyard / production' } });
+    const observe = () => observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
+    const production = (id: number, sha: string, ref = sha) => ({ id, sha, ref, environment: 'graphyard / production' });
+    // Railway's sequence on 2026-10-02: 14ebe09097 success at 08:07, inactive at 08:10, nothing newer.
+    const deactivated = { latest: 'inactive', history: ['inactive', 'success', 'in_progress', 'queued'] };
+
+    records = [{ id: 50, sha: 'b'.repeat(40), ref: 'graphyard/gy-1-1', environment: 'graphyard-reporting' }, production(3, release), production(2, mid)];
+    status = { 3: deactivated, 2: deactivated };
+    const served = await observe();
+    assert.equal(served.source, 'github-deployment');
+    assert.equal(served.sha, release, 'the newest production deployment, succeeded then marked inactive, is what production serves');
+    assert.deepEqual(served.pending, []);
+    assert.match(served.reason!, /graphyard \/ production deployment 3 reached success and was later marked inactive with no newer graphyard \/ production deployment/);
+    // Today's active success is unchanged and says nothing about inactivity.
+    status = { 3: { latest: 'success', history: ['success'] }, 2: deactivated };
+    assert.equal((await observe()).reason, null);
+
+    // Superseded: a newer successful production deployment is the release, never the older one.
+    records = [production(4, mid), production(3, release)];
+    status = { 4: { latest: 'success', history: ['success', 'in_progress'] }, 3: deactivated };
+    const superseded = await observe();
+    assert.equal(superseded.sha, mid, 'the newer success (here a rollback to an older commit) is served, not the deactivated release');
+    assert.deepEqual(superseded.pending, ['GY-3']);
+    // The newer one deactivated too: it is still the newest, so it is served, the older one not.
+    status[4] = deactivated;
+    assert.equal((await observe()).sha, mid);
+
+    // A newer failed attempt: the deactivated release behind it is not asserted.
+    records = [production(4, release), production(3, mid), production(2, old)];
+    status = { 4: { latest: 'failure', history: ['failure', 'in_progress'] }, 3: deactivated, 2: deactivated };
+    const behindFailure = await observe();
+    assert.equal(behindFailure.source, 'unavailable');
+    assert.deepEqual(behindFailure.deployed, []);
+    assert.match(behindFailure.reason!, /No GitHub deployment of the managed base branch to the graphyard \/ production environment reports a successful status/);
+    // But an older release still active behind the failed attempt is served, as today.
+    status[2] = { latest: 'success', history: ['success'] };
+    assert.equal((await observe()).sha, old);
+
+    // A newer attempt whose status is unread: nothing older is taken.
+    status = { 3: deactivated, 2: deactivated };
+    const unread = await observe();
+    assert.equal(unread.source, 'unavailable');
+    assert.match(unread.reason!, /status of graphyard \/ production deployment 4 could not be read/);
+
+    // A newer production record that is not a release (another branch): the deactivated release is not asserted.
+    records = [production(5, 'c'.repeat(40), 'graphyard/gy-7-1'), production(3, release)];
+    status = { 3: deactivated };
+    assert.equal((await observe()).source, 'unavailable');
+
+    // Inactive without ever reaching success is never a release.
+    records = [production(3, release)];
+    status = { 3: { latest: 'inactive', history: ['inactive', 'error'] } };
+    assert.equal((await observe()).source, 'unavailable');
+
+    // A newer production record a page earlier counts as newer too.
+    records = [...Array.from({ length: deploymentPageSize }, (_, index) => production(10_000 + index, release)), production(3, mid)];
+    status = Object.fromEntries(records.map(record => [record.id, record.id === 3 ? deactivated : { latest: 'failure', history: ['failure'] }]));
+    const paged = await observe();
+    assert.equal(paged.source, 'unavailable', 'the deactivated release on page two is behind 100 newer attempts');
+    assert.equal(paged.requests, 4);
+  } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
