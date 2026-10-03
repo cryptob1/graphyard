@@ -1,65 +1,62 @@
-import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
-import { isDelivered } from '../model/closure.js';
-import { appendedDescription, foldFollowUpBatch, followUpAppendSchema, followUpEntries, followUpParent, followUpPromotedEvent, followUpPromoteSchema, followUpRecordedEvent, mergeDuplicateFollowUps, mergeFollowUpEntries, triageRecordSchema, untriaged, type FollowUpBatch, type FollowUpBatchRow, type FollowUpEntry } from '../model/machine-backlog.js';
+import { isClosed, isDelivered } from '../model/closure.js';
+import { foldFollowUpBatch, followUpAppendSchema, followUpEntries, followUpParent, followUpPromotedEvent, followUpPromoteSchema, followUpRecordedEvent, mergeDuplicateFollowUps, mergeFollowUpEntries, openFollowUpItem, triageRecordSchema, untriaged, type FollowUpBatch, type FollowUpBatchRow, type FollowUpEntry } from '../model/machine-backlog.js';
+import { holdFollowUps, releasePromotedFollowUp } from '../model/followups-held.js';
 import { save } from '../store.js';
 import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
+import { appendToItem, masterOnly, migrateToParents, readAll, recordDispatch, shipFollowUps, type Db } from './followups-ship.js';
 import type { Services } from './routes.js';
 
 // The control plane's half of the machine-filed backlog (GY-402): a later approval's findings
 // appended to the parent's one follow-up item, the one-time migration of the duplicates filed
 // before that, the triage agent's judgement recorded on an item, and a triage closure applied once
-// an approver agreed. See model/machine-backlog.ts.
-
-type Db = pg.PoolClient;
-const readAll = async (db: Db): Promise<Work[]> => (await db.query('SELECT document FROM work_items ORDER BY number FOR UPDATE')).rows.map(row => row.document);
-const recordDispatch = (services: Services, db: Db, work: Work, now: Date) =>
-  (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
-/** The master's identities: its coordinator, its operator agent (holding `intent:create`), or an admin. */
-function masterOnly(actor: Principal, work: Work | undefined, services: Services, what: string) {
-  demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), `Only the master (coordinator or operator agent) or an admin may ${what}`, 403);
-  if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work, services.repository);
-}
+// an approver agreed. Follow-ups held until their parent ships: followups-ship.ts. See model/machine-backlog.ts.
 
 /**
- * `POST /api/work/ID/followups`: record one approval's non-blocking findings (GY-896). On an item
- * that is not a follow-up item — the approved item itself — they are recorded against its own
- * record as a `followups.recorded` event naming its pull request and head, keeping only those its
- * batch does not already hold by path and finding text; no work item is created, and the batch
- * waits for an operator to promote a finding (`promoteFollowUp`). On an open legacy follow-up item
- * (GY-402) they are appended to it as before; a closed or delivered one is refused with 409
- * "not an open follow-up item". An approval whose every finding is already held changes nothing.
+ * `POST /api/work/ID/followups`: record one approval's non-blocking findings. On an item that is
+ * not a follow-up item — the approved item itself — with `parent`, as the loop sends them, they go to
+ * its open follow-up item in any stage (GY-845); otherwise they are recorded against its own record as
+ * a `followups.recorded` event naming its pull request and head (GY-896) and held on it until it
+ * ships (`pendingFollowUps`, GY-845), keeping only those its batch does not already hold by path and
+ * finding text. No work item is created then; a parent closed without shipping takes none. On an
+ * open legacy follow-up item (GY-402) they are appended to it; a closed or delivered one is refused
+ * with 409 "not an open follow-up item". An approval whose every finding is already held changes
+ * nothing. A body with `ship` files a delivered parent's held findings as its one follow-up item
+ * (`shipFollowUps`).
  */
 export async function appendFollowUps(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  if (body && typeof body === 'object' && 'ship' in body) return shipFollowUps(services, caller, id, body, key);
   const data = followUpAppendSchema.parse(body);
   const fingerprint = digest({ id, followups: data });
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as { key: string; added: number };
     const all = await readAll(db);
-    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    let work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     masterOnly(actor, work, services, 'append review follow-ups');
-    const parent = followUpParent(work!);
-    if (!parent) {
-      const batch = await followUpBatch(db, work!);
-      const { findings, added } = mergeFollowUpEntries(batch.findings, data.findings as FollowUpEntry[]);
-      if (added.length) await save(db, work!, actor.id, followUpRecordedEvent, now,
-        { pr: work!.candidate?.pr ?? null, sha: work!.candidate?.sha ?? null, findings: added, offered: data.findings.length, reason: data.reason });
-      const result = { key: work!.key, added: added.length, findings: findings.length };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
+    let result: Record<string, unknown> | null = null;
+    if (data.parent || !followUpParent(work!)) {
+      const approved = work!, open = data.parent ? openFollowUpItem(all, approved.key) : undefined;
+      if (open) work = open;
+      else if (isClosed(approved)) result = { key: approved.key, added: 0, findings: 0, dropped: approved.pendingFollowUps?.dropped?.reason ?? `${approved.key} was closed without shipping, so its follow-ups are dropped` };
+      else {
+        const batch = await followUpBatch(db, approved);
+        const { findings, added } = mergeFollowUpEntries(batch.findings, data.findings as FollowUpEntry[]);
+        if (added.length) {
+          holdFollowUps(approved, added, now);
+          await save(db, approved, actor.id, followUpRecordedEvent, now,
+            { pr: approved.candidate?.pr ?? null, sha: approved.candidate?.sha ?? null, findings: added, offered: data.findings.length, reason: data.reason });
+        }
+        result = { key: approved.key, added: added.length, findings: findings.length };
+      }
     }
-    demand(work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
-    const { findings, added } = mergeFollowUpEntries(followUpEntries(work!), data.findings as FollowUpEntry[]);
-    if (added.length) {
-      work!.origin = { ...work!.origin, reviewFollowUps: { parent: parent!, findings } };
-      work!.description = appendedDescription(work!.description ?? '', added, `Added by a later approval of ${parent} (${data.reason.slice(0, 300)}):`);
-      services.engine.evaluate(work!, all, now);
-      await recordDispatch(services, db, work!, now);
-      await save(db, work!, actor.id, 'followups.appended', now, { parent, added: added.length, offered: data.findings.length, reason: data.reason });
+    if (!result) {
+      const parent = followUpParent(work!);
+      demand(parent && work!.stage !== 'done', `${work!.key} is not an open follow-up item`, 409);
+      const { findings, added } = await appendToItem(services, db, actor, work!, parent!, data.findings as FollowUpEntry[], `Added by a later approval of ${parent} (${data.reason.slice(0, 300)}):`, all, now, { reason: data.reason, offered: data.findings.length });
+      result = { key: work!.key, added: added.length, findings: findings.length };
     }
-    const result = { key: work!.key, added: added.length, findings: findings.length };
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
@@ -142,7 +139,9 @@ export async function promoteFollowUp(services: Services, caller: Principal, id:
       ?? await services.engine.execute(caller, 'create', null, input, `followup-promote:${work.id}:${index}`.slice(0, 200)) as Work;
     await store.transaction(async (db, now) => {
       const current = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document as Work;
-      await save(db, current, actor.id, followUpPromotedEvent, now, { index, key: created.key, path: finding!.path, text: finding!.text });
+      // Promoted, the finding no longer waits on the parent to ship (GY-845): the filing takes the rest.
+      const released = !parentKey && releasePromotedFollowUp(current, finding!);
+      await save(db, current, actor.id, followUpPromotedEvent, now, { index, key: created.key, path: finding!.path, text: finding!.text, ...(released ? { released: true } : {}) });
     });
     return { promoted, item: created, duplicate: false };
   } finally {
@@ -163,9 +162,12 @@ export async function migrateFollowUps(services: Services, caller: Principal, ke
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     masterOnly(actor, undefined, services, 'migrate review follow-ups');
-    const replay = await receipt(db, actor, key, digest({ migrate: 'followups' })); if (replay) return replay;
     const previous = (await db.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq LIMIT 1', [followUpMigrationEvent])).rows[0]?.payload;
-    if (previous) return { ...previous, already: true };
+    // The GY-845 fold runs once the GY-402 merge is on record, on the loop's next ask, ahead of the
+    // receipt: the loop asks under the one key it always used, whose receipt predates the fold.
+    const parents = previous ? await migrateToParents(services, db, actor, now) : null;
+    const replay = await receipt(db, actor, key, digest({ migrate: 'followups' })); if (replay) return parents ? { ...replay, parents } : replay;
+    if (previous) return { ...previous, already: true, parents };
     const all = await readAll(db);
     const { merged, survivors, closed } = mergeDuplicateFollowUps(all, actor.id, now);
     for (const item of closed) {
