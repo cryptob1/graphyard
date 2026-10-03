@@ -1721,6 +1721,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
     assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
   }
   assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
+  // GY-887: the landability verdict rode every observation as the one `graphyard/landable` run per
+  // head, written only when the verdict changed, at a bounded request cost, and every head GitHub
+  // merged carried its success.
+  const landableHeads = [...github.landable.entries()];
+  const landableRequests = (kind: string) => github.landableRequests.filter(request => request.kind === kind).length;
+  assert.ok(landableHeads.length >= basePlan.items, `every candidate head carried the landability verdict (${landableHeads.length} heads)`);
+  assert.deepEqual(landableHeads.filter(([, runs]) => runs.length !== 1).map(([head]) => head), [], 'one standing graphyard/landable run per head, updated in place');
+  assert.deepEqual(landableHeads.filter(([, runs]) => runs[0].writes > 5).map(([head, runs]) => `${head.slice(0, 12)} ${runs[0].writes}`), [], 'no head is rewritten in a loop: only a changed verdict is written');
+  assert.equal(landableRequests('post'), landableHeads.length, 'each head\'s run was created once');
+  assert.ok(github.landableRequests.length <= 2 * cycles, `publishing the verdict costs a bounded number of requests (${github.landableRequests.length} over ${cycles} cycles)`);
+  for (const merge of github.merges) {
+    const head = github.prs.get(merge.pr)!.head;
+    assert.equal(github.landable.get(head)?.[0]?.body.conclusion, 'success', `${merge.key}'s merged head ${head.slice(0, 12)} carried a landable success`);
+  }
   // The diagnostician (GY-439) rode the same day. The three held-job windows recur past the
   // threshold, so the loop files the class's one recurring item and diagnoses it within the cycle
   // that files it, and the day's own churn (the dead workers' leases, the delivery budget) recurs
