@@ -16,13 +16,13 @@ import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
 import type { RepairAudit } from '../master/repair-lane.js';
 import type { Closure } from './closure.js';
-import type { TriageRecord } from './machine-backlog.js';
+import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
 import { workOriginSchema } from './interventions.js';
 import { demand } from './refusal.js';
 
-export const CHECK_NAME = 'Graphyard / merge';
+export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const;
@@ -100,7 +100,7 @@ export interface Candidate { sha: string; baseSha: string; pr: number; branch: s
 export interface ScopeFile {
   path: string; status: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed' | 'unchanged';
   previousPath?: string; sha: string | null; additions: number; deletions: number; binary: boolean;
-  baseSha?: string | null; previousBaseSha?: string | null;
+  baseSha?: string | null; previousBaseSha?: string | null; /** Timing-baseline companion verdict (GY-1023), from both versions' contents. */ companion?: { allowed: boolean; detail: string };
 }
 export interface Observation {
   clockOffset?: { min: number; max: number };
@@ -109,8 +109,8 @@ export interface Observation {
   dismissedReviewIds?: number[];
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
-  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number }[];
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
+  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[] }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
@@ -176,7 +176,7 @@ export interface Work extends Create {
   /** What the research step found before build, and the product questions it asked (src/research.ts). */
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
-  closure?: Closure | null; triage?: TriageRecord | null; // triage is a machine-filed item's judgement (GY-402, model/machine-backlog.ts)
+  closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it ships (GY-845), model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];

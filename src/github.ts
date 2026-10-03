@@ -8,22 +8,25 @@ import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
+import { LANDABLE_CHECK, landableCarried, landableCheckCurrent, landableCheckRun, type LandableCheckRun } from './landable-check.js';
 import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
+import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timingBaselinePath } from './model/timing-companion.js';
 import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
-export { CHECK_NAME };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+export { CHECK_NAME, LANDABLE_CHECK };
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
-import { workerPushPermissions } from './worker-credential.js';
+import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
+import { observedReviewBody } from './review-cap.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -632,6 +635,19 @@ export class GitHub {
   }
   private blobs = new Map<string, string | null>();
   private histories = new Map<string, Set<string> | null>();
+  /** Settled terminal commit statuses per head commit sha and context name (GY-1060). */
+  private terminalStatuses = new Map<string, { name: string; result: string; appId: 0; source: 'status' }>();
+  /** Last published landability check run body per head commit sha (GY-1050). Bounded by landableBodiesEntries. */
+  private landableBodies = new Map<string, LandableCheckRun>();
+  /** Bound on how many published landability bodies the cache retains (GY-1050). */
+  landableBodiesEntries = ancestryEntries;
+  private cacheLandableBody(sha: string, body: LandableCheckRun) {
+    this.landableBodies.delete(sha);
+    this.landableBodies.set(sha, body);
+    if (this.landableBodies.size > this.landableBodiesEntries) {
+      this.landableBodies.delete(this.landableBodies.keys().next().value!);
+    }
+  }
   /**
    * Whole responses of immutable reads (`immutableRead`): a commit by SHA, a compare of two exact SHAs
    * (GY-806). Kept as JSON text within a byte bound, as the conditional-request cache is (GY-975): a
@@ -682,6 +698,8 @@ export class GitHub {
     clearTimeout(timer);
   }
   private preflightState: AppPermissionReport | null = null;
+  /** The wanted worker push permissions the last mint found ungranted (GY-1100); null until a mint. */
+  private pushShortfalls: PushPermissionShortfall[] | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
   // A rejected App credential is retried once a minute, not once per queued job: every request
@@ -909,7 +927,10 @@ export class GitHub {
       const app = typeof installation.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(this.config.appId);
       const installationUrl = typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId);
       const suspended = !!installation.suspended_at;
-      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl))];
+      // A push shortfall a mint met is kept current here, so accepting the permission clears it.
+      if (this.pushShortfalls) this.pushShortfalls = grantedPushPermissions(granted).missing;
+      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl)),
+        ...(this.pushShortfalls ?? []).map(shortfall => describePushShortfall(shortfall, app, installationUrl))];
       this.preflightState = { ...base, app, account: typeof installation.account?.login === 'string' ? installation.account.login : null, installationUrl, verifiedAt: base.observedAt, error: null, suspended, granted, missing, blockedFeatures: blockedFeatures(missing), attention };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'GitHub App permissions could not be read';
@@ -979,32 +1000,51 @@ export class GitHub {
   }
   /**
    * A worker session's push credential (GY-999): an installation token narrowed to this one
-   * repository and to the two permissions pushing a branch and opening its pull request need. It
-   * is never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * repository and to the permissions pushing a branch and opening its pull request need. It is
+   * never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * It asks only for the wanted permissions the installation grants (GY-1100): the preflight's
+   * verified reading when there is one, else the installation read now. A wanted permission the
+   * installation lacks is left out and raised as permission attention instead of failing the mint;
+   * a 422 on a preflight reading re-reads the installation once, in case it changed since.
    */
   async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     const bypass = await this.workerPushBypass();
     demand(!bypass, bypass ?? '', 409);
-    const mint = (permissions: Record<string, string>) => fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
-      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
-    });
-    let response = await mint(workerPushPermissions);
-    this.record('/app/installations/access_tokens', response, false);
-    // An installation that has not accepted `workflows` refuses the whole request (422); the worker
-    // still gets the push credential it had before, and only a base sync carrying a workflow change
-    // is refused, never every launch (2026-10-02).
-    if (response.status === 422 && 'workflows' in workerPushPermissions) {
-      const { workflows: _omitted, ...withoutWorkflows } = workerPushPermissions as Record<string, string>;
-      response = await mint(withoutWorkflows);
-      this.record('/app/installations/access_tokens', response, false);
-    }
+    const cached = this.preflightState?.verifiedAt ? this.preflightState.granted : null;
+    let response = await this.requestPushToken(cached ?? await this.installationGrants());
+    if (response.status === 422 && cached) response = await this.requestPushToken(await this.installationGrants());
     const refused = await this.refusal(response, 'worker push credential');
     if (refused) throw refused;
     const result: any = await response.json();
     demand(typeof result?.token === 'string' && result.token.length >= 20 && Number.isFinite(Date.parse(result.expires_at)), 'GitHub returned no worker push token', 502);
     return { token: result.token, expiresAt: new Date(Date.parse(result.expires_at)).toISOString(), permissions: result.permissions && typeof result.permissions === 'object' ? result.permissions : {} };
+  }
+  /** The installation's granted permissions read now with the App JWT. */
+  private async installationGrants(): Promise<Record<string, string>> {
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    this.record('/app/installations', response, false);
+    const refused = await this.refusal(response, 'GET /app/installations');
+    if (refused) throw refused;
+    const installation: any = await response.json();
+    demand(installation?.permissions && typeof installation.permissions === 'object', 'GitHub returned an installation without permissions', 502);
+    return Object.fromEntries(Object.entries(installation.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string>;
+  }
+  private async requestPushToken(granted: Record<string, string>) {
+    const { permissions, missing } = grantedPushPermissions(granted);
+    demand(permissions.contents === 'write', `The App installation grants no Contents: write, so no worker push credential can be minted; accept it at ${this.preflightState?.installationUrl ?? installationSettingsUrl(this.config.installationId)}`, 502);
+    this.pushShortfalls = missing;
+    const report = this.preflightState;
+    if (report) {
+      report.attention = [...report.attention.filter(line => !line.includes(pushShortfallMarker)),
+        ...missing.map(shortfall => describePushShortfall(shortfall, report.app, report.installationUrl))];
+    }
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
+    });
+    this.record('/app/installations/access_tokens', response, false);
+    return response;
   }
   /**
    * Why this App's token may not be handed to a worker, or null (GY-1066). On an organization
@@ -1215,6 +1255,52 @@ export class GitHub {
     } catch { return []; }
   }
   /**
+   * GY-1060. The commit statuses of required contexts no check run reports: a classic protection
+   * `contexts` entry or a ruleset check bound to no app is commonly a commit status, which the
+   * check-runs read never sees, so the gate would refuse it as not passed forever. They are read
+   * only when such a context exists that no configured CI app's run reports (another app's run
+   * never hides the status, which `requiredCheckRun` prefers to it), as entries of app 0 marked
+   * `status`, which no policy check's trusted CI apps include. Every page of the combined status is
+   * read, so a context past the first hundred is still seen. An error state is a failure; a settled
+   * terminal status per head is cached to save re-reading; a read error is not swallowed.
+   *
+   * External CI retries (finding 24): settled terminal statuses are cached per head commit SHA
+   * (bounded by ancestryEntries) to satisfy findings 21 & 22 and avoid polling /commits/{sha}/status
+   * on every cycle. While external CI can mutate status on an existing SHA upon manual retry,
+   * standard Graphyard workflow upon retry is pushing a new commit (or empty commit), which yields a
+   * fresh SHA and bypasses the cache; cache churn and process restarts also clear the entry.
+   */
+  private async requiredStatuses(sha: string, required: { name: string; appId: number | null }[], policy: readonly string[], runs: { name: string; app?: { id?: number } }[], ciAppIds: readonly number[]): Promise<Observation['checks']> {
+    const names = new Set(required.filter(check => check.appId === null && check.name !== CHECK_NAME && !policy.includes(check.name)
+      && !runs.some(run => run.name === check.name && ciAppIds.includes(run.app?.id as number))).map(check => check.name));
+    if (!names.size) return [];
+    const missing = [...names].filter(name => !this.terminalStatuses.has(`${sha}:${name}`));
+    if (!missing.length) return [...names].map(name => this.terminalStatuses.get(`${sha}:${name}`)!);
+    const statuses = await this.pages(`/commits/${sha}/status`, 'statuses');
+    const seen = new Set<string>();
+    for (const status of statuses) {
+      if (typeof status?.context === 'string' && names.has(status.context) && !seen.has(status.context)) {
+        seen.add(status.context);
+        if (['success', 'failure', 'error'].includes(status.state)) {
+          this.terminalStatuses.set(`${sha}:${status.context}`, {
+            name: status.context,
+            result: status.state === 'error' ? 'failure' : String(status.state),
+            appId: 0,
+            source: 'status' as const,
+          });
+          if (this.terminalStatuses.size > ancestryEntries) this.terminalStatuses.delete(this.terminalStatuses.keys().next().value!);
+        }
+      }
+    }
+    return [...names].flatMap(name => {
+      const cached = this.terminalStatuses.get(`${sha}:${name}`);
+      if (cached) return [cached];
+      const fresh = statuses.find((s: any) => s?.context === name);
+      if (!fresh) return [];
+      return [{ name, result: fresh.state === 'error' ? 'failure' : String(fresh.state), appId: 0, source: 'status' as const }];
+    });
+  }
+  /**
    * One GraphQL query as the installation. GitHub answers a failed query with 200 and `errors`,
    * which is refused here; a `RATE_LIMITED` error pauses the client as a REST rate limit does.
    */
@@ -1422,6 +1508,8 @@ export class GitHub {
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
     // only while protection still requires conversation resolution (drift, which GitHub enforces).
+    const requiredChecks = mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]);
+    const statuses = pr.state === 'open' && !pr.merged ? await this.requiredStatuses(pr.head.sha, requiredChecks, work.policy.checks, checks, ciAppIdsOf(work)) : [];
     const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
@@ -1477,8 +1565,8 @@ export class GitHub {
       candidate: { sha: pr.head.sha, baseSha: candidateBase, pr: pr.number, branch: pr.head.ref, author: pr.user.login, ...(Number.isFinite(Date.parse(pr.created_at)) ? { createdAt: pr.created_at } : {}) },
       // Canonical oldest-to-newest ordering makes legacy consumers deterministic;
       // gates also compare immutable run IDs rather than trusting response order.
-      checks: checks.filter(c => c.name !== CHECK_NAME).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
-        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })),
+      checks: checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
+        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })).concat(statuses),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
       // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
@@ -1486,10 +1574,11 @@ export class GitHub {
       // `reviews`, and review-conflict.ts must still read it as withdrawn rather than standing.
       dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
+        ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}),
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
-      protected: protection.protected, requiredChecks: mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]), conversations, files: files.map(f => f.filename), at: startedAt,
+      protected: protection.protected, requiredChecks, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}), ...(docsBudget ? { docsBudget } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
@@ -1971,9 +2060,22 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // one request wide, the item is queued (a worker push at that point is a new head the queue
     // would eject for anyway), and the next observation reads the branch afresh, so the worker's
     // head is at worst reported as replaced rather than silently kept. Narrow, and accepted.
-    if (reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
-    const merged = await this.mergeBranch(pr.head.ref, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`);
+    // The tip is built on the scratch branch and the pull request's branch is moved once, to it
+    // (GY-1087). Resetting the branch to the reviewed head and then merging onto it was two pushes:
+    // GitHub raised a pull_request event for each, both resolved to the tip, CI's per-PR concurrency
+    // cancelled one of the two runs, and when the later-created run was the one cancelled — before
+    // any job started — GitHub read the head's required checks as expected for good (GY-1063:
+    // "3 of 4 required status checks are expected"), so auto-merge never fired.
+    let merged: string | null;
+    try { merged = await this.mergeOnScratch(work.key, reviewedHead, placement.predictedBase!, `Graphyard speculative tip for ${work.key} behind ${placement.predecessors.join(', ') || this.config.base}`); }
+    catch (error) {
+      // A conflicting tip still leaves the branch at the item's own reviewed head, never at the
+      // earlier tip and the predecessors it carries.
+      if (error instanceof SpeculativeConflict && reviewedHead !== pr.head.sha) await this.updateBranch(pr.head.ref, reviewedHead);
+      throw error;
+    }
     const tip = merged ?? reviewedHead;
+    if (tip !== pr.head.sha) await this.updateBranch(pr.head.ref, tip);
     await this.publishRef(ref, tip);
     // What the merge produced is recorded with the tip, so the binding carry (see model/carry.ts)
     // is decided on GitHub's own account of the commit, never on the fact that a merge was asked for.
@@ -2044,27 +2146,31 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // record is what lets a second attempt tell a lasting refusal from a transient one.
     const refused = (kind: RestoreFailureKind, reason: string): BaseRefresh => record({}, 'unpublished', kind, reason);
     await beforeWrite();
+    // The restored commit is built on the scratch branch and the pull request's branch is moved
+    // once, as a speculative tip is (GY-1087): one push, so one CI run binds to the restored head.
+    let merged: string | null, conflict: string | null = null;
+    try { merged = await this.mergeOnScratch(work.key, own, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
+    catch (error) {
+      if (error instanceof SpeculativeConflict) { merged = null; conflict = error.message; }
+      else if (!(error instanceof Refusal)) throw error;
+      else return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
+    }
+    // A conflicting restore still moves the branch to the item's own reviewed head; the merge is the worker's.
+    const produced = merged ?? own;
     // The same one-request window as in publishSpeculativeTip: a worker push between the head
     // check above and this forced update is overwritten by the restore. The head being restored
     // is one no worker may push over (a contaminated tip), the record names the head it moved
     // from, and the next observation reads the branch afresh.
-    try { await this.updateBranch(pr.head.ref, own); }
+    try { await this.updateBranch(pr.head.ref, produced); }
     catch (error) {
       if (!(error instanceof Refusal)) throw error;
-      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to the reviewed head ${own.slice(0, 12)}: ${error.message}`);
+      return refused('branch reset refused', `the restore of ${pr.head.ref} stopped when the branch was reset to ${merged ? `the reviewed head ${own.slice(0, 12)} merged onto the base, ${produced.slice(0, 12)}` : `the reviewed head ${own.slice(0, 12)}`}: ${error.message}`);
     }
-    let merged: string | null;
-    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard branch restore for ${work.key} onto ${this.config.base}`); }
-    catch (error) {
-      if (error instanceof SpeculativeConflict)
-        return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${error.message}`);
-      if (!(error instanceof Refusal)) throw error;
-      return refused('merge refused', `the restore of ${pr.head.ref} stopped when base branch tip ${branch.tip.slice(0, 12)} was merged into it: ${error.message}`);
-    }
+    if (conflict !== null)
+      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} was restored to its own reviewed head ${own.slice(0, 12)}, which cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push.` }, 'conflict', 'conflict', `the reviewed head ${own.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict: ${conflict}`);
     // The restore is done only when GitHub itself shows the branch at the commit it produced
     // (GY-854): a push GitHub does not reflect has happened, and a record that claimed it anyway
     // left the item waiting at a head no observation would ever read.
-    const produced = merged ?? own;
     let shown: string;
     try { shown = await this.refHead(pr.head.ref); }
     catch (error) {
@@ -2120,16 +2226,26 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
-    const branch = mergeCheckBranch(key);
-    await this.publishRef(`refs/heads/${branch}`, head);
     try {
-      await this.mergeBranch(branch, base, `Graphyard merge check for ${key} [skip ci]`);
+      await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
       return null;
     } catch (error) {
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
-    } finally {
-      // A scratch branch left behind by a failed delete is overwritten by the next check, but it
+    }
+  }
+  /**
+   * Merges `base` onto `head` on the item's scratch branch and returns the merge commit, or null
+   * when `head` already contains `base`; a conflict throws SpeculativeConflict. No branch a pull
+   * request, a person or a check reads is written (GY-1087): the caller moves the pull request's
+   * branch to the result in one push, so GitHub starts one set of workflow runs for the new head.
+   */
+  async mergeOnScratch(key: string, head: string, base: string, message: string): Promise<string | null> {
+    const branch = mergeCheckBranch(key);
+    await this.publishRef(`refs/heads/${branch}`, head);
+    try { return await this.mergeBranch(branch, base, message); }
+    finally {
+      // A scratch branch left behind by a failed delete is overwritten by the next merge, but it
       // is visible in the repository until then, so the failure is named.
       await this.request(`/git/refs/heads/${branch}`, 'DELETE').catch(error => console.error(`Graphyard could not delete merge-check branch ${branch}: ${error instanceof Error ? error.message : String(error)}`));
     }
@@ -2213,6 +2329,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = { name: CHECK_NAME, head_sha: audit.head, status: 'completed', conclusion: 'success', external_id: work.id,
       output: { title: 'Repair lane: merge-path repair', summary: `Repair-lane merge of ${work.key} at ${audit.head}, decision ${audit.decision} (requested by ${audit.requestedBy}, approved by ${audit.approver}) for the fault in ${audit.fault}; bypassing a normal guarded merge ${audit.bypassed.state} since ${audit.bypassed.since}` } };
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    await this.upsertLandable(landableCarried(work, audit.head, body.output.title, body.output.summary));
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: autoMergeMethod() });
   }
   /**
@@ -2229,7 +2346,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   /** Every check run on a commit, as the gates read a candidate's: what the main guard judges a merge commit by (GY-500). */
   async commitChecks(sha: string): Promise<{ name: string; result: string; appId: number; id?: number }[]> {
-    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME)
+    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME && check.name !== LANDABLE_CHECK)
       .map(check => ({ name: check.name, result: check.status === 'completed' ? check.conclusion : check.status, appId: check.app?.id, ...(Number.isSafeInteger(check.id) ? { id: check.id } : {}) }));
   }
   /**
@@ -2297,6 +2414,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary)) {
       await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
     }
+    await this.upsertLandable(landableCarried(work, revert.head, body.output.title, body.output.summary));
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: revert.head, method: autoMergeMethod() });
     const merged = await this.request(`/pulls/${revert.pr}`);
     return merged?.merged && typeof merged.merge_commit_sha === 'string' ? merged.merge_commit_sha : null;
@@ -2307,11 +2425,57 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * while the head stays authorized: a withdrawn head is dequeued, which discards the group.
    */
   async publishGroupCheck(work: Work, groupHead: string) {
+    const summary = `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}`;
+    // The group commit carries the authorized head's landability verdict too (GY-887): branch protection requires both.
+    await this.upsertLandable(landableCarried(work, groupHead, 'Landable', summary));
     const existing = (await this.pages(`/commits/${groupHead}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
     if (existing?.status === 'completed' && existing.conclusion === 'success' && existing.external_id === work.id) return;
     const body = { name: CHECK_NAME, head_sha: groupHead, status: 'completed', conclusion: 'success', external_id: work.id,
-      output: { title: 'All required gates passed', summary: `Merge group for ${work.key}: candidate ${work.candidate!.sha}; base ${work.candidate!.baseSha}; policy ${work.policyRevision}` } };
+      output: { title: 'All required gates passed', summary } };
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+  }
+  /**
+   * GY-887. Publishes the landability verdict as `graphyard/landable` on the candidate head
+   * (landable-check.ts): created on a new head, updated when the verdict or its reasons change, and
+   * left alone when the published run already says the same. Success is written only while the pull
+   * request still has that head on that base, as `publish` writes its own.
+   */
+  async publishLandable(work: Work, all: Work[], beforeWrite: (success: boolean) => Promise<void> = async () => {}, skipOnMoved = false): Promise<{ skipped: boolean } | void> {
+    const body = landableCheckRun(work, all, new Date());
+    if (!body) return;
+    const success = body.conclusion === 'success';
+    // Check in-memory cache and standing run before making PR reads (GY-1050).
+    const cached = this.landableBodies.get(body.head_sha);
+    if (landableCheckCurrent(cached, body)) return;
+    const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
+    if (landableCheckCurrent(existing, body)) {
+      this.cacheLandableBody(body.head_sha, body);
+      return;
+    }
+    if (success) {
+      const pr = await this.request(`/pulls/${work.candidate!.pr}`);
+      const current = pr.head.sha === work.candidate!.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate!.baseSha;
+      if (!current) {
+        if (skipOnMoved) return { skipped: true };
+        requireCurrent(false, 'PR changed before the landability check was published; retry');
+      }
+    }
+    await beforeWrite(success);
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    this.cacheLandableBody(body.head_sha, body);
+  }
+  /** Creates or updates this App's `graphyard/landable` run on a head; an identical standing run is not rewritten. */
+  async upsertLandable(body: LandableCheckRun, beforeWrite: () => Promise<void> = async () => {}) {
+    const cached = this.landableBodies.get(body.head_sha);
+    if (landableCheckCurrent(cached, body)) return;
+    const existing = (await this.pages(`/commits/${body.head_sha}/check-runs?check_name=${encodeURIComponent(LANDABLE_CHECK)}&filter=latest`, 'check_runs')).find(c => c.name === LANDABLE_CHECK && c.app?.id === this.config.appId);
+    if (landableCheckCurrent(existing, body)) {
+      this.cacheLandableBody(body.head_sha, body);
+      return;
+    }
+    await beforeWrite();
+    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    this.cacheLandableBody(body.head_sha, body);
   }
   async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
     if (!work.candidate) return;
@@ -2328,11 +2492,15 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
   }
 }
-/** Required checks by name, deduplicated, without Graphyard's own merge check (GY-430). */
-function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+/**
+ * Required checks by name, deduplicated, without Graphyard's own merge check (GY-430) or its
+ * landability verdict (GY-887): the verdict is computed from these, so requiring itself would
+ * refuse every candidate forever once protection lists it.
+ */
+export function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
   const merged = new Map<string, { name: string; appId: number | null }>();
   for (const check of checks) {
-    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME) continue;
+    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME || check.name === LANDABLE_CHECK) continue;
     const appId = Number.isSafeInteger(check.appId) ? check.appId as number : null;
     const known = merged.get(check.name);
     // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
@@ -2506,6 +2674,8 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
     if (baseContent.includes(0) || headContent.includes(0) || landingContent.includes(0)) continue;
     const merged = threeWayMerge(baseContent, landingContent, headContent);
     if (merged.clean && merged.content !== null && merged.content.equals(landingContent)) file.mergeSha = file.baseSha;
+    // The baseline lands as the merge result: judged by the lines it adds to what the commit holds (GY-1023).
+    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(files));
   }
 }
 /**
@@ -2515,7 +2685,7 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
  * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
  * refuses rather than passes.
  */
-async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
+async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
   // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
   // then asked a few at a time: in turn they held a final merge verification past its window.
   const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
@@ -2532,6 +2702,11 @@ async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt'>, plannedFile
   }
   const found = await boundedMap(wanted, peerContainmentConcurrency, want => github.blobAt(want.path, base));
   wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
+  // The timing baseline is judged by its lines, not its blob (GY-1023): two content reads from the same budget.
+  if (github.blobContent && budget.remaining >= 2) {
+    const read = github.blobContent.bind(github);
+    await judgeTimingCompanion(compared, async sha => { budget.remaining -= 1; const content = await read(sha).catch(() => null); return content && content.length <= mergeContentCap ? content.toString('utf8') : null; }, path => inPlannedScope(plannedFiles, path));
+  }
   return compared;
 }
 /** Whether GitHub attributes a commit to the control-plane App's bot account: by the linked author, or by the App's noreply address. */
@@ -3099,13 +3274,28 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       if (!observation.merged) {
         const unpublishable = hold('check');
         if (unpublishable) held ??= unpublishable;
-        else if (typeof github.mergeQueueState === 'function') {
-          // The check and GitHub's queue move together (GY-258): an authorized, requested head is
-          // published as passed and handed to GitHub to merge; anything else is failed and taken out.
-          const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
-          if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
+        else {
+          // The landability verdict is recomputed from this observation's facts and published as its
+          // one required check on the head (GY-887); an unchanged verdict writes nothing.
+          // Publishing before gateMerge ensures GitHub sees the required check satisfied at enqueue time (GY-1050).
+          // Recomputing with the live store snapshot covers peer changes since job start (GY-1050).
+          if (typeof github.publishLandable === 'function') {
+            const peers = await engine.store.list();
+            const target = work;
+            const landable = await github.publishLandable(target, peers.map(item => item.id === target.id ? target : item), success => guard(target, success)(), true);
+            if (landable?.skipped) {
+              await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed);
+              return true;
+            }
+          }
+          if (typeof github.mergeQueueState === 'function') {
+            // The check and GitHub's queue move together (GY-258): an authorized, requested head is
+            // published as passed and handed to GitHub to merge; anything else is failed and taken out.
+            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
+          }
+          else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
         }
-        else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
         // A merge-path repair whose normal merge is stalled may take the audited repair lane (GY-406).
         if (work.repair === 'merge-path' && !unpublishable && typeof github.repairMerge === 'function') await repairLaneStep(engine, github, work, new Date(), guard(work, true));
       }
