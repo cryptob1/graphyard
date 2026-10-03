@@ -92,8 +92,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Status reads the cursor as the loop would; the loop logs and persists any repair it makes.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
-  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins), stuck.stuck);
-  // A dispatcher failing its tick launches nothing; it is named before the requests it is not launching.
+  const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins, snapshot.work, Date.parse(snapshot.now) || Date.now()), stuck.stuck);
+  // Dispatcher failures, then long launch waits (GY-710).
   const dispatchItems = dispatchFailureAttention(dispatch);
   const launches = await timedStep('worker launches', () => workerLaunchStatus(root, master)); // GY-417
   dispatchItems.push(...launches.items);
