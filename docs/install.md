@@ -25,7 +25,8 @@ Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `hcloud context create graphyard` (`brew install hcloud` first); needs `--ssh-key NAME` (`--domain` optional; without it Caddy certifies `<ip>.sslip.io`).
-- `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host`, `--domain`.
+  A coordinator that produces `manual:install-hetzner-live` also needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in the repository-root `.env` (mode `0600`, never committed); without them that launch is refused.
+- `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host` and `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
 ## Step 1: print the plan
