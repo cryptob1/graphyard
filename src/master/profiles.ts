@@ -328,6 +328,8 @@ export const masterConfigSchema = z.object({
   herdrWorkspace: z.string().trim().min(1).max(200).optional(),
   masterAgentName: sessionNameField,
   autoMerge: z.boolean().default(true),
+  // Review rounds before only a blocking finding stands against it (GY-1118; default 3).
+  reviewRoundCap: z.number().int().min(1).max(20).optional(),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
   workers: z.array(workerProfileSchema).max(100).default([]),
   reviewer: reviewerIdentitySchema.optional(),
@@ -666,10 +668,8 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
  * that pair to one mask, and hiding the real directory hides every symlink to it.
  *
  * When `secretsBus` names a live socket, each session-bus socket is replaced by it instead of by
- * `/dev/null`: the keyring-only proxy (`graphyard-secrets-bus.socket`, filtered in
- * `graphyard-secrets-bus-filter.service`) reaches only the read methods of the keyring holding the
- * operator's GitHub login, so `gh auth git-credential` works while systemd1 and every other bus name
- * stay unreachable. A session with a GitHub credential of its own gets no `secretsBus` (GY-1039).
+ * `/dev/null`: the keyring-only proxy (`graphyard-secrets-bus.socket`, filtered in `graphyard-secrets-bus-filter.service`) reaches only the
+ * keyring's read methods, so `gh auth git-credential` works while systemd1 and every other bus name stay unreachable. A session with a GitHub credential of its own gets no `secretsBus` (GY-1039).
  */
 export const processLaunchMaskWords = (
   targets: { directories?: readonly string[]; busSockets?: readonly string[]; secretsBus?: string | null },
