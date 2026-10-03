@@ -102,22 +102,30 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   const text = read(candidatePath), workflow = readWorkflow(text), jobs = jobsOf(text);
   assert.equal(workflow.pullRequest, false, 'release-candidate validation never runs on a pull request');
   const on = text.slice(text.indexOf('\non:\n') + 1, text.indexOf('\npermissions:'));
-  assert.match(on, /^ {2}workflow_dispatch:\n {4}inputs:\n {6}sha:\n(?: {8}.*\n)*? {8}required: true/m, 'dispatch takes a required sha input');
+  assert.match(on, /^ {2}workflow_dispatch:\n {4}inputs:\n {6}sha:\n/m, 'dispatch takes a sha input to validate one commit');
   assert.match(on, /^ {2}push:\n {4}tags: \['rc-\*'\]$/m, 'a pushed rc tag starts it');
+  assert.match(on, /^ {2}schedule:\n/m, 'a schedule cuts main\'s tip as a candidate (GY-1094)');
   assert.doesNotMatch(on, /branches|pull_request/, 'no branch push or pull request starts it');
 
-  // Every job validates the pinned candidate, the dispatched SHA or the tagged commit, never the ref it was started from.
-  assert.match(text, /^env:\n {2}CANDIDATE_SHA: \$\{\{ inputs\.sha \|\| github\.sha \}\}$/m);
-  assert.match(text, /\^\[0-9a-f\]\{40\}\$/, 'a dispatched sha must be a full commit SHA');
+  // Every long suite validates the pinned candidate — the cut tip, the dispatched SHA or the tagged commit — never the ref it was started from.
+  assert.match(jobs.get('candidate')!.text, /^ {6}PINNED: \$\{\{ inputs\.sha \|\| \(github\.event_name == 'push' && github\.sha\) \|\| '' \}\}$/m);
+  assert.match(jobs.get('candidate')!.text, /\^\[0-9a-f\]\{40\}\$/, 'a dispatched sha must be a full commit SHA');
+  const longSuites = ['chart', 'container-acceptance', 'container-recovery', 'long-suites'];
   for (const [id, job] of jobs) {
-    const checkouts = [...job.text.matchAll(/uses: actions\/checkout@v4\n\s+with: (.*)$/gm)];
-    assert.ok(checkouts.length >= 1 && checkouts.every(match => match[1].includes("ref: '${{ env.CANDIDATE_SHA }}'")), `${id} checks out the candidate SHA`);
     assert.doesNotMatch(job.text, /\$GITHUB_SHA/, `${id} stamps the candidate SHA, not the triggering ref's`);
     assert.ok(job.timeout, `${id} declares timeout-minutes`);
+    if (!longSuites.includes(id) && id !== 'uat') continue;
+    assert.match(job.text, /^ {6}CANDIDATE_SHA: \$\{\{ needs\.candidate\.outputs\.sha \}\}$/m, `${id} validates the candidate job's pinned SHA`);
+    const checkouts = [...job.text.matchAll(/uses: actions\/checkout@v4\n\s+with: (.*)$/gm)];
+    assert.ok(checkouts.length >= 1 && checkouts.every(match => match[1].includes("ref: '${{ env.CANDIDATE_SHA }}'")), `${id} checks out the candidate SHA`);
   }
+  for (const id of longSuites) assert.deepEqual(jobs.get(id)!.needs, ['candidate'], `${id} waits only for the candidate to be pinned`);
+  // A cut candidate's UAT record carries every long suite's verdict, so a failure among them blocks promotion.
+  assert.deepEqual(jobs.get('uat')!.needs, ['candidate', 'long-suites', 'container-acceptance', 'container-recovery', 'chart']);
+  for (const id of longSuites) assert.match(jobs.get('uat')!.text, new RegExp(`--suite '${id}=test "\\$[A-Z_]+" = success'`), `the UAT record carries the ${id} verdict`);
 
   // Every suite the pre-merge gate excludes runs here.
-  assert.deepEqual([...jobs.keys()].sort(), ['chart', 'container-acceptance', 'container-recovery', 'long-suites']);
+  assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'long-suites', 'promote', 'uat']);
   assert.match(jobs.get('long-suites')!.text, /node scripts\/ci-tests\.mjs release-candidate --out "\$RUNNER_TEMP\/release-candidate-tests\.txt"/);
   assert.match(jobs.get('long-suites')!.text, /npm test -- --files-from "\$RUNNER_TEMP\/release-candidate-tests\.txt"/);
   assert.match(jobs.get('long-suites')!.text, /apt-get install -y -q bubblewrap/, 'the soak confines its launches in real namespaces');
