@@ -448,11 +448,75 @@ export function closablePane(work: Pick<Work, 'containmentQuarantine' | 'session
   return shell && process && idlePaneShell(work, verification, process) ? shell.pane : null;
 }
 /**
+ * Whether the item's attempt was ended on the record by the loop (its preserve/close, not lease expiry).
+ */
+export function isLoopEndedAttempt(work: Pick<Work, 'containmentQuarantine'> & Partial<Pick<Work, 'capacity' | 'sessions' | 'submission' | 'stage'>>): boolean {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return false;
+  const epoch = quarantine.epoch;
+  const preserve = (work.capacity?.exhaustions ?? []).some(entry =>
+    entry.role === 'worker' && entry.epoch === epoch && !entry.reason?.includes('lease lapsed')
+  );
+  const close = (work.sessions ?? []).some(handle =>
+    (handle.epoch === epoch || handle.id === `${quarantine.owner}:${epoch}` || handle.id.endsWith(`:${epoch}`))
+    && handle.state === 'finished'
+    && (handle.outcome?.startsWith('closed by the loop') || handle.outcome?.startsWith('closed as failed'))
+  );
+  const submittedClosed = (work.submission?.epoch === epoch || (work.stage !== undefined && work.stage !== 'build')) && (work.sessions ?? []).some(handle =>
+    (handle.epoch === epoch || handle.id === `${quarantine.owner}:${epoch}` || handle.id.endsWith(`:${epoch}`))
+    && handle.state === 'finished'
+  );
+  return preserve || close || submittedClosed;
+}
+
+/** Whether the host verification proves the supervisor and its worker processes are gone. */
+export function isSupervisorVerifiedGone(
+  work: Pick<Work, 'containmentQuarantine' | 'workspaces' | 'sessions'>,
+  verification: ContainmentVerification,
+): boolean {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return false;
+  if (verification.platform !== 'linux') return false;
+  if (verification.unverifiable.length > 0) return false;
+  if (verification.truncated?.scopes !== undefined) return false;
+  const workspace = work.workspaces?.find(item => item.epoch === quarantine.epoch);
+  if (!workspace || workspace.host !== verification.host || workspace.path !== verification.workspacePath) return false;
+  if (quarantine.scope) {
+    if (verification.recordedScope?.unit !== quarantine.scope.unit || verification.recordedScope?.pid !== quarantine.scope.pid) {
+      return false;
+    }
+    if (!endedScopeStates.includes(verification.recordedScope.activeState)) {
+      return false;
+    }
+  }
+  for (const process of verification.processes) {
+    if (idlePaneShell(work, verification, process)) continue;
+    return false;
+  }
+  for (const scope of verification.scopes) {
+    const own = quarantine.scope?.unit === scope.unit;
+    if (scope.processes.length > 0 || (scope.truncated && own)) return false;
+  }
+  return true;
+}
+
+/** Whether a containment settlement was refused transiently (5xx or stale verification). */
+export function isTransientSettlementRefusal(error: unknown): boolean {
+  if (!error) return false;
+  const status = (error as any)?.status ?? (error as any)?.code ?? (error as any)?.statusCode;
+  if (typeof status === 'number' && status >= 500 && status < 600) return true;
+  const msg = typeof error === 'string' ? error : (error as any)?.message ? String((error as any).message) : JSON.stringify(error);
+  if (/\b5\d{2}\b/.test(msg) || msg.includes('Application failed to respond')) return true;
+  if (msg.includes('Host verification is older than') || msg.includes('verify the host again')) return true;
+  return false;
+}
+
+/**
  * Pure refusal evaluation, shared by the verifying coordinator and the control plane.
  * Every check states what it could not prove; an empty result is the only authorization.
  */
 export function containmentSettlementRefusals(
-  work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces' | 'sessions'>,
+  work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces' | 'sessions'> & Partial<Pick<Work, 'capacity' | 'submission' | 'stage'>>,
   verification: ContainmentVerification,
   options: { now: number; graceMs?: number; freshnessMs?: number; clockToleranceMs?: number },
 ): string[] {
@@ -476,12 +540,17 @@ export function containmentSettlementRefusals(
   // The quarantine retains its own deadline; the later of the two is the fence, and a
   // quarantine that records neither cannot prove its grace window has passed at all.
   if (work.lease && !Number.isFinite(Date.parse(work.lease.expiresAt))) refusals.push(`Worker lease for epoch ${work.lease.epoch} carries no readable expiry`);
-  const deadlines = [work.lease?.expiresAt, quarantine.leaseExpiresAt].map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
-  const leaseExpiry = deadlines.length ? Math.max(...deadlines) : null;
-  if (leaseExpiry === null) refusals.push(`Quarantined epoch ${quarantine.epoch} records no worker-lease deadline, so its ${seconds(grace)}s grace window cannot be established`);
-  else if (!(leaseExpiry + grace <= now)) refusals.push(`Worker lease for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
-  const launchExpiry = quarantine.launchExpiresAt ? Date.parse(quarantine.launchExpiresAt) : null;
-  if (launchExpiry !== null && !(launchExpiry + grace <= now)) refusals.push(`Launch authority for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+  const loopEnded = isLoopEndedAttempt(work);
+  const supervisorGone = isSupervisorVerifiedGone(work, verification);
+  const waiveGrace = loopEnded && supervisorGone;
+  if (!waiveGrace) {
+    const deadlines = [work.lease?.expiresAt, quarantine.leaseExpiresAt].map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
+    const leaseExpiry = deadlines.length ? Math.max(...deadlines) : null;
+    if (leaseExpiry === null) refusals.push(`Quarantined epoch ${quarantine.epoch} records no worker-lease deadline, so its ${seconds(grace)}s grace window cannot be established`);
+    else if (!(leaseExpiry + grace <= now)) refusals.push(`Worker lease for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+    const launchExpiry = quarantine.launchExpiresAt ? Date.parse(quarantine.launchExpiresAt) : null;
+    if (launchExpiry !== null && !(launchExpiry + grace <= now)) refusals.push(`Launch authority for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+  }
   const observed = Date.parse(verification.observedAt);
   if (!Number.isFinite(observed)) refusals.push('Host verification carries no readable observation time');
   else if (observed > now + tolerance) refusals.push('Host verification is dated after the control-plane clock; clocks disagree');

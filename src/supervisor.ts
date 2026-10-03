@@ -395,9 +395,38 @@ export async function supervise(command: string, args: string[], epoch: number, 
             await delay(Math.min(options.shutdownPollMs ?? 50, remaining));
           } while (performance.now() < shutdownDeadline);
           containmentFailure ??= lastVerificationFailure;
-          if (!empty) { finish(new Error(`Worker containment shutdown could not be verified${containmentFailure instanceof Error ? `: ${containmentFailure.message}` : ''}`)); return; }
+          if (!empty) {
+            const boundMs = Math.round(options.shutdownTimeoutMs ?? 2000);
+            const held = containmentFailure instanceof Error ? containmentFailure.message : containmentFailure ? String(containmentFailure) : 'scope not empty';
+            const failure = {
+              reason: `Worker containment shutdown could not be verified within ${boundMs}ms: ${held}`,
+              boundMs,
+              held,
+            };
+            if (options.quarantine) {
+              (options.quarantine as any).failure = failure;
+              (options.quarantine as any).settlementFailure = failure;
+              try { await (options.quarantine as any).recordFailure?.(failure); } catch {}
+              try { await (options.quarantine as any).recordSettlementFailure?.(failure); } catch {}
+            }
+            finish(new Error(`Worker containment shutdown could not be verified: ${held} (within ${boundMs}ms)`));
+            return;
+          }
           try { await options.quarantine!.settle(); }
-          catch (error) { finish(new Error(`Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
+          catch (error) {
+            const failure = {
+              reason: `Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`,
+              refusal: error instanceof Error ? error.message : String(error),
+            };
+            if (options.quarantine) {
+              (options.quarantine as any).failure = failure;
+              (options.quarantine as any).settlementFailure = failure;
+              try { await (options.quarantine as any).recordFailure?.(failure); } catch {}
+              try { await (options.quarantine as any).recordSettlementFailure?.(failure); } catch {}
+            }
+            finish(new Error(failure.reason));
+            return;
+          }
         }
         finish(null, code);
       }, options.graceMs ?? 5000);

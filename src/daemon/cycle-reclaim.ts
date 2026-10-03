@@ -12,7 +12,7 @@ import type { SessionHandle } from '../model/sessions.js';
 import type { ContainmentAssessment } from '../master.js';
 import { containmentQuarantines } from '../master.js';
 import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
-import { closablePane, endedScopeStates } from '../quarantine.js';
+import { closablePane, endedScopeStates, isLoopEndedAttempt, isTransientSettlementRefusal } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import type { DaemonAction, DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
@@ -243,14 +243,14 @@ export async function reclaimStep(cycle: Cycle) {
   //     A quarantine refused for a cause other than the clock still costs one read a cycle; the
   //     read is kept, since judging it with the snapshot's wider bound would add a clock refusal
   //     and change its escalation's cause on alternate cycles (GY-1044).
-  const assessable = effects.containment && containmentQuarantines(snapshot.work, config.hostId).some(item => containmentPhase(item, clock)?.state === 'lapsed');
+  const assessable = effects.containment && containmentQuarantines(snapshot.work, config.hostId).some(item => containmentPhase(item, clock)?.state === 'lapsed' || isLoopEndedAttempt(item));
   const measured = assessable ? await containmentClock(clockOffset, effects.controlPlaneClock) : null;
   const observed: ContainmentObservation = measured ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source } : { now: snapshot.now, clockOffset };
   const assessments = await effects.containment?.(snapshot.work, observed) ?? {};
   await closeEndedWorkerPanes(state, effects, open, assessments, observed, now, performed);
   // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
   await reclaimLaunchedPanes(cycle);
-  for (const item of open.filter(candidate => candidate.containmentQuarantine && containmentPhase(candidate, clock)?.state === 'lapsed')) await isolate('settle', item, item.key, async () => {
+  for (const item of open.filter(candidate => candidate.containmentQuarantine && (containmentPhase(candidate, clock)?.state === 'lapsed' || isLoopEndedAttempt(candidate)))) await isolate('settle', item, item.key, async () => {
     const epoch = item.containmentQuarantine!.epoch;
     const assessment = assessments[item.id];
     const key = `settle:${item.id}:${epoch}`;
@@ -267,7 +267,8 @@ export async function reclaimStep(cycle: Cycle) {
     }
     if (!effects.settleContainment) return;
     const previous = state.actions[key];
-    if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) return;
+    const transient = previous?.state === 'failed' && isTransientSettlementRefusal(previous.detail);
+    if (previous && (previous.state === 'done' || (!transient && !readyToRetry(previous, state.cycle)) || (transient && !(cycle.state.cycle > previous.cycle)))) return;
     // A supervisor verified gone with the lease lapsed is a worker killed outright — the whole
     // tree stopped, or the host rebooted. Its partial work goes on the record before the fence is
     // lowered, so the item is offered again only once the next attempt can be told where it is.
@@ -275,6 +276,7 @@ export async function reclaimStep(cycle: Cycle) {
     await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the verified-dead containment quarantine of ${item.key} epoch ${epoch}`, attempts: (previous?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist);
     try {
       await effects.settleContainment(item, assessment);
+      item.containmentQuarantine = null;
       performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail: `Settled the containment quarantine of ${item.key} epoch ${epoch}: its supervisor is verified gone on ${assessment.host ?? 'this host'}, so the item can be claimed again`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Containment settlement refused for ${item.key} epoch ${epoch}: ${message(error)}`, attempts: state.actions[key].attempts, epoch, cycle: state.cycle }, now(), effects.persist));
