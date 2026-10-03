@@ -1,5 +1,6 @@
 import type { ScopeFile, Work } from './model.js';
 import { classifyScope, inPlannedScope, shippedBy, type ScopeFinding } from './regression-guard.js';
+import { judgeTimingCompanion } from './model/timing-companion.js';
 
 /**
  * Local half of the regression guard, for `graphyard sync`. Parses `git diff --raw -M -z
@@ -40,8 +41,11 @@ export function parseLocalScopeDiff(raw: string, numstat: string): ScopeFile[] {
   return files;
 }
 
-export function localScopeFindings(plannedFiles: string[], raw: string, numstat: string, generated: readonly string[] = []): ScopeFinding[] {
-  return classifyScope(plannedFiles, parseLocalScopeDiff(raw, numstat), generated);
+/** `read` gives a blob's text by sha (`git cat-file blob`), so the timing baseline is judged by its lines as the control plane judges it (GY-1023). */
+export async function localScopeFindings(plannedFiles: string[], raw: string, numstat: string, generated: readonly string[] = [], read: (sha: string) => Promise<string | null> = async () => null): Promise<ScopeFinding[]> {
+  const files = parseLocalScopeDiff(raw, numstat);
+  await judgeTimingCompanion(files, read, path => inPlannedScope(plannedFiles, path));
+  return classifyScope(plannedFiles, files, generated);
 }
 
 /**
