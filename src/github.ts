@@ -7,7 +7,7 @@ import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
-import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
+import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, decideCarry, bindingApproval, evidenceBindsCandidate, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { LANDABLE_CHECK, landableCarried, landableCheckCurrent, landableCheckRun, type LandableCheckRun } from './landable-check.js';
 import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
 import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timingBaselinePath } from './model/timing-companion.js';
@@ -18,7 +18,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME, LANDABLE_CHECK };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, queueLandingRefreshNeeded, nextQueueSequence, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -2212,14 +2212,122 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * is a push that `on: push` workflows and branch rulesets see. A ruleset refusal fails the job
    * with GitHub's refusal, and a failed delete is logged, not hidden (GY-390).
    */
+  lastTestMergeSha?: string | null;
+
   async testMerge(key: string, head: string, base: string): Promise<string | null> {
     try {
-      await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
+      this.lastTestMergeSha = await this.mergeOnScratch(key, head, base, `Graphyard merge check for ${key} [skip ci]`);
       return null;
     } catch (error) {
+      this.lastTestMergeSha = null;
       if (!(error instanceof SpeculativeConflict)) throw error;
       return error.message;
     }
+  }
+  /**
+   * GY-1131. The queue verifies and refreshes waiting entries when work lands behind them
+   * instead of conflict-ejecting them at their turn.
+   *
+   * After each landing that moves the base branch tip, the control plane scratch test-merges
+   * queued entries whose turn has not come (position > 0) and whose reviewed files overlap the
+   * landed diff, bounded to at most once per entry per landing.
+   *
+   * - Clean test merge: pushed to the entry's branch as a speculative tip under the single-push
+   *   head-binding rule. Approval, proofs, and queue position survive refresh.
+   * - Confirmed conflict: requests rework immediately at landing time, names the conflict and the
+   *   tip that caused it, moves the entry to the back of the queue, letting the next entry head the
+   *   queue instead of discovering the conflict at its turn.
+   */
+  async refreshQueueOnLanding(
+    all: Work[],
+    landingBase: string,
+    previousBase?: string,
+    landedDiff?: readonly string[] | null,
+    beforeWrite: () => Promise<void> = async () => {}
+  ): Promise<{ refreshed: Work[]; conflicts: Work[] }> {
+    const diff = landedDiff ?? (previousBase && landingBase && previousBase !== landingBase ? await this.changedFiles(previousBase, landingBase).catch(() => null) : null) ?? [];
+    const refreshed: Work[] = [];
+    const conflicts: Work[] = [];
+    for (const work of all) {
+      const needed = queueLandingRefreshNeeded(work, all, diff, landingBase);
+      if (!needed) continue;
+      const candidate = work.candidate!;
+      const reviewedHead = await this.ownReviewedHead(work, candidate.sha);
+      await beforeWrite();
+      const conflict = await this.testMerge(work.key, reviewedHead, landingBase);
+      if (conflict) {
+        work.reworkRequested = true;
+        work.baseRefresh = {
+          from: { sha: candidate.sha, baseSha: candidate.baseSha },
+          base: landingBase,
+          baseTree: await this.commitTree(landingBase),
+          policyRevision: work.policyRevision,
+          at: new Date().toISOString(),
+          head: null,
+          conflict: `Candidate ${candidate.sha.slice(0, 12)} cannot be brought onto base branch tip ${landingBase.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate.sha.slice(0, 12)} do not survive the resolution.`,
+          merge: null,
+          carry: null,
+          trigger: 'conflict confirmed',
+        };
+        const nextSeq = Math.max(0, ...all.map(w => Math.max(w.queueSequence ?? 0, w.queue?.sequence ?? 0))) + 1;
+        work.queue!.sequence = nextSeq;
+        work.queueSequence = nextSeq;
+        work.queue!.refreshedLanding = landingBase;
+        if (work.observation) {
+          work.observation.baseTip = landingBase;
+        }
+        conflicts.push(work);
+      } else {
+        const merged = this.lastTestMergeSha;
+        const tip = merged ?? reviewedHead;
+        const branch = candidate.branch;
+        if (tip !== candidate.sha) await this.updateBranch(branch, tip);
+        await this.publishRef(queueRef(work.key), tip);
+        const merge = merged ? await this.describeMerge(reviewedHead, merged, candidate.baseSha, landingBase) : null;
+        const baseChanges = merged ? merge?.baseChanges ?? null : await this.changedFiles(candidate.baseSha, landingBase).catch(() => null);
+        const carry = decideCarry({
+          from: { sha: reviewedHead, baseSha: candidate.baseSha },
+          to: { sha: tip, baseSha: landingBase },
+          policyRevision: work.policyRevision,
+          at: new Date().toISOString(),
+          merge,
+          predecessor: { key: null, validated: true },
+          reviewedFiles: needed.reviewedFiles,
+          approval: bindingApproval(work),
+          proofs: (work.criteria ?? []).flatMap(ac => ac.proofs).map(proof => ({
+            proof,
+            evidence: (work.evidence ?? []).find(e => e.proof === proof && e.trusted && (e.sha === reviewedHead || e.sha === candidate.sha || evidenceBindsCandidate(work, e))),
+          })),
+          app: this.controlPlaneLogin ? await this.controlPlaneLogin().then(l => `control-plane (${l})`, () => 'control-plane') : 'control-plane',
+        });
+        const tipTree = await this.tipTree(tip);
+        work.queue!.speculation = {
+          ref: queueRef(work.key),
+          tip,
+          ...(tipTree ? { tipTree } : {}),
+          base: landingBase,
+          baseTree: await this.commitTree(landingBase),
+          predecessors: work.queue!.speculation?.predecessors ?? [],
+          policyRevision: work.policyRevision,
+          publishedAt: new Date().toISOString(),
+          reviewedHead,
+          trigger: 'landing-refresh',
+          merge,
+          carry,
+          ...(baseChanges !== undefined ? { baseChanges } : {}),
+        };
+        candidate.sha = tip;
+        candidate.baseSha = landingBase;
+        if (work.observation) {
+          work.observation.candidate.sha = tip;
+          work.observation.candidate.baseSha = landingBase;
+          work.observation.baseTip = landingBase;
+        }
+        work.queue!.refreshedLanding = landingBase;
+        refreshed.push(work);
+      }
+    }
+    return { refreshed, conflicts };
   }
   /**
    * Merges `base` onto `head` on the item's scratch branch and returns the merge commit, or null
@@ -3137,6 +3245,9 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       observed = true;
       // A peer git shows landed while its item records it unlanded is delivered now (GY-744).
       await engine.reconcileLanded(observation, all, peer => github.observe(peer, all));
+      if (previous?.baseTip && observation.baseTip && previous.baseTip !== observation.baseTip) {
+        await github.refreshQueueOnLanding(all, observation.baseTip, previous.baseTip);
+      }
       schedule.cadence = observationCadence(work, all.map(item => item.id === work!.id ? work! : item), now, previous, github.steadyStateMs?.(now.getTime()));
       // A required check that failed on this candidate is rerun once before it counts (GY-516): the
       // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,

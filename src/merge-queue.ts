@@ -49,8 +49,8 @@ export interface QueueSpeculation {
    * being republished. The carry decided at publication carries it exactly as an observed approval.
    */
   observedApproval?: ObservedApproval | null;
-  /** Why the tip was built (GY-375): the queue head is the one candidate brought onto the base unasked. */
-  trigger?: 'queue-head';
+  /** Why the tip was built (GY-375, GY-1131): queue-head, or landing-refresh behind a landing. */
+  trigger?: 'queue-head' | 'landing-refresh';
 }
 /** An approval GitHub held at one moment, as the publisher read it: the reviewer, its id and the head it approved. */
 export interface ObservedApproval { reviewer: string; reviewId?: number; sha: string }
@@ -182,6 +182,8 @@ export interface QueueEntry {
    * ordinary batch plan resume. Recorded on the head member's entry with the queue history.
    */
   batchDissolved?: { at: string; members: string[] } | null;
+  /** The base branch tip this entry was refreshed/verified for after a landing (GY-1131). */
+  refreshedLanding?: string | null;
 }
 /** The published tip that replaces a queued entry's head on the next observation, or null when the head is the tip. */
 export function tipReplacesHead(work: Pick<Work, 'candidate' | 'queue' | 'policyRevision'>): string | null {
@@ -727,8 +729,9 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
 /** The unresolved conflict a base refresh reported for exactly this candidate and branch head, or null. */
 export function baseRefreshConflict(work: Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>): string | null {
   const refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
-  if (!refresh?.conflict || !candidate || !observation) return null;
-  return refresh.from.sha === candidate.sha && refresh.base === observation.baseTip && refresh.policyRevision === work.policyRevision ? refresh.conflict : null;
+  if (!refresh?.conflict || !candidate) return null;
+  if (observation?.baseTip && refresh.base !== observation.baseTip) return null;
+  return refresh.from.sha === candidate.sha && refresh.policyRevision === work.policyRevision ? refresh.conflict : null;
 }
 
 /**
@@ -747,6 +750,37 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
   const refresh = work.baseRefresh, candidate = work.candidate, carry = refresh?.carry;
   if (!refresh || !carry || !candidate || refresh.head !== candidate.sha) return null;
   return carry.to.sha === candidate.sha && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
+}
+
+/**
+ * GY-1131. The landing refresh a waiting queue entry needs after a landing moves the base branch tip.
+ * After each landing that moves the base tip, the control plane scratch test-merges every queued entry
+ * whose turn has not come (position > 0) and whose reviewed files overlap the landed diff, bounded to
+ * at most once per entry per landing. An entry whose reviewed files do not overlap the landed diff is skipped.
+ */
+export function queueLandingRefreshNeeded(
+  work: Work,
+  all: Work[],
+  landedDiff: readonly string[],
+  landingBase: string,
+  now: number = Date.now()
+): { head: string; landingBase: string; reviewedFiles: string[] } | null {
+  if (!work.queue || work.stage === 'done' || work.observation?.merged) return null;
+  if (!work.submission || work.reworkRequested) return null;
+  const candidate = work.candidate;
+  if (!candidate) return null;
+  const placement = queuePlacement(work, all, now);
+  if (!placement || placement.position === 0) return null;
+  if (work.queue.refreshedLanding === landingBase) return null;
+  if (work.baseRefresh?.base === landingBase && work.baseRefresh.from.sha === candidate.sha) return null;
+  if (candidate.baseSha === landingBase && work.queue.speculation?.base === landingBase) return null;
+  const reviewed = reviewedFilesOf(work, candidate.sha)
+    ?? (work.queue.speculation?.reviewedHead ? reviewedFilesOf(work, work.queue.speculation.reviewedHead) : null)
+    ?? work.observation?.files
+    ?? work.plannedFiles
+    ?? [];
+  if (!reviewed.some(path => landedDiff.includes(path))) return null;
+  return { head: candidate.sha, landingBase, reviewedFiles: reviewed };
 }
 
 /**
@@ -1141,7 +1175,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
     const refusal = refusedReconciliation(work);
     return refusal ? `Pull request was merged without a valid merge execution and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
   }
-  if (!work.submission || work.reworkRequested) return 'Implementation returned to the worker for a new attempt';
+  if (!work.submission || (work.reworkRequested && !work.baseRefresh?.conflict)) return 'Implementation returned to the worker for a new attempt';
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
   if (work.blocker) return `Queued work was blocked: ${work.blocker}`;
   if (work.violations.length) return `Queued work has an open violation: ${work.violations[0]}`;
