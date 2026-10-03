@@ -226,7 +226,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'session-slots', title: 'Session slots', unit: 'sessions',
     bound: 'the summed concurrency of the role\'s launch profiles in .graphyard/master.json',
     usage: 'pending reviewer and producer ledger records, and live worker leases held by launch-profile principals', owner: 'the master loop and its dispatcher (src/master-daemon.ts, src/auto-dispatch.ts)',
-    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
+    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session finished or blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
     remedy: 'raise concurrency on a profile of the role, or add a profile on another account, in .graphyard/master.json',
     warnBelow: () => 1, symptoms: [/every (?:reviewer|independent producer) profile is busy/, /is at its concurrency limit/],
     read: input => (['worker', 'reviewer', 'producer'] as const).map(role => {
@@ -243,7 +243,7 @@ export const resourceRegistry: ResourceDefinition[] = [
       const answered = new Set(pending.map(record => record.requestId).filter(Boolean));
       const waiting = input.work.flatMap(item => role === 'reviewer' ? [item.autoDispatch?.review?.id] : (item.autoDispatch?.producers ?? []).map(entry => entry.id)).filter((id): id is string => !!id && live.has(id) && !answered.has(id)).length;
       const stuck = pending.filter(record => stuckSession(record, input.agents, input.now)).length;
-      return { id: role, used: pending.length, bound, waiting, reclaimable: stuck, detail: `${pending.length} ${role} session(s) pending across ${profiles.length} profile(s), ${waiting} request(s) waiting for a slot${stuck ? `, ${stuck} stuck on a prompt or never started` : ''}` };
+      return { id: role, used: pending.length, bound, waiting, reclaimable: stuck, detail: `${pending.length} ${role} session(s) pending across ${profiles.length} profile(s), ${waiting} request(s) waiting for a slot${stuck ? `, ${stuck} finished, stuck on a prompt or never started` : ''}` };
     }),
   },
   {
@@ -333,7 +333,9 @@ function stuckSession(record: { state: string; agentName: string; idleSince?: st
   if (record.state !== 'pending' || !agents) return false;
   const agent = agents.find(candidate => candidate.name === record.agentName);
   if (!agent) return now - Date.parse(record.requestedAt) >= stuckSessionMs;
-  return (agent.agent_status === 'blocked' || finished.includes(agent.agent_status ?? '')) && now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
+  if (agent.agent_status === 'blocked') return now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
+  if (finished.includes(agent.agent_status ?? '')) return !!record.idleSince && now - Date.parse(record.idleSince) >= stuckSessionMs;
+  return false;
 }
 
 const disk = new Set<ResourceId>(['worktree-disk', 'database-capacity']);
@@ -555,7 +557,7 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * answers no live request; a finished pane holding a profile's name whose record settled
  * `finishedSessionGraceMs` ago, with no pending record on the name, is closed and its name
  * released once an earlier pass at least that long before saw it the same way; a pending session
- * blocked on a prompt for `stuckSessionMs`, or absent from every pass for that long, is failed —
+ * finished or blocked on a prompt for `stuckSessionMs`, or absent from every pass for that long, is failed —
  * its slot released and the relaunch rule free to try again — and its pane closed. The ledger is
  * written from a fresh read once the panes are closed, so a launch recorded meanwhile survives.
  *
@@ -606,7 +608,7 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   /** Decides from one read what to fail, close and reap; the ledger is written from a fresh read afterwards. */
   const reclaimLedger = async (kind: 'review' | 'producer', records: Settleable[], profiles: { name: string; agentName: string; concurrency?: number }[]) => {
     const failed = new Map<string, { resolution: string }>();
-    // 1. Pending sessions stuck on a prompt, or absent from Herdr for the whole bound: failed, so their slot is released.
+    // 1. Pending sessions finished or stuck on a prompt, or absent from Herdr for the whole bound: failed, so their slot is released.
     for (const record of records) {
       if (!stuckSession(record, observed.agents, now)) continue;
       const agent = observed.agents?.find(candidate => candidate.name === record.agentName);
@@ -671,8 +673,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
     }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
-  // 4. Worker panes on a profile's names whose session settled and no live lease holds the profile's principal.
+  // 4. Worker panes on a launch profile's names whose session settled and no live lease holds the profile's principal.
   for (const worker of config.workers ?? []) {
+    if (worker.mode !== 'launch') continue;
     const held = (observed.agents ?? []).filter(agent => agent.pane_id && agent.name && isProfileSession(worker, agent.name));
     for (const agent of held) {
       const profile = { role: 'worker' as const, name: worker.name, agentName: worker.agentName, principal: worker.principal };
