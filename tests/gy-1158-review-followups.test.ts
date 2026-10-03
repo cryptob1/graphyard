@@ -213,3 +213,49 @@ test('unit:gy-1158-finding-3 — accountSchema rejects null plan but accepts omi
   assert.equal(parsed.plan, undefined);
 });
 
+
+test('unit:gy-1158-finding-2 — an OpenCode account whose key file is Anthropic\'s is never probed against Z.AI nor marked logged out', async () => {
+  const home = await temporaryDirectory('opencode-anthropic-key');
+  await mkdir(join(home, 'opencode'), { recursive: true });
+  await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant-fixture' } }));
+  await writeFile(join(home, 'anthropic.key'), 'sk-ant-fixture\n');
+  const runtime: any = { name: 'opencode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'XDG_DATA_HOME', modelFlag: '--model', login: null, loginFile: null } };
+  const account: any = { name: 'opencode-a', runtime: 'opencode', model: 'claude-3-5-sonnet', enabled: true,
+    credential: { host: HOST, home, key: { file: 'anthropic.key', variable: 'ANTHROPIC_API_KEY' } } };
+  const called: string[] = [];
+  const fetchStub = (async (url: string) => { called.push(String(url)); return new Response('{}', { status: 401 }); }) as typeof fetch;
+  const observed = await observeAccount(account, runtime, { fetch: fetchStub, cacheMs: 0, now: () => now });
+  assert.deepEqual(called, [], 'the Anthropic key is never sent to Z.AI');
+  assert.equal(observed.quota.loggedIn, true, 'the OpenCode account stays logged in on its own provider login');
+});
+
+test('unit:gy-1158-finding-2 — a Pi account with no Z.AI credential is left to its smoke test, not reported logged in', async () => {
+  const home = await temporaryDirectory('pi-keyless');
+  await writeFile(join(home, 'auth.json'), '{}');
+  const runtime: any = { name: 'pi', launch: { kind: 'pi', args: [], environment: {}, homeVariable: 'PI_CODING_AGENT_DIR', modelFlag: '--model', login: null, loginFile: null } };
+  const account: any = { name: 'pi-k', runtime: 'pi', model: 'glm-flash', enabled: true, credential: { host: HOST, home } };
+  const observed = await observeAccount(account, runtime, { quota: false, cacheMs: 0 });
+  assert.equal(observed.quota.loggedIn, null, 'unknown: an empty auth.json is no Z.AI login, and Pi\'s smoke test decides');
+});
+
+test('unit:gy-1158-finding-4 — eligibility is a pure read: a stale exhaustion is superseded without rewriting the account', () => {
+  const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
+    runtimes: [{ name: 'opencode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'OPENCODE_DIR', modelFlag: '--model', login: null, loginFile: null } }],
+    models: [{ name: 'glm', id: 'glm-4', cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'fast', contextTokens: null } }],
+    accounts: [
+      { name: 'acc-a', runtime: 'opencode', model: 'glm', plan: 'team-zai', credential: { host: 'host-a', home: '/home/a' }, enabled: true },
+      { name: 'acc-b', runtime: 'opencode', model: 'glm', plan: 'team-zai', credential: { host: 'host-b', home: '/home/b' }, enabled: true },
+    ],
+    roles: [{ name: 'worker', accounts: ['acc-a', 'acc-b'], concurrency: 2 }],
+    reason: 'test setup',
+  }, { actor: 'operator', at: iso(-2 * hour) }).registry;
+  const [a, b] = registry.accounts;
+  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-30 * minute) });
+  foldObservation(b, { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null }, { actor: 'coordinator', at: iso(-5 * minute) });
+  const before = structuredClone(a.quota);
+  assert.equal(accountIneligibility(registry, a, now, 'host-a'), null);
+  assert.deepEqual(a.quota, before, 'the read leaves the account\'s recorded quota as it was');
+  // A newer exhaustion on the plan holds every account on it.
+  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-1 * minute) });
+  assert.match(accountIneligibility(registry, b, now, 'host-b')!, /acc-b quota is exhausted on plan .*acc-a quota is exhausted: quota exceeded/);
+});

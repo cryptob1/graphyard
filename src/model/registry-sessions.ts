@@ -115,47 +115,16 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && runtime.launch.kind === 'pi');
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
   const plan = deriveAccountPlan(account, registry.accounts);
-  const planAccounts = registry.accounts.filter(other => deriveAccountPlan(other, registry.accounts).planId === plan.planId);
-
-  // 1. Operator holds on any account sharing this plan take precedence while active
-  const operatorExhausted = planAccounts.find(other =>
-    other.quota.source === 'operator' && other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now)
-  );
-  if (operatorExhausted) {
-    if (operatorExhausted.name === account.name) {
-      return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
-    }
-    return `${account.name} quota is exhausted on plan ${plan.planName} (${operatorExhausted.name} quota is marked exhausted by operator${until(operatorExhausted.quota.resetsAt)}${operatorExhausted.quota.reason ? `: ${operatorExhausted.quota.reason}` : ''})`;
-  }
-
-  // 2. Reconcile probe observations by freshness: find the newest observation on this plan
-  const planProbes = planAccounts
-    .filter(other => other.quota.source === 'probe' && other.quota.observedAt && (other.quota.state === 'available' || other.quota.state === 'exhausted'))
+  const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
+  const held = (other: FleetAccount) => other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now);
+  // An operator hold on the plan wins; otherwise the newest probe on the plan decides, so a stale exhaustion one host
+  // reported without a reset is superseded by a later probe elsewhere (GY-1158). A pure read: nothing is rewritten here.
+  const probes = planAccounts.filter(other => other.quota.source === 'probe' && other.quota.observedAt && other.quota.state !== 'unknown')
     .sort((a, b) => Date.parse(b.quota.observedAt!) - Date.parse(a.quota.observedAt!));
-  const newestProbe = planProbes[0];
-
-  if (newestProbe) {
-    if (newestProbe.quota.state === 'exhausted' && (!newestProbe.quota.resetsAt || Date.parse(newestProbe.quota.resetsAt) > now)) {
-      if (newestProbe.name === account.name) {
-        return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
-      }
-      return `${account.name} quota is exhausted on plan ${plan.planName} (${newestProbe.name} quota is exhausted${until(newestProbe.quota.resetsAt)}${newestProbe.quota.reason ? `: ${newestProbe.quota.reason}` : ''})`;
-    }
-    // Newest probe observation on this plan is available; stale exhausted observations from other accounts are ignored.
-    // Also synchronize this account's probe quota if its own record was a stale exhaustion
-    if (account.quota.source === 'probe' && account.quota.state === 'exhausted' && account.quota.observedAt && Date.parse(account.quota.observedAt) < Date.parse(newestProbe.quota.observedAt!)) {
-      account.quota = { ...account.quota, state: newestProbe.quota.state, usage: newestProbe.quota.usage, resetsAt: newestProbe.quota.resetsAt, reason: newestProbe.quota.reason };
-    }
-  } else {
-    // Fallback if no timestamps exist (e.g. synthetic accounts without observedAt)
-    if (account.quota.state === 'exhausted' && (!account.quota.resetsAt || Date.parse(account.quota.resetsAt) > now)) {
-      return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
-    }
-    const otherExhausted = planAccounts.find(other => other.name !== account.name && other.quota.state === 'exhausted' && (!other.quota.resetsAt || Date.parse(other.quota.resetsAt) > now));
-    if (otherExhausted) {
-      return `${account.name} quota is exhausted on plan ${plan.planName} (${otherExhausted.name} quota is exhausted${until(otherExhausted.quota.resetsAt)}${otherExhausted.quota.reason ? `: ${otherExhausted.quota.reason}` : ''})`;
-    }
-  }
+  const exhausted = planAccounts.find(other => other.quota.source === 'operator' && held(other))
+    ?? (probes.length ? [probes[0]].find(held) : [account, ...planAccounts].find(held));
+  if (exhausted?.name === account.name) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
+  if (exhausted) return `${account.name} quota is exhausted on plan ${plan.planName} (${exhausted.name} quota is ${exhausted.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${until(exhausted.quota.resetsAt)}${exhausted.quota.reason ? `: ${exhausted.quota.reason}` : ''})`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
   return null;

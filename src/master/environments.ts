@@ -217,17 +217,20 @@ async function codexAccount(environment: AgentEnvironment, probe: EnvironmentPro
 async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
-  const keyFileName = (environment as any).keyFile ?? (environment as any).key?.file ?? 'zai.key';
+  // A named key file is read as Z.AI's only when it is Z.AI's by its variable or name: an OpenCode account whose
+  // key is Anthropic's is never probed against Z.AI, so its 401 cannot mark the account logged out (GY-1158).
+  const named = (environment as any).keyFile as string | undefined, variable = (environment as any).keyVariable as string | undefined;
+  const keyFileName = named && (variable === 'ZAI_API_KEY' || /zai/i.test(named)) ? named : 'zai.key';
   const fileKey = await readFile(resolve(environment.home, keyFileName), 'utf8').catch(() => null);
   const fallbackKey = keyFileName !== 'zai.key' ? await readFile(resolve(environment.home, 'zai.key'), 'utf8').catch(() => null) : null;
   const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
   const piKey = auth?.zai?.key ?? auth?.['z.ai']?.key ?? auth?.['zai-coding-plan']?.key ?? auth?.ZAI_API_KEY;
-  const key = zaiKey ?? piKey ?? fileKey?.trim() ?? fallbackKey?.trim();
+  const key = zaiKey ?? piKey ?? (fileKey?.trim() || undefined) ?? (fallbackKey?.trim() || undefined);
 
   const hasZaiKey = !!key;
   const isZaiSpecific = (environment.kind as string) === 'pi'
     || (environment as any).plan?.startsWith?.('zai')
-    || (environment as any).keyFile
+    || keyFileName !== 'zai.key'
     || /zai|glm/i.test(environment.name);
 
   if (isZaiSpecific) {
@@ -250,9 +253,6 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
       signal: AbortSignal.timeout(probe.timeoutMs ?? 5_000),
     });
     if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        return { loggedIn: false, usage: [], note: `unauthorized: provider returned ${response.status}` };
-      }
       if (response.status === 429) {
         const text = await response.text();
         const parsed = parseZaiUsage(text);

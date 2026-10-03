@@ -184,8 +184,11 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
   if (kind) {
     const planInfo = deriveAccountPlan(account, allAccounts);
-    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, keyFile: account.credential.key?.file } as any, probe);
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable } as any, probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
+    // No Z.AI credential found for a Pi account is not proof it is logged out: Pi may hold another provider's login,
+    // so the smoke test it gets before first selection decides, with Pi's own error (GY-515, GY-1158).
+    if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
     return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
       resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null } };
   }
