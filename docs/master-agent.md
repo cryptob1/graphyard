@@ -17,15 +17,11 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: set `productionEnvironment`.
 5. Close finished agent sessions; repeat.
 
-Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags undeployed main.
 
 `master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout (GY-857; [sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
 
 The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
-
-### Base failures
-
-A required check failure the base branch head fails too is classified a base failure: the loop requests no rework and launches no approver (waiting while a base log is unreadable). It raises one attention entry and one P0 repair item per distinct failing test and base head. Once the base check passes again, attention clears, failed jobs rerun, and each blocked candidate is refreshed onto the repaired base by merging base into its branch, carrying its approval.
 
 ### System-driven items
 
@@ -33,8 +29,8 @@ Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 max). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for 3 minutes. A handle another host launched is left to
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
 that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
@@ -44,9 +40,11 @@ that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconc
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. Concurrency counts live sessions only; a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-Operators and masters never close sessions by hand (`master run --once` sweeps); for an overlong session, attach via the handle command. Never mark another session finished to free a slot.
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+another session's handle finished to free a slot.
 
 ### System invariants
 
@@ -54,7 +52,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Research and diagnosis
 
-With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows the recommendation, a differing answer reworks, failure never blocks; product questions need a human.
+With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows it, a differing answer reworks, failure never blocks; product questions need a human.
 
 `Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release a fix or close-as-duplicate; later recurrences re-file. An owed branch restore under 30 minutes and restart-resumed merges are self-handled, not `merge` faults.
 
@@ -64,11 +62,11 @@ Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then 
 
 ## Automatic dispatch at submit
 
-A candidate passing the build gate gets one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once those pass (`proofs-pending` until then). **The loop launches requests within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launch awaits bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping any with a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
+A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once those pass (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launch awaits bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping any with a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
-**Concurrency is per role.** `concurrency` (1–20, default 1) caps simultaneous sessions, each named uniquely above one. `run.reviewerProfile` defaults to 4; pending sessions count before Herdr shows them. Lowering concurrency drains sessions first (`longestWaitMs`); starving ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request above one. `run.reviewerProfile`'s profile defaults to 4 sessions; pending sessions count before Herdr shows them. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
-**Requests always settle.** Gone panes (`pane_not_found`) close. Settled reviewer panes close next dispatch tick, freeing the name; after 3 refused closes, attention names the pane. No request outlives its token: expired, unreported by Herdr, it settles `expired`; pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); unposted reviewers are reminded first. Vanished producer runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then rework.
+**Requests always settle.** Gone panes (`pane_not_found`) close. A settled reviewer's still-open pane is closed next dispatch tick, freeing its name; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; a pending one counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); unposted reviewers are reminded first. Vanished producer runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then rework.
 
 **Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
 
@@ -82,7 +80,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it for automated proofs. When all remaining proofs in a unit or integration group are unexercised, next action is `request-rework`, naming proof, criterion and mutation; `master status` shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When every proof a unit or integration group has left is such a finding, the next action is `request-rework`, naming proof, criterion and surviving mutation; `master status` shows it as awaiting rework, not an unanswered producer request. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
@@ -90,8 +88,10 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The first no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes with passed checks, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
+The first no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
 
 The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: a confirmed required-suite failure on main traced to the culprit lands a revert on the base tip — refused if later merges touched culprit files — through the same bypass, recorded `optimistic.revert.*`, item reopened as rework.
+
+A required check the base head fails too is a [base failure](development.md#base-failures): no rework, one P0 repair item, candidates refreshed once repaired.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

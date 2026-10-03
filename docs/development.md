@@ -27,7 +27,9 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 `test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests, `main` and queue tips every pre-merge file (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).
 
-A check `main` fails too is a [base failure](master-agent.md#base-failures): the loop requests no rework and refreshes candidates once repaired.
+### Base failures
+
+A required check failure the base branch head fails too is a base failure: the loop requests no rework and launches no approver (waiting while a base log is unreadable). It raises one attention entry and one P0 repair item per distinct failing test and base head. Once the base check passes again, attention clears, failed jobs rerun, and each blocked candidate is refreshed onto the repaired base by a Graphyard-authored merge of the base into its branch (`refresh`), carrying its approval.
 
 ## Documentation
 
