@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else readable same-host `data_directory` volume size, else an advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle temporary files. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else readable same-host `data_directory` volume size, else an advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 
@@ -122,7 +122,7 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 Reconcile reads each live item once per pass, not per batch, and locks only its batch rows, so mutations on other items never wait. Contended batches back off, then defer to the next tick; deferrals and ticks over 5 s log warnings.
 
-The server listens before startup validation finishes; `GET /healthz` reports liveness throughout and `readiness` true once done, and `GET /healthz?ready` answers 503 until then.
+The server listens before startup validation finishes: `GET /healthz` reports liveness and `readiness`, and `GET /healthz?ready` answers 503 until validation completes.
 
 ### Concurrent reconciliation
 
