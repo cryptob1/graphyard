@@ -78,6 +78,6 @@ export async function pushViaControlPlane({ api, print, args }: CliContext, work
   const request = describeSyncCommit(git, (...gitArgs) => run(gitArgs), commit, workspace.epoch);
   const outcome = await api(`work/${work.id}/sync-push`, request, randomUUID()) as SyncPushOutcome;
   // The local remote-tracking ref follows the push the control plane made, so the next plain push fast-forwards.
-  spawnSync('git', ['fetch', '--quiet', 'origin', `refs/heads/${outcome.branch}:refs/remotes/origin/${outcome.branch}`], { stdio: 'ignore' });
+  run(['fetch', '--quiet', 'origin', `refs/heads/${outcome.branch}:refs/remotes/origin/${outcome.branch}`]);
   print({ ...outcome, next: `The control plane pushed ${commit.slice(0, 12)} to ${outcome.branch}. Later commits that leave .github/workflows alone push plainly; then complete ${work.key} ${outcome.epoch} PR.` });
 }
