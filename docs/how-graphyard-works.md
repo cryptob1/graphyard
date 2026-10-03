@@ -14,12 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## Shared project memory
 
-Workers, reviewers and producers start with a role-scoped memory digest (<=500 words):
-- Approved decisions and answered operator requests.
-- Recurring fault classes with sanctioned remedies.
-- Merges to main after session base (or last 24h) with files.
-
-Updated from applied decisions, human answers, fault classes and merges — never agent claims — kept in cursor and `.graphyard/project-memory.json`. `graphyard master status` reports `projectMemory`; shown on Workers page.
+Workers, reviewers and producers start with a role-scoped memory digest (<=500 words): approved decisions, answered requests, recurring fault classes with remedies, merges to main since base (or 24h) with files. Updated from applied decisions, human answers, fault classes, merges (never agent claims), kept in cursor and `.graphyard/project-memory.json`. `master status` reports `projectMemory`; on Workers page.
 
 ## Risk lanes
 
@@ -50,5 +45,5 @@ Text equivalent: callers use the API; the engine applies mutations with events i
 - Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under current policy; pushes/base changes invalidate evidence.
 - Claims bump the epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; latest trusted record per proof/candidate wins.
-- Append-only history; retries replay 24 hours.
-- Graphyard merges only the authorized candidate, once; merge is not [delivery](delivery.md).
+- Append-only history; retries replay 24h.
+- Graphyard merges only the authorized candidate; merge is not [delivery](delivery.md).

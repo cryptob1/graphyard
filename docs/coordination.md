@@ -17,17 +17,17 @@ Gate: reviewer approval of the exact head plus required CI; threads are inputs. 
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` bounds changes: at `complete`, each new head and landing, files inside scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; every other file must match base byte-for-byte. Carried files (unlanded commits) never eject; only scope requests or audited revisions widen it.
+`plannedFiles` bounds changes: at `complete`, new heads and landings, files inside scope, new files, touched `tests/helpers/timing-baseline.json` lines pass; other files must match base byte-for-byte. Carried files (unlanded commits) never eject; scope requests or audited revisions widen it.
 
 `evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals. Published as required check `graphyard/landable` (`success`, or `failure` with reasons), never a verdict input.
 
-Out-of-scope files are three-way merged onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
+Out-of-scope files three-way merge onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 
-Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `graphyard sync GY-N --restore` also restores out-of-scope files to the base tip in one commit (plain push, never force).
+Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `graphyard sync GY-N --restore` restores out-of-scope files to base tip in one commit (plain push, never force).
 
 ### Submit when your own criteria pass
 
-The full suite is CI's gate (GY-853): workers run the build and `graphyard verify GY-N` (own proofs), submit on pass, and name any sandbox full-suite failure outside `plannedFiles` in the PR without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all cases passed but the run ended abnormally (hook, crash, signal); failed, skipped or unexecuted cases always block.
+The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own proofs), submit on pass, and name any sandbox full-suite failure outside `plannedFiles` in the PR without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all cases passed but the run ended abnormally (hook, crash, signal); failed, skipped or unexecuted cases always block.
 
 ### Generated files never conflict
 
@@ -35,4 +35,4 @@ The full suite is CI's gate (GY-853): workers run the build and `graphyard verif
 
 ## Ship in under thirty minutes
 
-[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance, never weaker gates. `graphyard diagnose GY-N` names the refusing gate, other holds; conflicting `base-behind`/`base-conflict` get rework. Three consecutive unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).
+[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance, never weaker gates. `graphyard diagnose GY-N` names refusing gate, other holds; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).

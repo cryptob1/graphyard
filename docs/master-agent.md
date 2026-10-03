@@ -15,14 +15,23 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; never close sessions manually.** Sweeps run every dispatch tick (`run.dispatchIntervalSeconds`, default 10, max 30). Handles close on second consecutive missed sweep; unobserved handles get 3 minutes grace; foreign-host handles are left to their loop. `dispatch.sessionReconcile` reports closures (`sessions.unseen`: stale handles):
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
 
-- **Vanished**: missed twice.
-- **Ended**: agentless pane or terminal state (`idle`, `done`, `blocked` are not terminal).
-- **Superseded**: review/proof session for an older head; delivered items close likewise. Implementation sessions follow leases.
-- **Duplicate**: older of two per role and head.
+- **Vanished**: missing from two consecutive listings.
+- **Ended**: agentless pane or terminal state; `idle`, `done` and
+  `blocked` are deliberately not terminal.
+- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
+  way as any other. Implementation sessions are left to the lease.
+- **Duplicate**: the older of two sessions for one role and head.
 
-Closures decide no gates, end no leases, and stop no processes. Concurrency counts live sessions only; names stay busy while held. Past role maximums (4h implementation, 1h review, `run.producerTimeoutMinutes` producer, 12h coordination), sessions raise attention, never closure. For dead sessions, `master run --once` sweeps; for overlong ones, attach via handle command. Never mark handles finished to free slots.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live
+sessions only; a name is busy only while a live session has it. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) a session raises attention, never closure.
+
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+another session's handle finished to free a slot.
 
 ### System invariants
 
@@ -39,8 +48,8 @@ Follow-ups wait on their item (`pendingFollowUps`) until it ships, forming or jo
 Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then, once they pass, a review request (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launches await the head's bot reviews (`run.awaitReviewers`) up to `awaitReviewersMinutes`, skipping a bot that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart (`run.reviewerProfile` defaults to 4 sessions); lowering it drains first (`longestWaitMs`); starved minutes count in `counts.concurrencyStarved`.
-- **Launches bind heads**: stale refusals wake observation and retry; 15m+ `dispatch.waiting` reviews raise attention.
-- Requests always settle: `pane_not_found` panes close, as do settled reviewers' open panes. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; pending ones count in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); killed/vanished producer runs spend no attempt, exhausted ones raise `escalation:proof-exhausted`, then a quoting rework.
+- **Launches bind heads**: stale refusals wake observation and retry; 15m+ waiting reviews raise attention.
+- Requests always settle: `pane_not_found` panes close, as do settled reviewers' open panes. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; pending ones count in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch (12 per request, then `dispatch.abandoned`); killed/vanished producer runs spend no attempt, exhausted ones raise `escalation:proof-exhausted`, then a quoting rework.
 - **Every role fails over on spent quota** or waits as one uncounted `capacity` line.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after relaunching stops.
@@ -51,12 +60,12 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 
 ## Guarded merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only when currently authorized for the exact head, base and policy; protocol skew refuses (`… deploy main first`).
+`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only when currently authorized for exact head, base and policy; protocol skew refuses (`… deploy main first`).
 
 ### Repair lane
 
-Only no-admin-bypass exceptions (head-bound, App's ruleset bypass):
-- A `"repair": "merge-path"` item stalled 15 minutes with checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault; audited (`repair.merged`).
-- The main guard's [revert](github.md#optimistic-merges) of a confirmed main required-suite failure's culprit, unless later merges touched its files (`optimistic.revert.*`); the item reopens as rework.
+No-admin-bypass exceptions (head-bound, App's ruleset bypass):
+- A `"repair": "merge-path"` item stalled 15m with checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault; audited (`repair.merged`).
+- The main guard's [revert](github.md#optimistic-merges) of a confirmed main required-suite failure's culprit, unless later merges touched its files (`optimistic.revert.*`); reopens as rework.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
