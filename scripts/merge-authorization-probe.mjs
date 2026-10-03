@@ -12,7 +12,8 @@ import { randomUUID } from 'node:crypto';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const repository = 'graphyard-probe/candidate';
-const proof = 'integration:merge-authorization';
+// GY-1101: the fixture item's gating proof is a unit: proof; integration: proofs no longer hold a merge.
+const proof = 'unit:merge-authorization';
 
 export function mergeAuthorizationPrincipals() { return [
   { id: 'probe-operator', role: 'admin', token: randomUUID() + randomUUID() },
@@ -20,7 +21,7 @@ export function mergeAuthorizationPrincipals() { return [
   { id: 'probe-coordinator', role: 'coordinator', token: randomUUID() + randomUUID() },
   { id: 'probe-other-coordinator', role: 'coordinator', token: randomUUID() + randomUUID() },
   { id: 'probe-producer', role: 'producer', proofs: [proof], token: randomUUID() + randomUUID() },
-  { id: 'probe-other-producer', role: 'producer', proofs: ['integration:unrelated'], token: randomUUID() + randomUUID() },
+  { id: 'probe-other-producer', role: 'producer', proofs: ['unit:unrelated'], token: randomUUID() + randomUUID() },
 ]; }
 
 export async function probeMergeAuthorization({ url, controlUrl, controlToken, principals, observeCandidate }) {

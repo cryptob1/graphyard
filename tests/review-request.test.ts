@@ -32,20 +32,21 @@ const conflicting = () => behind({ mergeable: false, conflicting: true });
 function item(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 191, branch: 'graphyard/gy-191-1', author: 'implementer' };
   return { id: 'work-191', key: 'GY-191', title: 'Behind base', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
-    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['unit:behind-base-still-reviewed', 'integration:behind-base'] }],
+    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['unit:behind-base-still-reviewed', 'unit:behind-base'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(-10_000), stageEnteredAt: iso(-30 * 60_000),
     ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/w/gy-191', branch: 'graphyard/gy-191-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 191 },
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: behind(), blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
 const evidence = (proof: string, id: string): Evidence => ({ id, proof, sha: H, baseSha: B, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: iso(-60_000) });
-const proven = () => [evidence('unit:behind-base-still-reviewed', 'e1'), evidence('integration:behind-base', 'e2')];
+const proven = () => [evidence('unit:behind-base-still-reviewed', 'e1'), evidence('unit:behind-base', 'e2')];
 
 test('unit:behind-base-still-reviewed — a mergeable candidate one commit behind base gets producer requests and then a review request for its head', () => {
-  // Unproven: one producer request per proof group, bound to the head as it stands.
+  // Unproven: one producer request per proof group, bound to the head as it stands. Both proofs
+  // are in the `unit` group, so one request covers them.
   const unproven = item();
   reconcileAutoDispatch(unproven, [unproven], new Date(clock));
-  assert.deepEqual(unproven.autoDispatch!.producers.map(request => [request.group, request.sha, request.baseSha, request.state]), [['unit', H, B, 'requested'], ['integration', H, B, 'requested']]);
+  assert.deepEqual(unproven.autoDispatch!.producers.map(request => [request.group, request.sha, request.baseSha, request.state]), [['unit', H, B, 'requested']]);
 
   // Proven: the review request is raised for the same head, bound to head, base and policy.
   const work = item({ evidence: proven() });

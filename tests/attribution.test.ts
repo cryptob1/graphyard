@@ -348,7 +348,7 @@ test('integration:safe-automatic-reanchor', async () => {
   const delayed = await observe(f, A, { now: dispatchedAt, validFrom: 0, validTo: 0.001, observedAt: 0.001 });
   assert.equal(delayed.authoritative, true);
   w = await current(f.w.id);
-  assert.equal(currentEvidence(w, f.proof), undefined, 'the undermined pass is no longer current'); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
+  assert.equal(currentEvidence(w, f.proof), undefined, 'the undermined pass is no longer current'); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, true, 'GY-1101: an e2e: scenario proof is a release-candidate proof; losing its pass does not reopen the merge gate');
   assert.equal(w.evidence.length, 1, 'the evidence record is preserved, not edited or removed'); assert.equal(w.evidence[0].result, 'pass');
   const undermined = await records(f.w.id, 'attribution-undermined'); assert.equal(undermined.length, 1); assert.equal(undermined[0].attemptId, attempt.id); assert.equal(undermined[0].details.evidenceId, w.evidence[0].id);
   assert.equal((await request(fresh.id)).state, 'superseded');
@@ -584,7 +584,7 @@ test('integration:attribution-security-regressions', async () => {
   const passed: any = await validation.result(collector, report(f, command), id()); assert.equal(passed.passed, true, passed.reasons.join('; '));
   const attempt = (await request(live.id)).attempts.at(-1)!;
   await observe(f, B, { now: Date.parse(attempt.dispatchedAt), validFrom: 0, validTo: 0.001, observedAt: 0.001 });
-  w = await current(f.w.id); assert.equal(currentEvidence(w, f.proof), undefined); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
+  w = await current(f.w.id); assert.equal(currentEvidence(w, f.proof), undefined); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, true, 'GY-1101: an e2e: scenario proof is a release-candidate proof; losing its pass does not reopen the merge gate');
   const replacement = await request(w.validation![f.proof].requestId!); assert.equal(replacement.attempts.length, 0);
   const late: any = await validation.result(collector, report(f, command), id()); assert.equal(late.accepted, false, 'a late report on the superseded attempt is recorded, never accepted');
   const generic = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());

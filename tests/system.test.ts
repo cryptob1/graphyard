@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
-import { ReconciliationRetry, SpeculativeConflict, deliveryState, rollbackGuidance, type Principal, type Work, type Observation, type ScopeFile } from '../src/model.js';
+import { ReconciliationRetry, SpeculativeConflict, currentEvidence, deliveryState, rollbackGuidance, type Principal, type Work, type Observation, type ScopeFile } from '../src/model.js';
 import { diagnose } from '../src/coordination.js';
 import { stageMetrics } from '../src/master-daemon.js';
 import { predictQueue, queueRef, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
@@ -34,13 +34,13 @@ const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas',
 const other: Principal = { id: 'agent-b', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
 const otherCoordinator: Principal = { id: 'other-master', role: 'coordinator' };
-const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:claim-safety'] };
-const otherProducer: Principal = { id: 'other-ci-runner', role: 'producer', proofs: ['integration:unrelated'] };
+const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:claim-safety'] };
+const otherProducer: Principal = { id: 'other-ci-runner', role: 'producer', proofs: ['unit:unrelated'] };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const probeWorkers = Array.from({ length: 32 }, (_, i) => ({ id: `probe-worker-${i}`, role: 'worker' as const, token: `test-probe-${i}-${'x'.repeat(32)}` }));
 let database: EmbeddedPostgres; let store: Store; let engine: Engine;
 let http: ReturnType<typeof server>; let url: string;
-const workInput = { title: 'Claims are exclusive', criteria: [{ id: 'AC-1', text: 'Only one agent claims the work', proofs: ['integration:claim-safety'] }] };
+const workInput = { title: 'Claims are exclusive', criteria: [{ id: 'AC-1', text: 'Only one agent claims the work', proofs: ['unit:claim-safety'] }] };
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -73,7 +73,7 @@ function observation(w: Work): Observation {
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true,
     merged: false, mergeSha: null, files: ['src/claims.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
-function proof() { return { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }; }
+function proof() { return { proof: 'unit:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 12, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }; }
 /**
  * A proven candidate with Graphyard's queue tip published for it: the state a merge authorization
  * now requires, since only a published tip proves the validated commit contains its base. Its
@@ -462,7 +462,7 @@ test('a revoked candidate cannot be merged through the broker, including concurr
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await proven(w);
   assert.equal(w.stage, 'merge'); assert.ok(w.gates.every(gate => gate.passed));
-  const withdrawal = { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Reported run was attributed to the wrong artifact' };
+  const withdrawal = { proof: 'unit:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Reported run was attributed to the wrong artifact' };
   for (const [actor, expected] of [[worker, /operator or the trusted producer/], [coordinator, /operator or the trusted producer/], [otherProducer, /operator or the trusted producer/]] as const)
     await assert.rejects(engine.execute(actor, 'revoke', w.id, withdrawal, randomUUID()), expected);
   await assert.rejects(engine.execute(producer, 'revoke', w.id, { ...withdrawal, sha: 'd'.repeat(40) }, randomUUID()), /No trusted evidence matches/);
@@ -475,7 +475,7 @@ test('a revoked candidate cannot be merged through the broker, including concurr
   assert.equal(revoked.mergeAuthorization, null); assert.equal(revoked.stage, 'acceptance');
   assert.match(revoked.gates.find(gate => gate.name === 'acceptance')!.reasons.join(' '), /previously accepted evidence was revoked/);
   assert.equal(revoked.queue, null, 'a withdrawn proof is an adverse conclusion: the entry leaves the queue instead of stalling it');
-  assert.match(revoked.queueEjection!.reason, /integration:claim-safety was revoked on speculative tip/);
+  assert.match(revoked.queueEjection!.reason, /unit:claim-safety was revoked on speculative tip/);
   assert.equal(revoked.evidence.at(-1)!.revocation?.actor, producer.id);
   assert.equal(revoked.evidence.at(-1)!.revocation?.reason, withdrawal.reason);
   assert.deepEqual(proofPreview(revoked).map(entry => entry.status), ['revoked']);
@@ -496,7 +496,7 @@ test('revocation withdraws every accepted run for the candidate and republishes 
   w = await proven(w);
   w = await engine.execute(producer, 'evidence', w.id, { ...proof(), executed: 14 }, randomUUID());
   assert.equal(w.stage, 'merge');
-  const withdrawal = { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Producer retracted both reported runs' };
+  const withdrawal = { proof: 'unit:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Producer retracted both reported runs' };
   w = await engine.execute(producer, 'revoke', w.id, withdrawal, randomUUID());
   assert.equal(w.evidence.filter(item => item.revocation).length, 2, 'an older accepted run must not re-authorize the candidate');
   assert.equal(w.stage, 'acceptance'); assert.equal(w.mergeAuthorization, null);
@@ -515,7 +515,7 @@ test('revocation withdraws every accepted run for the candidate and republishes 
   assert.doesNotMatch(w.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
   assert.equal(w.queueEjection, null);
   assert.ok(w.queue, 'the same head re-entered the queue');
-  assert.equal(w.queueHistory?.findLast(entry => entry.event === 'ejected')?.reason, 'Proof integration:claim-safety was revoked on speculative tip ' + head.slice(0, 12) + ': Producer retracted both reported runs');
+  assert.equal(w.queueHistory?.findLast(entry => entry.event === 'ejected')?.reason, 'Proof unit:claim-safety was revoked on speculative tip ' + head.slice(0, 12) + ': Producer retracted both reported runs');
 });
 test('delivered work refuses revocation and keeps its authorized delivery record', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
@@ -524,7 +524,7 @@ test('delivered work refuses revocation and keeps its authorized delivery record
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   const delivered = await engine.observe(w.id, requested.revision, { ...observation(w), merged: true, mergedAt, mergeSha: 'a'.repeat(40) });
   assert.equal(delivered.stage, 'done');
-  await assert.rejects(engine.execute(producer, 'revoke', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Too late to withdraw' }, randomUUID()), /immutable/);
+  await assert.rejects(engine.execute(producer, 'revoke', w.id, { proof: 'unit:claim-safety', sha: head, baseSha: base, policyRevision: w.policyRevision, reason: 'Too late to withdraw' }, randomUUID()), /immutable/);
   const reloaded = (await store.list()).find(item => item.id === w.id)!;
   assert.equal(reloaded.stage, 'done'); assert.ok(reloaded.delivery);
   assert.equal(reloaded.evidence.some(item => item.revocation), false);
@@ -561,7 +561,7 @@ test('latest failed evidence supersedes previous passing evidence', async () => 
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await proven(w); assert.equal(w.stage, 'merge');
   w = await engine.execute(producer, 'evidence', w.id, { ...proof(), result: 'fail' }, randomUUID()); assert.equal(w.stage, 'build');
-  assert.match(w.gates.find(g => g.name === 'build')!.reasons[0], /integration:claim-safety failed on .* the head returns to its worker before review$/);
+  assert.match(w.gates.find(g => g.name === 'build')!.reasons[0], /unit:claim-safety failed on .* the head returns to its worker before review$/);
 });
 test('legacy evidence URL remains valid and typed external artifacts do not change trust', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
@@ -873,12 +873,16 @@ test('E2E definitions are versioned, immutable, operator-owned, and pinned by wo
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'e2e-host', path: `/tmp/${w.id}`, branch: `graphyard/${w.id}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: Number(w.key.slice(3)) }, randomUUID());
   await clearQueue(w.id);
-  w = await engine.observe(w.id, w.revision, observation(w));
+  // GY-1101: an e2e proof is release-candidate proof, not a pre-merge requirement, so the item
+  // reaches merge without it; the pinned scenario still decides which runs count as its proof.
+  w = await engine.observe(w.id, w.revision, observation(w)); assert.equal(w.stage, 'merge');
   const reporter: Principal = { id: 'e2e-reporter', role: 'producer', proofs: ['e2e:booking-sms'] };
   for (const binding of [{}, { scenarioRevision: 2, environment: 'staging' }, { scenarioRevision: 1, environment: 'production' }]) {
-    w = await engine.execute(reporter, 'evidence', w.id, { ...proof(), proof: 'e2e:booking-sms', ...binding }, randomUUID()); assert.equal(w.stage, 'acceptance');
+    w = await engine.execute(reporter, 'evidence', w.id, { ...proof(), proof: 'e2e:booking-sms', ...binding }, randomUUID()); assert.equal(w.stage, 'merge');
+    assert.equal(currentEvidence(w, 'e2e:booking-sms'), undefined, `a run not bound to the pinned scenario revision and environment is not its proof: ${JSON.stringify(binding)}`);
   }
   w = await engine.execute(reporter, 'evidence', w.id, { ...proof(), proof: 'e2e:booking-sms', scenarioRevision: 1, environment: 'staging' }, randomUUID()); assert.equal(w.stage, 'merge');
+  assert.equal(currentEvidence(w, 'e2e:booking-sms')?.scenarioRevision, 1);
 });
 test('unknown E2E scenarios are refused rather than silently accepting undefined proof', async () => {
   await assert.rejects(engine.execute(operator, 'create', null, { title: 'Undefined test', criteria: [{ id: 'AC-1', text: 'Must work', proofs: ['e2e:undefined-case'] }] }, randomUUID()), /Register E2E scenario/);
@@ -1057,7 +1061,7 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   const adapter = {
     async observe() {
       // Any revision change while GitHub is being read; the worker's own untrusted assertion is one that needs no lease.
-      await engine.execute(worker, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0 }, randomUUID());
+      await engine.execute(worker, 'evidence', w.id, { proof: 'unit:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0 }, randomUUID());
       return observation(w);
     },
     async publish(_work: Work, reason: string, guard: () => Promise<void>) { assert.match(reason, /fresh verification/); await guard(); publications++; },
@@ -1141,7 +1145,7 @@ test('draft and closed submissions wait normally and dispatch after becoming rea
 test('requirement revisions require stopped ownership, preserve history, and invalidate prior proof', async () => {
   let w = await submitted(); w = await engine.observe(w.id, w.revision, observation(w));
   w = await proven(w);
-  const revision = { expectedPolicyRevision: 1, reason: 'Clarify the independent acceptance obligation', criteria: [{ id: 'AC-1', text: 'Revised outcome', proofs: ['integration:claim-safety'] }], dependencies: [], plannedFiles: ['src/'], exclusiveResources: ['staging:account'] };
+  const revision = { expectedPolicyRevision: 1, reason: 'Clarify the independent acceptance obligation', criteria: [{ id: 'AC-1', text: 'Revised outcome', proofs: ['unit:claim-safety'] }], dependencies: [], plannedFiles: ['src/'], exclusiveResources: ['staging:account'] };
   await assert.rejects(engine.execute(worker, 'requirements', w.id, revision, randomUUID()), /Operator/);
   // A live implementation lease refuses the revision; a submitted item has none left, because
   // `submit` ended it, so its requirements can be revised without stopping anyone.
@@ -1232,7 +1236,7 @@ test('formal review identities stay excluded after revisions regardless of clock
 
 // Post-deployment smoke proof: trunk stays the only pre-merge gate, and the second confidence
 // layer binds to the exact commit Graphyard observed serving the merge.
-const smokeProducer: Principal = { id: 'smoke-runner', role: 'producer', proofs: ['e2e:deploy-smoke', 'integration:claim-safety'] };
+const smokeProducer: Principal = { id: 'smoke-runner', role: 'producer', proofs: ['e2e:deploy-smoke', 'unit:claim-safety'] };
 const mergeSha = 'e'.repeat(40), servingSha = 'f'.repeat(40);
 async function deliveredWithSmokePolicy() {
   let w = await engine.execute(operator, 'create', null, { ...workInput, policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } }, randomUUID());

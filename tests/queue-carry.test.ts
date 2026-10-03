@@ -144,7 +144,7 @@ test('unit:queue-authored-tip-carry — a carried GitHub approval is re-posted o
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
-const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:queue', 'integration:docs'] };
+const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:queue', 'unit:docs'] };
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 500;
 before(async () => {
@@ -156,7 +156,7 @@ before(async () => {
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
-const input2 = { title: 'Queue carry', plannedFiles: ['src/queue.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:queue', 'integration:docs'] }] };
+const input2 = { title: 'Queue carry', plannedFiles: ['src/queue.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:queue', 'unit:docs'] }] };
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 /** Ledger entries of one kind, oldest first. */
 const events = async (work: Work, kind: string) => (await store.events(work.id)).filter(event => event.kind === kind).reverse();
@@ -181,7 +181,7 @@ function tip(work: Work, candidate: { sha: string; baseSha: string }, extra: Par
 async function validated(work: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}) {
   let observed = await engine.observe(work.id, work.revision, tip(work, candidate, extra));
   observed = await engine.execute(producer, 'evidence', observed.id, { proof: 'unit:queue', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/queue.ts', 'tests/'] }, randomUUID());
-  return engine.execute(producer, 'evidence', observed.id, { proof: 'integration:docs', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['docs/'] }, randomUUID());
+  return engine.execute(producer, 'evidence', observed.id, { proof: 'unit:docs', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, result: 'pass', executed: 2, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['docs/'] }, randomUUID());
 }
 async function onlyJob(work: Work) {
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
@@ -278,10 +278,10 @@ test('integration:queue-carry-refusals — a foreign author, extra parents, an u
   assert.match(unvalidated.carry.approval.reason, new RegExp(`predecessor ${first.key} is not fully validated`)); assert.equal(unvalidated.review, false);
   const intersecting = await attempt({ ...graphyard, baseChanges: ['docs/queue.md'] });
   assert.equal(intersecting.carry.approval.carried, true, 'the predecessor touched no reviewed file');
-  assert.deepEqual(intersecting.carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:queue', true], ['integration:docs', false]]);
+  assert.deepEqual(intersecting.carry.evidence.map(entry => [entry.proof, entry.carried]), [['unit:queue', true], ['unit:docs', false]]);
   assert.equal(intersecting.review, true); assert.equal(intersecting.acceptance.passed, false);
-  assert.deepEqual(intersecting.acceptance.reasons, ['AC-1: integration:docs needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
-  assert.deepEqual([intersecting.binding.approval.state, ...intersecting.binding.evidence.map(entry => [entry.proof, entry.state])], ['carried', ['unit:queue', 'carried'], ['integration:docs', 'required']]);
+  assert.deepEqual(intersecting.acceptance.reasons, ['AC-1: unit:docs needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
+  assert.deepEqual([intersecting.binding.approval.state, ...intersecting.binding.evidence.map(entry => [entry.proof, entry.state])], ['carried', ['unit:queue', 'carried'], ['unit:docs', 'required']]);
   assert.match(intersecting.binding.evidence[1].reason, /changed docs\/queue\.md inside the scope of evidence/);
   const reviewed = await attempt({ ...graphyard, baseChanges: ['tests/queue.test.ts'] });
   assert.equal(reviewed.carry.approval.carried, false); assert.match(reviewed.carry.approval.reason, /changed reviewed files tests\/queue\.test\.ts; a fresh independent approval/);
@@ -293,7 +293,7 @@ test('integration:queue-carry-refusals — a foreign author, extra parents, an u
   assert.deepEqual(decisions.map(event => event.payload.details.approval.carried), [false, false, false, true, false]);
   const diagnostics = diagnose(second, await store.list(), Date.now());
   assert.match(diagnostics.find(entry => entry.kind === 'queue-binding-required')!.message, /Approval is required afresh for tip .*: .* changed reviewed files/);
-  assert.ok(diagnostics.some(entry => entry.kind === 'queue-binding-carried' && /Proof integration:docs carried/.test(entry.message)));
+  assert.ok(diagnostics.some(entry => entry.kind === 'queue-binding-carried' && /Proof unit:docs carried/.test(entry.message)));
 });
 
 test('integration:queue-follower-merges-once — a follower behind a merged predecessor merges with no additional review or proof round', async () => {
@@ -328,7 +328,7 @@ test('integration:queue-follower-merges-once — a follower behind a merged pred
   const row = status.queue.find(entry => entry.key === second.key)!;
   assert.deepEqual([row.position, row.validated, row.binding!.base.binding, row.binding!.base.carriedTo!.sha], [1, true, 'tree-equivalent', mergedA]);
   assert.deepEqual([row.binding!.approval.state, row.binding!.approval.reviewer, row.binding!.approval.originalSha], ['carried', 'graphyard-reviewer[bot]', headB]);
-  assert.deepEqual(row.binding!.evidence.map(entry => [entry.proof, entry.state]), [['unit:queue', 'carried'], ['integration:docs', 'carried']]);
+  assert.deepEqual(row.binding!.evidence.map(entry => [entry.proof, entry.state]), [['unit:queue', 'carried'], ['unit:docs', 'carried']]);
   assert.match(row.binding!.approval.reason, /carried to Graphyard-authored tip/);
   const diagnostics = diagnose(second, await store.list(), Date.now());
   assert.equal(diagnostics.filter(entry => entry.kind === 'queue-binding-carried').length, 3);
@@ -337,7 +337,7 @@ test('integration:queue-follower-merges-once — a follower behind a merged pred
   second = await mergeHead(second, { sha: tipB, baseSha: headA }, mergedB);
   assert.equal(second.stage, 'done'); assert.deepEqual(second.violations, []);
   assert.equal(second.evidence.length, evidenceCount, 'the whole landing took one review and one proof round');
-  assert.deepEqual((await events(second, 'queue.predicted')).at(-1)!.payload.details.carry, { approval: 'carried', evidence: { 'unit:queue': 'carried', 'integration:docs': 'carried' } });
+  assert.deepEqual((await events(second, 'queue.predicted')).at(-1)!.payload.details.carry, { approval: 'carried', evidence: { 'unit:queue': 'carried', 'unit:docs': 'carried' } });
 });
 
 test('integration:queue-carry-refusals — a revoked original proof withdraws its carried binding and ejects the tip; a fresh proof on the tip stands on its own', async () => {

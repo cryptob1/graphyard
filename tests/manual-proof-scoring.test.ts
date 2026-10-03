@@ -95,13 +95,17 @@ test('unit:attested-is-manual-only — the zero-execution exception is the manua
   assert.equal(evidenceProves(E2E, { result: 'pass', executed: 1, skipped: 0 }), true, 'an e2e pass with a case executed proves');
   assert.equal(evidenceProves(MANUAL, { result: 'pass', executed: 0, skipped: 0 }), true, 'the attestation rule stays with manual:');
 
-  // The acceptance gate demands executed > 0 of an e2e proof and judges the zero-executed pass failed.
+  // GY-1101: an e2e proof no longer gates the merge — it runs against the release candidate — so
+  // the acceptance gate names none of these, whatever the evidence. The title rule above still
+  // decides whether the release candidate's e2e pass proves anything.
   const demanded = item([], { criteria: [{ id: 'AC-1', text: 'Checkout runs end to end', proofs: [E2E] }] });
-  assert.deepEqual(acceptanceReasons(demanded), [`AC-1: ${E2E} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`]);
+  assert.deepEqual(acceptanceReasons(demanded), [], 'an e2e proof is not a pre-merge requirement');
   const unjudged = item([evidence(E2E, { executed: 0 })], { criteria: [{ id: 'AC-1', text: 'Checkout runs end to end', proofs: [E2E] }] });
-  assert.deepEqual(acceptanceReasons(unjudged), [`AC-1: ${E2E} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`], 'the zero-executed e2e pass proves nothing');
+  assert.deepEqual(acceptanceReasons(unjudged), [], 'a zero-executed e2e pass neither gates nor proves before merge');
+  assert.equal(evidenceProves(E2E, unjudged.evidence[0]!), false, 'the zero-executed e2e pass still proves nothing');
   const proven = item([evidence(E2E, { executed: 2 })], { criteria: [{ id: 'AC-1', text: 'Checkout runs end to end', proofs: [E2E] }] });
-  assert.deepEqual(acceptanceReasons(proven), [], 'an e2e pass with cases executed proves the criterion');
+  assert.deepEqual(acceptanceReasons(proven), []);
+  assert.equal(evidenceProves(E2E, proven.evidence[0]!), true, 'an e2e pass with cases executed proves the criterion');
 });
 
 test('unit:manual-proof-not-title-counted — the verifier names a manual proof outstanding for judgment, and a delivered attested pass discharges a bootstrap obligation', () => {

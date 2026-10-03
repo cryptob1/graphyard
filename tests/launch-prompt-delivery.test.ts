@@ -35,7 +35,7 @@ const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
-const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
+const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*'] } });
 
 function observation(candidate: { sha: string; baseSha: string }): Observation {
   return { candidate: { ...candidate, pr: 93, branch: 'graphyard/gy-93-1', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
@@ -44,7 +44,7 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 93, branch: 'graphyard/gy-93-1', author: 'implementer' };
   return { id: 'work-93', key: 'GY-93', title: 'Launched sessions refuse their own prompt', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
-    criteria: [{ id: 'AC-1', text: 'Request', proofs: ['integration:launch-prompt-is-a-request'] }],
+    criteria: [{ id: 'AC-1', text: 'Request', proofs: ['unit:launch-prompt-is-a-request'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-93', branch: 'graphyard/gy-93-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 93 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
@@ -256,7 +256,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     assert.equal(retry.nextAt, iso(20 * 60_000 + sessionRetryBaseMs), 'a second never-started session waits the base interval again, not a wider one');
     assert.equal(sessionRetry(Array.from({ length: unstartedRetryLimit }, () => unstarted), request.id, clock).exhausted, true, 'never-started sessions have a bound of their own');
     // A genuine failure counts and widens the wait: two of them, then a never-started one.
-    const failedAt = (minutes: number) => ({ requestId: request.id, state: 'failed', requestedAt: iso(minutes * 60_000 - 30_000), closedAt: iso(minutes * 60_000), resolution: 'the session finished (done) without trusted evidence for integration:x (missing). Its last words: "npm test failed"' });
+    const failedAt = (minutes: number) => ({ requestId: request.id, state: 'failed', requestedAt: iso(minutes * 60_000 - 30_000), closedAt: iso(minutes * 60_000), resolution: 'the session finished (done) without trusted evidence for unit:x (missing). Its last words: "npm test failed"' });
     assert.equal(sessionRetry([failedAt(0), failedAt(10)], request.id, clock).nextAt, iso(10 * 60_000 + 4 * sessionRetryBaseMs));
     retry = sessionRetry([failedAt(0), failedAt(10), { ...unstarted, closedAt: iso(20 * 60_000) }], request.id, clock);
     assert.deepEqual([retry.attempts, retry.started, retry.neverStarted, retry.nextAt], [3, 2, 1, iso(20 * 60_000 + sessionRetryBaseMs)]);
@@ -462,7 +462,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
     const row = report.work[0];
     assert.equal(row.dispatch!.producers[0].session!.activity, 'awaiting acknowledgement');
     assert.equal(row.dispatch!.producers[0].session!.repromptedAt, iso(121_000));
-    assert.match(row.attention!, /Producer session for integration proofs of GY-93 \(produce-a\) is awaiting acknowledgement: no activity since its launch at .*, re-prompted once at .*never started if it stays quiet/);
+    assert.match(row.attention!, /Producer session for unit proofs of GY-93 \(produce-a\) is awaiting acknowledgement: no activity since its launch at .*, re-prompted once at .*never started if it stays quiet/);
     assert.equal(report.producers.pending[0].activity, 'awaiting acknowledgement');
     now = clock + 131_000; await runDispatchTick(config, cursor, effects, () => now);
     assert.equal(prompted().length, 1, 'never a second re-prompt');

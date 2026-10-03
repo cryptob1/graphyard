@@ -28,7 +28,7 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
 const second: Principal = { id: 'worker-b', role: 'worker' };
 const coordinator: Principal = { id: 'master', role: 'coordinator' };
-const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:flow'] };
+const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:flow'] };
 const reader: Principal = { id: 'observer', role: 'reader' };
 const tokens = { operator: 'o'.repeat(32), worker: 'w'.repeat(32), coordinator: 'm'.repeat(32), producer: 'p'.repeat(32), reader: 'r'.repeat(32) };
 const head = 'a'.repeat(40), base = 'b'.repeat(40), day = 86_400_000;
@@ -56,7 +56,7 @@ after(async () => {
 async function create(slice: string, overrides: Record<string, unknown> = {}) {
   return engine.execute(operator, 'create', null, {
     title: `Flow fixture in ${slice}`, plannedFiles: [`${slice}/`],
-    criteria: [{ id: 'AC-1', text: 'Observable delivery behavior', proofs: ['integration:flow'] }], ...overrides,
+    criteria: [{ id: 'AC-1', text: 'Observable delivery behavior', proofs: ['unit:flow'] }], ...overrides,
   }, randomUUID());
 }
 async function released(slice: string, overrides: Record<string, unknown> = {}) {
@@ -81,7 +81,7 @@ function observation(work: Work, slice: string, overrides: Partial<Observation> 
 function approval(sha = head, id = 9001, submittedAt = new Date(Date.now() - 3600_000).toISOString()) {
   return [{ reviewer: 'independent-reviewer', sha, state: 'APPROVED', id, submittedAt }];
 }
-function proof(sha = head) { return { proof: 'integration:flow', sha, baseSha: base, policyRevision: 1, result: 'pass' as const, executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }; }
+function proof(sha = head) { return { proof: 'unit:flow', sha, baseSha: base, policyRevision: 1, result: 'pass' as const, executed: 9, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }; }
 
 async function analyse(query: Partial<FlowQuery> = {}) {
   await projectFlow(store);
@@ -682,7 +682,7 @@ test('integration:flow-analytics-drilldown-export', async () => {
   assert.match(csv, /\n# exclusions,/);
   assert.match(csv, /\n# generatedAt,/);
   assert.match(csv, /\nworkKey,metric,bucket,observedAt,valueMs,pullRequest,commit,detail\n/);
-  assert.ok(csv.includes(`\n${work.key},evidence,integration:flow,`));
+  assert.ok(csv.includes(`\n${work.key},evidence,unit:flow,`));
   assert.ok(csv.endsWith('\n'));
   const json = JSON.parse(flowExport(report, evidenceRows, 'json'));
   assert.equal(json.metadata.timezone, 'UTC');
