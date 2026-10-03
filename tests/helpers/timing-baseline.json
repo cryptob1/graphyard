@@ -484,6 +484,7 @@
     "tests/runner-image.test.ts": 483,
     "tests/runner-report.test.ts": 4852,
     "tests/runner-setup.test.ts": 356,
+    "tests/runtime-screens.test.ts": 1200,
     "tests/scope-approver-routine.test.ts": 5637,
     "tests/scope-directory-collapse.test.ts": 3405,
     "tests/scope-request-flags.test.ts": 2695,
