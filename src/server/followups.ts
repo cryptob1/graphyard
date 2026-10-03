@@ -6,6 +6,8 @@ import { save } from '../store.js';
 import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
 import { appendToItem, masterOnly, migrateToParents, readAll, recordDispatch, shipFollowUps, type Db } from './followups-ship.js';
+import { coalescedScope, plannedScope } from '../review-threads.js';
+import { followUpPaths, plannedFilesMax } from '../model/scope.js';
 import type { Services } from './routes.js';
 
 // The control plane's half of the machine-filed backlog (GY-402): a later approval's findings
@@ -125,13 +127,14 @@ export async function promoteFollowUp(services: Services, caller: Principal, id:
     const promoted = { from: work.key, finding: index, parent: parent!.key };
     if (finding!.promoted) return { promoted, item: all.find(item => item.key === finding!.promoted) ?? { key: finding!.promoted }, duplicate: true };
     const title = `Promoted follow-up of ${parent!.key} (${work.key} finding ${index}): ${finding!.text}`.slice(0, 200);
+    const plannedFiles = coalescedScope(followUpPaths([finding!]).map(plannedScope).filter((path): path is string => !!path)).slice(0, plannedFilesMax);
     const input = {
       title,
       description: `Promoted from finding ${index} of ${work.key}'s follow-up batch${parentKey ? `, filed for ${parent!.key}` : ''}${finding!.pr ? ` (PR #${finding!.pr})` : ''}${finding!.ref ? `; raised at ${finding!.ref}` : ''}.\n\nFinding${finding!.path ? ` (${finding!.path})` : ''}: ${finding!.text}`.slice(0, 20000),
       type: 'chore', priority: 2, dependencies: [parent!.id],
       criteria: [{ id: 'AC-1', text: `The promoted finding is addressed in code, or declined with a recorded reason: ${finding!.text}`.slice(0, 2000), proofs: [promotedFindingProof] }],
       producerProofs: [promotedFindingProof],
-      plannedFiles: finding!.path ? [finding!.path.slice(0, 500)] : [],
+      plannedFiles,
       reason: `Promoted from ${work.key} finding ${index} by ${actor.id}`.slice(0, 2000),
     };
     // A create that landed before an interrupted promotion recorded it: the item is found, not filed again.
