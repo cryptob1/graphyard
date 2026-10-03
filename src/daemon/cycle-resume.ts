@@ -69,7 +69,6 @@ export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: Worker
   // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
   if (pane) await effects.closeSession(pane);
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
-  item.lease = null;
   if (item.containmentQuarantine?.epoch === epoch) {
     await settleEndedAttemptFence(cycle, item, epoch);
   }

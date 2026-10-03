@@ -174,7 +174,6 @@ test('unit:ended-attempt-fence-settled-at-once — ending an attempt settles its
 
   // Quarantine is settled in the same action
   assert.equal(item.containmentQuarantine, null);
-  assert.equal(item.lease, null);
   assert.equal(cycle.state.actions[`settle:${item.id}:1`]?.state, 'done');
 });
 

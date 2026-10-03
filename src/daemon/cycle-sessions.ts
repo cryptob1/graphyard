@@ -415,7 +415,6 @@ export async function closeStep(cycle: Cycle) {
         await effects.stopSupervisor!(orphan, signal);
         state.orphans[orphan.id] = { ...state.orphans[orphan.id], stops, stoppedLeaseExpiresAt: orphan.leaseExpiresAt };
         if (held) {
-          held.lease = null;
           if (held.containmentQuarantine?.epoch === orphan.epoch) {
             await settleEndedAttemptFence(cycle, held, orphan.epoch);
           }
