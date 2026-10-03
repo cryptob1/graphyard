@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluate, type Work } from '../src/model.js';
 import { defaultOptimisticExclude, optimisticEligibility, parseOptimisticExclude, sharedInfrastructure } from '../src/optimistic-merge.js';
+import { defaultParallelTips } from '../src/merge-queue.js';
 import { masterConfigSchema, optimisticExcludeGlobs, optimisticMergeEnabled } from '../src/master/profiles.js';
 import { onboardingMergeQueue } from '../src/repository-setup.js';
 
@@ -97,9 +98,10 @@ test('unit:optimistic-exclude-configurable the exclude list is per-repository co
   assert.deepEqual(parseOptimisticExclude(['a/', ' b/ ', 'a/']), ['a/', 'b/']);
   assert.equal(parseOptimisticExclude('services/**'), null);
   assert.equal(parseOptimisticExclude(['..']), null);
-  // Onboarding writes the defaults under the key an operator tunes, and keeps that choice.
-  assert.deepEqual(onboardingMergeQueue(), { optimisticExclude: [...defaultOptimisticExclude] });
-  assert.deepEqual(Object.keys(onboardingMergeQueue()), ['optimisticExclude']);
+  // Onboarding writes the defaults under the keys an operator tunes, and keeps that choice:
+  // the product-default parallel tips (GY-501) beside the shared-infrastructure globs (GY-503).
+  assert.deepEqual(onboardingMergeQueue(), { parallelTips: defaultParallelTips, optimisticExclude: [...defaultOptimisticExclude] });
+  assert.deepEqual(Object.keys(onboardingMergeQueue()), ['parallelTips', 'optimisticExclude']);
 });
 
 test('unit:optimistic-exclude-configurable the optimistic mode itself turns off per repository', () => {
