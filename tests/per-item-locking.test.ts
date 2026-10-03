@@ -57,18 +57,39 @@ const within = async <T>(promise: Promise<T>, ms: number) => Promise.race([promi
 
 test('unit:per-item-locking heartbeats on different items run while a dispatch holds the fleet lock, and neither waits for the other', { timeout: 60_000 }, async () => {
   const [one, two] = [await claimed(workers[0]), await claimed(workers[1])];
-  // A dispatch admission holding the fleet lock: a claim of a third item queues behind it.
-  const dispatch = hold({ fleetLock: true });
-  await dispatch.taken;
-  const waitingClaim = claimed(workers[2]);
+  // A real claim command on a third item holding the fleet lock: a claim of a fourth item queues behind it.
+  const threeItem = await engine.execute(operator, 'create', null, { title: `Locking item ${++created}`, plannedFiles: [`src/locking-${created}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+  await engine.execute(operator, 'ready', threeItem.id, {}, randomUUID());
+
+  let releaseDispatch!: () => void;
+  const dispatchDone = new Promise<void>(resolve => { releaseDispatch = resolve; });
+  let dispatchHeld!: () => void;
+  const dispatchTaken = new Promise<void>(resolve => { dispatchHeld = resolve; });
+  const originalTx = (store as any).transactionOnce.bind(store);
+  (store as any).transactionOnce = async (fn: any, options: any) => {
+    if (options.itemLock === threeItem.id && options.lane === 'lease') {
+      return originalTx(async (db: any, now: any) => {
+        dispatchHeld();
+        await dispatchDone;
+        return fn(db, now);
+      }, options);
+    }
+    return originalTx(fn, options);
+  };
+
+  const dispatchClaim = engine.execute(workers[2], 'claim', threeItem.id, {}, randomUUID());
+  await dispatchTaken;
+  const waitingClaim = claimed(workers[3]);
   const started = performance.now();
   const [renewedOne, renewedTwo] = await Promise.all([heartbeat(workers[0], one), heartbeat(workers[1], two)]);
   assert.ok(performance.now() - started < 1_000, 'both renewals committed while the fleet lock was held');
   assert.ok(Date.parse(renewedOne.lease!.expiresAt) > Date.parse(one.lease!.expiresAt) && Date.parse(renewedTwo.lease!.expiresAt) > Date.parse(two.lease!.expiresAt));
   assert.equal(await within(waitingClaim, 300), 'pending', 'the fleet command still waits for the fleet lock');
-  dispatch.release();
-  await dispatch.done;
-  assert.equal((await waitingClaim).lease?.owner, workers[2].id);
+  releaseDispatch();
+  const claimedThree = await dispatchClaim;
+  (store as any).transactionOnce = originalTx;
+  assert.equal(claimedThree.lease?.owner, workers[2].id);
+  assert.equal((await waitingClaim).lease?.owner, workers[3].id);
 
   // One item's lock held: the other item's renewal commits at once, this item's waits for it.
   const itemOne = hold({ fleetLock: false, itemLock: one.id });
@@ -79,6 +100,42 @@ test('unit:per-item-locking heartbeats on different items run while a dispatch h
   itemOne.release();
   await itemOne.done;
   await blocked;
+});
+
+test('unit:per-item-locking a heartbeat committing between renewClaimedAction read and write is not overwritten', { timeout: 60_000 }, async () => {
+  const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
+  engine.principals.push(coordinator);
+
+  const work = await claimed(workers[4]);
+  // Place an open action row in work's actionQueue.
+  const actionRow = { id: randomUUID(), kind: 'dispatch', target: 'implementation', state: 'claimed', attempts: 1, claim: { executor: 'exec-1', host: 'host-1', principal: coordinator.id, claimedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), renewals: 0 }, history: [] };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document, '{actionQueue}', jsonb_build_object('actions', jsonb_build_array($2::jsonb))) WHERE id=$1", [work.id, JSON.stringify(actionRow)]);
+  const updatedWork = (await store.list()).find(w => w.id === work.id)!;
+
+  const originalActionOwner = (engine as any).actionOwner.bind(engine);
+  let intercepted = false;
+  let heartbeatCommitted: any = null;
+  (engine as any).actionOwner = async (db: any, id: string) => {
+    const result = await originalActionOwner(db, id);
+    if (!intercepted && result && result.id === work.id) {
+      intercepted = true;
+      heartbeatCommitted = await heartbeat(workers[4], updatedWork);
+    }
+    return result;
+  };
+
+  try {
+    const renewed = await engine.renewClaimedAction(coordinator, actionRow.id, { executor: 'exec-1', leaseSeconds: 30 });
+    assert.ok(intercepted, 'heartbeat was committed between read and write');
+    assert.ok(heartbeatCommitted, 'heartbeat succeeded');
+    assert.equal(renewed.action.claim?.renewals, 1, 'action was renewed');
+
+    const stored = (await store.list()).find(w => w.id === work.id)!;
+    assert.equal(stored.lease?.expiresAt, heartbeatCommitted!.lease?.expiresAt, 'heartbeat renewal was preserved');
+    assert.equal(stored.actionQueue?.actions[0].claim?.renewals, 1, 'action renewal was preserved');
+  } finally {
+    (engine as any).actionOwner = originalActionOwner;
+  }
 });
 
 test('unit:per-item-locking commands that read fleet state still serialise on the fleet lock', { timeout: 60_000 }, async () => {

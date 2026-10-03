@@ -3,7 +3,7 @@ import { hostname } from 'node:os';
 import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { Store, StaleWrite, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { Store, StaleWrite, save, saveDocument, wakeJob, documentBefore, eventWorkSql } from './store.js';
 import { reconcileItemLockSql, reconcileRereadSql, reconcileRowsSql, reconcileSettledByIdSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
@@ -595,8 +595,9 @@ export class Engine {
         : { ...current, state: outcome.kind, probedAt: at, detail: outcome.detail, resolvedAt: at };
       work.checkReruns = work.checkReruns!.map((entry, position) => position === index ? next : entry).slice(-checkRerunLimit);
       // A wait whose status is unchanged is not a new fact: it refreshes the probe without a ledger entry.
+      // Guarded by the item's revision so a concurrent write on the same item is never lost (GY-1124).
       if (outcome.kind === 'waiting' && current.waiting?.status === outcome.status) {
-        await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
+        await saveDocument(db, work, now);
         return work;
       }
       const queuedBefore = work.queue?.sequence ?? null;
@@ -605,7 +606,7 @@ export class Engine {
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', `check.rerun.${outcome.kind}`, now, next);
       return work;
-    });
+    }, { itemLock: id });
   }
   /** A queue entry the evaluation just derived out is recorded as an ejection, and the entries behind it are woken. */
   private async recordEjection(db: PoolClient, work: Work, all: Work[], queuedBefore: number | null, now: Date, extra: Record<string, unknown> = {}) {
@@ -1550,7 +1551,8 @@ export class Engine {
       const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
       // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
       // the item and without an event of its own, so a long handler costs one update per interval.
-      await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work!.id, JSON.stringify(work)]);
+      // Guarded by the item's revision so a concurrent write on the same item is never lost (GY-1124).
+      await saveDocument(db, work!, now);
       return { action: row, work: { id: work!.id, key: work!.key } };
     }, { lane: 'lease' });
   }

@@ -275,7 +275,7 @@ export async function wakeJob(db: pg.PoolClient, id: string) {
   await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
 }
 
-export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
+export async function saveDocument(db: pg.PoolClient, work: Work, now: Date) {
   const read = work.revision;
   work.revision++;
   work.updatedAt = now.toISOString();
@@ -283,6 +283,10 @@ export async function save(db: pg.PoolClient, work: Work, actor: string, kind: s
   // alone, so a fleet command holding a copy read before that renewal must not overwrite it.
   const written = await db.query("UPDATE work_items SET document=$2 WHERE id=$1 AND (document->>'revision')::numeric IS NOT DISTINCT FROM $3::numeric", [work.id, JSON.stringify(work), read ?? null]);
   if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, read);
+}
+
+export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
+  await saveDocument(db, work, now);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details);
 }
