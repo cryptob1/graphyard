@@ -38,10 +38,10 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: callers use the API; the engine applies each mutation, with an event, in one locked Postgres transaction; reconciliation syncs GitHub, publishes the required check, merges; webhooks only wake jobs.
+Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub, publishes the required check, merges; webhooks wake jobs.
 
-- Gates deterministically check candidate `(PR, head SHA, base SHA)` under current policy; pushes or base changes invalidate evidence.
+- Gates check candidate `(PR, head SHA, base SHA)` deterministically under current policy; pushes/base changes invalidate evidence.
 - Claims bump the epoch; old-epoch or expired-lease commands refuse.
-- Evidence belongs to its authenticated producer; latest trusted record per proof and candidate wins.
-- Append-only history; retries replay for a day.
+- Evidence belongs to its producer; latest trusted record per proof/candidate wins.
+- Append-only history; retries replay 24 hours.
 - Graphyard merges only the authorized candidate, once; merge is not [delivery](delivery.md).
