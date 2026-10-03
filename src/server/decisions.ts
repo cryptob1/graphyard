@@ -11,6 +11,7 @@ import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { mergePath, namedMergePathFault } from '../master/repair-lane.js';
 import { closeWork } from './close.js';
+import { readFleet } from '../store/fleet.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
@@ -256,7 +257,7 @@ async function finish(db: Db, work: Work, approver: Principal, decisionId: strin
 async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   const target = standingEscalations(work).find(entry => entry.trigger === decision.input.trigger)!;
   resolveEscalation(work, decision.input.trigger);
-  const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document.id === work.id ? work : row.document);
+  const all: Work[] = (await readFleet(db, [work.id])).map(item => item.id === work.id ? work : item);
   services.engine.evaluate(work, all, now);
   // The engine's auto-dispatch ledger entries for this evaluation; the method is internal to the
   // engine's own transactions, and this is one of them.

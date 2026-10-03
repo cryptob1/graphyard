@@ -4,6 +4,7 @@ import { Refusal, demand, escalationTriggers, operatorScopeIncludes, standingEsc
 import { foldDecisions } from '../model/approval.js';
 import { assembleEscalationContext, canonical, contextBudget, escalationAction, intentLedgerKinds, contextLadder, routineLedgerKinds, rulesRef, type ContextInputs, type LedgerKindCount, type LedgerRow, type PrecedentDecision, type RulesSource } from '../model/escalation-context.js';
 import type { Services } from './routes.js';
+import { readFleet } from '../store/fleet.js';
 
 /**
  * `GET /api/work/:id/context?trigger=&budget=`: the assembled escalation context (GY-90). The
@@ -52,7 +53,7 @@ export async function readEscalationContext(services: Services, actor: Principal
   let inputs: ContextInputs;
   try {
     await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-    const snapshot: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(entry => entry.document);
+    const snapshot: Work[] = await readFleet(db, [work!.id]);
     const current = snapshot.find(item => item.id === work!.id)!;
     demand(standingEscalations(current).some(entry => entry.trigger === trigger), `The ${trigger} escalation on ${current.key} was resolved before the context was assembled`, 409);
     const kinds: LedgerKindCount[] = (await db.query('SELECT kind, count(*)::int AS count, min(seq) AS first_seq, max(seq) AS last_seq, min(created_at) AS first_at, max(created_at) AS last_at FROM events WHERE work_id=$1 GROUP BY kind ORDER BY kind', [current.id])).rows

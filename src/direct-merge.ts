@@ -7,6 +7,7 @@ import { save, wakeJob } from './store.js';
 import { settleDelivered } from './model/actions.js';
 import { reconciliationRefusalPrefix } from './merge-queue.js';
 import { unauthorizedMergeViolation, type OperatorAuthorizedDelivery } from './engine.js';
+import { readFleet } from './store/fleet.js';
 
 /**
  * Direct-merge mode: the operator's standing statement that merges into the base branch inside a
@@ -110,7 +111,7 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
 /** At startup: say whether direct-merge mode is on, and deliver the items already held inside a window. */
 export async function startDirectMerge(store: Store, environment: DirectMergeWindow | null) {
   const swept = await store.transaction(async (db, now) => {
-    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all: Work[] = await readFleet(db);
     const delivered = await sweepDirectMerges(db, all, await directMergeWindows(db, environment), now);
     return { status: await directMergeStatus(db, environment, now), delivered: delivered.map(work => work.key) };
   });
@@ -152,7 +153,7 @@ export class DirectMerges {
       // The status is read at the instant the change was written, so an `off` reads as closed.
       const at = (await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3) RETURNING created_at', [actor.id, `${directMergeEventPrefix}${action === 'on' ? 'set' : 'cleared'}`, JSON.stringify(payload)])).rows[0].created_at as Date;
       // Setting the mode resolves every item already held for a merge inside a window at once.
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+      const all: Work[] = await readFleet(db);
       const delivered = await sweepDirectMerges(db, all, await directMergeWindows(db, this.environment()), now);
       const result = { action, ...await directMergeStatus(db, this.environment(), at), delivered: delivered.map(work => work.key) };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);

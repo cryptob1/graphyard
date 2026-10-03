@@ -8,6 +8,7 @@ import { endAttempt } from '../pipeline-speed.js';
 import { save, wakeJob } from '../store.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
+import { readFleet } from '../store/fleet.js';
 
 type Db = pg.PoolClient;
 
@@ -35,7 +36,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
     demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
-    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all: Work[] = await readFleet(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work!, services.repository);
     const refused = closeRefusal(work!, now.getTime()); demand(!refused, refused!, 409);
