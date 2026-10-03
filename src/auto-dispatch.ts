@@ -14,6 +14,7 @@ import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
+import { launchWaitKind } from './model/fault-classes.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
@@ -1269,9 +1270,9 @@ export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick
   return rows.sort((a, b) => b.waitedMs - a.waitedMs);
 }
 const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor(ms % 3_600_000 / 60_000)} min` : `${Math.floor(ms / 60_000)} min`;
-/** One attention item per review request that has waited past the bound without a launch (GY-710), naming how long and why. */
+/** One attention item per review request that has waited past the bound without a launch (GY-710), naming how long and why, with the fault kind its reason names (GY-1171). */
 export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
-  return waits.filter(wait => wait.kind === 'review' && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
+  return waits.filter(wait => wait.kind === 'review' && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work, kind: launchWaitKind(wait.reason),
     text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
     ...agentOwner('master', `Fix what the wait names, or launch it with graphyard master review ${wait.work}`) }));
 }
