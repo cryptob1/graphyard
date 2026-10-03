@@ -187,9 +187,8 @@ export type ActorRole = typeof actorRoles[number];
 /** Every `who` label `nextActor`, `prSteps` and `waitsOn` write, with the role it names. */
 export const roleOf: Readonly<Record<string, ActorRole>> = {
   You: 'human-only', 'Master agent': 'master', 'Builder agent': 'worker', 'Reviewer agent': 'reviewer', 'Prover agent': 'producer',
-  // The control plane's own steps: the dispatcher, the CI run, the merge queue, the production watch.
+  // Control-plane steps (executor) and inactive states (held).
   'Graphyard (automatic)': 'executor', 'Graphyard (assigns a builder)': 'executor', 'Automated checks': 'executor',
-  // Nobody acts: a dependency holds it, or `prSteps` reads it closed, live or merged.
   'Nobody yet': 'held', 'Nobody — it was closed': 'held', 'Nobody — it is live': 'held', 'Nobody — it has merged': 'held',
 };
 
@@ -202,8 +201,7 @@ export function actorRole(work: Work, group: Group | null, who: string): ActorRo
   if (group === 'needs-you') return 'human-only';
   const request = work.scopeRequest;
   if (group === 'moving' && request && request.decision?.state !== 'refused' && work.lease?.epoch === request.epoch) return 'approver';
-  // A label this table does not know is no evidence the control plane acts: report it as held
-  // rather than claim a pending step for anyone (the misreport GY-371 fixed for 'Nobody yet').
+  // An unknown label is no evidence the control plane acts: report it as held (GY-371).
   return Object.hasOwn(roleOf, who) ? roleOf[who]! : 'held';
 }
 
