@@ -102,7 +102,7 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
   // nothing expands, wraps or assigns; reads stay inside the checkout, so the operator-agent
   // credential kept outside it is never read; git and gh run their read subcommands only; and a
   // redirection is refused on the raw line before any segment is judged.
-  const guard = { cwd: process.cwd(), cli: master.cliPath };
+  const guard = { cwd: process.cwd(), cli: master.cliPath, env: {} };
   const dynamic = (value: string) => ({ value, dynamic: true, glob: false });
   const glob = (value: string) => ({ value, dynamic: false, glob: true });
   const refused: [string, ReturnType<typeof words>][] = [
@@ -176,6 +176,9 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     ['an scp-style override', words('gh', 'pr', 'view', 'github.com:other/private')],
     ['a git@ override', words('gh', 'pr', 'view', 'git@github.com:other/private')],
     ['a --rep abbreviation', words('gh', 'pr', 'list', '--rep', 'other/private')],
+    ['a browser launch', words('gh', 'pr', 'view', '12', '--web')],
+    ['a short browser launch', words('gh', 'run', 'view', '-w')],
+    ['a clustered browser launch', words('gh', 'issue', 'list', '-cw')],
   ];
   for (const [label, segment] of refused) assert.equal(doctorSegmentAllowed(segment, guard).allow, false, `${label} is refused`);
   for (const line of ['cat README.md > leaked.txt', 'cat "$GRAPHYARD_TOKEN_FILE" >> x', 'grep x README.md 2>&1', 'jq . < /etc/passwd']) assert.equal(doctorRedirects(line), true, `${line} redirects`);
@@ -186,6 +189,10 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     words('cat', '.github/workflows/ci.yml'), words('cat', 'fixtures/credentials.example.json'), words('git', 'show', 'HEAD:package.json')])
     assert.deepEqual(doctorSegmentAllowed(segment, guard), { allow: true }, `${segment.map(word => word.value).join(' ')} is a read inside the checkout`);
   assert.equal(doctorSegmentAllowed(words('node', master.cliPath, 'master', 'merge', 'GY-74'), guard).allow, false, 'the named CLI still refuses merge');
+  // An ambient GH_REPO or GH_HOST picks another repository with no word on the line: gh is refused
+  // while either is set, and the extension clears both from the doctor's environment.
+  for (const name of ['GH_REPO', 'GH_HOST']) assert.equal(doctorSegmentAllowed(words('gh', 'pr', 'view', '1'), { ...guard, env: { [name]: 'other/private' } }).allow, false, `gh with ${name} set is refused`);
+  assert.deepEqual(doctorSegmentAllowed(words('gh', 'pr', 'view', '1'), { ...guard, env: {} }), { allow: true }, 'gh with no ambient override reads');
 
   // The doctor session launched through the headless runner gets exactly the doctor tool, and the
   // launch itself names that surface on the runtime's tools flag: bash under the allowlist and the
@@ -220,6 +227,16 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     assert.equal(refusedBash?.block, true, 'a bash command outside the allowlist is still refused');
   } finally {
     if (role === undefined) delete process.env.GRAPHYARD_PI_ROLE; else process.env.GRAPHYARD_PI_ROLE = role;
+  }
+  // A doctor session starting with an ambient GH_REPO and GH_HOST clears both before any bash runs.
+  const ambient = { role: process.env.GRAPHYARD_PI_ROLE, repo: process.env.GH_REPO, host: process.env.GH_HOST };
+  try {
+    Object.assign(process.env, { GRAPHYARD_PI_ROLE: 'doctor', GH_REPO: 'other/private', GH_HOST: 'github.example' });
+    graphyardExtension({ registerTool: () => {}, on: (_event, handler) => handler });
+    assert.equal(process.env.GH_REPO, undefined, 'the doctor extension clears GH_REPO');
+    assert.equal(process.env.GH_HOST, undefined, 'the doctor extension clears GH_HOST');
+  } finally {
+    for (const [name, value] of [['GRAPHYARD_PI_ROLE', ambient.role], ['GH_REPO', ambient.repo], ['GH_HOST', ambient.host]] as const) if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }
   // Another role keeps its built-in surface: the tool gate is the doctor's alone (the role is
   // read per call, and the finally above restored the session's own).

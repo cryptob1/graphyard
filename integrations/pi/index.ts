@@ -222,11 +222,13 @@ const gitWriting = /^(?:--output|--ext-diff|--textconv|--open-files-in-pager|-O$
 const gitBranchListing = /^(?:-a|-r|-l|-v|-vv|--all|--remotes|--list|--show-current|--contains|--no-contains|--merged|--no-merged|--points-at|--sort=.*|--format=.*|--color(?:=.*)?|--no-color|--column(?:=.*)?|--no-column|--verbose|--abbrev=.*|--omit-empty)$/;
 const gitReads = new Set(['log', 'show', 'diff', 'status', 'rev-parse', 'blame', 'describe', 'shortlog', 'ls-files', 'branch', 'worktree']);
 /** The provider CLI's read subcommands, under the groups a doctor reads. */
+/** The environment variables that point gh at another repository or host without a word on the command line. */
+export const doctorGhOverrides = ['GH_REPO', 'GH_HOST'] as const;
 const ghReads = new Map([['pr', new Set(['view', 'list', 'checks', 'diff'])], ['run', new Set(['view', 'list'])], ['issue', new Set(['view', 'list'])]]);
 /** The CLI programs a Graphyard command may be invoked through; the words after it are the CLI's own. */
 const doctorCliPrograms = new Set(['graphyard']);
 
-export interface DoctorGuardContext { cwd: string; home?: string; /** The Graphyard CLI the loop names in the prompt; `node` may run only this script. */ cli?: string }
+export interface DoctorGuardContext { cwd: string; home?: string; /** The Graphyard CLI the loop names in the prompt; `node` may run only this script. */ cli?: string; /** The environment gh would run with; process.env when absent. */ env?: NodeJS.ProcessEnv }
 
 /**
  * Whether the raw command line redirects: a `<` or `>` outside quotes. A doctor reads; it never
@@ -290,6 +292,13 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
         || /^git@/i.test(value) || /github\./i.test(value) || /^[\w.-]*\w\.[\w.-]+:\w/.test(value);
     });
     if (override) return { allow: false, reason: doctorRefusal(`gh ${override.value} (gh reads the repository this checkout serves; no repository override)`) };
+    // An ambient GH_REPO or GH_HOST selects another repository with no word on the line; the
+    // extension clears both for the doctor, and gh is refused should either still be set.
+    const ambient = doctorGhOverrides.find(name => (context.env ?? process.env)[name]);
+    if (ambient) return { allow: false, reason: doctorRefusal(`gh while ${ambient} is set (gh reads the repository this checkout serves; no repository override)`) };
+    // -w/--web opens a browser under the coordinator's account: a headless doctor reads, never launches.
+    const web = rest.find(word => word.value.startsWith('--web') || /^-[a-zA-Z]*w/.test(word.value));
+    if (web) return { allow: false, reason: doctorRefusal(`gh ${web.value} (the doctor reads headless; no browser launch)`) };
     allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
   }
   if (!allowed) return { allow: false, reason: doctorRefusal(`${program}${rest[0] ? ` ${rest[0].value}` : ''}`) };
@@ -623,6 +632,9 @@ export default function graphyard(pi: ExtensionApi) {
     else if (typeof event?.systemPrompt === 'string') return { systemPrompt: `${event.systemPrompt}\n\n${systemPromptSection}` };
     return undefined;
   });
+  // The doctor's bash children inherit this process's environment: an ambient repository or host
+  // selection is cleared so gh reads the repository the checkout serves (GY-711).
+  if (process.env.GRAPHYARD_PI_ROLE === 'doctor') for (const name of doctorGhOverrides) delete process.env[name];
   pi.on('tool_call', (event, ctx) => {
     const tool = String(event?.toolName ?? '');
     // The doctor role holds every tool, not only bash (GY-711): no built-in read, edit or write
