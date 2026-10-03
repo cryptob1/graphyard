@@ -52,8 +52,7 @@ export { approveScopeRequest } from './master-scope.js';
 // The queue-head observation lag, lease health and stall composition live in `stall-attention.ts`;
 // the report and the tests read them from here, as they always have.
 export { observationThroughputStatus } from './stall-attention.js';
-// The attention builders live beside each other in `status-attention.ts`; the report reads them
-// from here, as does everything that read them from here before the split.
+// The attention builders live in `status-attention.ts`; the report reads them from here.
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
