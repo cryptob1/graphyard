@@ -25,7 +25,7 @@ Generated `AGENTS.md`: **every session Graphyard launches receives its instructi
 
 ### Agent environments
 
-Login homes (`~/.coding_agents`) via `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode), `CURSOR_CONFIG_DIR`.
+Login homes (`~/.coding_agents`): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode), `CURSOR_CONFIG_DIR`.
 
 ```sh
 node "$GRAPHYARD_CLI" master environments --create claude,codex --apply
@@ -92,7 +92,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # executors
 node "$GRAPHYARD_CLI" master start codex     # or claude
 ```
 
-Run as an OS user whose GitHub credentials workers cannot read. `--browser-profile`: Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)). Setup writes [`mergeQueue.optimisticExclude`](github.md#optimistic-merges) globs.
+Run as an OS user whose GitHub credentials workers cannot read. `--browser-profile`: Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)). Setup writes `mergeQueue` in `.graphyard/master.json`: `parallelTips` (default 4; needs parallelTips × pull-request jobs concurrent Actions jobs — declare `ciConcurrency`, `master protection` flags a lower one) and [`optimisticExclude`](github.md#optimistic-merges) globs.
 
 ### The loop must be supervised
 

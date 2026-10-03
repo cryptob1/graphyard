@@ -17,11 +17,11 @@ Gate: reviewer approval of the exact head plus required CI; threads are inputs. 
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` bounds changes: at `complete`, each new head and landing, non-new files must match the base byte-for-byte, else refused. Carried files (unlanded commits) never eject; only scope requests or audited revisions widen `plannedFiles`.
+`plannedFiles` bounds changes: at `complete`, each new head and landing, non-new files must match the base byte-for-byte. Carried files (unlanded commits) never eject; only scope requests or audited revisions widen it.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals. Published to GitHub as check `graphyard/landable` (`success` when landable, `failure` with refusal reasons), it is required by protection and never an input to the verdict.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals. Published as required check `graphyard/landable` (`success`, or `failure` with reasons), never a verdict input.
 
-Out-of-scope files are judged by three-way merging onto the landing commit: extended or base-only changes pass; restoring merge-base versions, deleting, or rewriting refuse.
+Out-of-scope files are three-way merged onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 
 Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `graphyard sync GY-N --restore` also restores out-of-scope files to the base tip in one commit (plain push, never force).
 

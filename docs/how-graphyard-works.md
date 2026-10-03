@@ -12,8 +12,6 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 5. **Acceptance**: granted producers report proofs its [lane](#risk-lanes) requires.
 6. **Done**: Graphyard rechecks gates, merges, observes.
 
-Cards stop at the first refusing gate, naming what's missing.
-
 ## Risk lanes
 
 `src/model/policy.ts` sets a **risk lane** (`low`, `medium`, `high`) by paths; landability requires facts by lane.
@@ -40,7 +38,7 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub, publishes the required check, merges; webhooks wake jobs.
 
-- Gates check candidate `(PR, head SHA, base SHA)` deterministically under current policy; pushes/base changes invalidate evidence.
+- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under current policy; pushes/base changes invalidate evidence.
 - Claims bump the epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; latest trusted record per proof/candidate wins.
 - Append-only history; retries replay 24 hours.

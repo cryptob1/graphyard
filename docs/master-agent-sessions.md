@@ -3,7 +3,7 @@
 
 ## Launch profiles
 
-`master worker add FILE` adds workers ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); `master reviewer setup` or `master reviewer add FILE` reviewers ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)). `master producer replace`, `master producer remove`, `master reviewer remove` apply next tick; `setup.attention` reports launch-stopping setup.
+`master worker add FILE` adds workers ([Codex](../examples/master/codex-worker.json), [Claude](../examples/master/claude-worker.json), [Cursor](../examples/master/cursor-worker.json), [Muse](../examples/master/muse-worker.json)); `master reviewer setup` or `master reviewer add FILE` reviewers ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)). `master producer replace`, `master producer remove`, `master reviewer remove` apply next tick; `setup.attention` reports blocking setup.
 
 ### Session handles
 
@@ -15,11 +15,11 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` while every grant on the checkout or its `.git` stays within its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, fresh `/proc`, session bus a keyring-only proxy), re-exposing only the session's directory, worktree-admin directories and shared Git areas (objects, remote refs, `FETCH_HEAD`). Refused, with the reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout. Loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names paths and leases.
+Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` while every grant on the checkout or its `.git` stays within its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, fresh `/proc`, session bus a keyring-only proxy), re-exposing only the session's worktree or checkout, worktree-admin directories and shared Git areas (objects, remote refs, `FETCH_HEAD`). Refused, with the reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout. Loop and executors never start, self-upgrade or restart on a dirty checkout.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`). A runtime's own limit notice: worker changes committed as unpushed `WIP:`, `capacity.exhausted` (not `lease-loss`), relaunch on the next account or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (`master status`: `opencode-a failed to start: …; launched on claude-b`; three in a row → one attention item). A runtime's own limit notice: work committed as unpushed `WIP:`, `capacity.exhausted`, relaunch on the next account or after reset.
 
 ## The loop's own master session
 
@@ -41,17 +41,19 @@ GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo
 
 Ready (Herdr active, no prompt; or banner: `the claude runtime is on screen while Herdr reports it unknown`) within **60 seconds** (`run.launchStartSeconds`) starts; still starting → **120 seconds** (`started.extended`); else refused with the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`. Back at its shell after printing → fails at once quoting its last lines (`the cursor runtime exited back to the shell … it last printed: "Error: No Cursor IDE installation found. …"`), retried as `Automatic producer launch for GY-N refused 1 time(s)`. Failure stops supervisor, closes pane, releases claim.
 
+OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)).
+
 #### First-run consent prompts
 
-On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline` (least privilege), never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
+On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
 
 ### Acknowledgement, resume and idle sessions
 
-Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three per request (`retry.neverStarted`).
+Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`).
 
 A resolved blocker or scope request re-prompts the inactive session once (item, epoch, change, `complete GY-N EPOCH PR`); re-blocking that epoch ends attempt and blocker for a fresh session. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
 
-Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts, re-adopted; lost ones retry free.
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts; lost ones retry free.
 
 ### Panes are closed and reclaimed
 

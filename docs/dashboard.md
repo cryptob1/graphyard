@@ -1,11 +1,15 @@
-<!-- page: Operate Graphyard | 3 | pages and markers. -->
+<!-- page: Operate Graphyard | 3 | pages. -->
 # Reading the dashboard
 
 Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings**.
 
 ## Work
 
-One group per open item (a tile counts and filters it): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` serves groups, not the page; items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, default 30 minutes). `master status`: the master's as `board.owed`.
+One group per open item (a tile counts and filters it): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` serves groups, not the page; items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, default 30 minutes). `master status` lists the master's as `board.owed`.
+
+## Needs you
+
+`graphyard login` prints the operator's single-use, ten-minute sign-in link; others get **Sign in as the operator**. Requests offer choice buttons and notes; **Provide now** seals credentials for `unseal GY-N`; a refused answer keeps the form.
 
 ## Workers
 

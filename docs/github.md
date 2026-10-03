@@ -32,15 +32,13 @@ Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (newest configured-CI-App run) before rework or ejection.
-
-Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Queueless `CLEAN`/`UNSTABLE`/`HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Queueless mergeable PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled`.
 
 ### Bindings and carry
 
 Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs. On republication, the replaced tip's approval carries onto a Graphyard-authored tip of the same author head and patch; never a person's, a moved head or changed patch.
 
-Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the latest approval of the tip's reviewed head (`review.carry-refreshed`). With none usable, the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`) and requests a fresh review at once. Repeated refusals past 10 minutes raise attention; the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), judged in the high risk lane and applied in low/medium.
+Before merging, a carried review missing from the PR re-posts the tip's reviewed head's latest approval (`review.carry-refreshed`); with none usable, `mergerefused` clears it and requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention; the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), judged in the high risk lane, applied in low/medium.
 
 ### Parallel tips
 

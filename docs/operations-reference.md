@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restarting `graphyard master run` never dispatches twice. `master status` (cached interventions) → `daemon`: health, `cycleTime` (30-minute p50/p95); Cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3).
+Restarting `graphyard master run` never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95); cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3).
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, *already recording deployment* (follow-up item).
+`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, *already recording deployment* (follow-up item). Without `--deployment-url` it reads `productionEnvironment` deployments; the newest successful counts even when inactive.
 
 ## Lost worker before submission
 
@@ -117,4 +117,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile reads each live item once per pass and locks its batch rows; contended batches back off, deferring to the next tick (warnings past 5 s). Stale snapshots retry after two seconds.
+Reconcile reads each live item once per pass, locking its batch rows; contended batches defer to the next tick (warnings past 5 s); stale snapshots retry after two seconds.
