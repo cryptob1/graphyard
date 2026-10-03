@@ -19,13 +19,13 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; the session bus is a keyring-only proxy), only the session's own checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (bubblewrap missing, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. Every other session starts in its own checkout, never this one; the loop and executors never start, self-upgrade or restart on a dirty or moved checkout, checked each cycle; `escalation:dirty-checkout` names the paths, their leases, HEAD and the panes on it ([reference](master-agent-reference.md#resources-and-disk), GY-866).
+Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; the session bus is a keyring-only proxy), only the session's own checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout) is refused with the reason. The master session is exempt. Every other session starts in its own checkout, never this one; the loop and executors never start, self-upgrade or restart on a dirty or moved checkout (checked each cycle; `escalation:dirty-checkout` names paths, leases, HEAD and panes on it; [reference](master-agent-reference.md#resources-and-disk), GY-866).
 
 ## Accounts and failover
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-On a runtime's own limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), relaunches on the next account or awaits reset.
+On a runtime's limit notice (never agent text) the loop commits worker changes as unpushed `WIP:`, records `capacity.exhausted` (not `lease-loss`), relaunches on the next account or awaits reset.
 
 ## The loop's own master session
 
@@ -69,7 +69,7 @@ Every paste goes to the **pane on the attempt's own session handle**, never the 
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; when the loop ends that session it closes the pane in the same step. Research and triage run headless. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host** whose session has ended or whose worktree is gone, once agentless past the launch bound (**120 s**), at most **6** a pass — never a pane Graphyard did not launch, one with an agent, or one whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
+Every launch records its pane on the item's session handle; when the loop ends that session it closes the pane in the same step. Research and triage run headless. A per-cycle sweep is the backstop: it closes panes Graphyard launched **on this host** whose session ended or worktree is gone, once agentless past the launch bound (**120 s**), at most **6** a pass — never an unlaunched pane, one with an agent, or one whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
 
 ### The dispatcher's own state
 
