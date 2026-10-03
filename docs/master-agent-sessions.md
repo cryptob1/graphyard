@@ -27,7 +27,7 @@ A profile's `accounts` lists [agent environments](onboarding.md#agent-environmen
 
 A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise one attention item until a start.
 
-On a runtime's own limit notice (never agent text) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset (agy's `Individual quota reached … Resets in 1h31m31s` too).
+On a runtime's limit notice (never agent text) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset (agy's `Individual quota reached … Resets in 1h31m31s`).
 
 ## The loop's own master session
 
@@ -73,12 +73,12 @@ Every paste goes to the **pane on the attempt's own session handle**, never the 
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session has ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
+Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
 - **A cursor that fails its schema is repaired, not fatal**, logged once with the path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session launches for any item. `graphyard master restart` repairs the cursor.
 
 **A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
