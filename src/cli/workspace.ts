@@ -150,9 +150,8 @@ export const workspaceCommands = defineCommands([
       '                                name the shipped items behind each remaining conflict, and',
       '                                list every file outside plannedFiles that no longer matches',
       '                                the base; run before every push',
-      '  sync GY-N --restore           The same, then restore every such file to the base in one new',
-      '                                commit naming them; push it plainly. A force push is never',
-      '                                needed or allowed',
+      '  sync GY-N --restore           The same, then restore every such file to the base in one new commit',
+      '                                naming them; push it plainly. A force push is never needed or allowed',
       '  sync GY-N --push-via-control-plane COMMIT  The control plane pushes a base sync refused for workflows',
     ],
     async run(context, work) {
@@ -173,9 +172,8 @@ export const workspaceCommands = defineCommands([
     name: 'restore-branch',
     scope: 'work',
     help: [
-      '  restore-branch GY-N EPOCH     Replace the leased attempt\'s own branch with HEAD after an',
-      '                                ejected or contaminated tip: a lease push to that one branch,',
-      '                                conditional on the tip just fetched; run after reset and sync',
+      '  restore-branch GY-N EPOCH     Replace the leased attempt\'s own branch with HEAD after an ejected',
+      '                                or contaminated tip: a lease push conditional on the fetched tip',
     ],
     async run(context, work) {
       // The worker's one history rewrite (GY-128). Its harness denies every raw force push, the lease
