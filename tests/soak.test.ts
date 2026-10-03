@@ -50,7 +50,7 @@ import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } f
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
-import { queuePlacement } from '../src/merge-queue.js';
+import { cancelledRerunLimit, queuePlacement } from '../src/merge-queue.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
 import { classifyBlocker, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
@@ -446,7 +446,8 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * runs the day with the optimistic lane off, so every item goes through the merge queue under the
  * parallel-tip window (GY-498): `window` is the configured `mergeQueue.parallelTips`, `reconfigure`
  * rewrites master config mid-day the way an operator's edit does (the next cycle republishes it),
- * and `failTip` names the item whose first speculative tip fails and keeps failing after its rerun.
+ * and `failTip` names the item whose first speculative tip fails and keeps failing after its rerun,
+ * `cancelTip` the one whose first speculative tip's `test` run GitHub cancels, and every rerun of it too.
  * `stale` stages the GY-831 faults against two items, armed from the record the loop itself
  * produced: `stuck` is the item whose published tip GitHub answers with a head other than the
  * record's, so every guarded merge attempt refuses with one unchanged message, and `lostCarry` is
@@ -454,7 +455,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; cancelTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -601,6 +602,27 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // GY-498: in the queue-only day one item's first tip fails and keeps failing after its rerun, so
   // the window has to attribute the failure to it and rebuild the tips behind it without it.
   if (options.queued?.failTip) github.flaky.set(items[options.queued.failTip - 1].key, 'rerun-fails');
+  // GY-1161: the cancelTip item's first speculative tip has its `test` run cancelled by GitHub — a
+  // concurrency group replacing it — and so is every rerun the control plane asks for, so the check
+  // never concludes there and its cancelled-rerun allowance is spent.
+  if (options.queued?.cancelTip) {
+    const key = items[options.queued.cancelTip - 1].key;
+    github.flaky.set(key, 'rerun-fails');
+    const checksOf = github.checks.bind(github), rerunOf = github.rerun.bind(github);
+    github.checks = (pr, now) => {
+      const reported = checksOf(pr, now);
+      if (pr.key === key) for (const run of github.runs.get(pr.head) ?? []) if (run.name === 'test' && run.result === 'failure') run.result = 'cancelled';
+      return reported;
+    };
+    // GitHub reruns a cancelled job as it reruns a failed one; the world's rerun reads it as failed, and its new attempt is cancelled again.
+    github.rerun = checkRunId => {
+      const runs = [...github.runs.values()].find(entries => entries.some(entry => entry.id === checkRunId && entry.result === 'cancelled'));
+      if (!runs) return rerunOf(checkRunId);
+      const run = runs.find(entry => entry.id === checkRunId)!;
+      run.result = 'failure';
+      try { return rerunOf(checkRunId); } finally { run.result = 'cancelled'; runs.at(-1)!.result = 'cancelled'; }
+    };
+  }
   // GY-854: the entry ahead of the failing one passes but GitHub is slow to make it mergeable, so
   // the failing tip is ejected while that entry is still queued, unlanded, and the ejected tip holds
   // its commits; GitHub refuses every write of every restore of the failing entry's branch.
@@ -2240,6 +2262,37 @@ test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses 
 });
 
 const docsTotalDebug = (count: Record<string, number> | undefined) => count === undefined ? undefined : Object.values(count).reduce((a: number, b: number) => a + b, 0);
+test('unit:soak-invariants-hold — a speculative tip whose required check GitHub keeps cancelling is rerun exactly up to its cancelled-rerun allowance, then ejected with that reason instead of holding the queue, and every item is still delivered', { timeout: 600_000 }, async () => {
+  // GY-1161: a queue-only day in which item two's first speculative tip has its `test` run cancelled
+  // by GitHub, and every rerun of it is cancelled again. A cancelled run is never a failure (GY-1109),
+  // so the control plane reruns it on its own allowance; once that is spent the check must not stay
+  // pending until a generic timeout: the entry leaves the queue naming the spent allowance, the
+  // entries behind it land meanwhile, and its rework round delivers it on a new head.
+  const cancelTip = 2;
+  const day = await simulateDay({ hours: 3, queued: { window: 4, cancelTip, releaseEveryMs: 3 * minute },
+    plan: { items: 4, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } });
+  const { items, final, github, violations, failures } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item is delivered');
+  const ejectee = final.find(item => item.key === items[cancelTip - 1].key)!;
+  const history = ejectee.queueHistory ?? [];
+  const ejection = history.find(entry => entry.event === 'ejected' && /Required CI check test did not pass on speculative tip [0-9a-f]{12}; GitHub cancelled every run of it/.test(entry.reason ?? ''));
+  assert.ok(ejection, `the spent allowance ejected its entry, naming it: ${JSON.stringify(history.map(entry => [entry.event, entry.reason]))}`);
+  assert.match(ejection!.reason!, new RegExp(`the ${cancelledRerunLimit} reruns allowed for a cancelled run are spent`), 'the ejection names the spent allowance, not a failure');
+  const cancelledTip = ejection!.tip!;
+  // Exactly the allowance was asked of GitHub on the cancelled tip: never more, and never a failure's rerun.
+  const reruns = github.reruns.filter(rerun => rerun.key === ejectee.key && rerun.sha === cancelledTip);
+  assert.equal(reruns.length, cancelledRerunLimit, `the cancelled check was rerun exactly ${cancelledRerunLimit} times: ${JSON.stringify(reruns)}`);
+  // Bounded: the ejection followed the last rerun's cancelled run within a few cycles, not a generic queue timeout.
+  const lastRerun = reruns.at(-1)!.at;
+  assert.ok(Date.parse(ejection!.at) - lastRerun <= 15 * minute, `the entry left the queue within a bound of its last cancelled rerun (${(Date.parse(ejection!.at) - lastRerun) / minute} min)`);
+  assert.ok(github.merges.every(merge => !github.contains(merge.sha, cancelledTip)), 'the cancelled tip never landed');
+  // The queue did not stand behind the ejected entry: an entry queued behind it landed before it did.
+  const landedEjectee = github.merges.find(merge => merge.key === ejectee.key)!;
+  assert.ok(github.merges.some(merge => merge.key !== ejectee.key && merge.at < landedEjectee.at && merge.at > Date.parse(ejection!.at) - 30 * minute), 'other entries landed while the ejected entry was out of the queue');
+});
+
 test('unit:soak-invariants-hold — the documentation budget under the real loop: a base inside the 3% warning files the trim item once across the day, a tip failing only the docs budget ejects the entry whose docs change crossed it naming the words over and the pages that grew, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-574, over the real queue, the real observer and the real word counting: the base sits at
   // 11,985 of a 12,000-word budget (inside the 3% warning), four items grow the pages, and the day
