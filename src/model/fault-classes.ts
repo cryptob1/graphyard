@@ -52,7 +52,7 @@ export const faultClassMeaning: Record<FaultClass, string> = {
 export const faultCatalogue = {
   'session-liveness': ['session', 'launch-review', 'launch-producer', 'consent-hold', 'overlong-session', 'unanswered-request', 'stuck-request', 'escalation:lease-loss',
     'action:close', 'action:dispatch', 'action:session', 'action:preserve', 'action:wake'],
-  'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'escalation:security-concern', 'action:review'],
+  'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'review-settlement', 'escalation:security-concern', 'action:review'],
   'decision': ['approver-launch', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
     'action:decision', 'action:escalation'],
   'scope': ['scope-request', 'scope-violation', 'escalation:requirement-weakening', 'action:scope'],
@@ -63,7 +63,7 @@ export const faultCatalogue = {
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
   'merge': ['base-conflict', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
   'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'escalation:evidence-policy-conflict', 'action:proof'],
-  'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'fleet-capacity', 'action:failover', 'action:capacity'],
+  'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'reviewer-busy', 'fleet-capacity', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
   'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
@@ -85,11 +85,24 @@ export interface Classified { kind: FaultKind; faultClass: FaultClass }
 export const classified = (kind: FaultKind): Classified => ({ kind, faultClass: faultClassOf(kind) });
 
 /**
+ * GY-1171: a review launch wait's kind (launchWaitAttention, GY-710), by the reason it names: a full or
+ * quota-exhausted reviewer pool is capacity; a request already answered and awaiting settlement (GY-1083)
+ * is a review that does not settle; anything else is a launch that did not happen.
+ */
+export function launchWaitKind(reason: string): 'reviewer-busy' | 'review-settlement' | 'launch-review' {
+  if (/^every reviewer profile is busy|^reviewer capacity is exhausted/.test(reason)) return 'reviewer-busy';
+  return /^reviewer session \S+ already answered with /.test(reason) ? 'review-settlement' : 'launch-review';
+}
+const launchWait = /^\S+'s review request \S+ on \S+ has waited .+? without a reviewer launch: /;
+
+/**
  * Attention lines built where no kind is set are recognised by what they say: the subject a
  * builder always uses, or the fixed wording of its sentence. The order matters only where two
  * could both match; the first wins.
  */
 const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
+  ...(['reviewer-busy', 'review-settlement'] as const).map((kind): [FaultKind, (subject: string, text: string) => boolean] => [kind, (_, text) => launchWait.test(text) && launchWaitKind(text.replace(launchWait, '')) === kind]),
+  ['launch-review', (_, text) => launchWait.test(text)],
   ['resource-bound', (subject, text) => subject.startsWith('resource:') || /is held by a registered resource at its bound/.test(text)],
   ['ledger-refusal', (_, text) => /cannot be requested because the .+ refused the write/.test(text)],
   ['disk-pressure', subject => subject === 'disk'],
