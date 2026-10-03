@@ -120,6 +120,18 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     ['a path outside the checkout', words('cat', '/home/someone/.graphyard/operator-agent.token')],
     ['the installation credentials inside the checkout', words('cat', '.graphyard/credentials.json')],
     ['the installation credentials by absolute path', words('cat', `${process.cwd()}/.graphyard/credentials.json`)],
+    ['connection.json inside .graphyard', words('cat', '.graphyard/connection.json')],
+    ['github-app.json inside .graphyard', words('cat', '.graphyard/github-app.json')],
+    ['jq github-app.json inside .graphyard', words('jq', '.', '.graphyard/github-app.json')],
+    ['a pem key inside the checkout', words('cat', 'some/key.pem')],
+    ['a token file inside the checkout', words('cat', 'some/secret.token')],
+    ['grep recursive inside .graphyard', words('grep', '-r', '-i', 'key', '.graphyard')],
+    ['grep recursive inside checkout', words('grep', '-r', 'key', 'src')],
+    ['grep recursive cluster', words('grep', '-ri', 'key', 'src')],
+    ['grep --recursive', words('grep', '--recursive', 'key', 'src')],
+    ['ls recursive', words('ls', '-R', 'src')],
+    ['reading the .graphyard directory', words('ls', '.graphyard')],
+    ['rg in .graphyard directory', words('rg', 'key', '.graphyard')],
     ['an environment file', words('cat', '.env')],
     ['an environment file variant', words('grep', 'TOKEN', '.env.local')],
     ['an environment file by absolute path', words('cat', `${process.cwd()}/.env`)],
@@ -214,7 +226,8 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
   assert.equal(call('read', { path: 'src/x.ts' }), undefined, 'without the doctor role the built-in tools are not blocked here');
 
   // The shipped template names every check bound, the sanctioned commands and the unactionable rule.
-  const prompt = doctorPrompt({ repository: master.repository, cliPath: `node ${master.cliPath}` }, { items: [], faults: [] });
+  const prompt = doctorPrompt({ repository: master.repository, cliPath: master.cliPath }, { items: [], faults: [] });
+  assert.ok(prompt.includes(`node ${master.cliPath}`), 'the template names node <cliPath>');
   for (const [bound, minutes] of Object.entries(doctorBounds)) assert.ok(prompt.includes(`${minutes} min`), `the template names the ${bound} bound (${minutes} min)`);
   assert.ok(prompt.includes('lapsed containment') && prompt.includes('refusal') && prompt.includes('overdue'), 'the template names the non-minute checks: lapsed containment, stale refusal text, overdue items');
   for (const command of doctorSanctionedCommands) assert.ok(prompt.includes(`master ${command}`), `the template names the sanctioned command master ${command}`);

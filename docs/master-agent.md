@@ -5,7 +5,7 @@ The master (`coordinator`) routes, merges, verifies deployments, administers Git
 
 ## Agents approve agents
 
-The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent and never asks a human to run what an agent may run.
+The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent and never asks humans to run what agents may run.
 
 ## Operate
 
@@ -92,7 +92,7 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The first no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`).
+The first no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15 minutes, checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
 
 The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: confirmed required-suite failures on main traced to culprits land reverts on the base tip — refused if later merges touched the culprit's files — head-bound through the bypass, recorded `optimistic.revert.*`, reopening items as rework.
 

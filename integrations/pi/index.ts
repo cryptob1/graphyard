@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { autonomyContract } from '../../src/autonomy';
@@ -293,7 +293,12 @@ export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardCon
     allowed = ghReads.get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
   }
   if (!allowed) return { allow: false, reason: doctorRefusal(`${program}${rest[0] ? ` ${rest[0].value}` : ''}`) };
-  const secret = rest.find(word => doctorSecretFile(word.value));
+  const recursive = doctorRecursiveReads.get(program);
+  if (recursive) {
+    const rec = rest.find(word => recursive.test(word.value));
+    if (rec) return { allow: false, reason: doctorRefusal(`a recursive read with ${rec.value}`) };
+  }
+  const secret = rest.find(word => doctorSecretFile(word.value, context));
   if (secret) return { allow: false, reason: doctorRefusal(`reading ${secret.value}, a local secret file the checkout boundary does not cover,`) };
   const outside = rest.find(word => doctorPathOutside(word.value, context));
   return outside ? { allow: false, reason: doctorRefusal(`reading ${outside.value}, a path outside the checkout ${context.cwd},`) } : { allow: true };
@@ -321,7 +326,7 @@ function doctorCliScript(script: string, context: DoctorGuardContext) {
 }
 /** Whether a word names a path outside the checkout: absolute, home-relative, `..`, or a link that resolves out. `--opt=PATH` is judged by its PATH. */
 function doctorPathOutside(value: string, context: DoctorGuardContext) {
-  const path = value.startsWith('-') ? value.includes('=') ? value.slice(value.indexOf('=') + 1) : '' : value;
+  const path = value.startsWith('-') ? value.includes('=') ? value.slice(value.indexOf('=') + 1) : '' : path_without_flag(value);
   if (!path) return false;
   const root = physical(resolve(context.cwd), true);
   const within = (candidate: string) => candidate === root || inside(candidate, root);
@@ -333,22 +338,45 @@ function doctorPathOutside(value: string, context: DoctorGuardContext) {
   }
   return !within(physical(resolve(context.cwd, path), true));
 }
+function path_without_flag(value: string) { return value.startsWith('-') ? '' : value; }
+const doctorRecursiveReads = new Map<string, RegExp>([
+  ['grep', /^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--(?:recursive|dereference-recursive)(?:=.*)?)$/],
+  ['ls', /^(?:-[a-zA-Z]*R[a-zA-Z]*|--recursive(?:=.*)?)$/],
+  ['diff', /^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive(?:=.*)?)$/],
+]);
 /**
  * Whether a word names a local secret file, wherever it sits: an environment file, Graphyard's
- * installation credentials, or the classic credential files a clone can carry. These resolve inside
- * the checkout, so the checkout boundary is not a read boundary for them; naming one is refused
- * whether or not the file exists, because probing a secret path is itself information. A git
- * revision path (`HEAD:.env`) and an option's path (`--ignore-file=.env`) are judged by their path.
+ * installation credentials, App keys, tokens, or the classic credential files a clone can carry.
+ * These resolve inside the checkout, so the checkout boundary is not a read boundary for them;
+ * naming one is refused whether or not the file exists, because probing a secret path is itself
+ * information. A git revision path (`HEAD:.env`) and an option's path (`--ignore-file=.env`) are
+ * judged by their path.
  */
 const doctorSecretBasenames = new Set(['.git-credentials', '.netrc', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519']);
-function doctorSecretFile(value: string) {
+function doctorSecretFile(value: string, context?: DoctorGuardContext) {
+  const cwd = context?.cwd ?? process.cwd();
   for (const part of value.split(':')) {
-    const path = part.startsWith('-') ? part.includes('=') ? part.slice(part.indexOf('=') + 1) : '' : part;
-    if (!path) continue;
+    const rawPath = part.startsWith('-') ? part.includes('=') ? part.slice(part.indexOf('=') + 1) : '' : part;
+    if (!rawPath) continue;
+    const path = isAbsolute(rawPath) ? relative(cwd, resolve(cwd, rawPath)) : rawPath;
     const base = path.split('/').pop() ?? '';
     if (/^\.env(?:\.|$)/.test(base)) return true;
-    if (base === 'credentials.json' && /(?:^|\/)\.graphyard(?:\/|$)/.test(path)) return true;
+    if (base.endsWith('.pem') || base.endsWith('.token')) return true;
     if (doctorSecretBasenames.has(base)) return true;
+    if (path === '.graphyard' || path.startsWith('.graphyard/') || /(?:^|\/)\.(?:graphyard|config\/graphyard)(?:\/|$)/.test(path)) return true;
+    if (path !== '.' && path !== './' && !path.startsWith('..')) {
+      try {
+        const full = resolve(cwd, path);
+        if (existsSync(full) && statSync(full).isDirectory()) {
+          if (existsSync(join(full, '.graphyard')) || existsSync(join(full, '.env'))) return true;
+          const entries = readdirSync(full, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.name.endsWith('.pem') || entry.name.endsWith('.token') || /^\.env(?:\.|$)/.test(entry.name) || doctorSecretBasenames.has(entry.name)) return true;
+            if (entry.isDirectory() && entry.name === '.graphyard') return true;
+          }
+        }
+      } catch {}
+    }
   }
   return false;
 }

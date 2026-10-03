@@ -147,7 +147,7 @@ export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock:
  * `doctorBounds` carries is named here, and the test holds the two together.
  */
 export function doctorPrompt(config: { repository: string; cliPath: string }, input: DoctorInput) {
-  const cli = `node ${config.cliPath}`, b = doctorBounds;
+  const cli = config.cliPath.startsWith('node ') ? config.cliPath : `node ${config.cliPath}`, b = doctorBounds;
   const checklist = [
     `- blocked: an item blocked for more than ${b.blockedMinutes} min`,
     `- worker: an attempt holding its lease for more than ${b.workerMinutes} min without a submission`,

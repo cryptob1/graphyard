@@ -21,7 +21,7 @@ export const doctorRoute: Route = {
     demand(['coordinator', 'admin'].includes(actor.role)
       || (actor.role === 'operator-agent' && !!actor.capabilities?.includes('intent:create')),
       'Coordinator permission or the intent:create capability is required', 403);
-    const run = doctorRunRecordSchema.parse(await parseJson(context, 65_536));
+    const run = doctorRunRecordSchema.parse(await parseJson(context, 262_144));
     // One event per item: an action on an item with no finding reaches its history too, and
     // several findings for one item are one event, never a duplicate.
     const perItem = new Map<string, { subject: string; findings: unknown[]; actions: unknown[] }>();
