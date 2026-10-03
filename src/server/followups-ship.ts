@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
-import { followUpEntries, followUpShipSchema, mergeFollowUpEntries, openFollowUpItem, appendedDescription, type FollowUpEntry } from '../model/machine-backlog.js';
+import { followUpEntries, followUpParent, followUpShipSchema, mergeFollowUpEntries, openFollowUpItem, appendedDescription, type FollowUpEntry } from '../model/machine-backlog.js';
 import { followUpParentMigrationEvent, foldUnshippedFollowUps, shippedFollowUpsOwed } from '../model/followups-held.js';
 import { shippedFollowUpItem } from '../review-threads.js';
 import { endAttempt } from '../pipeline-speed.js';
