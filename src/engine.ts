@@ -3,7 +3,7 @@ import { hostname } from 'node:os';
 import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { Store, StaleWrite, save, saveDocument, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { Store, StaleWrite, save, rewriteDocument, lockItem, wakeJob, documentBefore, eventWorkSql } from './store.js';
 import { reconcileItemLockSql, reconcileRereadSql, reconcileRowsSql, reconcileSettledByIdSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
@@ -599,9 +599,9 @@ export class Engine {
         : { ...current, state: outcome.kind, probedAt: at, detail: outcome.detail, resolvedAt: at };
       work.checkReruns = work.checkReruns!.map((entry, position) => position === index ? next : entry).slice(-checkRerunLimit);
       // A wait whose status is unchanged is not a new fact: it refreshes the probe without a ledger entry.
-      // Guarded by the item's revision so a concurrent write on the same item is never lost (GY-1124).
+      // Written in place under the item's lock, so a concurrent renewal of the item is never lost (GY-1124).
       if (outcome.kind === 'waiting' && current.waiting?.status === outcome.status) {
-        await saveDocument(db, work, now);
+        await rewriteDocument(db, work);
         return work;
       }
       const queuedBefore = work.queue?.sequence ?? null;
@@ -1555,13 +1555,17 @@ export class Engine {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     const data = actionRenewSchema.parse(input);
     return this.store.transaction(async (db, now) => {
+      const owner = await this.actionOwner(db, id);
+      demand(owner, 'Action is not open on any work item', 404);
+      // The item's lock, which a heartbeat takes alone (GY-1124), then the item as it stands under it.
+      await lockItem(db, owner!.id);
       const work = await this.actionOwner(db, id);
       demand(work, 'Action is not open on any work item', 404);
       const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
       // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
-      // the item and without an event of its own, so a long handler costs one update per interval.
-      // Guarded by the item's revision so a concurrent write on the same item is never lost (GY-1124).
-      await saveDocument(db, work!, now);
+      // the item and without an event or revision of its own, so a long handler costs one update
+      // per interval and a reader's ledger lookback still counts saves exactly.
+      await rewriteDocument(db, work!);
       return { action: row, work: { id: work!.id, key: work!.key } };
     }, { lane: 'lease' });
   }

@@ -285,6 +285,17 @@ export async function saveDocument(db: pg.PoolClient, work: Work, now: Date) {
   if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, read);
 }
 
+/**
+ * Write bookkeeping onto an item in place (GY-1124): no new revision and no ledger entry, so a
+ * reader resolving an older revision from the ledger (`onlyActionsMovedSince`) still counts saves
+ * exactly. Only for a caller holding the item's lock — the lock a heartbeat takes alone — so no
+ * renewal can commit between its read and this write; the revision guard refuses one that did.
+ */
+export async function rewriteDocument(db: pg.PoolClient, work: Work) {
+  const written = await db.query("UPDATE work_items SET document=$2 WHERE id=$1 AND (document->>'revision')::numeric IS NOT DISTINCT FROM $3::numeric", [work.id, JSON.stringify(work), work.revision ?? null]);
+  if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, work.revision);
+}
+
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
   await saveDocument(db, work, now);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
