@@ -27,7 +27,7 @@ export async function main() {
   const generatedFiles = configuredGeneratedFiles();
   const credentials = principalSchema.parse(JSON.parse(process.env.GRAPHYARD_PRINCIPALS ?? '[]'));
   demand(new Set(credentials.map(p => p.id)).size === credentials.length && new Set(credentials.map(p => p.token)).size === credentials.length, 'Principal IDs and tokens must be unique');
-  const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard');
+  const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard', serverPoolSizes(process.env));
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
@@ -194,6 +194,26 @@ export function startReconciliation(tick: (step: ReconciliationStep) => Promise<
  * fleet (GY-392), so a large installation reads less with longer batches, at the cost of a lease
  * renewal waiting up to one batch. Bounded to 100..5000 ms; anything else keeps the default.
  */
+/**
+ * The server's database pool sizes (2026-10-02). A fixed 12-connection main pool, half of it lent to
+ * the reconciliation tick and up to half to the observation workers, starved requests behind both
+ * while Postgres allowed 500: webhooks, heartbeats and claims failed with "timeout exceeded when
+ * trying to connect". The main pool defaults to 30 and each pool is sized by its own variable
+ * (GRAPHYARD_DB_POOL_MAX, GRAPHYARD_DB_LEASE_POOL_MAX, GRAPHYARD_DB_REPORT_POOL_MAX); a value that
+ * is not an integer in range keeps the default.
+ */
+export const serverPoolDefaults = { max: 30, leaseMax: 6, reportMax: 4 } as const;
+export function serverPoolSizes(env: Record<string, string | undefined>) {
+  const size = (value: string | undefined, fallback: number, ceiling: number) => {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed >= 2 && parsed <= ceiling ? parsed : fallback;
+  };
+  return {
+    max: size(env.GRAPHYARD_DB_POOL_MAX, serverPoolDefaults.max, 200),
+    leaseMax: size(env.GRAPHYARD_DB_LEASE_POOL_MAX, serverPoolDefaults.leaseMax, 50),
+    reportMax: size(env.GRAPHYARD_DB_REPORT_POOL_MAX, serverPoolDefaults.reportMax, 50),
+  };
+}
 export function reconcileBatchMs(value: string | undefined, fallback = 250): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 100 && parsed <= 5000 ? parsed : fallback;
