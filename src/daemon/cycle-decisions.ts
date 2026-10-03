@@ -574,8 +574,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A producer request whose attempts are used up calls for a rework once its escalation has stood
   // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
-  // The approvals' planned mechanical fixes (GY-971), each a bot round for its approved head.
-  const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : [];
+  const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
