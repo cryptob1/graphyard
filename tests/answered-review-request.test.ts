@@ -173,11 +173,14 @@ test('manual:fault-class-review-convergence — GY-1083: a request whose answer 
     await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: fresh });
     assert.equal(master.tabs.length, 2, 'the fresh request is launched');
     // A verdict the control plane observed withdrawn after the loop settled it answers nothing either:
-    // GitHub listed it dismissed, or no longer listed it, so the request is reviewed again.
+    // GitHub listed it dismissed, or recorded it in dismissedReviewIds, so the request is reviewed again.
     const withdrawn = item(instance, new Date().toISOString());
-    for (const reviews of [[{ id: instance.verdicts[0][0], reviewer, sha: instance.sha, state: 'DISMISSED', submittedAt: instance.verdicts[0][2] }], []]) {
+    for (const obs of [
+      { reviews: [{ id: instance.verdicts[0][0], reviewer, sha: instance.sha, state: 'DISMISSED', submittedAt: instance.verdicts[0][2] }] },
+      { reviews: [], dismissedReviewIds: [instance.verdicts[0][0]] },
+    ]) {
       await updateReviewLedger(master.root, ledger => { ledger.reviews = [answered(instance, 60_000)]; });
-      withdrawn.observation = { ...withdrawn.observation!, reviews };
+      withdrawn.observation = { ...withdrawn.observation!, ...obs };
       await launchReview(master.root, withdrawn, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: instance.requestId });
     }
     assert.equal(master.tabs.length, 4, 'each withdrawn answer is reviewed again');
