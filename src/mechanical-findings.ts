@@ -326,7 +326,7 @@ export function appliedMechanicalRework(work: Pick<Work, 'candidate'>, decisions
   const latest = decisions.filter(decision => decision.action === 'rework' && decision.state === 'applied')
     .sort((a, b) => Date.parse(a.approvedAt ?? '') - Date.parse(b.approvedAt ?? '')).at(-1);
   const bound = typeof latest?.input?.binding === 'string' ? /^([0-9a-f]{40}):mechanical:(\d+)$/i.exec(latest.input.binding) : null;
-  return head && bound && bound[1] === head ? Number(bound[2]) : null;
+  return head && bound && bound[1].toLowerCase() === head.toLowerCase() ? Number(bound[2]) : null;
 }
 
 /**
