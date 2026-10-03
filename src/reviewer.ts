@@ -611,15 +611,15 @@ export function answeringRecord(records: readonly ReviewRecord[], requestId: str
     && !!record.verdict && conflictingVerdictStates.includes(record.verdict.state) && !withdrawnSinceSettled(record, observation)).at(-1) ?? null;
 }
 /**
- * A settled verdict the control plane has since seen withdrawn: its observation, read after the loop
- * settled the record, lists that review in another state (dismissed) or no longer lists it at all.
- * Such a verdict answers nothing, so the request is reviewed again (stale-dismissal).
+ * A settled verdict the control plane has since seen withdrawn (GY-1083, GY-1140): its observation lists
+ * that review in another state (dismissed), or reports it in dismissedReviewIds. A verdict that is not
+ * observed yet awaits the control plane's observation ingestion, and is not withdrawn; treating an
+ * unobserved verdict as withdrawn caused duplicate reviewer launches and review-conflict faults (GY-1092, GY-1052).
  */
 function withdrawnSinceSettled(record: ReviewRecord, observation: Work['observation'] | undefined) {
   const listed = observation?.reviews.find(review => review.id === record.verdict!.reviewId);
   if (listed) return !conflictingVerdictStates.includes(listed.state);
-  const settledAt = Date.parse(record.closedAt ?? record.verdict!.submittedAt), observedAt = Date.parse(observation?.at ?? '');
-  return Number.isFinite(settledAt) && Number.isFinite(observedAt) && observedAt > settledAt;
+  return !!observation?.dismissedReviewIds?.includes(record.verdict!.reviewId);
 }
 /** The reviewer session a launch was refused for, when it already answers the requested head. */
 export const answeredByPendingReview = (error: unknown, request: { sha: string }) =>
