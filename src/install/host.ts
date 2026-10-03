@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { composeBundle, composeRunning, emptyObservation, hetznerAddress, httpHealth, markersFromEnvFile, readRemote, type AdapterContext, type AdapterObservation, type BundleFile, type ProviderAdapter } from './adapters.js';
+import { composeBundle, composeRunning, emptyObservation, hetznerAddress, httpHealth, markersFromEnvFile, publicHostname, readRemote, unroutableAddress, type AdapterContext, type AdapterObservation, type BundleFile, type ProviderAdapter } from './adapters.js';
 import { fingerprint, generateToken, workerPrincipals } from './secrets.js';
 import { shellQuote, type Transport } from './transport.js';
 import { REDACTED, type EnvValue, type PlanAction, type PlannedPrincipal, type PreflightItem } from './types.js';
@@ -314,6 +314,9 @@ export function asUser(remote: Transport, cwd: string, program: string, args: st
   return remote.exec('runuser', ['-u', HOST_USER, '--', 'sh', '-c', script, cwd, program, ...args], { timeout: 900_000, ...options });
 }
 
+/** The namespaces a contained dependency install (src/cli/test-isolation.ts containedInstall) asks bubblewrap for. */
+export const HOST_BWRAP_PROBE = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--unshare-all', '--share-net', '--die-with-parent', '--new-session'];
+
 /**
  * Idempotent machine preparation, run as root: Docker, Node 24, git, gh and bubblewrap (with the
  * unprivileged user namespaces it needs, checked by running it) when missing, the graphyard
@@ -334,8 +337,10 @@ export function bootstrapScript(layout: HostLayout) {
     // without it; Ubuntu 24.04 also restricts the unprivileged user namespaces it needs by default.
     'command -v bwrap >/dev/null || apt-get install -y bubblewrap',
     `if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/60-graphyard-bwrap.conf && sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0; fi`,
-    'bwrap --unshare-user --ro-bind / / true',
     `id -u ${HOST_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ${HOST_USER}`,
+    // The probe runs as the account the loop and executors run as, with the isolation flags a
+    // contained dependency install uses: root passing it says nothing about an unprivileged user.
+    `runuser -u ${HOST_USER} -- bwrap ${HOST_BWRAP_PROBE.join(' ')} true`,
     `loginctl enable-linger ${HOST_USER}`,
     `install -d -m 0700 -o ${HOST_USER} -g ${HOST_USER} ${[`${HOST_HOME}/.config`, `${HOST_HOME}/.config/environment.d`, `${HOST_HOME}/.config/graphyard`, layout.configDirectory, layout.tokensDirectory, layout.accountsDirectory, layout.migrationDirectory, layout.profilesDirectory, layout.githubDirectory, layout.userUnitDirectory, `${HOST_HOME}/code`].map(q).join(' ')}`,
     `install -d -m 0755 ${q(layout.workdir)} ${q(`${layout.dataPath}/postgres`)}`,
@@ -352,12 +357,12 @@ async function resolveOwner(ctx: AdapterContext, remote: Transport) {
 }
 
 /** Every file a host setEnv writes: the Compose bundle, the units, and the credentials (0600, owned by graphyard). */
-export function hostFiles(ctx: AdapterContext, values: EnvValue[], owner: string): BundleFile[] {
+export function hostFiles(ctx: AdapterContext, values: EnvValue[], owner: string, hostname = hostAddressName(ctx, ctx.sshHost)): BundleFile[] {
   const host = ctx.host!;
   const layout = host.layout;
   const environment = [...values, ...(host.claim ? [{ name: SIGNIN_CLAIM_VARIABLE, value: claimHash(host.claim), secret: false }] : [])];
   return [
-    ...composeBundle(ctx, environment, 'proxy', { databasePort: HOST_DATABASE_PORT }),
+    ...composeBundle(ctx, environment, 'proxy', { databasePort: HOST_DATABASE_PORT, hostname }),
     ...hostUnitFiles(ctx.installId, layout, owner),
     { path: hostEnvironmentFile(layout), content: `${Object.entries(hostEnvironment(layout)).map(([name, value]) => `${name}=${value}`).join('\n')}\n`, mode: 0o644, owner },
     ...host.principals.map(principal => ({ path: hostTokenFile(layout, principal.id), content: `${host.tokens.get(principal.id) ?? ''}\n`, mode: 0o600, owner })),
@@ -497,7 +502,9 @@ async function unitStates(remote: Transport, names: string[]) {
   return Object.fromEntries(names.map((name, index) => [name, (lines[index] ?? '').trim() || 'unknown']));
 }
 
-const publicUrl = (ctx: AdapterContext, address: string) => ctx.domain ? `https://${ctx.domain}` : `https://${address}`;
+/** The public name the host's proxy serves: --domain, else the SSH address (an IPv4 one named under sslip.io). */
+const hostAddressName = (ctx: AdapterContext, address: string | null) => publicHostname(ctx, address ?? 'localhost');
+const publicUrl = (ctx: AdapterContext, address: string | null) => `https://${hostAddressName(ctx, address)}`;
 
 /** An existing Linux machine: reached as root over SSH (or --local), prepared by the bootstrap script. */
 export const existingMachineAdapter: ProviderAdapter = {
@@ -505,7 +512,10 @@ export const existingMachineAdapter: ProviderAdapter = {
   async preflight(ctx) {
     const items: PreflightItem[] = [];
     if (!ctx.host?.local) items.push({ name: 'SSH target', ok: !!ctx.sshHost, detail: ctx.sshHost ? `${ctx.sshUser}@${ctx.sshHost}` : 'no target selected', fix: 'Pass --ssh-host HOST, or --local when this installer runs on the host itself' });
-    items.push({ name: 'Public hostname', ok: true, detail: ctx.domain ?? 'no domain selected; Caddy will issue an internal certificate', ...(ctx.domain ? {} : { fix: `Pass --domain graphyard.example.com and point its A record at ${ctx.sshHost ?? 'this host'}` }) });
+    // GitHub delivers webhooks only to a publicly trusted certificate, and Caddy can obtain one only
+    // for a name that resolves to this machine from the internet: a loopback or private address cannot.
+    const routable = !!ctx.domain || (!ctx.host?.local && !unroutableAddress(ctx.sshHost));
+    items.push({ name: 'Public hostname', ok: routable, detail: ctx.domain ?? (routable ? `no domain selected; served as ${hostAddressName(ctx, ctx.sshHost)}, a public name Caddy obtains a trusted certificate for` : `no domain selected, and ${ctx.host?.local ? 'a --local install' : ctx.sshHost ?? 'this host'} has no public address Caddy could obtain a trusted certificate for`), ...(routable ? {} : { fix: `Pass --domain graphyard.example.com and point its A record at ${ctx.sshHost ?? 'this host'}'s public address` }) });
     if (!ctx.host?.local && !ctx.sshHost) return items;
     const remote = await hostRemote(ctx);
     const whoami = await remote.exec('id', ['-u'], { allowFailure: true, timeout: 60_000 }).catch(() => ({ stdout: '', stderr: '', code: 1 }));
@@ -527,14 +537,14 @@ export const existingMachineAdapter: ProviderAdapter = {
     observation.variables = markersFromEnvFile(environment);
     const state = await composeRunning(remote, ctx);
     observation.database = state.database; observation.app = state.app;
-    observation.url = state.app ? publicUrl(ctx, ctx.sshHost ?? 'localhost') : null;
+    observation.url = state.app ? publicUrl(ctx, ctx.sshHost) : null;
     return observation;
   },
   plan() { return []; },
   async provision() { /* the machine exists; the self-contained layer prepares it */ },
   async setEnv() { throw new Error('The host target writes its bundle through the self-contained adapter'); },
   async deploy() { throw new Error('The host target deploys through the self-contained adapter'); },
-  async url(ctx) { return publicUrl(ctx, ctx.sshHost ?? 'localhost'); },
+  async url(ctx) { return publicUrl(ctx, ctx.sshHost); },
   health: httpHealth,
   async logs() { return ''; },
 };
@@ -798,7 +808,8 @@ export function selfContainedAdapter(base: ProviderAdapter): ProviderAdapter & {
     async setEnv(ctx, values) {
       const remote = await hostRemote(ctx);
       const owner = await resolveOwner(ctx, remote);
-      for (const file of hostFiles(ctx, values, owner)) {
+      const hostname = ctx.provider === 'hetzner' ? publicHostname(ctx, await hetznerAddress(ctx)) : hostAddressName(ctx, ctx.sshHost);
+      for (const file of hostFiles(ctx, values, owner, hostname)) {
         // Every file bound for the host passes the vault's check first, except the ones that exist to hold a credential.
         if (!file.path.startsWith(ctx.host!.layout.configDirectory) && !/\/(server|db)\.env$|github-private-key\.pem$/.test(file.path)) ctx.vault.assertClean(file.content, file.path);
         await remote.putFile(file.path, file.content, file.mode, file.owner);

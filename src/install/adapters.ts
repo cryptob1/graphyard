@@ -80,7 +80,6 @@ export const emptyObservation = (): AdapterObservation => ({ installed: false, c
 
 export async function httpHealth(ctx: AdapterContext, url: string) {
   try {
-    if (!ctx.domain) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     const response = await ctx.fetch(`${url.replace(/\/$/, '')}/healthz`, { signal: AbortSignal.timeout(15_000) });
     if (!response.ok) return false;
     return (await response.json() as any)?.ok === true;
@@ -109,7 +108,27 @@ const PRIVATE_KEY_BUNDLE_NAME = 'github-private-key.pem';
  * `databasePort` publishes Postgres on the host's loopback only: a self-contained host restores a
  * migrated ledger into it with `graphyard db restore` before the server starts (GY-717).
  */
-export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 'loopback' | 'proxy', options: { databasePort?: number } = {}): BundleFile[] {
+/**
+ * The name the proxy serves and Caddy certifies. Without --domain a public IPv4 address is named
+ * under sslip.io (1.2.3.4 -> 1-2-3-4.sslip.io), which resolves publicly to that address, so Caddy
+ * still obtains a publicly trusted certificate and GitHub's webhook delivery (insecure_ssl 0) and
+ * the installer's health check both verify it. A DNS name is served as it is.
+ */
+export function publicHostname(ctx: Pick<AdapterContext, 'domain'>, address: string) {
+  if (ctx.domain) return ctx.domain;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(address) ? `${address.replace(/\./g, '-')}.sslip.io` : address;
+}
+
+/** True when no publicly trusted certificate can be issued for this address without a domain: loopback, private or link-local. */
+export function unroutableAddress(address: string | null | undefined) {
+  if (!address || address === 'localhost') return true;
+  const octets = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(address);
+  if (!octets) return !address.includes('.');
+  const [a, b] = [Number(octets[1]), Number(octets[2])];
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+}
+
+export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 'loopback' | 'proxy', options: { databasePort?: number; hostname?: string } = {}): BundleFile[] {
   // `GITHUB_PRIVATE_KEY` is a PEM that spans many lines, and docker compose reads an env file
   // as one `NAME=value` per line: every continuation line of a raw key would be refused as a
   // malformed variable name and the deploy would fail. The key is therefore written to its own
@@ -163,9 +182,13 @@ ${ctx.dataPath ? '' : '  graphyard-data: {}\n'}${proxied ? '  caddy-data: {}\n  
     // the install instead of deploying a server that cannot start.
     files.push({ path: `${ctx.workdir}/${PRIVATE_KEY_BUNDLE_NAME}`, mode: 0o600, owner: `${SERVER_CONTAINER_UID}:${SERVER_CONTAINER_UID}`, content: key.value });
   }
-  // Without a registered domain Caddy issues an internal certificate: the endpoint is
-  // encrypted but not publicly trusted, which the installer reports rather than hides.
-  if (proxied) files.push({ path: `${ctx.workdir}/Caddyfile`, mode: 0o644, content: ctx.domain ? `${ctx.domain} {\n\treverse_proxy server:${SERVER_PORT}\n}\n` : `:443 {\n\ttls internal\n\treverse_proxy server:${SERVER_PORT}\n}\n` });
+  // Caddy always serves a public name it obtains a trusted certificate for: never an internal
+  // certificate, which GitHub's webhook delivery and the health check would both reject.
+  if (proxied) {
+    const hostname = options.hostname ?? ctx.domain;
+    if (!hostname) throw new Error('The proxy needs a public hostname: pass --domain HOST');
+    files.push({ path: `${ctx.workdir}/Caddyfile`, mode: 0o644, content: `${hostname} {\n\treverse_proxy server:${SERVER_PORT}\n}\n` });
+  }
   return files;
 }
 
@@ -378,7 +401,7 @@ export const hetznerAdapter: ProviderAdapter = {
   async preflight(ctx) {
     const items = [await tool(ctx, ctx.transport, 'hcloud', ['version'], 'hcloud CLI', 'Install the hcloud CLI (brew install hcloud, or the archive for this platform from https://github.com/hetznercloud/cli/releases), then run: hcloud context create graphyard')];
     items.push(await tool(ctx, ctx.transport, 'hcloud', ['context', 'active'], 'Hetzner Cloud project', 'Run: hcloud context create graphyard, then paste a Read & Write API token from the Hetzner Cloud console (Security - API tokens) of the project this installation is billed to'));
-    items.push({ name: 'Public hostname', ok: true, detail: ctx.domain ?? 'no domain selected; Caddy will issue an internal certificate', ...(ctx.domain ? {} : { fix: 'Pass --domain graphyard.example.com and point its A record at the created server for publicly trusted TLS' }) });
+    items.push({ name: 'Public hostname', ok: true, detail: ctx.domain ?? 'no domain selected; the server is served as <its IPv4 address>.sslip.io, a public name Caddy obtains a trusted certificate for' });
     // The installer reaches the server over key-authenticated SSH only (BatchMode, no
     // passwords). Without a key Hetzner sets a root password, and provisioning would wait
     // out the SSH attempts before blaming cloud-init for a server it cannot log into.
@@ -409,14 +432,14 @@ export const hetznerAdapter: ProviderAdapter = {
     observation.variables = markersFromEnvFile(environment);
     const state = await composeRunning(remote, ctx);
     observation.database = state.database; observation.app = state.app;
-    observation.url = state.app ? (ctx.domain ? `https://${ctx.domain}` : `https://${address}`) : null;
+    observation.url = state.app ? `https://${publicHostname(ctx, address)}` : null;
     return observation;
   },
   plan(ctx, observation) {
     return [
       { id: 'provider.provision.server', target: 'provider', title: `Create Hetzner server ${ctx.service} (${ctx.serverType}, ${ctx.location}) with a Docker cloud-init and an attached data volume`, state: observation.compute ? 'satisfied' : 'create', command: `hcloud server create --name ${ctx.service} --type ${ctx.serverType} --location ${ctx.location} --image ubuntu-24.04${ctx.sshKey ? ` --ssh-key ${ctx.sshKey}` : ''}` },
       ...composeActions(ctx, observation, `Hetzner server ${ctx.service}`),
-      { id: 'provider.tls', target: 'provider', title: ctx.domain ? `Terminate TLS for ${ctx.domain} with Caddy and automatic certificates` : 'Terminate TLS with a Caddy internal certificate (no public domain selected)', state: observation.app ? 'satisfied' : 'create' },
+      { id: 'provider.tls', target: 'provider', title: `Terminate TLS for ${ctx.domain ?? '<server address>.sslip.io'} with Caddy and an automatic, publicly trusted certificate`, state: observation.app ? 'satisfied' : 'create' },
       { id: 'provider.backup', target: 'provider', title: `Schedule backups of the ${ctx.service}-data volume mounted at ${ctx.dataPath}; the work ledger lives only in Postgres`, state: 'update', command: `hcloud volume describe ${ctx.service}-data -o json` },
     ];
   },
@@ -432,11 +455,12 @@ export const hetznerAdapter: ProviderAdapter = {
     await remote.exec('mkdir', ['-p', ctx.workdir, ...(ctx.dataPath ? [`${ctx.dataPath}/postgres`] : [])], { timeout: 120_000 });
   },
   async setEnv(ctx, values) {
-    const remote = ctx.ssh(await hetznerAddress(ctx), ctx.sshUser);
-    for (const file of composeBundle(ctx, values, 'proxy')) await remote.putFile(file.path, file.content, file.mode, file.owner);
+    const address = await hetznerAddress(ctx);
+    const remote = ctx.ssh(address, ctx.sshUser);
+    for (const file of composeBundle(ctx, values, 'proxy', { hostname: publicHostname(ctx, address) })) await remote.putFile(file.path, file.content, file.mode, file.owner);
   },
   async deploy(ctx) { await composeUp(ctx, ctx.ssh(await hetznerAddress(ctx), ctx.sshUser), true); },
-  async url(ctx) { return ctx.domain ? `https://${ctx.domain}` : `https://${await hetznerAddress(ctx)}`; },
+  async url(ctx) { return `https://${publicHostname(ctx, await hetznerAddress(ctx))}`; },
   health: httpHealth,
   async logs(ctx, lines = 100) {
     const remote = ctx.ssh(await hetznerAddress(ctx), ctx.sshUser);

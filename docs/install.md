@@ -24,7 +24,7 @@ Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `hcloud context create graphyard` (`brew install hcloud` first); needs `--ssh-key NAME` (`--domain` optional; Caddy issues an internal certificate without it).
+- `hetzner`: `hcloud context create graphyard` (`brew install hcloud` first); needs `--ssh-key NAME` (`--domain` optional; without it Caddy certifies `<ip>.sslip.io`).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; needs `--ssh-host`, `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
@@ -66,7 +66,7 @@ Dispatch a small item ([onboarding](onboarding.md#4-prove-the-first-pr)); once `
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; bootstrap installs gh and bubblewrap and enables unprivileged user namespaces. When the registry has no release image, the host builds it from its Graphyard checkout at the installer's commit. Workers push and open pull requests as the App: git's credential helper and the `gh` wrapper mint one-hour tokens scoped to the repository from the App key in `<install>/github/`, so nobody logs into the host. Sign in with the printed link, then connect each runtime's account in Settings › Agents (Pi: **Pi (z.ai key)**). A re-apply that cannot read the host's credentials refuses rather than rotating them.
+`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; without `--domain` a public IPv4 is served as `<ip>.sslip.io` (a private or `--local` address needs `--domain`); bootstrap installs gh and bubblewrap and checks its namespaces as `graphyard`. When the registry has no release image, the host builds it from its Graphyard checkout at the installer's commit. Workers push and open pull requests as the App: git's credential helper and the `gh` wrapper mint one-hour tokens scoped to the repository from the App key in `<install>/github/`, so nobody logs into the host. Sign in with the printed link, then connect each runtime's account in Settings › Agents (Pi: **Pi (z.ai key)**). A re-apply that cannot read the host's credentials refuses rather than rotating them.
 
 **Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare; confirmed with `--confirm-price` / `--max-monthly`.
 

@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { parseEnv } from 'node:util';
 import { dirname, join } from 'node:path';
 import { applyInstall, buildPlan, prepareInstall, type InstallDependencies, type InstallInputs } from '../src/install/index.js';
-import { claimHash, ghWrapper, hostGithubFiles, hostLayout, hostRuntimes, CONNECT_PATH, HOST_GH_WRAPPER, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
+import { claimHash, ghWrapper, HOST_BWRAP_PROBE, hostGithubFiles, hostLayout, hostRuntimes, CONNECT_PATH, HOST_GH_WRAPPER, OPENCODE_WORKER_PERMISSION, HOST_USER, MIGRATE_SOURCE_VARIABLE, SIGNIN_CLAIM_VARIABLE } from '../src/install/host.js';
 import { hostSizing, recommendServerType, parseServerTypes } from '../src/install/pricing.js';
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
@@ -20,6 +20,7 @@ import { authenticate } from '../src/server/auth.js';
 import { signinRoutes, claimHashOf } from '../src/server/routes/signin.js';
 import { claimFromHash } from '../web/pages/login.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { publicHostname, unroutableAddress } from '../src/install/adapters.js';
 import { allText, appKey, harness, GRAPHYARD_APP_ID, HETZNER_SERVER_TYPES, WEBHOOK_SECRET, type Harness } from './install-harness.js';
 
 // GY-717: the self-contained Graphyard host. Each test is named for the proof it produces, and its
@@ -93,7 +94,13 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     const bootstrap = lines.find(line => line.startsWith('sh -c set -eu'))!;
     assert.match(bootstrap, /command -v bwrap >\/dev\/null \|\| apt-get install -y bubblewrap/);
     assert.match(bootstrap, /kernel\.apparmor_restrict_unprivileged_userns=0/);
-    assert.match(bootstrap, /\nbwrap --unshare-user --ro-bind \/ \/ true/);
+    // The probe runs as the account the loop and executors run as, after it exists, with the
+    // namespaces a contained dependency install asks for: root passing says nothing about graphyard.
+    assert.doesNotMatch(bootstrap, /\nbwrap /, 'no root-only bubblewrap probe');
+    const probe = bootstrap.indexOf(`\nrunuser -u ${HOST_USER} -- bwrap ${HOST_BWRAP_PROBE.join(' ')} true`);
+    assert.ok(probe > 0, 'bubblewrap is probed as the graphyard user');
+    assert.ok(bootstrap.indexOf('useradd --create-home') < probe, 'the account exists before the probe');
+    assert.ok(HOST_BWRAP_PROBE.includes('--unshare-all') && HOST_BWRAP_PROBE.includes('--proc'), 'the probe asks for the isolation flags containedInstall uses');
 
     for (const name of ['graphyard-postgres.service', 'graphyard-server.service', 'graphyard-proxy.service']) {
       const unit = files.get(`/etc/systemd/system/${name}`)!;
@@ -670,10 +677,40 @@ test('unit:host-size-and-price-confirmed — --target hetzner shows the recommen
     assert.ok(fixture.hostFiles.has('/etc/systemd/system/graphyard-server.service'));
     assert.match(fixture.hostFiles.get('/opt/graphyard/owner-project/compose.yaml')!.content, /\/mnt\/graphyard\/postgres/);
 
-    // Hetzner without a domain plans Caddy's internal certificate and preflight passes.
+    // Hetzner without a domain serves the server's address under sslip.io, a public name with a
+    // publicly trusted certificate, never Caddy's internal one that GitHub's webhook delivery rejects.
     const withoutDomain = await buildPlan(await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'hetzner', selfContained: true, sshKey: 'graphyard-key', workers: 1, confirmPrice: 19.52 }, fixture.deps, 'plan'));
     assert.equal(withoutDomain.preflight.find(item => item.name === 'Public hostname')?.ok, true);
-    assert.equal(withoutDomain.preflight.find(item => item.name === 'Public hostname')?.detail, 'no domain selected; Caddy will issue an internal certificate');
+    assert.match(withoutDomain.preflight.find(item => item.name === 'Public hostname')!.detail, /sslip\.io, a public name Caddy obtains a trusted certificate for/);
+    assert.match(withoutDomain.actions.find(action => action.id === 'provider.tls')!.title, /sslip\.io with Caddy and an automatic, publicly trusted certificate/);
     assert.ok(withoutDomain.preflight.every(item => item.ok), JSON.stringify(withoutDomain.preflight.filter(item => !item.ok)));
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:host-install-plan — without --domain the proxy certifies a public name for the host\'s address, never an internal certificate, and an unroutable host is refused', async () => {
+  assert.equal(publicHostname({ domain: null }, '203.0.113.10'), '203-0-113-10.sslip.io');
+  assert.equal(publicHostname({ domain: 'graphyard.example.test' }, '203.0.113.10'), 'graphyard.example.test');
+  assert.equal(publicHostname({ domain: null }, 'box.example.test'), 'box.example.test');
+  for (const address of ['localhost', '127.0.0.1', '10.0.0.4', '172.20.1.1', '192.168.1.5', '169.254.1.1', '100.100.1.1', 'box', null]) assert.equal(unroutableAddress(address), true, String(address));
+  for (const address of ['203.0.113.10', '172.32.0.1', 'box.example.test']) assert.equal(unroutableAddress(address), false, address);
+
+  const fixture = await harness({ provider: 'hetzner', selfContained: true, serverUrl: 'https://203-0-113-10.sslip.io' });
+  try {
+    const { summary } = await applyHost(fixture, hetznerInputs({ workers: 1, confirmPrice: 19.52, domain: undefined }));
+    const caddyfile = fixture.hostFiles.get('/opt/graphyard/owner-project/Caddyfile')!.content;
+    assert.match(caddyfile, /^203-0-113-10\.sslip\.io \{/);
+    assert.doesNotMatch(caddyfile, /tls internal/);
+    assert.equal(summary.url, 'https://203-0-113-10.sslip.io');
+    assert.notEqual(process.env.NODE_TLS_REJECT_UNAUTHORIZED, '0', 'certificate verification stays on for the whole installer');
+  } finally { await fixture.cleanup(); }
+
+  const host = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    for (const [inputs, ok] of [[{ sshHost: '192.168.1.5', domain: undefined }, false], [{ sshHost: undefined, local: true, domain: undefined }, false], [{ sshHost: '203.0.113.20', domain: undefined }, true], [{ sshHost: '192.168.1.5' }, true]] as const) {
+      const plan = await buildPlan(await prepareInstall(host.root, hostInputs(inputs as Partial<InstallInputs>), host.deps, 'plan'));
+      const item = plan.preflight.find(entry => entry.name === 'Public hostname')!;
+      assert.equal(item.ok, ok, JSON.stringify(inputs));
+      if (!ok) assert.match(item.fix!, /--domain/);
+    }
+  } finally { await host.cleanup(); }
 });

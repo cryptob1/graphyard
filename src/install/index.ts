@@ -484,7 +484,6 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   // point not even a credential file exists yet for a first install.
   const blocked = plan.preflight.filter(item => !item.ok);
   if (blocked.length) throw new Error(`Preflight is incomplete; the installer changed nothing.\n${blocked.map(item => `- ${item.name}: ${item.detail}${item.fix ? `\n  Run: ${item.fix}` : ''}`).join('\n')}`);
-  if (!context.domain) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   await materializeInstall(session);
 
   const observation = await adapter.observe(context);
