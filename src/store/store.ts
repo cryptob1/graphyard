@@ -42,6 +42,39 @@ export class BackgroundLane {
   }
 }
 
+export interface StoreTransactionOptions {
+  lane?: StoreLane;
+  coordinationLock?: boolean;
+  fleetLock?: boolean;
+  itemLock?: string | number | null;
+}
+
+/**
+ * Take an exclusive advisory transaction lock on a specific work item (GY-1124).
+ * If the item number is known (or parsed from a GY-N key), the lock is taken on (advisoryLocks.item, number).
+ * If passed a UUID, the number is looked up in work_items so both lock the exact same pair.
+ */
+export async function lockItem(db: pg.PoolClient, item: string | number): Promise<void> {
+  let num: number | null = null;
+  if (typeof item === 'number') {
+    num = item;
+  } else if (/^GY-\d+$/i.test(item)) {
+    num = parseInt(item.slice(3), 10);
+  } else if (/^\d+$/.test(item)) {
+    num = parseInt(item, 10);
+  } else {
+    const res = await db.query("SELECT number FROM work_items WHERE id::text = $1 OR document->>'key' = $1 LIMIT 1", [item]);
+    if (res.rows.length > 0) {
+      num = Number(res.rows[0].number);
+    }
+  }
+  if (num !== null && !Number.isNaN(num)) {
+    await db.query('SELECT pg_advisory_xact_lock($1, $2)', [advisoryLocks.item, num]);
+  } else {
+    await db.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [advisoryLocks.item, String(item)]);
+  }
+}
+
 export class Store {
   pool: pg.Pool;
   /** Lease commands only (pools.ts `leaseCommands`); `background` bounds the tick to half the main pool; `reportPool` serves report reads only (report-pool.ts). */
@@ -87,14 +120,16 @@ export class Store {
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request', coordinationLock: takeCoordinationLock = true }: { lane?: StoreLane; coordinationLock?: boolean } = {}): Promise<T> {
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions = {}): Promise<T> {
+    const { lane = 'request', itemLock } = options;
+    const fleetLock = options.fleetLock ?? (options.coordinationLock !== false);
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
-      // Serializes short coordination decisions across replicas, including dependency edits and cross-task workspace
-      // reservations; never held during external I/O. Reconciliation batches lock their own rows instead (GY-727).
-      if (takeCoordinationLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      // Serializes coordination decisions: fleet lock first, then per-item lock in fixed order so no deadlock is possible (GY-1124).
+      if (fleetLock) await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.coordination]);
+      if (itemLock !== undefined && itemLock !== null) await lockItem(db, itemLock);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       const result = await fn(db, rows[0].now);
       await db.query('COMMIT');

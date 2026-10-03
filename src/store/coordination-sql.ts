@@ -132,3 +132,5 @@ export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM w
  * on any other item commits while the batch holds its transaction.
  */
 export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE';
+/** Item revisions from work_index, read to determine which documents changed since the last reconciliation batch (GY-1124). */
+export const reconcileIndexRevisionsSql = 'SELECT i.id, i.number, COALESCE(i.revision, 0)::int AS revision, i.settled FROM work_index i ORDER BY i.number';

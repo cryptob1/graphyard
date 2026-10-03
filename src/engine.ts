@@ -4,7 +4,7 @@ import { stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
-import { reconcileCandidatesSql, reconcileItemLockSql, reconcileRereadSql, reconcileSettledSql, reconcileVersionsSql } from './store/coordination-sql.js';
+import { reconcileCandidatesSql, reconcileIndexRevisionsSql, reconcileItemLockSql, reconcileRereadSql, reconcileSettledSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
@@ -469,6 +469,16 @@ export class Engine {
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   private conflictTransitions = new WeakMap<Work, ReviewConflictTransition[]>();
+  /** The cached fleet snapshot and max work revision for incremental reconciliation (GY-1124). */
+  readonly fleetSnapshot = new Map<string, { number: number; work: Work; version: string; revision: number; settled: boolean }>();
+  fleetMaxRevision = 0;
+  clearFleetSnapshot() {
+    this.fleetSnapshot.clear();
+    this.fleetMaxRevision = 0;
+  }
+  get fleetSnapshotVersion() {
+    return this.fleetMaxRevision;
+  }
   /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
   documentation: DocumentationPolicy = configuredDocumentation();
   /**
@@ -760,6 +770,40 @@ export class Engine {
     const data: any = commands[command].parse(input);
     const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
     // Provider I/O stays outside the coordination transaction.
+    if (command === 'heartbeat') {
+      demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
+      demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+      const data: any = commands[command].parse(input);
+      const fingerprint = createHash('sha256').update(JSON.stringify({ command, id, data })).digest('hex');
+      return this.store.transaction(async (db, now) => {
+        const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
+        if (receipt) {
+          demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
+          return receipt.result as Work;
+        }
+        const row = (await db.query("SELECT document FROM work_items WHERE id::text = $1 OR document->>'key' = $1 LIMIT 1", [id])).rows[0];
+        demand(row, 'Work item not found', 404);
+        const work: Work = row.document;
+        demandWork(work);
+        await this.renewalGrace(db, work, now);
+        if (!work.lease && submittedEpoch(work, data.epoch)) {
+          demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
+        }
+        activeLease(work, actor, data.epoch, now);
+        work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
+        delete (work.lease as GracedLease).renewalFault;
+        preserveAssignment(work);
+        retainQuarantineFence(work);
+        await save(db, work, actor.id, 'heartbeat', now, data);
+        if (this.fleetSnapshot.has(work.id)) {
+          const entry = this.fleetSnapshot.get(work.id)!;
+          entry.work = work;
+          entry.revision = work.revision;
+        }
+        await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(compactHeartbeatReceipt(work))]);
+        return work;
+      }, { lane: 'lease', fleetLock: false, itemLock: id });
+    }
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
     return this.store.transaction(async (db, now) => {
       if (actor.role === 'operator-agent') {
@@ -1098,12 +1142,9 @@ export class Engine {
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
         beginAttempt(work, work.lease, now);
       }
-      // The lease a worker submitted under ended at that submission. A supervisor that keeps
-      // renewing it is told so, rather than left to read the loss as a superseded epoch.
-      if ((command === 'heartbeat' || command === 'release') && !work.lease && submittedEpoch(work, data.epoch))
+      if (command === 'release' && !work.lease && submittedEpoch(work, data.epoch))
         demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
-      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
-      if (command === 'heartbeat') { work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString(); delete (work.lease as GracedLease).renewalFault; }
+      if (['release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
       if (command === 'quarantine') {
         demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
           && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
@@ -1404,13 +1445,17 @@ export class Engine {
         // A requirements revision an approved decision applies records whether it was a live widening too (GY-549).
         : command === 'requirements' ? { ...data, liveScopeWidening: widening, before: { plannedFiles: before?.plannedFiles ?? [] }, ...(closedScope ? { closedScopeRequest: closedScope } : {}) }
         : closedScope ? { ...data, closedScopeRequest: closedScope } : data);
-      if (work.submission && !postDeployment && !deliveredSessionClosure && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
-      // A renewal's replay needs only the lease, not a whole document per renewal.
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(command === 'heartbeat' ? compactHeartbeatReceipt(work) : work)]);
+      if (this.fleetSnapshot.has(work.id)) {
+        const entry = this.fleetSnapshot.get(work.id)!;
+        entry.work = work;
+        entry.revision = work.revision;
+      }
+      if (work.submission && !postDeployment && !deliveredSessionClosure && !['release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
       return work;
     // Lease commands take the lease pool (GY-274, GY-558): however busy every other pool is, a live
     // worker is never stopped because its renewal, claim, completion or blocker could not reach the database.
-    }, leaseCommands.has(command) ? { lane: 'lease' } : undefined);
+    }, { lane: leaseCommands.has(command) ? 'lease' : 'request', itemLock: id ?? undefined });
   }
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
@@ -2155,8 +2200,8 @@ export class Engine {
    */
   async reconcile() {
     const tickStarted = performance.now();
-    // The pass's view: every item with the row version it was read at, and the candidates in number order.
-    const fleet = new Map<string, { number: number; work: Work; version: string }>();
+    // The pass's view: every item with the row version it was read at, and the candidates in number order (GY-727, GY-1124).
+    const fleet = this.fleetSnapshot;
     let all: Work[] = [], candidates: string[] = [], next = 0, contended = 0;
     const view = () => { all = [...fleet.values()].sort((a, b) => a.number - b.number).map(entry => entry.work); };
     // Only the pass's candidates and the rows not settled now are versioned: a settled delivery that stays settled is never visited.
@@ -2164,10 +2209,13 @@ export class Engine {
     const moved = (versions: Map<string, string>, except = new Set<string>()) => [...versions].filter(([id, version]) => !except.has(id) && fleet.get(id)?.version !== version).map(([id]) => id);
     const reread = async (db: PoolClient, ids: string[]) => {
       if (!ids.length) return;
-      for (const row of (await db.query(reconcileRereadSql, [ids])).rows) fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version });
+      for (const row of (await db.query(reconcileRereadSql, [ids])).rows) {
+        const existing = fleet.get(row.id);
+        fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, revision: Number(row.document.revision ?? 0), settled: existing?.settled ?? false });
+      }
       view();
     };
-    let opened = false, written = new Set<string>();
+    let opened = false, written = new Set<string>(), reevaluateIds = new Set<string>();
     for (;;) {
       const opening = !opened, batch = next;
       written = new Set();
@@ -2175,13 +2223,80 @@ export class Engine {
       try {
         finished = await this.store.transaction(async (db, now) => {
           if (opening) {
-            const live = (await db.query(reconcileCandidatesSql)).rows as { id: string; number: string; document: Work }[];
-            for (const row of (await db.query(reconcileSettledSql)).rows as { id: string; number: string; summary: Work }[]) fleet.set(row.id, { number: Number(row.number), work: row.summary, version: '' });
-            for (const row of live) fleet.set(row.id, { number: Number(row.number), work: row.document, version: '' });
-            candidates = live.map(row => row.id); view();
+            const changedIds: string[] = [];
+            const changedSet = new Set<string>();
+            let indexMap: Map<string, { id: string; number: string; revision: number; settled: boolean }> | undefined;
+            if (!fleet.size) {
+              const live = (await db.query(reconcileCandidatesSql)).rows as { id: string; number: string; document: Work }[];
+              for (const row of (await db.query(reconcileSettledSql)).rows as { id: string; number: string; summary: Work }[]) fleet.set(row.id, { number: Number(row.number), work: row.summary, version: '', revision: Number(row.summary.revision ?? 0), settled: true });
+              for (const row of live) fleet.set(row.id, { number: Number(row.number), work: row.document, version: '', revision: Number(row.document.revision ?? 0), settled: false });
+              candidates = live.map(row => row.id);
+              reevaluateIds = new Set(candidates);
+            } else {
+              // Incremental pass (GY-1124): read index revisions to determine what moved since the previous pass/batch.
+              const indexRows = (await db.query(reconcileIndexRevisionsSql)).rows as { id: string; number: string; revision: number; settled: boolean }[];
+              indexMap = new Map(indexRows.map(r => [r.id, r]));
+              for (const row of indexRows) {
+                const existing = fleet.get(row.id);
+                if (!existing || existing.revision !== row.revision) {
+                  changedIds.push(row.id);
+                  changedSet.add(row.id);
+                }
+              }
+              for (const id of fleet.keys()) if (!indexMap.has(id)) fleet.delete(id);
+              if (changedIds.length) {
+                const rereadRows = (await db.query(reconcileRereadSql, [changedIds])).rows as { id: string; number: string; version: string; document: Work }[];
+                for (const row of rereadRows) {
+                  const idx = indexMap.get(row.id);
+                  fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, revision: Number(row.document.revision ?? 0), settled: idx?.settled ?? false });
+                }
+              }
+              candidates = indexRows.filter(r => !r.settled).map(r => r.id);
+
+              // Re-evaluate items whose own state or whose fleet inputs (dependencies, queue position, exclusive resources) changed (GY-1124).
+              reevaluateIds = new Set(changedIds);
+              const changedResources = new Set<string>();
+              for (const id of changedIds) for (const res of fleet.get(id)?.work.exclusiveResources ?? []) changedResources.add(res);
+              const queuedChanged = changedIds.some(id => !!fleet.get(id)?.work.queue);
+
+              for (const [id, entry] of fleet) {
+                if (entry.settled) continue;
+                const work = entry.work;
+                if (work.lease && Date.parse(work.lease.expiresAt) <= now.getTime()) { reevaluateIds.add(id); continue; }
+                if (standingEscalations(work).length > 0) { reevaluateIds.add(id); continue; }
+                if (work.dependencies.some(dep => changedSet.has(dep))) { reevaluateIds.add(id); continue; }
+                if (changedResources.size && work.exclusiveResources?.some(res => changedResources.has(res))) { reevaluateIds.add(id); continue; }
+                if (queuedChanged && work.queue) { reevaluateIds.add(id); continue; }
+              }
+            }
+            let maxRev = 0;
+            for (const entry of fleet.values()) if (entry.revision > maxRev) maxRev = entry.revision;
+            this.fleetMaxRevision = maxRev;
+
+            view();
             // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
             await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
-            for (const [id, version] of await versionsOf(db)) { const entry = fleet.get(id); if (entry) entry.version = version; }
+            let extraMoved = false;
+            for (const [id, version] of await versionsOf(db)) {
+              const entry = fleet.get(id);
+              if (entry) {
+                if (entry.version && entry.version !== version && !changedSet.has(id)) {
+                  changedIds.push(id);
+                  changedSet.add(id);
+                  reevaluateIds.add(id);
+                  extraMoved = true;
+                }
+                entry.version = version;
+              }
+            }
+            if (extraMoved) {
+              const rereadRows = (await db.query(reconcileRereadSql, [changedIds])).rows as { id: string; number: string; version: string; document: Work }[];
+              for (const row of rereadRows) {
+                const idx = indexMap?.get(row.id);
+                fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, revision: Number(row.document.revision ?? 0), settled: idx?.settled ?? false });
+              }
+            }
+            view();
             opened = true;
             return false;
           }
@@ -2200,20 +2315,34 @@ export class Engine {
             if (locked.version !== fleet.get(id)?.version) {
               if (written.size) throw new ReconcileContended();
               await reread(db, [id]);
+              reevaluateIds.add(id);
             }
-            if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) written.add(id);
+            if (reevaluateIds.has(id)) {
+              if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) {
+                written.add(id);
+                const saved = fleet.get(id)!.work;
+                fleet.get(id)!.revision = saved.revision;
+                if (saved.revision > this.fleetMaxRevision) this.fleetMaxRevision = saved.revision;
+              }
+            }
           }
           if (!written.size) return done;
           const locked = !!(await db.query('SELECT pg_try_advisory_xact_lock($1) AS ok', [advisoryLocks.coordination])).rows[0].ok;
           const versions = await versionsOf(db);
           if (!locked || moved(versions, written).length) throw new ReconcileContended();
-          for (const id of written) fleet.get(id)!.version = versions.get(id)!;
+          for (const id of written) {
+            const entry = fleet.get(id);
+            if (entry && versions.has(id)) entry.version = versions.get(id)!;
+          }
           return done;
         }, { lane: 'background', coordinationLock: opening });
       } catch (error) {
         if (!(error instanceof ReconcileContended)) throw error;
         // Rolled back: the batch's writes never happened, so its items are read again and it runs again.
-        for (const id of written) fleet.get(id)!.version = '';
+        for (const id of written) {
+          const entry = fleet.get(id);
+          if (entry) entry.version = '';
+        }
         const attemptedThrough = next;
         next = batch; contended++;
         if (contended >= this.reconcileMaxAttempts) {

@@ -120,7 +120,11 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token (budget above reserve, less others' spend, to reset). Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed, five-minute-due, review/rework waits, running sessions, `available_at`; tight, idle items await webhooks. `observationThroughput`: budget, pace, head lag, oldest unobserved (`github` past 120s). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
-Reconcile reads each live item once per pass, not per batch, and locks only its batch rows, so mutations on other items never wait. Contended batches back off, then defer to the next tick; deferrals and ticks over 5 s log warnings.
+Reconcile maintains an in-memory fleet snapshot versioned by work revision, querying index revisions each pass and rereading only documents whose revision changed since the previous batch. It re-evaluates only items whose own state or fleet inputs (dependencies, queue position, exclusive resources) changed, locking only its batch rows so mutations on other items never wait. Contended batches back off, then defer to the next tick; deferrals and ticks over 5 s log warnings.
+
+### Per-item and fleet advisory locking
+
+Mutations targeting a single item (such as heartbeats) acquire only the transactional per-item advisory lock (`pg_advisory_xact_lock(advisoryLocks.item, number)`), allowing writes to different items to run concurrently without serialising. Commands that read or affect fleet state (such as dispatch admission, merge-queue order, and dependency release) acquire the fleet coordination lock (`advisoryLocks.coordination`). Whenever a command requires both locks, it acquires them in a fixed order—fleet lock first, then per-item lock—preventing lock-order deadlocks.
 
 ### Concurrent reconciliation
 
