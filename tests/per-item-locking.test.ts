@@ -2,188 +2,170 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
+import { Store, StaleWrite, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { advisoryLocks } from '../src/store/locks.js';
+import { definiteRenewalRefusal } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
+import { Refusal, unknownWorkCode } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-1124: Writes to different items run in parallel and reconciliation rereads only what changed,
-// so the server scales with load instead of serialising on one lock.
-// AC-1: Two commands on different items that do not read fleet state run concurrently (neither waits
-// for the other's lock), commands that read fleet state still serialise, and no lock-order deadlock
-// occurs; test against a real database drives concurrent heartbeats on different items alongside a dispatch.
-// AC-3: Load test with 100 items and 20 concurrent writers keeps p95 request latency under 1 s and a full
-// reconciliation pass under 30 s.
+// GY-1124 AC-1: commands on different items that read no fleet state (heartbeats) take only their
+// item's lock and run concurrently; commands that read fleet state still serialise on the fleet
+// lock, taken before any item lock, so no lock-order deadlock occurs. AC-3: 100 items and 20
+// concurrent writers keep p95 request latency under 1 s.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
-const worker1: Principal = { id: 'worker-1', role: 'worker' };
-const worker2: Principal = { id: 'worker-2', role: 'worker' };
+const workers: Principal[] = Array.from({ length: 22 }, (_, i) => ({ id: `worker-${i}`, role: 'worker' }));
 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1124;
-  database = new EmbeddedPostgres({
-    databaseDir: await temporaryDirectory('per-item-locking'),
-    user: 'graphyard',
-    password: 'testing-only',
-    port,
-    persistent: false,
-    onLog: () => {},
-    onError: () => {},
-    postgresFlags: ['-h', '127.0.0.1'],
-  });
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 124;
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('per-item-locking'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise();
   await database.start();
   await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
-  engine.principals = [operator, worker1, worker2];
+  engine.principals = [operator, ...workers];
 });
 
 after(async () => {
-  if (store) await store.close();
-  if (database) await database.stop();
+  await store?.close();
+  await database?.stop();
 });
 
-test('unit:per-item-locking — concurrent heartbeats on different items run alongside a dispatch without blocking', { timeout: 60_000 }, async () => {
-  // Setup two items, both claimed and leased
-  const item1 = await engine.execute(operator, 'create', null, { title: 'Item 1', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Criterion 1', proofs: ['unit:per-item-locking'] }] }, randomUUID());
-  const item2 = await engine.execute(operator, 'create', null, { title: 'Item 2', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Criterion 2', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+let created = 0;
+async function claimed(worker: Principal) {
+  const item = await engine.execute(operator, 'create', null, { title: `Locking item ${++created}`, plannedFiles: [`src/locking-${created}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+  await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  return engine.execute(worker, 'claim', item.id, {}, randomUUID());
+}
+const heartbeat = (worker: Principal, work: Work) => engine.execute(worker, 'heartbeat', work.id, { epoch: work.lease!.epoch }, randomUUID());
+/** Hold a transaction open with the given locks until `release` is called; resolves `held` once the locks are taken. */
+function hold(options: Parameters<Store['transaction']>[1]) {
+  let release!: () => void, held!: () => void;
+  const released = new Promise<void>(resolve => { release = resolve; });
+  const taken = new Promise<void>(resolve => { held = resolve; });
+  const done = store.transaction(async () => { held(); await released; }, options);
+  return { taken, release, done };
+}
+/** 'settled' once `promise` settles, or 'pending' if it has not within `ms`. */
+const within = async <T>(promise: Promise<T>, ms: number) => Promise.race([promise.then(() => 'settled' as const), sleep(ms).then(() => 'pending' as const)]);
 
-  await engine.execute(operator, 'ready', item1.id, {}, randomUUID());
-  await engine.execute(operator, 'ready', item2.id, {}, randomUUID());
+test('unit:per-item-locking heartbeats on different items run while a dispatch holds the fleet lock, and neither waits for the other', { timeout: 60_000 }, async () => {
+  const [one, two] = [await claimed(workers[0]), await claimed(workers[1])];
+  // A dispatch admission holding the fleet lock: a claim of a third item queues behind it.
+  const dispatch = hold({ fleetLock: true });
+  await dispatch.taken;
+  const waitingClaim = claimed(workers[2]);
+  const started = performance.now();
+  const [renewedOne, renewedTwo] = await Promise.all([heartbeat(workers[0], one), heartbeat(workers[1], two)]);
+  assert.ok(performance.now() - started < 1_000, 'both renewals committed while the fleet lock was held');
+  assert.ok(Date.parse(renewedOne.lease!.expiresAt) > Date.parse(one.lease!.expiresAt) && Date.parse(renewedTwo.lease!.expiresAt) > Date.parse(two.lease!.expiresAt));
+  assert.equal(await within(waitingClaim, 300), 'pending', 'the fleet command still waits for the fleet lock');
+  dispatch.release();
+  await dispatch.done;
+  assert.equal((await waitingClaim).lease?.owner, workers[2].id);
 
-  const claimed1 = await engine.execute(worker1, 'claim', item1.id, {}, randomUUID());
-  const claimed2 = await engine.execute(worker2, 'claim', item2.id, {}, randomUUID());
-
-  assert.equal(claimed1.lease?.owner, 'worker-1');
-  assert.equal(claimed2.lease?.owner, 'worker-2');
-
-  // Start a dispatch operation holding the fleet lock for 1000 ms
-  let dispatchHolding = false;
-  let dispatchDone = false;
-  const dispatch = store.transaction(async (db) => {
-    dispatchHolding = true;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    dispatchDone = true;
-  }, { fleetLock: true });
-
-  // Wait until dispatch transaction is holding the fleet lock
-  for (let waited = 0; !dispatchHolding && waited < 5_000; waited += 10) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.ok(dispatchHolding, 'dispatch acquired and is holding the fleet lock');
-  assert.ok(!dispatchDone, 'dispatch is still in flight');
-
-  // Concurrently execute heartbeats on item1 and item2 while dispatch is holding the fleet lock
-  const startHeartbeats = Date.now();
-  const [hb1, hb2] = await Promise.all([
-    engine.execute(worker1, 'heartbeat', item1.id, { epoch: claimed1.lease!.epoch }, randomUUID()),
-    engine.execute(worker2, 'heartbeat', item2.id, { epoch: claimed2.lease!.epoch }, randomUUID()),
-  ]);
-  const heartbeatDuration = Date.now() - startHeartbeats;
-
-  // Heartbeats took per-item locks and ran concurrently without waiting for dispatch's fleet lock
-  assert.ok(heartbeatDuration < 600, `heartbeats completed in ${heartbeatDuration} ms while dispatch held fleet lock for 1000 ms`);
-  assert.ok(!dispatchDone, 'heartbeats finished BEFORE dispatch finished');
-
-  assert.ok(Date.parse(hb1.lease!.expiresAt) > Date.parse(claimed1.lease!.expiresAt), 'item 1 lease extended');
-  assert.ok(Date.parse(hb2.lease!.expiresAt) > Date.parse(claimed2.lease!.expiresAt), 'item 2 lease extended');
-
-  await dispatch;
-  assert.ok(dispatchDone, 'dispatch completed cleanly');
+  // One item's lock held: the other item's renewal commits at once, this item's waits for it.
+  const itemOne = hold({ fleetLock: false, itemLock: one.id });
+  await itemOne.taken;
+  assert.equal(await within(heartbeat(workers[1], two), 1_000), 'settled', 'a renewal of item two never waits for item one');
+  const blocked = heartbeat(workers[0], one);
+  assert.equal(await within(blocked, 300), 'pending', 'a renewal of item one waits for its own item lock');
+  itemOne.release();
+  await itemOne.done;
+  await blocked;
 });
 
-test('unit:per-item-locking — commands that read fleet state still serialise on the fleet lock', { timeout: 60_000 }, async () => {
-  let firstHolding = false;
-  let firstCompletedAt = 0;
-  let secondStartedAt = 0;
-
-  const first = store.transaction(async () => {
-    firstHolding = true;
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    firstCompletedAt = Date.now();
-  }, { fleetLock: true });
-
-  for (let waited = 0; !firstHolding && waited < 5_000; waited += 10) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-
-  const second = store.transaction(async () => {
-    secondStartedAt = Date.now();
-  }, { fleetLock: true });
-
-  await Promise.all([first, second]);
-
-  assert.ok(secondStartedAt >= firstCompletedAt, `second fleet command waited for first (started at ${secondStartedAt}, first finished at ${firstCompletedAt})`);
+test('unit:per-item-locking commands that read fleet state still serialise on the fleet lock', { timeout: 60_000 }, async () => {
+  const holder = hold({ fleetLock: true });
+  await holder.taken;
+  const ready = engine.execute(operator, 'create', null, { title: 'Serialised', plannedFiles: ['src/serialised.ts'], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+  assert.equal(await within(ready, 300), 'pending', 'a create reads the fleet and waits for the fleet lock');
+  const reconcile = engine.reconcile();
+  assert.equal(await within(reconcile, 300), 'pending', 'reconciliation opens under the fleet lock too');
+  holder.release();
+  await holder.done;
+  await Promise.all([ready, reconcile]);
 });
 
-test('unit:per-item-locking — fixed fleet-then-item acquisition order prevents deadlocks under concurrent load', { timeout: 60_000 }, async () => {
-  const itemA = await engine.execute(operator, 'create', null, { title: 'Deadlock item A', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'OK', proofs: ['unit:per-item-locking'] }] }, randomUUID());
-  const itemB = await engine.execute(operator, 'create', null, { title: 'Deadlock item B', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'OK', proofs: ['unit:per-item-locking'] }] }, randomUUID());
-
-  // Drive concurrent operations mixing fleet lock and per-item locks in varying orders
-  const operations = Array.from({ length: 40 }, (_, i) => {
-    const item = i % 2 === 0 ? itemA.id : itemB.id;
-    const isFleet = i % 3 === 0;
-    return store.transaction(async (db) => {
-      await new Promise((resolve) => setTimeout(resolve, 5 + (i % 5)));
-      return i;
-    }, { fleetLock: isFleet, itemLock: item });
+test('unit:per-item-locking a fleet command that read an item before a renewal committed never overwrites the renewal', { timeout: 60_000 }, async () => {
+  const work = await claimed(workers[3]);
+  let attempts = 0, renewed: Work | undefined;
+  await store.transaction(async db => {
+    attempts++;
+    const stale: Work = (await db.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
+    // The first attempt reads, then a renewal of the same item commits under its item lock alone.
+    if (attempts === 1) renewed = await heartbeat(workers[3], work);
+    stale.title = `${stale.title} (retitled)`;
+    await save(db, stale, operator.id, 'test.retitle', new Date());
   });
-
-  const results = await Promise.all(operations);
-  assert.equal(results.length, 40, 'all concurrent mixed operations completed without deadlock');
+  assert.equal(attempts, 2, 'the stale write was refused and the transaction ran again on the current document');
+  const stored = (await store.list()).find(item => item.id === work.id)!;
+  assert.equal(stored.lease!.expiresAt, renewed!.lease!.expiresAt, 'the renewal survived the fleet command');
+  assert.match(stored.title, /\(retitled\)$/);
+  // Without the retry the refusal surfaces.
+  await assert.rejects(store.transaction(async db => {
+    const stale: Work = (await db.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document;
+    await heartbeat(workers[3], stored);
+    await save(db, stale, operator.id, 'test.retitle', new Date());
+  }, { retryStaleWrites: false }), StaleWrite);
 });
 
-test('unit:per-item-locking — load test with 100 items and 20 concurrent writers keeps p95 latency under 1 s', { timeout: 120_000 }, async () => {
+test('unit:per-item-locking a renewal of an unknown item is the definite work-not-found refusal', { timeout: 60_000 }, async () => {
+  const refusal = await heartbeat(workers[4], { id: randomUUID(), lease: { owner: workers[4].id, epoch: 1, expiresAt: new Date().toISOString() } } as Work).catch(error => error);
+  assert.ok(refusal instanceof Refusal, String(refusal));
+  // The supervisor stops at once on exactly this answer (GY-448), rather than retrying until its lease runs out.
+  assert.equal(refusal.status, 404);
+  assert.equal(refusal.details?.code, unknownWorkCode);
+  assert.equal(definiteRenewalRefusal({ status: 404, confirmedRefusal: true, body: { error: refusal.message, ...refusal.details } }), true);
+});
+
+test('unit:per-item-locking mixed fleet and item locks under concurrent load never deadlock', { timeout: 60_000 }, async () => {
+  const items = await Promise.all(workers.slice(5, 10).map(claimed));
+  const operations: Promise<unknown>[] = [];
+  for (let round = 0; round < 6; round++) {
+    items.forEach((work, i) => operations.push(heartbeat(workers[5 + i], work)));
+    // Fleet commands (fleet lock, then the item's) and item-only transactions on the same items.
+    items.forEach((work, i) => operations.push(store.transaction(async db => { await db.query('SELECT 1 FROM work_items WHERE id=$1 FOR UPDATE', [work.id]); await sleep(2); }, { fleetLock: i % 2 === 0, itemLock: work.id })));
+    operations.push(engine.execute(operator, 'create', null, { title: `Mixed ${round}`, plannedFiles: [`src/mixed-${round}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID()));
+    operations.push(engine.reconcile());
+  }
+  assert.equal(await within(Promise.all(operations), 30_000), 'settled', 'every operation committed');
+});
+
+test('unit:per-item-locking 100 items and 20 concurrent writers keep p95 request latency under 1 s', { timeout: 300_000 }, async () => {
+  const writers = workers.slice(0, 20).map((worker, i) => ({ ...worker, id: `load-${i}` }));
+  engine.principals = [operator, ...workers, ...writers];
   const items: Work[] = [];
   for (let n = 0; n < 100; n++) {
-    const item = await engine.execute(operator, 'create', null, {
-      title: `Scale Load Item ${n}`,
-      plannedFiles: ['src/'],
-      criteria: [{ id: 'AC-1', text: 'Scale Proof', proofs: ['unit:per-item-locking'] }],
-    }, randomUUID());
-    items.push(item);
+    const item = await engine.execute(operator, 'create', null, { title: `Load ${n}`, plannedFiles: [`src/load-${n}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+    items.push(await engine.execute(operator, 'ready', item.id, {}, randomUUID()));
   }
-  assert.equal(items.length, 100, '100 items created');
-
-  // Ready all items
-  for (const item of items) {
-    await engine.execute(operator, 'ready', item.id, {}, randomUUID());
-  }
-
-  // 20 concurrent workers claiming and heartbeating items
-  const workers: Principal[] = Array.from({ length: 20 }, (_, i) => ({ id: `load-worker-${i}`, role: 'worker' }));
-  engine.principals = [operator, worker1, worker2, ...workers];
-
   const latencies: number[] = [];
-  const writerTasks = workers.map(async (w, workerIdx) => {
-    // Each worker operates on 5 distinct items (20 * 5 = 100 items total)
-    const assignedItems = items.slice(workerIdx * 5, workerIdx * 5 + 5);
-    for (const item of assignedItems) {
-      // Claim item
-      const startClaim = performance.now();
-      const claimed = await engine.execute(w, 'claim', item.id, {}, randomUUID());
-      latencies.push(performance.now() - startClaim);
-
-      // Heartbeat 2 times
-      for (let h = 0; h < 2; h++) {
-        const startHb = performance.now();
-        await engine.execute(w, 'heartbeat', item.id, { epoch: claimed.lease!.epoch }, randomUUID());
-        latencies.push(performance.now() - startHb);
-      }
+  const timed = async <T>(run: () => Promise<T>) => { const started = performance.now(); const result = await run(); latencies.push(performance.now() - started); return result; };
+  let writing = true;
+  // Reconciliation runs beside the writers, as the server's tick does.
+  const ticking = (async () => { while (writing) { await engine.reconcile(); await sleep(50); } })();
+  await Promise.all(writers.map(async (writer, w) => {
+    for (const item of items.slice(w * 5, w * 5 + 5)) {
+      const work = await timed(() => engine.execute(writer, 'claim', item.id, {}, randomUUID()));
+      for (let beat = 0; beat < 4; beat++) await timed(() => heartbeat(writer, work));
     }
-  });
-
-  await Promise.all(writerTasks);
-
+  }));
+  writing = false;
+  await ticking;
   latencies.sort((a, b) => a - b);
   const p95 = latencies[Math.floor(latencies.length * 0.95)];
-  const p50 = latencies[Math.floor(latencies.length * 0.50)];
-
-  assert.ok(p95 < 1000, `p95 latency was ${Math.round(p95)} ms, expected < 1000 ms (p50: ${Math.round(p50)} ms, samples: ${latencies.length})`);
+  assert.ok(p95 < 1_000, `p95 ${Math.round(p95)} ms over ${latencies.length} requests (p50 ${Math.round(latencies[Math.floor(latencies.length / 2)])} ms)`);
+  engine.resetReconcileView();
+  const started = performance.now();
+  await engine.reconcile();
+  const elapsed = performance.now() - started;
+  assert.ok(engine.lastReconcile.full && engine.lastReconcile.live >= 100, 'a full pass over every live item');
+  assert.ok(elapsed < 30_000, `a full reconciliation pass took ${Math.round(elapsed)} ms`);
 });

@@ -4,6 +4,7 @@ import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
 import { advisoryLocks } from './locks.js';
+import { StaleWrite, lockItem, staleWriteAttempts, type StoreTransactionOptions } from './item-lock.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
 // the lock budget stays exported here with the store that applies it.
@@ -13,6 +14,7 @@ import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js'
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
+export * from './item-lock.js';
 export type { CoordinationTrim } from './coordination-sql.js';
 
 /**
@@ -39,39 +41,6 @@ export class BackgroundLane {
     if (this.held >= this.limit) await new Promise<void>(resolve => this.waiting.push(resolve)); else this.held++;
     let released = false;
     return () => { if (released) return; released = true; const next = this.waiting.shift(); if (next) next(); else this.held--; };
-  }
-}
-
-export interface StoreTransactionOptions {
-  lane?: StoreLane;
-  coordinationLock?: boolean;
-  fleetLock?: boolean;
-  itemLock?: string | number | null;
-}
-
-/**
- * Take an exclusive advisory transaction lock on a specific work item (GY-1124).
- * If the item number is known (or parsed from a GY-N key), the lock is taken on (advisoryLocks.item, number).
- * If passed a UUID, the number is looked up in work_items so both lock the exact same pair.
- */
-export async function lockItem(db: pg.PoolClient, item: string | number): Promise<void> {
-  let num: number | null = null;
-  if (typeof item === 'number') {
-    num = item;
-  } else if (/^GY-\d+$/i.test(item)) {
-    num = parseInt(item.slice(3), 10);
-  } else if (/^\d+$/.test(item)) {
-    num = parseInt(item, 10);
-  } else {
-    const res = await db.query("SELECT number FROM work_items WHERE id::text = $1 OR document->>'key' = $1 LIMIT 1", [item]);
-    if (res.rows.length > 0) {
-      num = Number(res.rows[0].number);
-    }
-  }
-  if (num !== null && !Number.isNaN(num)) {
-    await db.query('SELECT pg_advisory_xact_lock($1, $2)', [advisoryLocks.item, num]);
-  } else {
-    await db.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [advisoryLocks.item, String(item)]);
   }
 }
 
@@ -121,6 +90,13 @@ export class Store {
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions = {}): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.transactionOnce(fn, options); } catch (error) {
+        if (!(error instanceof StaleWrite) || options.retryStaleWrites === false || attempt >= staleWriteAttempts) throw error;
+      }
+    }
+  }
+  private async transactionOnce<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions): Promise<T> {
     const { lane = 'request', itemLock } = options;
     const fleetLock = options.fleetLock ?? (options.coordinationLock !== false);
     const permit = lane === 'background' ? await this.background.acquire() : null;
@@ -128,7 +104,7 @@ export class Store {
     try {
       await db.query('BEGIN');
       // Serializes coordination decisions: fleet lock first, then per-item lock in fixed order so no deadlock is possible (GY-1124).
-      if (fleetLock) await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.coordination]);
+      if (fleetLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
       if (itemLock !== undefined && itemLock !== null) await lockItem(db, itemLock);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       const result = await fn(db, rows[0].now);
@@ -300,9 +276,13 @@ export async function wakeJob(db: pg.PoolClient, id: string) {
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
+  const read = work.revision;
   work.revision++;
   work.updatedAt = now.toISOString();
-  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
+  // Written only over the revision it was read at (GY-1124): a heartbeat commits under its item lock
+  // alone, so a fleet command holding a copy read before that renewal must not overwrite it.
+  const written = await db.query("UPDATE work_items SET document=$2 WHERE id=$1 AND (document->>'revision')::numeric IS NOT DISTINCT FROM $3::numeric", [work.id, JSON.stringify(work), read ?? null]);
+  if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, read);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details);
 }

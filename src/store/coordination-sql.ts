@@ -104,15 +104,15 @@ export const coordinationTrimSql = (kept: string, keep: number) => `jsonb_build_
   'sessions', ${length("d.document->'sessions'")} - ${length(`${kept}->'sessions'`)})`;
 
 /**
- * The items a reconciliation pass can change (GY-727): everything that is not a settled delivery.
- * `settled` is the work index's own flag, kept current beside every write by the same trigger, so
- * the filter is an index lookup that never reads a document: the pass reads only these documents,
- * once, and takes a settled delivery's summary from the index instead of its document.
+ * Every row's version and settled flag, never a document (GY-1124). A pass compares the versions
+ * with the view the previous pass kept and reads again only the rows that moved; `settled` is the
+ * work index's own flag, kept current beside every write by the same trigger, so a settled
+ * delivery is read from its summary instead of its document.
  */
-export const reconcileCandidatesSql = `SELECT w.id, w.number, w.document FROM work_items w
-  WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) ORDER BY w.number`;
-/** The settled deliveries' summaries: the rest of the fleet a batch evaluates its items against. */
-export const reconcileSettledSql = 'SELECT i.id, i.number, i.summary FROM work_index i WHERE i.settled ORDER BY i.number';
+export const reconcileRowsSql = `SELECT w.id, w.number, w.xmin::text AS version, COALESCE(i.settled, false) AS settled
+  FROM work_items w LEFT JOIN work_index i ON i.id = w.id ORDER BY w.number`;
+/** The settled deliveries among `$1` that moved since the pass's view: their summaries, the rest of the fleet a batch evaluates against. */
+export const reconcileSettledByIdSql = 'SELECT i.id, i.number, i.summary FROM work_index i WHERE i.settled AND i.id = ANY($1::uuid[])';
 /** Items a pass already read that moved since, read again: the only documents a pass reads twice. */
 export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS version, w.document FROM work_items w WHERE w.id = ANY($1::uuid[])';
 /**
@@ -132,5 +132,3 @@ export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM w
  * on any other item commits while the batch holds its transaction.
  */
 export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE';
-/** Item revisions from work_index, read to determine which documents changed since the last reconciliation batch (GY-1124). */
-export const reconcileIndexRevisionsSql = 'SELECT i.id, i.number, COALESCE(i.revision, 0)::int AS revision, i.settled FROM work_index i ORDER BY i.number';
