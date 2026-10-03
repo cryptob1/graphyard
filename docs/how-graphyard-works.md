@@ -42,7 +42,7 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub, publishes the required check, merges; webhooks wake jobs.
 
-- Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`, under current policy; pushes/base changes invalidate evidence.
+- Gates deterministically check `(PR, head SHA, base SHA)` under current policy; changes invalidate evidence.
 - Claims bump the epoch; old-epoch or expired-lease commands refuse.
 - Evidence belongs to its producer; latest trusted record per proof/candidate wins.
 - Append-only history; retries replay 24h.

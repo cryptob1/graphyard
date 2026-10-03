@@ -1798,6 +1798,8 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(proofEscalations.length, 1, `one escalation for the spent request: ${proofEscalations.join(', ')}`);
   assert.equal(reworks.length, 1, `one rework decision for the spent head: ${reworks.join(', ')}`);
   assert.deepEqual([...actionKeys].filter(key => key.startsWith('escalation:proof-workflow:')), [], 'the trusted workflow was never spent');
+  // GY-1118: the review-cap step runs on every open item every cycle of the day; no item passes its cap of three rounds, so it files, withdraws and escalates nothing.
+  assert.deepEqual([...actionKeys].filter(key => /^(escalation:)?review-cap:/.test(key)), [], 'no review-cap action on a day whose items stay within the cap');
   assert.equal(sessions.filter(session => session.state === 'dead').length, basePlan.deaths.size, 'two workers died');
   // GY-756: the pull request merged by hand outside the queue was found landed by another
   // candidate's landing check while its item recorded it unlanded, reconciled by `processJob` at

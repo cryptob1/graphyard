@@ -72,11 +72,11 @@ Hour without deliveries: `master status` points to `https://github.com/settings/
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB or volume size). `tmp-inodes`: free `/tmp` inodes (warns under 25%) and 2h-idle temp cleanup. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes (warns <25%) and 2h-idle temp cleanup; `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 
-Receipts answer retries for a day; ledger rows store only changes unless moving stage or delivery; every 10 minutes, compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1), appending `ledger.compacted`.
+Receipts answer retries for a day; ledger rows store changes; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1), appending `ledger.compacted`.
 
 ## Bootstrap mode for a self-proving change
 
@@ -113,7 +113,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤half pool) pace per token (above-reserve budget until reset), claiming webhook jobs, merge path, then remainder. `observationThroughput`: budget, pace, head lag, oldest submission (`github` past two minutes). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤half pool) pace per token, claiming webhook jobs, merge path, remainder. `observationThroughput`: budget, pace, head lag, oldest submission (`github` past two minutes). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s.
 
 ### Concurrent reconciliation
 

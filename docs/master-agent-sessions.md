@@ -19,11 +19,11 @@ Every launch but the master session's gets the checkout unwritable to shell comm
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (`master status`: `opencode-a failed to start: …; launched on claude-b`; three in a row → one attention item). A runtime limit notice: work committed as unpushed `WIP:`, `capacity.exhausted`, relaunch on next account or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (three in a row → one attention item). A runtime limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted`, and relaunches on next account or after reset.
 
 ## The loop's own master session
 
-Fleet role `master registry role set master ACCOUNTS …` (unconfigured, nothing launches), one session holding its registry slot until the loop ends it; loop and `master start` adopt a live `masterAgentName`. Starts on the master prompt plus a durable handover of standing judgement work; relaunches on exit (unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240; open item merge defers ≤30 min). Changed subjects wake it; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`master status` `daemon.master`).
+Fleet role `master registry role set master ACCOUNTS …` (unconfigured, nothing launches), one session holding its registry slot until the loop ends it; loop and `master start` adopt a live `masterAgentName`. Starts on the master prompt plus durable handover of standing judgement work; relaunches on exit, a limit notice (account held), or past `run.masterSessionMinutes` (default 240; open merge defers ≤30 min). Changed subjects wake it; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`master status` `daemon.master`).
 
 ### The request is the session's first message
 

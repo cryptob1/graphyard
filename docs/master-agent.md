@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 5 | loop, dispatch, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked; never implements, reviews or proves. Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); the rest it does itself or via an approver agent, never asking a human to run what an agent may.
+The master (`coordinator`) routes and administers GitHub unasked; never implements, reviews or proves. Human-only: goals, priorities, money, third-party accounts, people's credentials ([who decides](glossary.md#who-decides)); the rest it does itself or via an approver agent, never asking a human to run what an agent may.
 
 ## Operate
 
-Cycle: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; close finished sessions; verify deployment (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)). Stop only when in-scope items are Done or externally blocked, and merges verified or deployment-blocked. Review findings, rework, idle workers and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Cycle: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; close finished sessions; verify deployment (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)). Stop only when in-scope items are Done or externally blocked, and merges verified or deployment-blocked. Findings, rework, idle workers and proof setup never stop the loop. `controlPlane.production` flags main ahead of production.
 
 `master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
 
@@ -39,9 +39,9 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Machine-filed backlog
 
-Follow-ups wait on their item (`pendingFollowUps`) until it ships, forming or joining its follow-up item; closing unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Follow-ups wait on their item (`pendingFollowUps`) until ship, joining its follow-up item; closing unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. Pi (`run.research`) triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
 
-`Recurring <class> faults` and `invariant:` faults get a read-only diagnostician (`run.diagnostician`): approved, its fix releases or closes as duplicate. Branch restores owed under 30m and restart-resumed merges are self-handled, not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults get a read-only diagnostician (`run.diagnostician`): approved, its fix releases or closes as duplicate. Restores owed under 30m and restart-resumed merges are self-handled, not `merge` faults.
 
 ## Automatic dispatch at submit
 
@@ -49,7 +49,7 @@ Past the build gate (`autoDispatch`): a producer request per proof group (`unit`
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart (`run.reviewerProfile` defaults to 4 sessions); lowering it drains first (`longestWaitMs`); starved minutes count in `counts.concurrencyStarved`.
 - **Launches bind heads**: stale refusals wake observation and retry; 15m+ waiting reviews raise attention.
-- Requests always settle: `pane_not_found` panes close, as do settled reviewers' open panes. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; pending ones count in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch (12 per request, then `dispatch.abandoned`); killed/vanished producer runs spend no attempt, exhausted ones raise `escalation:proof-exhausted`, then a quoting rework.
+- Requests always settle: `pane_not_found` panes close, as do settled reviewers' open panes. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; pending ones count in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch (12 per request, then `dispatch.abandoned`); vanished producer runs spend no attempt, exhausted ones raise `escalation:proof-exhausted`, then a quoting rework.
 - **Every role fails over on spent quota** or waits as one uncounted `capacity` line.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after relaunching stops.

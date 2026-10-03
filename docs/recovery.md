@@ -7,7 +7,7 @@
 
 ## Artifact backends, capacity and migration
 
-Postgres (default) or S3: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, optional `_PREFIX`. Failed upload: 503; past `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB): 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves ≤100 per call; at `remaining` 0, switch backends.
+Postgres (default) or S3: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, optional `_PREFIX`. Failed upload: 503; over `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB): 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves ≤100 per call; at `remaining` 0, switch backends.
 
 ## Rollback
 
@@ -47,4 +47,4 @@ reports `applied`/`failed`/`unknown` (`POST /api/delivery/rollback-settle`):
  "evidence":"https://railway.app/project/example/deployments/01J8Q5"}
 ```
 
-`"automaticRollback": true` rolls degraded generations back to last verified release if fenced automatic executors cover every service; else `automaticRollbackRefusal` explains.
+`"automaticRollback": true` rolls degraded generations to last verified release if fenced automatic executors cover every service; else `automaticRollbackRefusal` explains.
