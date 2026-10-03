@@ -378,8 +378,14 @@ export async function applyProtection(config: { repository: string; baseBranch: 
   }
   if (!plan.landableCheck && !(reviewChanges && plan.current.requireConversationResolution)) {
     // The landability verdict joins the required checks (GY-887): every observed check is kept, and strict stays as observed (off).
-    run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_status_checks`, '--input', '-'],
-      JSON.stringify({ strict: current?.required_status_checks?.strict === true, checks: requiredStatusChecks(current, config.githubAppId) }));
+    // If the branch had no required_status_checks subresource, GitHub returns 404 on PATCH; PUT the whole protection payload instead (GY-1050).
+    if (!current?.required_status_checks) {
+      run('gh', ['api', '--method', 'PUT', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection`, '--input', '-'],
+        JSON.stringify(conversationPayload(current, plan.desired, config.githubAppId)));
+    } else {
+      run('gh', ['api', '--method', 'PATCH', `repos/${config.repository}/branches/${encodeURIComponent(config.baseBranch)}/protection/required_status_checks`, '--input', '-'],
+        JSON.stringify({ strict: current?.required_status_checks?.strict === true, checks: requiredStatusChecks(current, config.githubAppId) }));
+    }
   }
   const reread = readProtection(config, run);
   const verified = protectionPlan(reread, config, work, undefined, workflows);

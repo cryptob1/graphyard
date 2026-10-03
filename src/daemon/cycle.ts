@@ -15,6 +15,7 @@ import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
+import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { triageBacklogStep } from './cycle-triage.js';
@@ -217,6 +218,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   await settleLaunches();
   spent('dispatch');
 
+  // 4b. Past the review-round cap (GY-1118) a change request is filed as follow-ups and withdrawn, or escalated; it is never reworked.
+  await timings.step('review cap', () => reviewCapStep(cycle));
   await timings.step('decisions', () => decisionStep(cycle, settled, assessments, capacity));
   await settleLaunches();
   spent('decisions');
