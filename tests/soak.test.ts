@@ -51,6 +51,8 @@ import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
+import { probeBlocker } from '../src/daemon/blocker-probes.js';
+import { classifyBlocker, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
 import { followUpEntries, followUpParent, hasShipped } from '../src/model/machine-backlog.js';
 import { repeatedClientErrorLimit } from '../src/retry-stop.js';
@@ -337,6 +339,33 @@ const scopePlan = {
   wideRulePlanned: 20, wideRuleAsked: 90, wideFindingAsked: 100, unrepresentablePlanned: plannedFilesMax - 1,
 };
 const padded = (n: number) => String(n).padStart(3, '0');
+
+/**
+ * GY-1008: the blocked day. Each of the first seven items' first attempt records one of the
+ * 2026-09-30 blocker texts a few minutes in, which ends the attempt; the loop re-checks each one
+ * every cycle and nobody else touches them. The credential, sandbox and control-plane probes run
+ * through the real probe code and fail until their cause clears at the minute below; the
+ * outside-scope failure clears once the base moves (items eight and nine land meanwhile); the
+ * planned-file-scope blocker becomes a widening decision its approver judges; the needs-decision
+ * blocker names a decision the master requested and never put to an approver, which the loop
+ * launches. Item `repeating` blocks on every attempt, so the loop clears it `maxAutomaticClears`
+ * times in a row and then leaves it to the master.
+ */
+const blockerPlan = {
+  items: 9, repeating: 7, blockAfterMs: 5 * minute,
+  clearsAt: { 'github-credential': 60 * minute, 'sandbox-path': 75 * minute, 'control-plane-error': 30 * minute } as Partial<Record<BlockerClass, number>>,
+  classes: { 1: 'github-credential', 2: 'sandbox-path', 3: 'control-plane-error', 4: 'outside-scope-test-failure', 5: 'planned-file-scope', 6: 'needs-decision', 7: 'control-plane-error' } as Record<number, BlockerClass>,
+  text: (n: number, branch: string, decision: string | null): string | null => ({
+    1: "git push failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    2: `error: unable to append to '.git/logs/refs/remotes/origin/${branch}': Read-only file system`,
+    3: 'graphyard complete command failed with Internal error',
+    4: "The test suite fails in tests/shared.test.ts on the base branch, outside this item's plannedFiles",
+    5: `SCOPE NEEDED: ${extraFile(5)} (https://github.com/owner/project/issues/5 explains why) for commit 8106499e9f`,
+    6: `Waiting on decision ${decision}: its approver was never launched`,
+    7: 'graphyard complete command failed with Internal error (HTTP 500)',
+  } as Record<number, string>)[n] ?? null,
+};
+const extraFile = (n: number) => `src/soak/item-${n}-extra.ts`;
 /** Item `unrepresentable`'s planned files: plannedFilesMax entries, none in the asked path's directories. */
 const bulk18 = [file(scopePlan.unrepresentable), ...Array.from({ length: scopePlan.unrepresentablePlanned }, (_, index) => `tests/bulk-18/bulk-${padded(index)}.test.ts`)];
 
@@ -425,7 +454,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * re-post cannot use it.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -441,7 +470,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless;
+  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless && !options.blockers;
   // The documentation day's world (GY-574): the project keeps the 12,000-word budget and its base
   // sits 15 words under it, within the 3% warning — so the loop's headroom step counts it, and the
   // queue tips whose entries grow the pages are what the day judges.
@@ -599,8 +628,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
-  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked'; syncs: number; syncedFor?: string; refusedSince?: number;
-    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; settlementToken?: string }
+  interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked'; syncs: number; syncedFor?: string; refusedSince?: number;
+    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; settlementToken?: string }
   const sessions: Session[] = [], lost: string[] = [];
   // GY-888: every session launch the day makes carries the coordinator confinement through the
   // launcher's own logic, and the same launch where the mount namespace cannot be built is
@@ -668,7 +697,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // any session of the day; the world's tick renews its lease and pushes its head.
     const attempt = (attempts.get(work.key) ?? 0) + 1; attempts.set(work.key, attempt);
     sessions.push({ work: work.id, key: work.key, branch, profile, epoch, attempt, pane: result.pane!, pushAt: clock.now() + plan.workMs, diesAt: null, exitsAt: null, dispatchAt: clock.now(), state: 'working', syncs: 0,
-      scopeAt: null, misreadAt: null, misread: false, credentialAt: null });
+      scopeAt: null, misreadAt: null, misread: false, credentialAt: null, blockAt: null });
     return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
   } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
   async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
@@ -710,6 +739,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
       exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
+      // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
+      blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + blockerPlan.blockAfterMs : null,
       credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, settlementToken });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
@@ -762,6 +793,23 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         herdr.status(session.pane, 'idle');
         await engine.execute(principals.coordinator, 'autoscope', session.work, { epoch: session.epoch }, id());
         decided.push(`${session.key}:${session.epoch}`);
+      }
+      // GY-1008: the worker records its blocker, which ends the attempt in the same transaction; its
+      // runtime then exits. The needs-decision item's master requested a decision first and put it
+      // to no approver, as on 2026-09-30.
+      if (session.blockAt !== null && now >= session.blockAt) {
+        const n = numberOf(session);
+        let decision: string | null = null;
+        if (blockerPlan.classes[n] === 'needs-decision') {
+          const current = (await store.list()).find(item => item.id === session.work)!;
+          decision = (await api(principals.operatorAgent, 'POST', `work/${current.id}/decide`, { action: 'requirements', input: decisionInput('requirements', current, { plannedFiles: [...current.plannedFiles, extraFile(n)] }), reason: `Soak: ${current.key} needs ${extraFile(n)}, requested by the master and put to no approver` })).id;
+          blockerDecisions.set(session.key, decision!);
+        }
+        const blocked = await engine.execute(principal, 'blocked', session.work, { epoch: session.epoch, reason: blockerPlan.text(n, session.branch, decision)! }, id());
+        blockerEvents.push({ key: session.key, epoch: session.epoch, elapsed: now - dayStart, lease: blocked.lease?.epoch ?? null });
+        herdr.kill(session.pane);
+        session.state = 'blocked';
+        continue;
       }
       // The unrepresentable item's worker stays live on its refused ask: the item is blocked on
       // scope, so it neither pushes nor submits.
@@ -820,6 +868,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
 
   // ---- The session record and the prompts the loop gives sessions (GY-544). ----
+  // GY-1008: each recorded blocker (with the lease the item held right after it), every probe the
+  // loop ran, the needs-decision item's decision, and the loop's blocker actions.
+  const blockerEvents: { key: string; epoch: number; elapsed: number; lease: number | null }[] = [];
+  const blockerProbes: { key: string; class: BlockerClass; elapsed: number; passed: boolean }[] = [];
+  const blockerDecisions = new Map<string, string>();
+  const blockerActions: { elapsed: number; work: string | null; state: string; detail: string }[] = [];
+  let blockerKeysPeak = 0;
   const decided: string[] = [], misreads: string[] = [], prompts: { key: string; epoch: number; pane: string; text: string }[] = [], exitedLive: string[] = [], exitedClosed: string[] = [];
   const panes = new Map<string, string>();
   const recordSession: DaemonEffects['recordSession'] = async (work, handle) => {
@@ -966,7 +1021,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // would otherwise be dispatched, pushed and refused here for its linked pull request. The
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
   // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well.
-  const ownItems = options.reassigned || options.headless || options.credentialBlocked || options.dispatchFailing || options.containment || failover ? new Set(items.map(item => item.id)) : null;
+  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.containment || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -1061,6 +1116,22 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       },
     } : {}),
     promptSession,
+    // GY-1008: the blocked day probes through the real probe code, over a world whose credential,
+    // write path and control plane fail until their minute, and records through the real route.
+    // The credential-blocked day's world answers every probe: what fails there is each session's own credential.
+    ...(options.blockers || options.credentialBlocked ? {
+      probeBlocker: (work: Work, classification: Parameters<NonNullable<DaemonEffects['probeBlocker']>>[1]) => {
+        const failing = !!options.blockers && elapsed < (blockerPlan.clearsAt[classification.class] ?? 0);
+        const ran = (passed: boolean) => blockerProbes.push({ key: work.key, class: classification.class, elapsed, passed });
+        return probeBlocker(work, classification, {
+          run: () => { ran(!failing); if (failing) throw Object.assign(new Error('exit 1'), { stderr: classification.class === 'github-credential' ? 'You are not logged into any GitHub hosts.' : 'Read-only file system' }); return ''; },
+          planeHealth: async () => { ran(!failing); return failing ? 'the server answered 500 Internal Server Error on /healthz' : null; },
+          baseTip: async () => { ran(false); return github.tip; },
+          launch: { kind: workers[0].kind, args: workers[0].agentArgs ?? [], environment: workers[0].environment }, cwd: `/tmp/soak/${work.key}-${work.epoch}`, clock: clock.now(),
+        });
+      },
+      recordBlockerProbe: (work: Work, body: unknown) => api(principals.coordinator, 'POST', `work/${work.id}/blocker-probe`, body),
+    } : {}),
     // GY-1078: the loop records a repeated dispatch failure's cause through the real `dispatchblock`
     // command; the control plane refuses the first `refuseBlocks` of those requests.
     ...(options.dispatchFailing ? {
@@ -1628,6 +1699,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
+        if (options.blockers) blockerActions.push(...result.actions.filter(action => action.kind === 'blocker').map(action => ({ elapsed, work: action.work, state: action.state, detail: action.detail })));
         if (options.master) {
           const after = clock.now() - dayStart;
           master.rotations.push(...result.actions.filter(action => action.kind === 'failover' && action.detail.startsWith('Ended master session')).map(action => ({ at: elapsed, detail: action.detail, before: now - dayStart, after })));
@@ -1640,6 +1712,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       }
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
       for (const key of Object.keys(state.actions)) actionKeys.add(key);
+      blockerKeysPeak = Math.max(blockerKeysPeak, Object.keys(state.actions).filter(key => key.startsWith('blocker:')).length);
       // Only the day that holds a merge BLOCKED pays for the extra snapshot read each cycle.
       if (plan.blockedMerge) mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
@@ -1698,6 +1771,17 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
   }
 
+  // The blocked day ends with its repeating item left to the master: it is closed here, so the
+  // next day's loop does not inherit it.
+  if (options.blockers) {
+    await moveClock(5 * minute);
+    for (const leftover of await store.list()) {
+      if (leftover.stage === 'done' || leftover.closure || !items.some(item => item.id === leftover.id)) continue;
+      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the blocked day ends with its repeating blocker left to the master' });
+    }
+    // One more cycle sees it closed: the rows the loop kept for its blocker go with it.
+    await runCycle(config, state, effects, clock.now, launcher); await launcher.idle();
+  }
   // The credential-blocked day ends with its never-curing item held at the cap, and a failing-dispatch
   // day may end with an item still held: each is closed here, so a later day's loop never dispatches it.
   if (options.credentialBlocked || options.dispatchFailing) {
@@ -1714,7 +1798,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, lost, violations, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, followUpDay, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
+    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
     wakes, staleMerges, restartLog };
 }
 
@@ -2566,6 +2651,74 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+test('unit:soak-invariants-hold — blocked work unblocks itself: every routine blocker is re-checked each cycle and cleared only once its cause is gone, the scope and decision blockers reach their approver, a repeating blocker is left to the master, and no approver session or cursor row outlives its blocker', { timeout: 600_000 }, async () => {
+  // GY-1008: the blocker step runs per item, every cycle, so it lives in this world. Seven of nine
+  // items' first attempts record a blocker from the 2026-09-30 incidents; nothing outside the loop
+  // touches them. Each must hold no lease from the moment it is recorded, clear without the master
+  // only once its probe passes (never while it fails), and be delivered by its next attempt.
+  // No wall-clock budget: about ten seconds alone, this day ran 214 s on the CI shard that also
+  // holds the confinement soak, so a budget would measure the runner; the test timeout bounds it.
+  const day = await simulateDay({
+    hours: 4, blockers: true,
+    plan: { items: blockerPlan.items, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 9, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 9 } },
+  });
+  const { items, final, violations, failures, state, herdr, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts } = day;
+  const repeating = items[blockerPlan.repeating - 1].key;
+  assert.deepEqual(final.filter(item => item.key !== repeating && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.blocker ?? ''} ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the repeating one is delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the blockers, their probes and their approvers');
+  assert.deepEqual(failures, [], 'no cycle failed');
+
+  // AC-2 in the loop: every recorded blocker ended its attempt — the item held no lease after it.
+  assert.ok(blockerEvents.length >= 7, `each blocked item recorded its blocker: ${JSON.stringify(blockerEvents)}`);
+  assert.deepEqual(blockerEvents.filter(entry => entry.lease !== null), [], 'a recorded blocker leaves no lease behind');
+
+  const cleared = (key: string) => blockerActions.filter(action => action.work === key && action.state === 'done' && /^Cleared /.test(action.detail));
+  for (const [n, blockerClass] of Object.entries(blockerPlan.classes).map(([n, cls]) => [Number(n), cls] as const)) {
+    const key = items[n - 1].key;
+    assert.equal(classifyBlocker(blockerPlan.text(n, 'graphyard/x', 'decision')).class, blockerClass, `item ${n}'s blocker text reads as ${blockerClass}`);
+    if (key === repeating) continue;
+    const clear = cleared(key);
+    assert.equal(clear.length, 1, `${key}'s ${blockerClass} blocker was cleared by the loop exactly once: ${JSON.stringify(blockerActions.filter(action => action.work === key))}`);
+    assert.match(clear[0].detail, new RegExp(`Cleared ${key}'s ${blockerClass} blocker`));
+    assert.equal(attempts.get(key), 2, `${key} was delivered by the attempt after its blocker cleared`);
+    const recorded = blockerEvents.find(entry => entry.key === key)!;
+    // AC-3: an environmental cause is probed every cycle while it stands, and clears only once it passes.
+    const clearsAt = blockerPlan.clearsAt[blockerClass];
+    if (clearsAt !== undefined) {
+      const ran = blockerProbes.filter(probe => probe.key === key);
+      assert.ok(ran.filter(probe => !probe.passed).length >= Math.floor((clearsAt - recorded.elapsed) / minute) - 2, `${key}'s ${blockerClass} probe ran every cycle its cause stood (${ran.length} runs)`);
+      assert.ok(clear[0].elapsed >= clearsAt, `${key} was cleared only once its probe passed (+${clear[0].elapsed / minute} min, cause gone at +${clearsAt / minute} min)`);
+      assert.ok(clear[0].elapsed <= Math.max(clearsAt, recorded.elapsed) + 2 * minute, `${key} was cleared within two cycles of its cause going (+${clear[0].elapsed / minute} min)`);
+    }
+  }
+  // The outside-scope failure cleared on a later base tip than the one it was met on.
+  const outside = items[3].key;
+  assert.ok(blockerProbes.some(probe => probe.key === outside && probe.class === 'outside-scope-test-failure'), 'the outside-scope blocker read the base tip');
+  // AC-4: the scope blocker became an additive widening the approver judged; the decision blocker's approver was launched by the loop.
+  const scoped = final.find(item => item.key === items[4].key)!, decided = final.find(item => item.key === items[5].key)!;
+  assert.ok(scoped.plannedFiles.includes(extraFile(5)) && scoped.plannedFiles.includes(file(5)), `the planned-file-scope blocker widened plannedFiles additively: ${scoped.plannedFiles.join(', ')}`);
+  assert.ok(!scoped.plannedFiles.some(path => /github\.com/.test(path)), 'the URL the blocker cites never became a planned path');
+  assert.ok(decided.plannedFiles.includes(extraFile(6)), 'the needs-decision blocker\'s decision was judged and applied');
+  const decision = blockerDecisions.get(decided.key)!;
+  assert.ok(day.decideCalls.some(call => call.key === scoped.key && call.action === 'requirements'), 'the loop requested the scope widening itself');
+  assert.ok(blockerActions.some(action => action.work === decided.key && new RegExp(`blocked on decision ${decision} .*launched approver`).test(action.detail)), `the loop launched the waiting decision's approver: ${JSON.stringify(blockerActions.filter(action => action.work === decided.key))}`);
+
+  // The repeating blocker: cleared maxAutomaticClears times in a row, then left to the master.
+  assert.equal(cleared(repeating).length, maxAutomaticClears, `${repeating} was cleared ${maxAutomaticClears} times and no more`);
+  assert.ok(blockerActions.some(action => action.work === repeating && new RegExp(`again after the loop cleared its blocker ${maxAutomaticClears} times in a row`).test(action.detail)), `${repeating} was left to the master once spent`);
+  assert.equal(attempts.get(repeating), maxAutomaticClears + 1, `${repeating} was dispatched once per clear, and not again`);
+
+  // Nothing outlives its blocker: no approver session lingers, no watch is kept, and the cursor's
+  // blocker rows went with their items.
+  // (The recurring-fault items the day's stalled blockers file have approvers of their own, which the
+  // invariants already judge; these are the blocked items' own.)
+  const approvers = [...herdr.agents.values()].filter(agent => items.some(item => new RegExp(`^graphyard-approver-${item.key.toLowerCase()}-[0-9a-f]+$`).test(agent.name ?? '')));
+  assert.deepEqual(approvers.map(agent => agent.name), [], 'no approver session of a blocked item is left open');
+  assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), 'the launched approver\'s watch went with its judged decision');
+  assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('blocker:')), [], 'no blocker row outlives its item');
+  assert.ok(blockerKeysPeak <= 2 * 7, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
 });
 
 test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
