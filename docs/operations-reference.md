@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never dispatches twice. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
+Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up).
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up). Without `--deployment-url` it reads `productionEnvironment` deployments only; the newest, if successful, counts even when inactive.
 
 ## Lost worker before submission
 
@@ -27,7 +27,7 @@ With `GRAPHYARD_INTERVENTION_PATTERNS=1`, each minute's pattern scan groups refu
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval, proofs, with no rework meanwhile, however long its workflow run waits for a runner (`check.rerun.waiting`; master status says *waiting for a runner*); a rerun GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, a concluded failing rerun or refusal ejects (`check.rerun.*`). Its passing rerun on that tip lifts the ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables, published like `batchSize`.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval and proofs, despite runner waits (`check.rerun.waiting`); one GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, failing rerun or refusal ejects (`check.rerun.*`). A cancelled run never fails: it reruns (≤3) or stays pending. A passing rerun, or any pass after a cancelled ejecting run, lifts it. `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
 
 ## Accepted evidence turns out to be wrong
 
@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else readable same-host `data_directory` volume size, else an advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else readable same-host `data_directory` volume size, else an advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 

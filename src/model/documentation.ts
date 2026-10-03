@@ -285,11 +285,22 @@ export function attributeDocsOverflow(base: DocsWordCount | undefined, entries: 
       if (!before) return null;
       const prior = before;
       const grew = Object.entries(entry.count).filter(([page, words]) => words > (prior[page] ?? 0)).map(([page, to]) => ({ page, from: prior[page] ?? 0, to }));
-      return { member: entry.key, total, budget, paths: [...configured.paths], over: total - budget, grew };
+      // A total the commit before it already carried, with no page grown, is inherited (GY-1109):
+      // GY-967 was ejected naming 15643 words its base 7ef4cb702d65 carried, "pages that grew: none".
+      if (!(docsTotal(prior) > budget && !grew.length)) return { member: entry.key, total, budget, paths: [...configured.paths], over: total - budget, grew };
     }
     before = entry.count;
   }
   return null;
+}
+/**
+ * GY-1109: whether a tip's docs total over the budget is its own — the commit it was built on was
+ * within the budget, or the tip grew a page. A total the base already carries with no page grown is
+ * inherited: it is never judged the tip's failure nor named in an ejection or rework reason.
+ */
+export function ownDocsOverflow(docs: Pick<TipDocs, 'base' | 'pages'> & { budget: Pick<DocsWordBudget, 'total'> }): boolean {
+  if (docsTotal(docs.pages) <= docs.budget.total) return false;
+  return docsTotal(docs.base) <= docs.budget.total || Object.entries(docs.pages).some(([page, words]) => words > (docs.base[page] ?? 0));
 }
 /** The refusal an attributed overflow ejects its entry with. */
 export const docsOverflowReason = (overflow: DocsOverflow) =>

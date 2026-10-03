@@ -14,6 +14,15 @@ Graphyard decides whether work may advance; runtimes such as Herdr run the sessi
 
 A card stops at its first refusing gate, naming what is missing; nothing sets a stage directly.
 
+## Shared project memory
+
+Every worker, reviewer and producer Graphyard launches starts with a project-memory digest for its role in its first request, within 500 words:
+- Approved decisions with the approver's reason, and operator answers that provided what was asked.
+- Recurring fault classes with their sanctioned remedies.
+- Merges to main after the session's base, with their files (the last 24 hours when the base is not a remembered merge).
+
+The loop updates it only from decisions it sees applied (never a refusal), answered human requests, recurring fault classes and merges — never from an agent's claim — and keeps it in its cursor and `.graphyard/project-memory.json`. `graphyard master status` reports it as `projectMemory`, and the Workers page shows it.
+
 ## Risk lanes
 
 Every item rides a **risk lane**, decided from the paths its change touches by the shipped path policy (`src/model/policy.ts`) and stamped on the item with its speed target in `master status`: any path under `migrations/schema`, `auth/credentials`, the schema and persistence layer (`src/store/`), authentication, principals, the public API, its assembler and the credential-loading bootstrap under `src/server/`, the operator agent, proof grants, or the installation and deployment surfaces (`src/install/`, `deploy/`, the Dockerfile, `compose.yaml`) rides **high**; test-only, docs-only and single-module changes (paths sharing their leading segments) ride **low**, and everything else rides **medium**. A rename is classified from both endpoints. The lane is an input to the one landability verdict (`src/model/gates.ts`): it takes the item's lane, decides from it which facts it requires, and reports the lane with its speed target.

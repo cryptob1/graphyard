@@ -72,6 +72,8 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
+`--plan NAME` names the provider plan an account draws on (`none` clears). Otherwise it is inferred: one host and home share a plan, `pi-X` and `opencode-X` share a Z.AI plan, others stand alone. A plan's accounts group on the Accounts page and share one failover budget: one exhausted bars the rest.
+
 `--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Any registry write (CLI, dashboard or API) is refused when a field looks like a pasted key: a known prefix, a PEM block, a JWT, a z.ai key, or a long random letter-and-digit token. A model id built of words, numbers and short version parts is exempt.
 
 ### Add a role
@@ -106,7 +108,7 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
-Onboarding also writes `mergeQueue.optimisticExclude` into `.graphyard/master.json`: the [shared-infrastructure](github.md#optimistic-merges) globs — manifests and lockfiles, CI config, test helpers, schema and migration directories — never merged optimistically over. Tune the list there; re-runs keep it; `mergeQueue.optimistic: false` turns the lane off.
+Onboarding writes and explains `mergeQueue` in `.graphyard/master.json`: `parallelTips` (default 4) queue positions validated at once, needing parallelTips × pull-request jobs concurrent Actions jobs — declare your limit as `ciConcurrency` and `master protection` flags a lower one — and the [shared-infrastructure](github.md#optimistic-merges) `optimisticExclude` globs never merged optimistically over. Tune both there; re-runs keep them; `mergeQueue.optimistic: false` turns the lane off.
 
 ### The loop must be supervised
 

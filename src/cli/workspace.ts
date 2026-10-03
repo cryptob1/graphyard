@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { supervise, systemdContainment } from '../supervisor.js';
+import { setupLine, supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
 import { managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
@@ -15,6 +15,7 @@ import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
+import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import { restoreAndReport } from './sync-restore.js';
 import { defineCommands, workMutation } from './registry.js';
 
@@ -125,10 +126,11 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) git('commit', '--no-edit', '--quiet');
   else if (quietly('diff', '--cached', '--quiet').status !== 0) git('commit', '--quiet', '-m', `Regenerate generated files after sync ${work.key}`);
   const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
-  const findings = localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? []);
+  const read = async (sha: string) => { const blob = quietly('cat-file', 'blob', sha); return blob.status === 0 ? blob.stdout : null; };
+  const findings = await localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? [], read);
   const refused = findings.filter(finding => finding.refused);
   // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR.
-  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path) });
+  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read });
 
   print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
     files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
@@ -224,37 +226,37 @@ export const workspaceCommands = defineCommands([
       await mutate('workspace', { epoch, host: hostId, path, branch });
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
+      // GY-1078: an abandoned session worktree of this item still holding the branch — checked out
+      // on a rework, or stopped mid-rebase, mid-am or mid-bisect of it, which git lists as detached —
+      // is reclaimed first; one with a live lease or uncommitted changes is named and left alone.
+      // Every failure carries git's own stderr, so the loop's record says why.
+      let reclaimed: ReclaimedHolder[] = [];
       try {
-        if (work.submission && exists) {
-          const records = execFileSync('git', ['worktree', 'list', '--porcelain', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).split('\0\0');
-          for (const record of records) {
-            const fields = record.split('\0'); const priorPath = fields.find(field => field.startsWith('worktree '))?.slice(9);
-            if (priorPath && fields.includes(`branch refs/heads/${branch}`)) execFileSync('git', ['-C', priorPath, 'checkout', '--detach', '--quiet'], { stdio: ['ignore', 'ignore', 'inherit'] });
-          }
-        }
-        execFileSync('git', exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
-        if (work.submission) execFileSync('git', ['-C', path, 'reset', '--hard', startPoint], { stdio: ['ignore', 'ignore', 'inherit'] });
+        if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, Date.parse(status.now ?? '') || Date.now(), { checkouts: !!work.submission });
+        for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
+        gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
+        if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
       }
-      catch { throw new Error('Git worktree creation failed. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.'); }
+      catch (error) { throw new Error(`Git worktree creation failed: ${error instanceof Error ? error.message : String(error)}. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.`); }
       // A checkout whose lockfile the reachable install does not match gets its own install now,
       // so the session never starts on the wrong dependency versions. The lease is kept alive
       // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
       // heartbeat means this epoch is no longer held: npm is stopped there and the command fails
       // rather than reporting a worktree ready for work nobody may do.
       const dependencies = await installUnderLease(path, () => mutate('heartbeat', { epoch }), `${work.key} epoch ${epoch}`);
-      return print({ path, branch, epoch, dependencies });
+      return print({ path, branch, epoch, dependencies, ...(reclaimed.length ? { reclaimed } : {}) });
     },
   },
   {
     name: 'watch',
-    scope: 'work',
     help: ['  watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss'],
-    async run(context, work) {
-      const { args, api, base } = context;
-      const epoch = Number(args[0]); const separator = args.indexOf('--');
-      if (separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
-      const workspace = work.workspaces.find((w: any) => w.epoch === epoch);
-      const hostId = context.individualHostId();
+    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup.
+    async run(context) {
+      const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
+      if (!id || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      console.error(setupLine(id, epoch));
+      const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
+      const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
       if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
       const workerStatus = await api('status');
       if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
