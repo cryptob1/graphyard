@@ -344,5 +344,5 @@ test('integration:tip-republication-preserves-approval — a merge-queue tip is 
   const published = await merging.github.publishSpeculativeTip(moved[1], ahead3[1]);
   assert.deepEqual([published.tip, published.base], [sha40('e1'), sha40('c3')]);
   assert.equal(published.tipTree, treeOf(sha40('e1')));
-  assert.deepEqual(merging.writes.map(entry => `${entry.method} ${entry.path}`), ['POST /merges', `PATCH /git/${queueRef('GY-100')}`]);
+  assert.deepEqual(merging.writes.map(entry => `${entry.method} ${entry.path}`), ['PATCH /git/refs/heads/graphyard-merge-check/gy-100', 'POST /merges', 'DELETE /git/refs/heads/graphyard-merge-check/gy-100', 'PATCH /git/refs/heads/graphyard/gy-100-1', `PATCH /git/${queueRef('GY-100')}`]);
 });

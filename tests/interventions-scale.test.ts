@@ -166,8 +166,11 @@ function counted(pool: pg.Pool) {
   return { statements, db: { query: ((text: string, values?: unknown[]) => { statements.push(text); return pool.query(text, values); }) as pg.Pool['query'] } };
 }
 
-/** The report routes: the interventions ledger, the flow analytics (Insights) and the shipping pulse. */
-const reportRoutes = ['interventions?window=7', 'analytics/flow?window=30', 'analytics/flow/drilldown?window=30', 'shipping-pulse'];
+/**
+ * The report routes: the interventions ledger, the flow analytics (Insights), the shipping pulse,
+ * the attribution analytics with one item's attribution history, and the deployment audit read.
+ */
+const reportRoutes = ['interventions?window=7', 'analytics/flow?window=30', 'analytics/flow/drilldown?window=30', 'shipping-pulse', 'analytics/attribution?window=30', 'analytics/attribution/drilldown?window=30', `attribution/work/${uuid(1)}`, 'deployments'];
 /**
  * Records every statement and checkout on the report pool and on the coordination pools until
  * restored. The request's own authentication (the operator-agent credential check) is not the
@@ -240,6 +243,13 @@ test('unit:report-pool-isolated — the report routes run on their own small poo
     } finally { restore(); }
     assert.ok(report.length > 0, `GET /api/${path} reads through the report pool`);
     assert.deepEqual(coordination, [], `GET /api/${path} took no coordination connection`);
+  }
+  // A release manifest is looked up on the report pool too, even when the revision is missing.
+  {
+    const { report, coordination, restore } = poolTraffic();
+    try { assert.equal((await read('attribution/manifest/absent/1', tokens.operator)).status, 404); } finally { restore(); }
+    assert.ok(report.length > 0, 'GET /api/attribution/manifest reads through the report pool');
+    assert.deepEqual(coordination, [], 'GET /api/attribution/manifest took no coordination connection');
   }
 
   // The report pool is smaller than the coordination pool and times out sooner.
