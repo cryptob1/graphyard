@@ -6,6 +6,7 @@ import { detectRuntimeExhaustion } from '../master/environments.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
+import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
@@ -14,6 +15,7 @@ import { type DaemonEffects, failoverKey, record, stoppedStates } from './effect
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
+import { wakeObservationJob } from './cycle-delivery.js';
 
 /** The launcher key of the approver launch for a decision (GY-616). */
 const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
@@ -41,8 +43,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
-  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
-    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) => performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   /**
    * End the agent registry session a watch's launch holds (GY-182). At a role concurrency of 1 a
    * live one refuses the next decision's approver, so it goes wherever the approver is closed or
@@ -509,6 +510,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
+      recordSettledDecision(state.projectMemory, watch, judged, stamp);
       await note(`${base}:settled`, item, 'decision', 'done', step.detail);
       if (judged) await noteScopeOutcome(item, watch, judged);
       return;
@@ -564,10 +566,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (held === undefined || age < held) capacityRank.set(watch.work, age);
   }
   const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
-  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => {
-    const aRank = waitingRank(a), bRank = waitingRank(b);
-    return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
-  }) : snapshot.work;
+  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => waitingRank(a) - waitingRank(b)) : snapshot.work;
   // Spent producer attempts call for a rework once the proof step's escalation has stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   const wake = effects.observe && observationWaker(effects.observe);
@@ -591,8 +590,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     let key = decisionKey(item, decision);
     needed.add(key);
-    // Rework waits for an observation that still describes the item (GY-144); a standing request is left until GitHub is observed again.
-    // The step wakes it itself unless paused (GY-793) and re-decides at once: a new head, passing rerun or refreshed base breakage needs none.
+    // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
     let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment);
@@ -606,6 +604,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
+      // The refusal wakes the item's observation job at once (GY-710).
+      await wakeObservationJob(cycle, item, 'rework');
       return;
     }
     // A settled watch is supervised no more, but a registry session its close could not end still

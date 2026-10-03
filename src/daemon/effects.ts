@@ -15,7 +15,7 @@ import { RefusedResponse } from '../model/refusal.js';
 import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
-import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
+import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
@@ -28,6 +28,7 @@ import { listHerdrPanes } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
+import { writeProjectMemory } from '../project-memory.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
@@ -73,8 +74,9 @@ export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
-  /** Asks the control plane to decide the item's open scope request and returns the decided document: Graphyard decides from the item's own criteria, the loop carries no verdict, and a loop wired without it leaves every request to the operator. */
+  /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work) => Promise<Work>;
+  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: `resync` now, for a step refused on a stale observation
   /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
   observe?: (work: Work, waitMs: number) => Promise<Work | null>;
   /**
@@ -140,6 +142,14 @@ export interface DaemonEffects {
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
+  /**
+   * GY-1118: records a capped change request's non-blocking findings as the item's follow-up batch
+   * (`POST /api/work/KEY/followups`), as the master's operator-agent identity, idempotent on `key`.
+   * With `withdrawReview` absent too, a capped change request is escalated instead.
+   */
+  fileReviewFollowUps?: (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) => Promise<unknown>;
+  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal). */
+  withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
    * base branch, checks out its tip when the checkout is a clean detached checkout, and, when the
@@ -521,7 +531,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     };
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
-  const persistLoop = (state: DaemonState) => writeDaemonState(current(), state);
+  // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
+  let writtenMemory: string | null = null;
+  const persistLoop = async (state: DaemonState) => {
+    const memory = state.projectMemory ? JSON.stringify(state.projectMemory) : null;
+    if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
+    return writeDaemonState(current(), state);
+  };
   return {
     agents: () => listHerdrAgents(run).catch(() => []),
     panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
@@ -613,6 +629,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }),
+    wakeObservation: work => mutate(`work/${work.id}/resync`, {}),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, body, randomUUID()), ms => delay(ms), { waitMs }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
@@ -628,6 +645,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get replan() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
+    },
+    get fileReviewFollowUps() {
+      return current().operatorAgent ? async (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) =>
+        asOperatorAgent('POST', `work/${encodeURIComponent(work.key)}/followups`, { findings, reason }, key) : undefined;
+    },
+    get withdrawReview() {
+      const reviewer = current().reviewer;
+      return reviewer ? (work: Work, reviewId: number, message: string) => dismissApproval(root, reviewer, current().repository, work.candidate!.pr, reviewId, message) : undefined;
     },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {

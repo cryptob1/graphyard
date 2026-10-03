@@ -1,6 +1,7 @@
 import { documentationGlobMatches } from './documentation-glob.js';
 import { companionGround } from './scope-companions.js';
 export { companionGround, plannedCompanions } from './scope-companions.js';
+import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
 // Unsupported glob expressions are not interpreted as semantic dependency knowledge.
@@ -117,7 +118,7 @@ export function namedPaths(text: string) {
   return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
 }
 
-export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion'; why: string }
+export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
  * documentation the repository requires updating for the behaviour those criteria change.
@@ -152,14 +153,15 @@ export const scopeBlockedBudgetMs = 900_000;
 export const scopeDecisionSample = 10;
 /** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
 export const plannedFilesMax = 100;
-export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[] }
+/** `companions`: approved paths implied only as the timing baseline's companion (GY-1023), never added to plannedFiles so its line judgement stays in force. */
+export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; companions?: string[] }
 /**
  * The decision itself, computed from the item's own record: never from what the requester claims.
  * A purely additive request whose every path is implied is approved with the implication as its
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null },
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
@@ -172,7 +174,9 @@ export function decideScopeRequest(
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
   const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
-    ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : [])];
+    ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : []),
+    // A change that adds a test file may record its timing line (GY-1023): the baseline is implied by the test.
+    ...(addsTestFile(item) ? [{ scope: timingBaselinePath, kind: 'timing-companion' as const, why: `${timingBaselinePath} records the timing line of a test file this item adds or changes` }] : [])];
   // GY-955: a companion the change inevitably carries — the documentation-budget gate beside a
   // documentation path, the test file named for a criterion's proofs — is implied as well.
   const documentation = options.documentation ?? itemDocumentationPaths(item);
@@ -188,7 +192,8 @@ export function decideScopeRequest(
   const folded = collapsePlannedFiles(item.plannedFiles ?? [], paths, collapseArea(item)).plannedFiles;
   if (folded.length > plannedFilesMax)
     return refused(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds (${folded.length} after folding); decide it with graphyard master requirements GY-N FILE REASON, whose plannedFiles can fold or split the ask under the cap — a plain union of exact paths is refused by the same bound`);
-  return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}`, paths };
+  const companions = matched.filter(entry => entry.by!.kind === 'timing-companion').map(entry => entry.path);
+  return { state: 'approved', reason: `additive scope the item already implies — ${matched.map(entry => `${entry.path} (${entry.by!.why})`).join('; ')}${companions.length ? `; ${companions.join(', ')} stays outside plannedFiles, so only the lines of this item's own test files may change there` : ''}`, paths, companions };
 }
 
 // ---------------------------------------------------------------------------
@@ -239,7 +244,7 @@ export function pinningTestGround(path: string, reason: string, testText: string
  * decide it again rather than leave the item blocked on a verdict the rules no longer give.
  * Only a refusal that is still the item's blocker qualifies; an approval is never re-decided.
  */
-export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; blocker?: string | null; scopeRequest?: ScopeRequestState | null }) {
+export function redecidableScopeRefusal(item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null; blocker?: string | null; scopeRequest?: ScopeRequestState | null }) {
   const request = item.scopeRequest;
   return !!request && request.decision?.state === 'refused' && !!item.blocker?.startsWith(scopeRefusalBlocker)
     && decideScopeRequest(item, request).state === 'approved';
