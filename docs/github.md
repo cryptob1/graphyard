@@ -10,12 +10,12 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
 | Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit (the required checks) |
-| Contents | Read and write | read commits, trees and pull request files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
+| Contents | Read and write | read commits, trees and PR files (pull request observation); publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it (the merge queue) |
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
 
-A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
+A reviewer App is never granted Contents: write, Checks, or Administration; workers are not Apps. It holds:
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ Once gated, the candidate's speculative tip, pushed onto the candidate branch on
 
 Reviews and proofs bind one head, base and policy revision. On moved bases all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip over the same author head and patch, the App's own dismissal restoring; never a person's, a moved head or a changed patch.
 
-Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review at once, and the entry yields the head to the next until a fresh approval re-enters. The same refusal past 10 minutes raises an attention; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) and which is applied as requested in low or medium. An approver refusing that rework lifts the refusal for that candidate and base (`merge.refusal.lifted`). Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
+Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review, and the entry yields the head to the next until a fresh approval re-enters. The same refusal past 10 minutes raises an attention; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) and which is applied as requested in low or medium. An approver refusing that rework lifts the refusal for that candidate and base (`merge.refusal.lifted`). Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
 
 ### Parallel tips
 
