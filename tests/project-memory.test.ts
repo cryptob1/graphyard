@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { docsWords } from '../src/model/documentation.js';
 import {
   emptyProjectMemory,
@@ -10,6 +11,7 @@ import {
   recordDecisionInMemory,
   recordPitfallInMemory,
   recordChangeInMemory,
+  recordSettledDecision,
   updateProjectMemoryFromWork,
   sanctionedRemedies,
   isDecisionRoleRelevant,
@@ -20,7 +22,6 @@ import {
   readProjectMemory,
   writeProjectMemory,
   syncProjectMemory,
-  projectMemoryPath,
 } from '../src/project-memory.js';
 import { workerPrompt } from '../src/master/dispatch.js';
 import { reviewPrompt } from '../src/reviewer.js';
@@ -30,7 +31,7 @@ import { buildMasterStatus } from '../src/master/status.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model/work.js';
-import type { DaemonState } from '../src/daemon/state.js';
+import { emptyDaemonState, writeDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master/profiles.js';
 
 function createSampleMemory(): ProjectMemory {
@@ -96,6 +97,13 @@ function createSampleMemory(): ProjectMemory {
     files: ['README.md', 'docs/overview.md'],
     mergedAt: '2026-10-02T06:00:00Z',
   });
+  // The merge every sample session is based on: it and anything before it is not news.
+  recordChangeInMemory(memory, {
+    key: 'GY-998',
+    sha: '0000000000111111111122222222223333333333',
+    files: ['src/old.ts'],
+    mergedAt: '2026-10-02T05:00:00Z',
+  });
 
   return memory;
 }
@@ -125,7 +133,30 @@ test('unit:session-request-carries-project-memory — worker request carries rol
   assert.ok(request.includes('Shared project memory:'));
   assert.ok(request.includes('Recent decisions:'));
   assert.ok(request.includes('Recurring pitfalls and remedies:'));
-  assert.ok(request.includes('Recent merges to main since base 0000000000:'));
+  assert.ok(request.includes('Recent merges to main since base 0000000000: - GY-1000 (1111111111): src/auth.ts, tests/auth.test.ts - GY-999 (5555555555): README.md, docs/overview.md'));
+  assert.ok(!request.includes('GY-998'), 'the base merge itself is not news to the session');
+});
+
+test('unit:session-request-carries-project-memory — merges since base exclude the base and every merge it already contains', () => {
+  const memory = createSampleMemory();
+  const digest = projectMemoryDigest(memory, 'worker', { baseSha: '5555555555666666666677777777778888888888' });
+  assert.ok(digest.includes('Recent merges to main since base 5555555555: - GY-1000 (1111111111): src/auth.ts, tests/auth.test.ts'));
+  assert.ok(!digest.includes('GY-999 (') && !digest.includes('GY-998'));
+  // At the newest merge, nothing changed on main since the session's base.
+  assert.ok(!projectMemoryDigest(memory, 'worker', { baseSha: '1111111111222222222233333333334444444444' }).includes('Recent merges'));
+  // A base memory does not hold keeps the whole recent window, labelled as such.
+  assert.ok(projectMemoryDigest(memory, 'worker', { baseSha: 'f'.repeat(40) }).includes('Recent merges to main in last 24h: - GY-1000'));
+});
+
+test('unit:session-request-carries-project-memory — the digest renders each section in its exact form', () => {
+  const memory = emptyProjectMemory('2026-10-02T12:00:00Z');
+  recordDecisionInMemory(memory, { id: 'd', key: 'GY-1', action: 'scope', reason: 'Widen to src/a.ts', state: 'applied', approvedBy: 'approver-1', at: '2026-10-02T10:00:00Z' });
+  recordPitfallInMemory(memory, { faultClass: 'merge', count: 1, at: '2026-10-02T09:00:00Z' });
+  recordChangeInMemory(memory, { key: 'GY-2', sha: 'a'.repeat(40), files: ['src/a.ts'], mergedAt: '2026-10-02T08:00:00Z' });
+  assert.equal(projectMemoryDigest(memory, 'worker'),
+    `Shared project memory: Recent decisions: - GY-1 (scope): Widen to src/a.ts [approved by approver-1] Recurring pitfalls and remedies: - merge (1 recurrence): ${sanctionedRemedies.merge} Recent merges to main in last 24h: - GY-2 (aaaaaaaaaa): src/a.ts `);
+  assert.equal(projectMemoryDigest(emptyProjectMemory(), 'worker'), '');
+  assert.equal(projectMemoryDigest(null, 'reviewer'), '');
 });
 
 test('unit:session-request-carries-project-memory — reviewer request carries role-relevant project-memory digest within word budget', () => {
@@ -225,7 +256,9 @@ test('unit:session-request-carries-project-memory — memory updates from settle
       key: 'GY-500',
       title: 'Human decision item',
       stage: 'done',
-      humanRequest: {
+      // An answered request is cleared from humanRequest and kept in humanRequests.
+      humanRequest: null,
+      humanRequests: [{
         id: 'hr-1',
         kind: 'credentials-for-people',
         needed: 'Deploy token for production',
@@ -234,10 +267,17 @@ test('unit:session-request-carries-project-memory — memory updates from settle
         answer: {
           outcome: 'provided',
           text: 'Token created and stored in vault',
-          by: 'alice',
+          by: 'operator-1',
           at: '2026-10-02T08:30:00Z',
         },
-      },
+      }, {
+        id: 'hr-0',
+        kind: 'money-or-accounts',
+        needed: 'A paid runner plan',
+        reason: 'Faster CI',
+        at: '2026-10-02T07:00:00Z',
+        answer: { outcome: 'declined', text: 'Decline: not this quarter', by: 'operator-1', at: '2026-10-02T07:10:00Z' },
+      }],
       delivery: {
         epoch: 1,
         pr: 500,
@@ -257,26 +297,30 @@ test('unit:session-request-carries-project-memory — memory updates from settle
   assert.equal(memory.decisions[0].key, 'GY-500');
   assert.equal(memory.decisions[0].action, 'credentials-for-people');
   assert.ok(memory.decisions[0].reason.includes('Deploy token for production: Token created and stored in vault'));
-  assert.equal(memory.decisions[0].approvedBy, 'alice');
+  assert.equal(memory.decisions[0].approvedBy, 'operator-1');
+  assert.ok(!memory.decisions.some(d => d.id === 'hr-0'), 'a declined answer decided nothing');
 
   assert.equal(memory.changes.length, 1);
   assert.equal(memory.changes[0].key, 'GY-500');
   assert.deepEqual(memory.changes[0].files, ['src/deploy.ts']);
 
-  // 2. Sync from daemon state approvals and recurring faults
+  // 2. Two-party decisions enter as the loop settles them: applied ones with the approver's reason, never a refusal.
+  const watch = { work: 'GY-600', action: 'scope', decision: 'dec-approved-1' };
+  assert.equal(recordSettledDecision(memory, watch, { state: 'applied', approvedBy: 'graphyard-approver', approvedAt: '2026-10-02T09:15:00Z', approvalReason: 'The criterion names src/auth.ts', reason: 'Widen to src/auth.ts' }, '2026-10-02T09:20:00Z'), true);
+  assert.deepEqual(memory.decisions.find(d => d.key === 'GY-600'), { id: 'dec-approved-1', key: 'GY-600', action: 'scope', reason: 'The criterion names src/auth.ts', approvedBy: 'graphyard-approver', at: '2026-10-02T09:15:00Z' });
+  const refusedWatch = { work: 'GY-601', action: 'requirements', decision: 'dec-refused-1' };
+  assert.equal(recordSettledDecision(memory, refusedWatch, { state: 'refused', approvedBy: null, refusal: { approver: 'graphyard-approver', reason: 'Out of scope' } } as any, '2026-10-02T09:20:00Z'), false);
+  assert.equal(recordSettledDecision(memory, refusedWatch, { state: 'withdrawn', approvedBy: null }, '2026-10-02T09:20:00Z'), false);
+  assert.equal(recordSettledDecision(memory, refusedWatch, null, '2026-10-02T09:20:00Z'), false);
+  assert.ok(!memory.decisions.some(d => d.key === 'GY-601'), 'a refused decision is never remembered as approved');
+
+  // 3. Recurring fault classes; a settled approval watch alone (which a refusal also sets) adds no decision.
   const daemonState: DaemonState = {
     version: 1,
     url: 'http://localhost:3000',
     repository: 'owner/project',
     approvals: {
-      'dec-watch-1': {
-        decision: 'dec-approved-1',
-        work: 'GY-600',
-        action: 'scope',
-        requestedAt: '2026-10-02T09:00:00Z',
-        settledAt: '2026-10-02T09:15:00Z',
-        agentName: 'graphyard-approver',
-      } as any,
+      'dec-watch-2': { decision: 'dec-refused-2', work: 'GY-602', action: 'requirements', requestedAt: '2026-10-02T09:00:00Z', settledAt: '2026-10-02T09:15:00Z', agentName: 'graphyard-approver' } as any,
     },
     faults: {
       instances: [
@@ -296,7 +340,7 @@ test('unit:session-request-carries-project-memory — memory updates from settle
     policy: { threshold: 2, windowHours: 24 },
   });
 
-  assert.equal(memory.decisions.some(d => d.key === 'GY-600'), true);
+  assert.ok(!memory.decisions.some(d => d.key === 'GY-602'));
   assert.equal(memory.pitfalls.some(p => p.faultClass === 'scope' && p.count >= 2), true);
   assert.ok(memory.pitfalls.find(p => p.faultClass === 'scope')?.remedy.includes('Request scope widening'));
 });
@@ -371,16 +415,17 @@ test('unit:session-request-carries-project-memory — master status shows projec
       undefined,
       'graphyard',
       { batchSize: 5 },
-      memory
+      { projectMemory: memory }
     );
 
     assert.ok(status.projectMemory, 'buildMasterStatus must include projectMemory');
     assert.equal(status.projectMemory.decisions.length, 3);
     assert.equal(status.projectMemory.pitfalls.length, 3);
-    assert.equal(status.projectMemory.changes.length, 2);
+    assert.equal(status.projectMemory.changes.length, 3);
 
     // 2. masterStatusReport
-    const tokenFile = join(dir, 'master.token');
+    const credentials = await temporaryDirectory('master-status-credentials');
+    const tokenFile = join(credentials, 'master.token');
     await writeFile(tokenFile, 'dummy-token');
     const config = masterConfigSchema.parse({
       version: 1,
@@ -397,6 +442,13 @@ test('unit:session-request-carries-project-memory — master status shows projec
       producers: [],
     });
 
+    // master status shows the memory the loop's cursor holds.
+    // The cursor is read only from outside the repository's worktrees, so the root is a repository.
+    execFileSync('git', ['init', '-q', dir]);
+    const loop = emptyDaemonState(config);
+    loop.projectMemory = memory;
+    await writeDaemonState(config, loop);
+
     const mockApi = async (path: string) => {
       if (path === 'work-snapshot') return { work: [], now: new Date().toISOString() };
       return {};
@@ -411,10 +463,10 @@ test('unit:session-request-carries-project-memory — master status shows projec
       { reportReadBoundMs: 1000 }
     );
 
-    assert.ok(report.projectMemory, 'masterStatusReport must include projectMemory');
+    assert.ok(report.projectMemory, `masterStatusReport must include projectMemory: ${JSON.stringify(report.daemon).slice(0, 400)}`);
     assert.equal(report.projectMemory.decisions.length, 3);
     assert.equal(report.projectMemory.pitfalls.length, 3);
-    assert.equal(report.projectMemory.changes.length, 2);
+    assert.equal(report.projectMemory.changes.length, 3);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }

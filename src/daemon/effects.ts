@@ -524,8 +524,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     };
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
+  // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
+  let writtenMemory: string | null = null;
   const persistLoop = async (state: DaemonState) => {
-    if (state.projectMemory) await writeProjectMemory(root, state.projectMemory).catch(() => {});
+    const memory = state.projectMemory ? JSON.stringify(state.projectMemory) : null;
+    if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
   return {

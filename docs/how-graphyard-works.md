@@ -16,12 +16,12 @@ A card stops at its first refusing gate, naming what is missing; nothing sets a 
 
 ## Shared project memory
 
-Every session Graphyard launches — worker, reviewer, and producer — starts with a shared project-memory digest in its initial prompt. Bound within a fixed 500-word budget, the digest provides:
-- Recent approved decisions with their explicit reasons.
-- Recurring pitfalls by fault class with sanctioned remedies.
-- Recent merges to the base branch since the session's base commit, listing touched files.
+Every worker, reviewer and producer Graphyard launches starts with a project-memory digest for its role in its first request, within 500 words:
+- Approved decisions with the approver's reason, and operator answers that provided what was asked.
+- Recurring fault classes with their sanctioned remedies.
+- Merges to main after the session's base, with their files (the last 24 hours when the base is not a remembered merge).
 
-The project memory updates strictly from settled decisions, recurring fault classes, and observed merges — never from an agent's own unreviewed claim. `graphyard master status` reports the project memory, and the coordinator dashboard displays it under active workers.
+The loop updates it only from decisions it sees applied (never a refusal), answered human requests, recurring fault classes and merges — never from an agent's claim — and keeps it in its cursor and `.graphyard/project-memory.json`. `graphyard master status` reports it as `projectMemory`, and the Workers page shows it.
 
 ## Risk lanes
 

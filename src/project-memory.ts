@@ -6,8 +6,6 @@ import { faultClassPolicyDefaults, recurringClasses, type FaultClassPolicy } fro
 import {
   emptyProjectMemory,
   projectMemorySchema,
-  recordChangeInMemory,
-  recordDecisionInMemory,
   recordPitfallInMemory,
   updateProjectMemoryFromWork,
   type ProjectMemory,
@@ -25,6 +23,7 @@ export {
   recordChangeInMemory,
   recordDecisionInMemory,
   recordPitfallInMemory,
+  recordSettledDecision,
   retainedMemoryChanges,
   retainedMemoryDecisions,
   retainedMemoryPitfalls,
@@ -80,22 +79,8 @@ export async function syncProjectMemory(
     memory = updateProjectMemoryFromWork(memory, options.work, now);
   }
 
-  // 2. Update from settled decisions in daemon state approvals
-  if (options.state?.approvals) {
-    for (const [key, watch] of Object.entries(options.state.approvals)) {
-      if (watch.settledAt) {
-        recordDecisionInMemory(memory, {
-          id: watch.decision,
-          key: watch.work,
-          action: watch.action,
-          reason: `Settled approved ${watch.action} decision on ${watch.work}`,
-          state: 'applied',
-          approvedBy: watch.agentName ?? 'graphyard-approver',
-          at: watch.settledAt,
-        });
-      }
-    }
-  }
+  // 2. Applied two-party decisions are recorded as the loop settles them (recordSettledDecision
+  //    in daemon/cycle-decisions.ts), with the approver's reason; a refused one settles nothing here.
 
   // 3. Update from recurring fault classes in daemon state
   if (options.state?.faults) {

@@ -66,45 +66,29 @@ export const projectMemorySchema = z.object({
 export type ProjectMemory = z.infer<typeof projectMemorySchema>;
 
 export function emptyProjectMemory(now: string = new Date().toISOString()): ProjectMemory {
-  return {
-    version: 1,
-    updatedAt: now,
-    decisions: [],
-    pitfalls: [],
-    changes: [],
-  };
+  return { version: 1, updatedAt: now, decisions: [], pitfalls: [], changes: [] };
 }
 
 export type SessionRole = 'worker' | 'reviewer' | 'producer';
 
 /** Role relevance for decisions: prioritizing actions each role acts on or requires. */
+const decisionRoles: Record<SessionRole, string[]> = {
+  worker: ['requirements', 'scope', 'rework', 'unblock', 'close', 'human-answer', 'goals-and-priorities', 'money-or-accounts', 'credentials-for-people'],
+  reviewer: ['review', 'merge', 'requirements', 'close', 'rework'],
+  producer: ['attest', 'requirements', 'rework'],
+};
 export function isDecisionRoleRelevant(decision: MemoryDecision, role: SessionRole): boolean {
-  const action = decision.action.toLowerCase();
-  if (role === 'worker') {
-    return ['requirements', 'scope', 'rework', 'unblock', 'close', 'human-answer', 'goals-and-priorities', 'money-or-accounts', 'credentials-for-people'].includes(action);
-  }
-  if (role === 'reviewer') {
-    return ['review', 'merge', 'requirements', 'close', 'rework'].includes(action);
-  }
-  if (role === 'producer') {
-    return ['attest', 'requirements', 'rework'].includes(action);
-  }
-  return true;
+  return decisionRoles[role]?.includes(decision.action.toLowerCase()) ?? true;
 }
 
 /** Role relevance for recurring pitfalls: prioritizing fault classes each role commonly encounters. */
+const pitfallRoles: Record<SessionRole, string[]> = {
+  worker: ['scope', 'configuration', 'session-liveness', 'merge', 'human-decision'],
+  reviewer: ['review-convergence', 'merge', 'decision', 'scope'],
+  producer: ['proof', 'configuration', 'session-liveness'],
+};
 export function isPitfallRoleRelevant(pitfall: MemoryPitfall, role: SessionRole): boolean {
-  const cls = pitfall.faultClass;
-  if (role === 'worker') {
-    return ['scope', 'configuration', 'session-liveness', 'merge', 'human-decision'].includes(cls);
-  }
-  if (role === 'reviewer') {
-    return ['review-convergence', 'merge', 'decision', 'scope'].includes(cls);
-  }
-  if (role === 'producer') {
-    return ['proof', 'configuration', 'session-liveness'].includes(cls);
-  }
-  return true;
+  return pitfallRoles[role]?.includes(pitfall.faultClass) ?? true;
 }
 
 /** Record an approved/settled decision in project memory. Never updates from an agent's unreviewed claim. */
@@ -184,36 +168,30 @@ export function recordChangeInMemory(memory: ProjectMemory, change: {
   return true;
 }
 
-/** Update project memory from settled decisions, recurring fault classes, and merges in work. Never from an agent's claim. */
+/**
+ * Record a two-party decision the loop observed settling (GY-1125). Only an applied decision
+ * enters memory, with the approver's own reason (the request's when the approver gave none): a
+ * refused or withdrawn decision also settles the loop's watch, but it approved nothing.
+ */
+export function recordSettledDecision(memory: ProjectMemory, watch: { work: string; action: string; decision: string }, judged: { state: string; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; reason?: string } | null | undefined, at: string): boolean {
+  if (!judged || judged.state !== 'applied') return false;
+  const reason = (judged.approvalReason || judged.reason || '').trim();
+  if (!reason) return false;
+  return recordDecisionInMemory(memory, { id: watch.decision, key: watch.work, action: watch.action, reason, state: 'applied', approvedBy: judged.approvedBy, at: judged.approvedAt ?? at });
+}
+
+/** Update project memory from settled operator answers and merges in work. Never from an agent's claim. */
 export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonly Work[], now: number = Date.now()): ProjectMemory {
-  // 1. Settled operator answers from human requests
+  // 1. Settled operator answers: an answered request moves to `humanRequests` and the open one is
+  // cleared, so the retained history is where a provided answer lives. A declined one decided nothing.
   for (const item of work) {
-    if (item.humanRequest?.answer?.outcome === 'provided') {
-      recordDecisionInMemory(memory, {
-        id: item.humanRequest.id,
-        key: item.key,
-        action: item.humanRequest.kind,
-        reason: `${item.humanRequest.needed}: ${item.humanRequest.answer.text}`,
-        state: 'provided',
-        approvedBy: item.humanRequest.answer.by || 'operator',
-        at: item.humanRequest.answer.at,
-      });
+    for (const request of item.humanRequests ?? []) {
+      if (request.answer?.outcome !== 'provided') continue;
+      recordDecisionInMemory(memory, { id: request.id, key: item.key, action: request.kind, reason: `${request.needed}: ${request.answer.text}`, state: 'provided', approvedBy: request.answer.by || 'operator', at: request.answer.at });
     }
     // Answered research product decisions
-    if (item.researchBrief?.questions?.length) {
-      for (const q of item.researchBrief.questions) {
-        if (q.answer) {
-          recordDecisionInMemory(memory, {
-            id: q.id,
-            key: item.key,
-            action: 'product-decision',
-            reason: `${q.question}: ${q.answer.text}`,
-            state: 'provided',
-            approvedBy: q.answer.by || 'operator',
-            at: q.answer.at,
-          });
-        }
-      }
+    for (const q of item.researchBrief?.questions ?? []) {
+      if (q.answer) recordDecisionInMemory(memory, { id: q.id, key: item.key, action: 'product-decision', reason: `${q.question}: ${q.answer.text}`, state: 'provided', approvedBy: q.answer.by || 'operator', at: q.answer.at });
     }
   }
 
@@ -271,9 +249,10 @@ export function projectMemoryDigest(
   // Filter changes: if baseSha provided, those since session base (or all recent in window)
   const baseSha = options?.baseSha;
   let changes = [...memory.changes];
-  if (baseSha) {
-    changes = changes.filter(c => c.sha !== baseSha);
-  }
+  // A base that is itself a remembered merge contains that merge and every one before it, so only
+  // the later ones are news to the session; an unremembered base keeps the whole recent window.
+  const baseMerge = baseSha ? changes.find(c => c.sha === baseSha) : undefined;
+  if (baseMerge) changes = changes.filter(c => c.sha !== baseMerge.sha && Date.parse(c.mergedAt) > Date.parse(baseMerge.mergedAt));
   changes.sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
 
   if (!decisions.length && !pitfalls.length && !changes.length) return '';
@@ -311,7 +290,7 @@ export function projectMemoryDigest(
   // Add merges since base
   if (changes.length) {
     const changeLines: string[] = [];
-    const baseLabel = baseSha ? `since base ${short(baseSha)}` : 'in last 24h';
+    const baseLabel = baseMerge ? `since base ${short(baseMerge.sha)}` : 'in last 24h';
     for (const c of changes) {
       const fileList = c.files.length ? c.files.slice(0, 10).join(', ') + (c.files.length > 10 ? '…' : '') : 'none';
       const line = `- ${c.key} (${short(c.sha)}): ${fileList}`;
