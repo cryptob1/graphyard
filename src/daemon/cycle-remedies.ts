@@ -1,7 +1,9 @@
 // Concern: cycle step 6b — apply the remedy a stalled row's unchanged reason binds to (GY-949).
+import { fileURLToPath } from 'node:url';
+import type { ChildRun } from '../child-runner.js';
 import { actionStall, type ActionRow } from '../model/actions.js';
 import type { Work } from '../model.js';
-import { applyInstallationAccept, stallRemedy, standingRemedy, type BoundRemedy } from '../stall-remedies.js';
+import { applyInstallationAccept, stallRemedy, standingRemedy, type BoundRemedy, type FlowResult, type RemedyFlow } from '../stall-remedies.js';
 import { record } from './effects.js';
 import { message } from './state.js';
 import type { Cycle } from './cycle.js';
@@ -83,4 +85,21 @@ export async function remedyStep(cycle: Cycle) {
         attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     });
   }
+}
+
+/** How long a remedy's browser flow may run: a sudo confirmation it waits on is bounded inside it (passSudo). */
+export const remedyFlowTimeoutMs = 15 * 60_000;
+const graphyardCli = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
+/**
+ * `graphyard master browser FLOW` as a child of the loop (GY-949), the same command the master
+ * runs by hand, so the flow is recorded, verified through the API and audited exactly as it is
+ * then. It prints its ledger entry whether it applied or refused, and exits non-zero on a refusal.
+ */
+export async function browserFlowChild(run: ChildRun, root: string, flow: RemedyFlow): Promise<FlowResult> {
+  let printed: string;
+  try { printed = String(await run(process.execPath, [graphyardCli, 'master', 'browser', flow], { cwd: root, timeoutMs: remedyFlowTimeoutMs })); }
+  catch (error) { printed = String((error as { stdout?: unknown } | null)?.stdout ?? ''); if (!printed.includes('{')) throw error; }
+  const entry = JSON.parse(printed.slice(printed.indexOf('{'))) as { outcome?: unknown; verified?: unknown; reason?: unknown };
+  const outcome = entry.outcome === 'applied' || entry.outcome === 'unchanged' ? entry.outcome : 'refused';
+  return { outcome, verified: entry.verified === true, reason: String(entry.reason ?? `master browser ${flow} printed no reason`) };
 }

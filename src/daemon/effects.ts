@@ -1,7 +1,6 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -51,6 +50,7 @@ import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import { selectFleetSession } from '../fleet.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
+import { browserFlowChild } from './cycle-remedies.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -373,23 +373,6 @@ export async function record(state: DaemonState, key: string, action: Omit<Daemo
   const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() }, faultKind);
   await persist(state);
   return entry;
-}
-
-/** How long a remedy's browser flow may run: a sudo confirmation it waits on is bounded inside it (passSudo). */
-export const remedyFlowTimeoutMs = 15 * 60_000;
-const graphyardCli = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
-/**
- * `graphyard master browser FLOW` as a child of the loop (GY-949), the same command the master
- * runs by hand, so the flow is recorded, verified through the API and audited exactly as it is
- * then. It prints its ledger entry whether it applied or refused, and exits non-zero on a refusal.
- */
-export async function browserFlowChild(run: ChildRun, root: string, flow: RemedyFlow): Promise<FlowResult> {
-  let printed: string;
-  try { printed = String(await run(process.execPath, [graphyardCli, 'master', 'browser', flow], { cwd: root, timeoutMs: remedyFlowTimeoutMs })); }
-  catch (error) { printed = String((error as { stdout?: unknown } | null)?.stdout ?? ''); if (!printed.includes('{')) throw error; }
-  const entry = JSON.parse(printed.slice(printed.indexOf('{'))) as { outcome?: unknown; verified?: unknown; reason?: unknown };
-  const outcome = entry.outcome === 'applied' || entry.outcome === 'unchanged' ? entry.outcome : 'refused';
-  return { outcome, verified: entry.verified === true, reason: String(entry.reason ?? `master browser ${flow} printed no reason`) };
 }
 
 /** One preservation per attempt: the record an interrupted attempt leaves for the next one. */
