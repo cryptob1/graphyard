@@ -23,7 +23,7 @@ import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, ty
 import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
-import { workerPushPermissions } from './worker-credential.js';
+import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -682,6 +682,8 @@ export class GitHub {
     clearTimeout(timer);
   }
   private preflightState: AppPermissionReport | null = null;
+  /** The wanted worker push permissions the last mint found ungranted (GY-1100); null until a mint. */
+  private pushShortfalls: PushPermissionShortfall[] | null = null;
   private preflightDueAt = 0;
   private appSlug: string | null = null;
   // A rejected App credential is retried once a minute, not once per queued job: every request
@@ -909,7 +911,10 @@ export class GitHub {
       const app = typeof installation.app_slug === 'string' && installation.app_slug ? installation.app_slug : String(this.config.appId);
       const installationUrl = typeof installation.html_url === 'string' && /^https:\/\/github\.com\//.test(installation.html_url) ? installation.html_url : installationSettingsUrl(this.config.installationId);
       const suspended = !!installation.suspended_at;
-      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl))];
+      // A push shortfall a mint met is kept current here, so accepting the permission clears it.
+      if (this.pushShortfalls) this.pushShortfalls = grantedPushPermissions(granted).missing;
+      const attention = [...(suspended ? [`App ${app} installation is suspended; restore it at ${installationUrl}`] : []), ...missing.map(shortfall => describeShortfall(shortfall, app, installationUrl)),
+        ...(this.pushShortfalls ?? []).map(shortfall => describePushShortfall(shortfall, app, installationUrl))];
       this.preflightState = { ...base, app, account: typeof installation.account?.login === 'string' ? installation.account.login : null, installationUrl, verifiedAt: base.observedAt, error: null, suspended, granted, missing, blockedFeatures: blockedFeatures(missing), attention };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'GitHub App permissions could not be read';
@@ -979,32 +984,51 @@ export class GitHub {
   }
   /**
    * A worker session's push credential (GY-999): an installation token narrowed to this one
-   * repository and to the two permissions pushing a branch and opening its pull request need. It
-   * is never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * repository and to the permissions pushing a branch and opening its pull request need. It is
+   * never cached here and never the token this client itself uses; GitHub bounds it to an hour.
+   * It asks only for the wanted permissions the installation grants (GY-1100): the preflight's
+   * verified reading when there is one, else the installation read now. A wanted permission the
+   * installation lacks is left out and raised as permission attention instead of failing the mint;
+   * a 422 on a preflight reading re-reads the installation once, in case it changed since.
    */
   async mintPushToken(): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate/access refusal`, 502);
     const bypass = await this.workerPushBypass();
     demand(!bypass, bypass ?? '', 409);
-    const mint = (permissions: Record<string, string>) => fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
-      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
-    });
-    let response = await mint(workerPushPermissions);
-    this.record('/app/installations/access_tokens', response, false);
-    // An installation that has not accepted `workflows` refuses the whole request (422); the worker
-    // still gets the push credential it had before, and only a base sync carrying a workflow change
-    // is refused, never every launch (2026-10-02).
-    if (response.status === 422 && 'workflows' in workerPushPermissions) {
-      const { workflows: _omitted, ...withoutWorkflows } = workerPushPermissions as Record<string, string>;
-      response = await mint(withoutWorkflows);
-      this.record('/app/installations/access_tokens', response, false);
-    }
+    const cached = this.preflightState?.verifiedAt ? this.preflightState.granted : null;
+    let response = await this.requestPushToken(cached ?? await this.installationGrants());
+    if (response.status === 422 && cached) response = await this.requestPushToken(await this.installationGrants());
     const refused = await this.refusal(response, 'worker push credential');
     if (refused) throw refused;
     const result: any = await response.json();
     demand(typeof result?.token === 'string' && result.token.length >= 20 && Number.isFinite(Date.parse(result.expires_at)), 'GitHub returned no worker push token', 502);
     return { token: result.token, expiresAt: new Date(Date.parse(result.expires_at)).toISOString(), permissions: result.permissions && typeof result.permissions === 'object' ? result.permissions : {} };
+  }
+  /** The installation's granted permissions read now with the App JWT. */
+  private async installationGrants(): Promise<Record<string, string>> {
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    this.record('/app/installations', response, false);
+    const refused = await this.refusal(response, 'GET /app/installations');
+    if (refused) throw refused;
+    const installation: any = await response.json();
+    demand(installation?.permissions && typeof installation.permissions === 'object', 'GitHub returned an installation without permissions', 502);
+    return Object.fromEntries(Object.entries(installation.permissions).filter(([, level]) => typeof level === 'string')) as Record<string, string>;
+  }
+  private async requestPushToken(granted: Record<string, string>) {
+    const { permissions, missing } = grantedPushPermissions(granted);
+    demand(permissions.contents === 'write', `The App installation grants no Contents: write, so no worker push credential can be minted; accept it at ${this.preflightState?.installationUrl ?? installationSettingsUrl(this.config.installationId)}`, 502);
+    this.pushShortfalls = missing;
+    const report = this.preflightState;
+    if (report) {
+      report.attention = [...report.attention.filter(line => !line.includes(pushShortfallMarker)),
+        ...missing.map(shortfall => describePushShortfall(shortfall, report.app, report.installationUrl))];
+    }
+    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+      method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
+    });
+    this.record('/app/installations/access_tokens', response, false);
+    return response;
   }
   /**
    * Why this App's token may not be handed to a worker, or null (GY-1066). On an organization
