@@ -94,13 +94,14 @@ export async function shipFollowUps(services: Services, caller: Principal, id: s
  * The one-time fold of GY-845: each open follow-up item whose parent has not shipped is closed as
  * superseded by the parent, its findings held there (`followUpParentMigrationEvent`); a parent
  * closed without shipping drops what it then holds, saying why. Nothing is deleted; a second run
- * returns the first run's record.
+ * returns the first run's record. Items deferred under a live lease leave the migration unfinished:
+ * no record is written, so the next ask folds them once their lease has ended.
  */
 export async function migrateToParents(services: Services, db: Db, actor: Principal, now: Date) {
   const previous = (await db.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq LIMIT 1', [followUpParentMigrationEvent])).rows[0]?.payload;
   if (previous) return { ...previous, already: true };
   const all = await readAll(db);
-  const { folded, parents, dropped } = foldUnshippedFollowUps(all, actor.id, now);
+  const { folded, parents, dropped, deferred } = foldUnshippedFollowUps(all, actor.id, now);
   for (const { work, parent } of folded) {
     const settled = settleOpenRequests(work, work.closure!, now);
     if (work.lease) { endAttempt(work, work.lease.epoch, 'released', now); work.lease = null; }
@@ -113,6 +114,7 @@ export async function migrateToParents(services: Services, db: Db, actor: Princi
     folded: folded.filter(entry => entry.parent === parent).map(entry => entry.work.key), dropped: parent.pendingFollowUps?.dropped?.reason ?? null });
   const payload = { folded: folded.length, at: now.toISOString(), by: actor.id, parents: parents.map(parent => ({ key: parent.key, folded: folded.filter(entry => entry.parent === parent).map(entry => entry.work.key), held: parent.pendingFollowUps?.findings.length ?? 0 })),
     dropped: dropped.map(entry => ({ key: entry.parent.key, findings: entry.dropped, reason: entry.parent.pendingFollowUps!.dropped!.reason })) };
+  if (deferred.length) return { ...payload, deferred: deferred.map(item => item.key) };
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, followUpParentMigrationEvent, JSON.stringify(payload)]);
   return payload;
 }
