@@ -402,6 +402,14 @@ async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
     const requested = await decide!(item, 'rework', reason, { binding });
     // A low- or medium-lane rework is applied as it is requested (GY-883): no approver to launch.
     const settledState = (requested as { state?: string }).state;
+    // The request may instead have resumed an interrupted lane rework bound to other grounds
+    // (GY-1057). Its outcome settles that decision, not the cap: the step is done, and the next
+    // cycle, finding no rework standing, requests the cap's own round once.
+    const bound = (requested as { input?: { binding?: unknown } }).input?.binding, resumed = bound !== binding;
+    if (resumed && (settledState === 'applied' || settledState === 'failed' || settledState === 'stale')) {
+      performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Requesting ${item.key}'s cap decision resumed interrupted rework decision ${requested.id}, bound to ${String(bound ?? 'no binding')}, which the control plane settled ${settledState}; the cap's own round is requested next`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     if (settledState === 'applied' || settledState === 'failed') {
       performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: settledState === 'applied' ? 'done' : 'failed', detail: `Requested decision ${requested.id} (rework) for ${item.key}; its risk lane needs no approver, and the control plane ${settledState === 'applied' ? 'applied it' : 'could not apply it'} at once: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       return;

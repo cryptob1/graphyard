@@ -287,8 +287,8 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
     if (args[1] === 'rework' && faults-- > 0) throw new Error('simulated server fault mid-application');
     return execute(...args);
   }) as typeof engine.execute;
-  const decide = async (token: string, key: string) => {
-    const response = await fetch(`${url}/api/work/${key}/decide`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' }) });
+  const decide = async (token: string, key: string, idempotencyKey = randomUUID()) => {
+    const response = await fetch(`${url}/api/work/${key}/decide`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify({ action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' }) });
     return { status: response.status, body: await response.json() as any };
   };
   const decisions = async (key: string) => (await (await fetch(`${url}/api/work/${key}/decisions`, { headers: { Authorization: `Bearer ${master.token}` } })).json() as any).decisions as any[];
@@ -297,14 +297,41 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
   assert.notEqual((await decide(master.token, interrupted.key)).status, 200, 'the fault interrupts the application');
   const [stuck] = await decisions(interrupted.key);
   assert.equal(stuck.state, 'approved'); assert.equal(stuck.approvedBy, 'graphyard-risk-lane');
-  const resumed = await decide(master.token, interrupted.key);
+  const resumeKey = randomUUID();
+  const resumed = await decide(master.token, interrupted.key, resumeKey);
   assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
   assert.equal(resumed.body.id, stuck.id, 'the interrupted rework is resumed, not a new one recorded');
   assert.equal(resumed.body.state, 'applied');
   assert.equal((await store.list()).find(item => item.id === interrupted.id)!.reworkRequested, true);
+  // The request that resumed it wrote its key's receipt: a replay of that key returns the same
+  // decision as it now stands, not a fresh evaluation of the request.
+  const replayed = await decide(master.token, interrupted.key, resumeKey);
+  assert.equal(replayed.status, 200, JSON.stringify(replayed.body));
+  assert.equal(replayed.body.id, stuck.id, 'the replay is answered from the receipt');
+  assert.equal(replayed.body.state, 'applied');
+  assert.equal((await decisions(interrupted.key)).filter(entry => entry.action === 'rework').length, 1, 'the replay recorded no second rework');
+
+  // GY-1057: a fault that recurs on every resume is bounded: the application interrupted for the
+  // third time is recorded failed, so no request is answered with a 500 forever, and the item's
+  // rework slot is free for a fresh request.
+  const recurring = await submitted('recurring-fault-rework', ['src/model/lanes.ts']);
+  faults = 3;
+  assert.equal((await decide(master.token, recurring.key)).status, 500, 'the first application is interrupted');
+  assert.equal((await decide(master.token, recurring.key)).status, 500, 'the resume is interrupted again');
+  const bounded = await decide(master.token, recurring.key);
+  assert.equal(bounded.status, 200, JSON.stringify(bounded.body));
+  assert.equal(bounded.body.state, 'failed', 'the third interruption settles the rework failed');
+  assert.match(bounded.body.outcome, /interrupted by a server fault 3 times, the last: simulated server fault mid-application/);
+  assert.equal((await decisions(recurring.key)).filter(entry => entry.action === 'rework').length, 1, 'every interruption resumed the one rework');
+  assert.equal((await store.list()).find(item => item.id === recurring.id)!.reworkRequested, false, 'the failed rework was not applied');
+  const fresh = await decide(master.token, recurring.key);
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+  assert.notEqual(fresh.body.id, bounded.body.id, 'a fresh request records a new rework');
+  assert.equal(fresh.body.state, 'applied');
 
   // GY-1057: the requester's authority is re-read when the lane applies its rework, as an approver's
-  // application re-reads it: a requester revoked before the application is declined, not applied.
+  // application re-reads it: a requester revoked before the application is settled stale, not
+  // applied, and not as a refusal that would stand against a live requester's identical request.
   const second = { id: 'lane-second', token: `lane-second-${'s'.repeat(32)}` };
   await call(credentials[0].token, 'operator-agents', { id: second.id, displayName: second.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: second.token, reason: 'A second requester' });
   const revoked = await submitted('revoked-rework', ['src/model/lanes.ts']);
@@ -314,9 +341,15 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
   const declined = await decide(master.token, revoked.key);
   assert.equal(declined.status, 200, JSON.stringify(declined.body));
   assert.equal(declined.body.requestedBy, second.id);
-  assert.equal(declined.body.state, 'refused', 'a revoked requester no longer carries its request');
-  assert.match(declined.body.refusal.reason, /no longer a live agent identity/);
+  assert.equal(declined.body.state, 'stale', 'a revoked requester no longer carries its request');
+  assert.match(declined.body.outcome, /no longer a live agent identity/);
+  assert.equal(declined.body.refusal, null, 'no approver judged the rework');
   assert.equal((await store.list()).find(item => item.id === revoked.id)!.reworkRequested, false, 'the rework was not applied');
+  const live = await decide(master.token, revoked.key);
+  assert.equal(live.status, 200, `the live master's identical request is not refused on the stale one: ${JSON.stringify(live.body)}`);
+  assert.notEqual(live.body.id, declined.body.id);
+  assert.equal(live.body.state, 'applied');
+  assert.equal((await store.list()).find(item => item.id === revoked.id)!.reworkRequested, true);
   engine.execute = execute;
 });
 

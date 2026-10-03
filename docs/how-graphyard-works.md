@@ -31,6 +31,8 @@ Every item rides a **risk lane**, decided from the paths its change touches by t
 - **Medium** adds its producer-run proofs (`unit:`, `integration:`); its reworks need no approver either.
 - **High** keeps the full path: producer proofs, `manual:` attestations, and a two-party approver decision for every rework.
 
+A lane-applied rework re-reads its requester's authority first: one revoked since it asked is settled stale, never refused. One a server fault interrupts is resumed by the next rework request on the item, and recorded failed at the third interruption.
+
 An `e2e:` proof and an inherited bootstrap obligation are required in every lane, and a change not yet observed rides high. A rework needing no approver is recorded in the decision ledger as approved by `graphyard-risk-lane`. Speed targets ship per lane — low p50 30 min, medium 60 min, high 4 h — and are reported beside it.
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
