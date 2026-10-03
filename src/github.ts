@@ -16,7 +16,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -3026,6 +3026,25 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           continue;
         }
         const probe = classifyRerunRun(due, found);
+        if (probe.kind === 'cancelled') {
+          // A rerun attempt GitHub cancelled did not conclude the rerun (GY-1109): it keeps the hold
+          // and is rerun again on the cancelled allowance (at most cancelledRerunLimit times),
+          // without spending the single re-request meant for vanished runs.
+          const cancelledCount = Number(due.detail?.match(/cancelled:(\d+)/)?.[1] ?? 0);
+          if (cancelledCount < cancelledRerunLimit) {
+            let outcome: Parameters<Engine['recordCheckRerun']>[3];
+            try {
+              const again = await github.rerunFailedJobs(due.failedRunId);
+              outcome = { state: 'requested', runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail: `cancelled:${cancelledCount + 1}:${new Date().toISOString()}` };
+            } catch (error) {
+              outcome = { state: 'refused', detail: `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}` };
+            }
+            work = await engine.recordCheckRerun(work.id, job.token, due, outcome);
+          } else {
+            work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'waiting', status: 'cancelled' });
+          }
+          continue;
+        }
         if (probe.kind !== 'missing') { work = await engine.recordCheckRerunProbe(work.id, job.token, due, probe); continue; }
         if (due.rerequestedAt) {
           work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun twice but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes of either request` });

@@ -8,7 +8,7 @@ import { Engine } from '../src/engine.js';
 import { processJob, type GitHub } from '../src/github.js';
 import { routineDecision } from '../src/master-daemon.js';
 import { failedCheckRework } from '../src/daemon/decisions.js';
-import { batchStep, classifyRerunRun, ejectedCheckLift, ejectingCheck, latestCheck, queueRef, reconcileCheckReruns, tipVerdict, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
+import { batchStep, checkRerunVisibilityMs, classifyRerunRun, ejectedCheckLift, ejectingCheck, latestCheck, queueRef, reconcileCheckReruns, tipVerdict, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { attributeDocsOverflow, docsBudgetProof, ownDocsOverflow, type DocsWordBudget, type DocsWordCount, type TipDocs } from '../src/model/documentation.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
@@ -141,8 +141,85 @@ test('unit:cancelled-rerun-not-failure — GY-967\'s run 36975811723, cancelled 
   assert.deepEqual(owed.reruns.map(entry => [entry.failedRunId, entry.state, entry.cancelled]), [[110739678221, 'owed', true]]);
   const spent = { ...onlyCancelled, checkReruns: [{ sha: head, check: 'test', failedRunId: 1, state: 'failed' as const, at: new Date().toISOString() }] } as Work;
   assert.equal(reconcileCheckReruns(spent, [15368], 1, new Date()).reruns.at(-1)!.failedRunId, 110739678221, 'a spent failure allowance does not stop the rerun of a cancelled run');
-  assert.deepEqual(classifyRerunRun({ attempt: 1 }, { status: 'completed', conclusion: 'cancelled', attempt: 2 }), { kind: 'missing' }, 'a cancelled attempt is requested again');
+  assert.deepEqual(classifyRerunRun({ attempt: 1 }, { status: 'completed', conclusion: 'cancelled', attempt: 2 }), { kind: 'cancelled', attempt: 2 }, 'a cancelled attempt is classified as cancelled');
   assert.deepEqual(classifyRerunRun({ attempt: 1 }, { status: 'completed', conclusion: 'failure', attempt: 2 }), { kind: 'failed', conclusion: 'failure' }, 'a failed attempt still fails');
+});
+
+test('unit:cancelled-rerun-probed-twice — a failure rerun whose attempt is cancelled twice by GitHub keeps holding the candidate, is rerun again on the cancelled allowance without expiring or ejecting, and passes when the next attempt passes', async () => {
+  await clearQueue();
+  const main = sha40('7ef4cb702d67'), head = sha40('5c54592412c1');
+  let work = await queuedTip('Twice cancelled rerun', head, main);
+  const sequence = work.queue!.sequence;
+
+  let attemptsRequested: number[] = [];
+  let workflowAttempt = 2;
+  let workflowConclusion: string | null = 'cancelled';
+  const gh = {
+    observe: async (w: Work) => seen(w, { sha: head, baseSha: main }, [failedTest, typecheck]),
+    publishSpeculativeTip: async (w: Work, placement: QueuePlacement): Promise<QueueSpeculation> =>
+      ({ ref: queueRef(w.key), tip: head, base: placement.predictedBase!, baseTree: treeOf(placement.predictedBase!), predecessors: placement.predecessors, policyRevision: w.policyRevision, publishedAt: new Date().toISOString(), merge: null }),
+    rerunFailedJobs: async (id: number) => { attemptsRequested.push(id); return { runId: 36972672738, attempt: workflowAttempt - 1 }; },
+    rerunWorkflowRun: async (id: number) => ({ status: 'completed', conclusion: workflowConclusion, attempt: workflowAttempt }),
+    requestCodex: async () => { throw new Error('no review request expected'); },
+    publish: async () => {},
+  } as unknown as GitHub;
+
+  await onlyJob(work);
+  await processJob(engine, gh);
+  work = await reload(work);
+  assert.equal(work.queue?.sequence, sequence);
+  assert.deepEqual(work.checkReruns!.map(e => [e.failedRunId, e.state]), [[110730635605, 'requested']]);
+
+  const elapseBack = async (ms: number) => {
+    const cur = await reload(work);
+    const back = (val?: string) => val && new Date(Date.parse(val) - ms).toISOString();
+    cur.checkReruns = cur.checkReruns!.map(e => ({
+      ...e,
+      at: back(e.at)!,
+      ...(e.probedAt ? { probedAt: back(e.probedAt) } : {}),
+      ...(e.rerequestedAt ? { rerequestedAt: back(e.rerequestedAt) } : {}),
+      ...(e.detail ? { detail: e.detail.replace(/cancelled:(\d+):(\S+)/, (_, c, t) => `cancelled:${c}:${back(t)}`) } : {})
+    }));
+    await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [cur.id, JSON.stringify(cur)]);
+    work = await reload(cur);
+  };
+
+  await elapseBack(checkRerunVisibilityMs);
+  await onlyJob(work);
+  await processJob(engine, gh);
+  work = await reload(work);
+  console.log("DEBUG STEP 2 checkReruns:", work.checkReruns, "attemptsRequested:", attemptsRequested);
+
+  assert.equal(work.queue?.sequence, sequence, 'keeps place after first cancellation');
+  assert.equal(work.queueEjection ?? null, null);
+  assert.equal(work.checkReruns![0].state, 'requested');
+  assert.equal(work.checkReruns![0].rerequestedAt, undefined, 'vanished-run re-request is not spent');
+  assert.match(work.checkReruns![0].detail ?? '', /cancelled:1/);
+
+  workflowAttempt = 3;
+  await elapseBack(checkRerunVisibilityMs);
+  await onlyJob(work);
+  await processJob(engine, gh);
+  work = await reload(work);
+
+  assert.equal(work.queue?.sequence, sequence, 'keeps place after second cancellation');
+  assert.equal(work.queueEjection ?? null, null, 'never ejected for twice-cancelled rerun');
+  assert.equal(work.checkReruns![0].state, 'requested');
+  assert.equal(work.checkReruns![0].rerequestedAt, undefined, 'vanished-run re-request is still not spent');
+  assert.match(work.checkReruns![0].detail ?? '', /cancelled:2/);
+
+  const passCheck = run('test', 110739500004, 'success');
+  const ghPass = {
+    ...gh,
+    observe: async (w: Work) => seen(w, { sha: head, baseSha: main }, [failedTest, passCheck, typecheck]),
+  } as unknown as GitHub;
+  await onlyJob(work);
+  await processJob(engine, ghPass);
+  work = await reload(work);
+
+  assert.equal(work.checkReruns![0].state, 'passed');
+  assert.equal(work.queue?.sequence, sequence);
+  assert.ok(gate(work, 'test').passed);
 });
 
 // GY-967's base 7ef4cb702d65 already carried 15643 budgeted words; its head grew no page.

@@ -2084,7 +2084,7 @@ export function dueCheckRerunProbes(work: Work, ciAppIds: readonly number[], now
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
   return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'requested' && entry.runId !== undefined
     && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId
-    && now.getTime() - Date.parse(entry.rerequestedAt ?? entry.at) >= checkRerunVisibilityMs
+    && now.getTime() - Date.parse(entry.detail?.match(/cancelled:\d+:(\S+)/)?.[1] ?? entry.rerequestedAt ?? entry.at) >= checkRerunVisibilityMs
     && (!entry.probedAt || now.getTime() - Date.parse(entry.probedAt) >= checkRerunProbeMs));
 }
 /** The workflow run GitHub reports for a rerun (GY-1096), or null when there is none. */
@@ -2093,6 +2093,7 @@ export interface RerunWorkflowRun { status: string; conclusion: string | null; a
 export type CheckRerunProbe =
   | { kind: 'waiting'; status: string }
   | { kind: 'failed'; conclusion: string }
+  | { kind: 'cancelled'; attempt?: number }
   | { kind: 'missing' };
 /**
  * Classifies the workflow run read for an accepted rerun with no new check run: a run not yet
@@ -2105,8 +2106,8 @@ export function classifyRerunRun(entry: Pick<CheckRerun, 'attempt'>, run: RerunW
   if (run.status !== 'completed') return { kind: 'waiting', status: run.status };
   const later = entry.attempt !== undefined && run.attempt !== null && run.attempt > entry.attempt;
   if (!later) return { kind: 'missing' };
-  // GY-1109: a later attempt GitHub cancelled did not conclude the rerun; it is requested again, as a missing one is.
-  if (run.conclusion === 'cancelled') return { kind: 'missing' };
+  // GY-1109: a later attempt GitHub cancelled did not conclude the rerun; it keeps the hold and is rerun again.
+  if (run.conclusion === 'cancelled') return { kind: 'cancelled', ...(run.attempt !== null ? { attempt: run.attempt } : {}) };
   if (run.conclusion && failedConclusions.has(run.conclusion)) return { kind: 'failed', conclusion: run.conclusion };
   return { kind: 'waiting', status: 'completed' };
 }
