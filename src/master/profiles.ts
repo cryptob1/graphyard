@@ -286,21 +286,17 @@ export const masterRunSchema = z.object({
   // An account whose provider usage reached this percentage of any window is skipped at launch:
   // a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
-  // The runtime of each narrow role (GY-169): `herdr`, a terminal session (what an absent setting
-  // means), or `pi`, the headless runner (src/runner) — the approver, and the producer for the
-  // unit proof group. `pi` names the environment wrapper and model those runs use.
+  // The runtime of each narrow role (GY-169): `herdr` terminal session, or `pi` headless runner
+  // (the approver and unit proof producer). `pi` names the wrapper and model those runs use.
   runtimes: narrowRoleRuntimeSchema.optional(),
   pi: piRuntimeSchema.optional(),
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
-  // The pipeline doctor (GY-711): the headless Pi session the loop launches every
-  // `intervalMinutes` (10 by default) to find stuck and overdue work and fix it through its
-  // sanctioned commands — its model, stronger fallback model, and time limit.
+  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (10 by default).
   doctor: doctorSettingsSchema.optional(),
-  // The diagnostician (GY-439): the headless Pi session that turns each recurring-fault item into
-  // its root cause and a fix item — its model, stronger fallback model, time limit, the bound an
-  // invariant violation stands before it is diagnosed, and the commands that read its log excerpts.
+  // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
+  // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
   diagnostician: diagnosticianSettingsSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;

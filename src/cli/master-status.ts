@@ -162,8 +162,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   attentionItems.push(...setupItems);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
-  // Everything the control plane takes from the operator's own credential alone, from the
-  // human-only rule table, answered on the dashboard's Needs you page (GY-102).
+  // Operator credentials from the human-only rule table (GY-102).
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
   // A standing ledger refusal is attributed first (GY-131); what still reads as a symptom of a
   // resource at its bound is then rewritten to name that resource (GY-132).
@@ -200,7 +199,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     setup, administration, daemon, dispatch,
     // Each session ledger's bound, retention and the room left for live sessions (GY-131).
     ledgers: { reviews: sessionLedgerHeadroom(reviewRecords, reviewLedgerSpec), producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec) },
-    // GY-711 doctor runs: accepted, else the cursor's (an empty list must not hide those).
+    // Doctor runs: accepted, else cursor's.
     doctor: coordinator?.doctor?.length ? coordinator.doctor : cycling?.doctor?.recent ?? null,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
