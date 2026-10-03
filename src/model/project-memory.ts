@@ -92,30 +92,11 @@ export function isPitfallRoleRelevant(pitfall: MemoryPitfall, role: SessionRole)
 }
 
 /** Record an approved/settled decision in project memory. Never updates from an agent's unreviewed claim. */
-export function recordDecisionInMemory(memory: ProjectMemory, decision: {
-  id: string;
-  key: string;
-  action: string;
-  reason: string;
-  state: string;
-  approvedBy?: string | null;
-  at: string;
-}): boolean {
+export function recordDecisionInMemory(memory: ProjectMemory, decision: { id: string; key: string; action: string; reason: string; state: string; approvedBy?: string | null; at: string }): boolean {
   // Only settled / applied / approved decisions and operator answers, never unreviewed agent claims.
-  if (decision.state !== 'applied' && decision.state !== 'approved' && decision.state !== 'provided') {
-    return false;
-  }
-  if (!decision.approvedBy) {
-    return false;
-  }
-  const entry: MemoryDecision = {
-    id: decision.id,
-    key: decision.key,
-    action: decision.action,
-    reason: decision.reason.trim(),
-    approvedBy: decision.approvedBy,
-    at: decision.at,
-  };
+  if (decision.state !== 'applied' && decision.state !== 'approved' && decision.state !== 'provided') return false;
+  if (!decision.approvedBy) return false;
+  const entry: MemoryDecision = { id: decision.id, key: decision.key, action: decision.action, reason: decision.reason.trim(), approvedBy: decision.approvedBy, at: decision.at };
   const filtered = memory.decisions.filter(d => d.id !== entry.id);
   memory.decisions = [entry, ...filtered]
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
@@ -125,19 +106,9 @@ export function recordDecisionInMemory(memory: ProjectMemory, decision: {
 }
 
 /** Record a recurring fault class pitfall with its sanctioned remedy in project memory. */
-export function recordPitfallInMemory(memory: ProjectMemory, pitfall: {
-  faultClass: string;
-  count: number;
-  remedy?: string;
-  at: string;
-}): boolean {
+export function recordPitfallInMemory(memory: ProjectMemory, pitfall: { faultClass: string; count: number; remedy?: string; at: string }): boolean {
   const remedy = pitfall.remedy || sanctionedRemedies[pitfall.faultClass] || `Address root cause of ${pitfall.faultClass} fault.`;
-  const entry: MemoryPitfall = {
-    faultClass: pitfall.faultClass,
-    count: pitfall.count,
-    remedy,
-    at: pitfall.at,
-  };
+  const entry: MemoryPitfall = { faultClass: pitfall.faultClass, count: pitfall.count, remedy, at: pitfall.at };
   const filtered = memory.pitfalls.filter(p => p.faultClass !== entry.faultClass);
   memory.pitfalls = [entry, ...filtered]
     .sort((a, b) => b.count - a.count || Date.parse(b.at) - Date.parse(a.at))
@@ -147,21 +118,9 @@ export function recordPitfallInMemory(memory: ProjectMemory, pitfall: {
 }
 
 /** Record a verified merge in project memory. */
-export function recordChangeInMemory(memory: ProjectMemory, change: {
-  key: string;
-  sha: string;
-  baseSha?: string | null;
-  files: string[];
-  mergedAt: string;
-}): boolean {
+export function recordChangeInMemory(memory: ProjectMemory, change: { key: string; sha: string; baseSha?: string | null; files: string[]; mergedAt: string }): boolean {
   if (!change.sha || !change.key) return false;
-  const entry: MemoryChange = {
-    key: change.key,
-    sha: change.sha,
-    baseSha: change.baseSha ?? null,
-    files: [...new Set(change.files)],
-    mergedAt: change.mergedAt,
-  };
+  const entry: MemoryChange = { key: change.key, sha: change.sha, baseSha: change.baseSha ?? null, files: [...new Set(change.files)], mergedAt: change.mergedAt };
   const filtered = memory.changes.filter(c => c.sha !== entry.sha && c.key !== entry.key);
   memory.changes = [entry, ...filtered]
     .sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt))
@@ -186,14 +145,10 @@ export function recordSettledDecision(memory: ProjectMemory, watch: { work: stri
 export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonly Work[], now: number = Date.now()): ProjectMemory {
   // 1. Settled operator answers: an answered request moves to `humanRequests` and the open one is
   // cleared, so the retained history is where a provided answer lives. A declined one decided nothing.
-  // Note on GY-1125 review follow-up finding 1/4: settled items in the loop's snapshot are compact
-  // summaries that omit humanRequests/researchBrief (summaryOmitted in src/store/summary-sql.ts) to
-  // avoid transferring unbounded megabytes over historical work. Settled operator and research
-  // answers enter project memory while their item is still open and persist in state.projectMemory /
-  // .graphyard/project-memory.json across cycles and restarts. Fetching whole documents for settled
-  // items on every cycle or startup is declined to preserve snapshot performance.
-  // Candidate decisions are collected and sorted newest-first by answer time (GY-1125 follow-up finding 2)
-  // so retention reflects chronological answer order rather than work-item snapshot ordering.
+  // GY-1125 follow-up 1/4 (declined): settled snapshot items are summaries without humanRequests/
+  // researchBrief (summaryOmitted, src/store/summary-sql.ts); answers enter memory while their item is
+  // open and persist in .graphyard/project-memory.json, so whole settled documents are not re-read.
+  // Follow-up 2: candidates are retained newest-first by answer time, not work-item order.
   const candidateDecisions: { id: string; key: string; action: string; reason: string; state: string; approvedBy: string; at: string }[] = [];
   for (const item of work) {
     for (const request of item.humanRequests ?? []) {
@@ -217,14 +172,7 @@ export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonl
       const mergedAt = item.delivery?.mergedAt ?? item.observation?.mergedAt;
       const mergeSha = item.delivery?.mergeSha ?? item.observation?.mergeSha;
       if (mergedAt && mergeSha && Date.parse(mergedAt) >= recentCutoff) {
-        const files = item.observation?.files ?? item.plannedFiles ?? [];
-        recordChangeInMemory(memory, {
-          key: item.key,
-          sha: mergeSha,
-          baseSha: item.candidate?.baseSha ?? null,
-          files,
-          mergedAt,
-        });
+        recordChangeInMemory(memory, { key: item.key, sha: mergeSha, baseSha: item.candidate?.baseSha ?? null, files: item.observation?.files ?? item.plannedFiles ?? [], mergedAt });
       }
     }
   }
@@ -237,11 +185,7 @@ const short = (sha: string) => sha ? sha.slice(0, 10) : '';
 /**
  * Format a role-relevant digest of project memory within a fixed word budget, newest and most relevant first.
  */
-export function projectMemoryDigest(
-  memory: ProjectMemory | null | undefined,
-  role: SessionRole,
-  options?: { baseSha?: string; wordBudget?: number }
-): string {
+export function projectMemoryDigest(memory: ProjectMemory | null | undefined, role: SessionRole, options?: { baseSha?: string; wordBudget?: number }): string {
   if (!memory) return '';
   const budget = options?.wordBudget ?? projectMemoryWordBudget;
 
@@ -306,9 +250,7 @@ export function projectMemoryDigest(
       }
       // GY-1125 follow-up finding 5: continue to allow later shorter decisions to be considered
     }
-    if (decisionLines.length) {
-      parts.push('Recent decisions:', decisionLines.join(' '));
-    }
+    if (decisionLines.length) parts.push('Recent decisions:', decisionLines.join(' '));
   }
 
   // Add pitfalls with sanctioned remedies
@@ -321,9 +263,7 @@ export function projectMemoryDigest(
       if (docsWords(candidate) > budget) continue;
       pitfallLines.push(line);
     }
-    if (pitfallLines.length) {
-      parts.push('Recurring pitfalls and remedies:', pitfallLines.join(' '));
-    }
+    if (pitfallLines.length) parts.push('Recurring pitfalls and remedies:', pitfallLines.join(' '));
   }
 
   // Add merges since base
@@ -338,9 +278,7 @@ export function projectMemoryDigest(
       if (docsWords(candidate) > budget) continue;
       changeLines.push(line);
     }
-    if (changeLines.length) {
-      parts.push(`Recent merges to main ${baseLabel}:`, changeLines.join(' '));
-    }
+    if (changeLines.length) parts.push(`Recent merges to main ${baseLabel}:`, changeLines.join(' '));
   }
 
   const result = parts.join(' ').trim();
