@@ -412,6 +412,7 @@
     "tests/overlap-scheduler.test.ts": 1647,
     "tests/pacer-reserve.test.ts": 3906,
     "tests/pane-reclaim.test.ts": 2487,
+    "tests/parallel-tips-onboarding.test.ts": 403,
     "tests/parallel-tips.test.ts": 2193,
     "tests/pi-account-key.test.ts": 1983,
     "tests/pi-graphyard-tools.test.ts": 342,
