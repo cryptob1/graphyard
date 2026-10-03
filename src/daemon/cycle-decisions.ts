@@ -50,11 +50,11 @@ export function resetDecisionCache() {
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
   // GY-1142: deduplicate per-item decision reads within a single cycle.
-  const cycleDecisions = new Map<string, Promise<{ decisions: any[] }>>();
+  const cycleDecisions = new Map<string, Promise<{ decisions: any[] } | undefined>>();
   const getWorkDecisions = async (item: Work) => {
     let p = cycleDecisions.get(item.id);
     if (!p) {
-      p = effects.decisions ? effects.decisions(item).catch(() => ({ decisions: [] })) : Promise.resolve({ decisions: [] });
+      p = effects.decisions ? effects.decisions(item).catch(() => undefined) : Promise.resolve(undefined);
       cycleDecisions.set(item.id, p);
     }
     return p;
@@ -341,7 +341,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (cached && cached.signature === sig) {
         history = cached.history;
       } else {
-        history = effects.decisions ? (await getWorkDecisions(item)).decisions : [];
+        const read = effects.decisions ? await getWorkDecisions(item) : { decisions: [] };
+        if (!read) throw new Error(`Could not read decisions for ${item.key}`);
+        history = read.decisions;
         decisionHistoryCache.set(key, { history, signature: sig });
       }
       const applied = decision.action === 'merge' ? approvedMerge(item, history) : null;
@@ -554,12 +556,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       let step = approvalStep(watch, judged, await sessions(), clock);
       if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
       if (effects.decisions) {
-        history = (await getWorkDecisions(item)).decisions;
-        decisionHistoryCache.set(key, { history, signature: sig });
-        judged = history.find(entry => entry.id === watch.decision) ?? null;
+        const fresh = await getWorkDecisions(item);
+        if (fresh) {
+          history = fresh.decisions;
+          decisionHistoryCache.set(key, { history, signature: sig });
+          judged = history.find(entry => entry.id === watch.decision) ?? null;
+        } else {
+          history = undefined;
+          judged = undefined;
+        }
       }
     } else {
-      history = effects.decisions ? (await getWorkDecisions(item)).decisions : undefined;
+      const fresh = effects.decisions ? await getWorkDecisions(item) : undefined;
+      history = fresh ? fresh.decisions : undefined;
       if (history !== undefined) decisionHistoryCache.set(key, { history, signature: sig });
       judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
       if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
@@ -706,7 +715,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // An applied widening clears the request it answered, and so does the approver's refusal, so
     // the item stops needing it at once: its outcome is noted and measured here, before the watch goes.
     if (item && watch.scope && !watch.settledAt && effects.decisions) {
-      const judged = await getWorkDecisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision), () => undefined);
+      const judged = await getWorkDecisions(item).then(result => result?.decisions.find(entry => entry.id === watch.decision), () => undefined);
       if (judged?.state === 'applied' || judged?.state === 'refused') {
         if (scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
         watch.settledAt = stamp; await noteScopeOutcome(item, watch, judged);
@@ -720,7 +729,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     if (item && !watch.settledAt && !unattestable.has(key) && effects.withdraw && effects.decisions) {
       try {
-        const standing = (await getWorkDecisions(item)).decisions.find(entry => entry.id === watch.decision);
+        const standing = (await getWorkDecisions(item))?.decisions.find(entry => entry.id === watch.decision);
         if (standing?.state === 'requested') {
           await effects.withdraw(item, watch.decision, `${watch.work} moved past the ${watch.action} this decision asked for before any approver judged it, so its reason no longer describes the item`);
           decisionHistoryCache.delete(key);
@@ -766,7 +775,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (!item) continue;
       let decision = record?.decision ?? null;
       if (!decision) {
-        const history = effects.decisions ? await getWorkDecisions(item).then(result => result.decisions, () => null) : null;
+        const history = effects.decisions ? await getWorkDecisions(item).then(result => result?.decisions, () => null) : null;
         decision = history?.find(entry => approverSessionName(item, entry.id) === agent.name)?.id ?? null;
         // A delivered item's approver is closed whatever it judges; it is named for its session.
         if (!decision && item.stage === 'done') decision = agent.name;
@@ -786,7 +795,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (!record.work || !record.decision || seen.agents.some(agent => agent.name === record.agentName) || watched.some(watch => watch.decision === record.decision || watch.agentName === record.agentName)) continue;
       const item = snapshot.work.find(candidate => candidate.key === record.work);
       if (!item || item.stage === 'done' || !effects.decisions) continue;
-      const judged = await getWorkDecisions(item).then(result => result.decisions.find(entry => entry.id === record.decision) ?? null, () => null);
+      const judged = await getWorkDecisions(item).then(result => result?.decisions.find(entry => entry.id === record.decision) ?? null, () => null);
       if (judged?.state !== 'requested') continue;
       const watch = state.approvals[`${handWatchPrefix}${record.decision}`] = approvalWatchSchema.parse({ work: item.key, action: judged.action, decision: record.decision, requestedAt: stamp, agentName: record.agentName,
         launchedAt: record.launchedAt, launches: 1, account: record.account, runtime: record.runtime, session: record.session });
@@ -802,7 +811,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (!item) why = `${watch.work} is no longer open`;
       else if (item.stage === 'done') why = `${item.key} is delivered`;
       else if (effects.decisions) {
-        judged = await getWorkDecisions(item).then(result => result.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
+        judged = await getWorkDecisions(item).then(result => result?.decisions.find(entry => entry.id === watch.decision) ?? null, () => undefined);
         if (judged === null) why = `${item.key} holds no decision ${watch.decision}`;
         else if (judged && !['requested', 'approved'].includes(judged.state)) why = `its decision is ${judged.state}`;
         if (judged) watch.action = judged.action;
@@ -852,6 +861,16 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     await effects.persist(state);
   });
+
+  // Evict decision history cache entries for settled decisions or items no longer in the active working set.
+  const activeWorkIds = new Set(snapshot.work.map(candidate => candidate.id));
+  for (const [cacheKey] of decisionHistoryCache) {
+    const parts = cacheKey.split(':');
+    const workId = parts[2];
+    if (!activeWorkIds.has(workId) || state.approvals[cacheKey]?.settledAt) {
+      decisionHistoryCache.delete(cacheKey);
+    }
+  }
 
   // 4d. Registry sessions end with the sessions they record (GY-190). A registry session is a
   //     launch, not a process, and nothing reports its end: an approver that judged its decision and

@@ -80,7 +80,7 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
 - **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1) every 10 minutes, in ≤2,000-row batches per phase, five a run. It never deletes other kinds, deltas, an item's newest save, delivery events, unmerged rows, or unread rows. Each batch appends a `ledger.compacted` event. Postgres reuses space; only `VACUUM FULL` returns it to disk.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1) every 10 minutes, in ≤2,000-row batches per phase, five a run. It never deletes other kinds, deltas, an item's newest save, delivery events, a row of an item merged but not done, or unread rows. Each batch appends a `ledger.compacted` event. Postgres reuses space; only `VACUUM FULL` returns it to disk.
 
 ## Bootstrap mode for a self-proving change
 
