@@ -339,7 +339,8 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
       : run(undefined, 'Lease missing, expired, or superseded; claim the task again')(command, args);
     const failure = await prepareWorkerLaunch(root, 'GY-860', 'launch', real).then(() => null, (error: unknown) => error);
     assert.ok(failure instanceof Error);
-    assert.match(failure.message, /^Command failed: /, 'the real ChildProcessError, not a stub');
+    // The launcher names the attempt and carries the command's own stderr (GY-1078), never only its command line.
+    assert.match(failure.message, /^Worker launch failed: the worktree for GY-860 epoch 9 could not be created: Git worktree creation failed: fatal: /, 'the real child stderr, not a stub');
     assert.equal(workspaceDispatchFailure(failure.message), true, 'the git message reaches the classifier');
     // A release that genuinely could not reach the server is wrapped, not swallowed.
     await assert.rejects(prepareWorkerLaunch(root, 'GY-860', 'launch', run('checkout failed', 'connect ECONNREFUSED')), /Graphyard could not release epoch 9/);

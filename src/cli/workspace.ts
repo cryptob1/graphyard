@@ -17,7 +17,7 @@ import { releaseUnderFailure, reserveReleasingHold, submittedBranchRefusal } fro
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
-import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
+import { branchHolders, gitOrThrow, heldBranchRefusal, holderRefusals, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import { restoreAndReport } from './sync-restore.js';
 import { defineCommands, workMutation } from './registry.js';
 
@@ -226,6 +226,15 @@ export const workspaceCommands = defineCommands([
       }
       const hostId = context.individualHostId();
       // GY-860: an earlier attempt's hold on this branch is recorded with the reservation, then released; the branch ref never moves.
+      // A holder whose epoch holds a live lease, or an operation outside this item's session
+      // worktrees, is never touched (GY-1078): the claim is released as a workspace failure naming it.
+      const refusals = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0
+        ? holderRefusals(root, branchHolders(root, branch, path), work, Date.parse(status.now ?? '') || Date.now(), { dirty: false }) : [];
+      if (refusals.length) {
+        const detail = heldBranchRefusal(branch, refusals);
+        await releaseUnderFailure(mutate, epoch, detail);
+        throw new Error(`Git worktree creation failed: ${detail} The claim was released as a workspace failure, so the attempt costs nothing.`);
+      }
       const released = await reserveReleasingHold(root, branch, path, runChild, mutate, epoch, hostId);
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;

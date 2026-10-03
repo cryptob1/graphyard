@@ -605,6 +605,9 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     const fields = record.split('\0');
     const holderPath = fields.find(field => field.startsWith('worktree '))?.slice('worktree '.length);
     if (!holderPath || !existsSync(holderPath)) continue;
+    // A stopped `git am` keeps its state in `rebase-apply` too, but `rebase --abort` refuses it:
+    // that holder is left to the GY-1078 reclaim the worktree command runs next.
+    if (existsSync(resolve(holderPath, (await git(holderPath, 'rev-parse', '--git-path', 'rebase-apply/applying')).trim()))) continue;
     // A rebase detaches the holder's HEAD, so the branch shows neither in the porcelain record
     // nor as HEAD: the rebase's own head-name is what still holds it.
     const op = await inProgressOperation(git, holderPath);
