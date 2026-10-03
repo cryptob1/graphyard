@@ -28,14 +28,14 @@ export async function readFlowReport(api: Dashboard['api']) {
 export async function readReplay(api: Dashboard['api'], now: number) {
   const since = new Date(now - replayWindowMs).toISOString();
   const moves = await readStepRows(api, since);
-  return { frames: replayFrames(transitionsFromRows(moves.rows), now), truncated: !moves.complete };
+  return { frames: replayFrames(transitionsFromRows(moves.rows), now), truncated: !moves.complete || moves.coverage !== null, coverage: moves.coverage };
 }
 
 /**
  * What the Flow panel reads from the control plane: the flow report and the replay frames of the
  * last day's recorded step moves. The two reads settle independently (GY-705): a failed or slow
  * replay read never discards the report, and each failure is named on its own
- * (`reportError`, `replayError`, present only on a failed read). Tolerant of what a real board returns — a report without step
+ * (`reportError`, `replayError`, present only on a failed read), and a replay read that stopped short names where (`coverage`, present only then). Tolerant of what a real board returns — a report without step
  * or throughput figures, a drill-down without rows — so an item with no observation, reviews or
  * candidate never stops the panel (GY-161, AC-12).
  */
@@ -45,6 +45,7 @@ export async function readFlow(api: Dashboard['api'], now: number) {
     report: flow.status === 'fulfilled' ? flow.value : null,
     frames: replay.status === 'fulfilled' ? replay.value.frames : [],
     truncated: replay.status === 'fulfilled' && replay.value.truncated,
+    ...(replay.status === 'fulfilled' && replay.value.coverage ? { coverage: replay.value.coverage } : {}),
     ...(flow.status === 'rejected' ? { reportError: (flow.reason as Error).message } : {}),
     ...(replay.status === 'rejected' ? { replayError: (replay.reason as Error).message } : {}),
   };
@@ -385,6 +386,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
   const [report, setReport] = useState<any>(null);
   const [frames, setFrames] = useState<ReplayFrame[] | null>(null);
   const [truncated, setTruncated] = useState(false);
+  const [coverage, setCoverage] = useState<string | null>(null);
   const [reportError, setReportError] = useState('');
   const [replayError, setReplayError] = useState('');
   const [expanded, setExpanded] = useState<ReadonlySet<StepId>>(() => new Set());
@@ -396,7 +398,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
     // moment the report answers, and a failed or slow replay read never blanks them.
     readFlowReport(api).then(flow => { if (active) setReport(flow); }, (e: Error) => { if (active) setReportError(e.message); });
     // Loading only shows the replay: it waits, still at its first frame, for the viewer to press play.
-    readReplay(api, now).then(replay => { if (active) { setFrames(replay.frames); setTruncated(replay.truncated); } }, (e: Error) => { if (active) setReplayError(e.message); });
+    readReplay(api, now).then(replay => { if (active) { setFrames(replay.frames); setTruncated(replay.truncated); setCoverage(replay.coverage); } }, (e: Error) => { if (active) setReplayError(e.message); });
     return () => { active = false; };
     // Read once per visit: the replay is the last day's record, not a live feed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -425,8 +427,10 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
       <NowLane entries={now7} blocked={new Set(byGroup.blocked.map(item => item.id))} expanded={expanded} onSelect={setSelected}
         onToggle={step => setExpanded(previous => { const next = new Set(previous); if (!next.delete(step)) next.add(step); return next; })}/>
       <div className="flow-subhead"><h3>Last 24 hours, replayed</h3><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
+      {/* A read that stopped short names where it stopped, never answers "no item changed step" for the part it never read (GY-1119). */}
+      {coverage && <p className="notice" role="status" data-flow="replay-truncated">The recorded step changes were read only in part: {coverage}</p>}
       {frames === null ? <p className="muted flow-wait">{replayError ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
-        : frames.length === 0 ? <p className="muted flow-wait">No item changed step in the last 24 hours.</p>
+        : frames.length === 0 ? <p className="muted flow-wait">{coverage ? 'No item changed step in the part of the last 24 hours that was read.' : 'No item changed step in the last 24 hours.'}</p>
           : <ReplaySection frames={frames} truncated={truncated}/>}
     </section>
     <div className="insight-charts">
