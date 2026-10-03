@@ -1,8 +1,10 @@
 import { createSign } from 'node:crypto';
 import type { Transport } from './transport.js';
-import { enableAutoMergeArgs, mergeMode, mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState, queueRulesetRefused, repositoryMergeSettings, type RepositoryMergeSettings } from '../protection.js';
+import { enableAutoMergeArgs, GRAPHYARD_CHECKS, mergeMode, mergeQueueRuleset, mergeQueueRulesetName, mergeQueueState, queueRulesetRefused, repositoryMergeSettings, type RepositoryMergeSettings } from '../protection.js';
+import { LANDABLE_CHECK } from '../landable-check.js';
 
 export const CHECK_NAME = 'Graphyard / merge';
+export { LANDABLE_CHECK, GRAPHYARD_CHECKS };
 export const VERIFICATION_CHECK = 'Graphyard / install verification';
 
 export interface AppFacts { appId: number; slug: string; installationId: number; privateKey: string; webhookSecret: string }
@@ -180,8 +182,8 @@ export function protectionPayload(inputs: ProtectionInputs, current: any | null)
     else if (appId !== null) checks[found] = { context, app_id: appId };
   };
   for (const context of inputs.requiredChecks) upsert(context, null);
-  // The merge gate is bound to Graphyard's App: another producer cannot publish it.
-  if (inputs.graphyardAppId) upsert(CHECK_NAME, inputs.graphyardAppId);
+  // The merge gate and the landability verdict are bound to Graphyard's App: another producer cannot publish them.
+  if (inputs.graphyardAppId) for (const context of GRAPHYARD_CHECKS) upsert(context, inputs.graphyardAppId);
   const reviews = current?.required_pull_request_reviews;
   const reviewCount = effectiveReviewCount(inputs, current);
   const dismissal = reviews?.dismissal_restrictions;
@@ -229,7 +231,7 @@ export function protectionSatisfied(inputs: ProtectionInputs, current: any | nul
   const reviews = current.required_pull_request_reviews;
   return current.required_status_checks?.strict === false
     && inputs.requiredChecks.every(context => has(context, null))
-    && (!inputs.graphyardAppId || has(CHECK_NAME, inputs.graphyardAppId))
+    && (!inputs.graphyardAppId || GRAPHYARD_CHECKS.every(context => has(context, inputs.graphyardAppId)))
     && !!current.enforce_admins?.enabled
     && !current.required_conversation_resolution?.enabled
     && !current.allow_force_pushes?.enabled
