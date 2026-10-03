@@ -1,11 +1,20 @@
 import { defineRailway, github, postgres, preserve, project, service, volume } from "railway/iac";
 
-export default defineRailway(() => {
+// Neither environment deploys main's tip. Each service tracks a release branch that only
+// `graphyard release` moves, to the exact SHA of a release candidate (docs/delivery.md#release-candidates):
+// `release/uat` for any candidate under test, `release/production` only for one whose UAT validation passed.
+export const releaseBranches = { uat: "release/uat", production: "release/production" } as const;
+
+export default defineRailway(ctx => {
+  // UAT runs the candidate against its own Postgres (each Railway environment has its own instance)
+  // and without the GitHub App: with no GITHUB_* variable it holds no credential that can write to
+  // the production repository, so it never merges, dispatches or spends the App's request budget.
+  const uat = ctx.isEnvironment("uat");
   const Postgres = postgres("Postgres", { region: "us-west2" });
   Postgres.networking = { privateNetworkEndpoint: "postgres" };
   const postgresVolume = volume("postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: "us-west2", sizeMB: 5000 });
   const graphyard = service("graphyard", {
-    source: github("cryptob1/graphyard", { branch: "main" }),
+    source: github("cryptob1/graphyard", { branch: uat ? releaseBranches.uat : releaseBranches.production }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
     healthcheck: "/healthz",
     healthcheckTimeout: 120,
@@ -17,10 +26,12 @@ export default defineRailway(() => {
     // Delegation capacity variables); the same adapters write GRAPHYARD_GENERATED_FILES from the
     // repository's generated-file manifest, and dropping it would make the regression guard treat
     // every generated page as owned work; RAILWAY_API_TOKEN lets the control plane observe deployments.
-    env: { DATABASE_URL: preserve(), GITHUB_REPOSITORY: preserve(), GRAPHYARD_PRINCIPALS: preserve(), HOST: preserve(), PORT: preserve(),
-      GITHUB_APP_ID: preserve(), GITHUB_INSTALLATION_ID: preserve(), GITHUB_PRIVATE_KEY: preserve(), GITHUB_WEBHOOK_SECRET: preserve(),
-      GRAPHYARD_MAX_SLICE_LEADS: preserve(), GRAPHYARD_MAX_ENGINEERS_PER_LEAD: preserve(), GRAPHYARD_MIN_REVIEWERS: preserve(), GRAPHYARD_MAX_REVIEWERS: preserve(), GRAPHYARD_GENERATED_FILES: preserve(),
-      RAILWAY_API_TOKEN: preserve() },
+    env: uat
+      ? { DATABASE_URL: preserve(), GRAPHYARD_PRINCIPALS: preserve(), HOST: preserve(), PORT: preserve(), GRAPHYARD_GENERATED_FILES: preserve() }
+      : { DATABASE_URL: preserve(), GITHUB_REPOSITORY: preserve(), GRAPHYARD_PRINCIPALS: preserve(), HOST: preserve(), PORT: preserve(),
+        GITHUB_APP_ID: preserve(), GITHUB_INSTALLATION_ID: preserve(), GITHUB_PRIVATE_KEY: preserve(), GITHUB_WEBHOOK_SECRET: preserve(),
+        GRAPHYARD_MAX_SLICE_LEADS: preserve(), GRAPHYARD_MAX_ENGINEERS_PER_LEAD: preserve(), GRAPHYARD_MIN_REVIEWERS: preserve(), GRAPHYARD_MAX_REVIEWERS: preserve(), GRAPHYARD_GENERATED_FILES: preserve(),
+        RAILWAY_API_TOKEN: preserve() },
   });
 
   return project("graphyard", {
