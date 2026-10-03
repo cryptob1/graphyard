@@ -15,7 +15,7 @@ Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Clau
 
 ### Approval modes
 
-Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor, started and logged in as `agent`: `cursor` is the IDE launcher and `cursor-agent` refuses interactive runs); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); `--dangerously-skip-permissions`, request via `--prompt-interactive` (Antigravity `agy`); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
+Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor, started and logged in as `agent`: `cursor` is the IDE launcher and `cursor-agent` refuses interactive runs); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); `--dangerously-skip-permissions`, `trustedWorkspaces` trust, request via `--prompt-interactive` (Antigravity `agy`); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
 
 ### The coordinator checkout is confined at the OS level
 
@@ -57,7 +57,7 @@ OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fix
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. Workspace-trust prompts fail the launch, never held. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
