@@ -8,6 +8,7 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, agentToken, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { clientErrorStatus, nextClientErrorRun, retryStopAttention, retryStopped, type ClientErrorRun } from './retry-stop.js';
+import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStatus, type ReviewRoundStatus } from './review-cap.js';
 import { criteriaRuleSection, fileFollowUpThreads, followUpCreateKey, plannedScope, followUpFindingLimit, followUpFindingMax, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type AppendFollowUpFindings, type CreateFollowUpItem, type FollowUpCreateStore, type FollowUpFiling, type FollowUpItem, type LaunchThread, type PendingFollowUpCreate, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
@@ -445,12 +446,12 @@ export async function reviewerBindingHealth(config: Pick<MasterConfig, 'credenti
   return { registered: app, bound: config.reviewer ? { appId: config.reviewer.appId, slug: config.reviewer.slug } : null, attention };
 }
 
-/** How old the observation of the exact requested head may be when a reviewer is launched for it (GY-710). */
-export const reviewLaunchObservationMaxAgeMs = 30 * 60_000;
-
 // A launched reviewer reads one exact candidate. Everything a verdict is bound to is verified
-// here, before a token exists: a stale or unobserved candidate never reaches a reviewer session.
-export function assertReviewCandidate(work: Work, observedAt: string) {
+// here, before a token exists: a superseded or unobserved candidate never reaches a reviewer session.
+// The launch binds the head, not the observation's age (GY-710): the item's latest observation must
+// be of this exact head and base, and a head or base that moved since supersedes the request. The
+// reviewer judges the head it is given, so the two-minute bound protects merges, not review launches.
+export function assertReviewCandidate(work: Work, observedAt: string, request?: { sha: string; baseSha: string; policyRevision: number }) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A reviewer launch requires a valid Graphyard snapshot clock');
   if (!work.policy.review) throw new Error(`${work.key} does not require independent review`);
@@ -460,12 +461,8 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
   if (!work.submission || !candidate) throw new Error(`${work.key} has no independently observed pull-request candidate to review`);
   if (work.reworkRequested) throw new Error(`${work.key} is awaiting rework; review the next submitted candidate`);
   if (!observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) throw new Error(`${work.key} GitHub observation does not match the current candidate`);
-  // The launch binds the exact head, base and policy revision the observation names, and the reviewer
-  // judges that head itself; the observation only has to be recent enough that the head has not moved
-  // unseen. Two minutes, the merge gate's bound, starved launches: with ~250 items a given item is read
-  // every several minutes, so review requests waited hours (2026-09-26, GY-710). Merges keep two minutes.
-  const age = now - Date.parse(observation.at);
-  if (!(age >= 0 && age < reviewLaunchObservationMaxAgeMs)) throw new Error(`${work.key} GitHub observation is missing or older than ${reviewLaunchObservationMaxAgeMs / 60_000} minutes`);
+  if (!Number.isFinite(Date.parse(observation.at))) throw new Error(`${work.key} GitHub observation has no valid time`);
+  if (request && (request.sha !== candidate.sha || request.baseSha !== candidate.baseSha || request.policyRevision !== work.policyRevision)) throw new Error(`${work.key} review request for ${request.sha.slice(0, 12)} on base ${request.baseSha.slice(0, 12)} is superseded: the latest observation is of head ${candidate.sha.slice(0, 12)} on base ${candidate.baseSha.slice(0, 12)}`);
   if (observation.prState === 'closed') throw new Error(`${work.key} pull request is closed`);
   if (observation.draft) throw new Error(`${work.key} pull request is still a draft`);
   // A head behind the base branch is reviewed as it stands when it merges cleanly: the merge queue
@@ -478,8 +475,8 @@ export function assertReviewCandidate(work: Work, observedAt: string) {
 
 export type ReviewBinding = ReturnType<typeof assertReviewCandidate>;
 
-/** The changes-requested rounds after which only an unmet acceptance criterion may request changes (GY-167). */
-export const reviewRoundCap = 3;
+/** The changes-requested rounds after which only an unmet acceptance criterion may request changes (GY-167); the item's own round is capped by master.json `reviewRoundCap` (GY-1118). */
+export const reviewRoundCap = defaultReviewRoundCap;
 export type ReviewHistory = NonNullable<ReviewRecord['reviewRound']>;
 /**
  * What earlier review rounds of this pull request mean for the next launch (GY-167): the head the
@@ -505,11 +502,15 @@ export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBindi
 }
 
 /** The prompt's review-round section: the delta since the head last reviewed, and the cap once three rounds requested changes (GY-167). */
-export function reviewRoundSection(sha: string, history?: ReviewHistory) {
-  if (!history) return '';
+/** `rounds` is the item's own review round against the configured cap (GY-1118); past it the cap applies whatever this pull request's history holds. */
+export function reviewRoundSection(sha: string, history?: ReviewHistory, rounds?: ReviewRoundStatus) {
+  if (!history && !rounds?.capped) return '';
+  history ??= { changesRequested: 0 };
+  const cap = rounds?.cap ?? reviewRoundCap;
   return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
       + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '')
-    + (history.changesRequested >= reviewRoundCap ? `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. ` : '')
+    + (rounds?.capped || history.changesRequested >= cap ? `${rounds?.capped ? `This is review round ${rounds.round} of this item, past its cap of ${cap} rounds` : `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision`}, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. `
+      + 'Name each blocking finding — an acceptance criterion not met, wrong behaviour, or a security defect — on its own line starting BLOCKING: in the body of REQUEST_CHANGES, and every other finding on its own line starting Follow-up finding:; a change request with no BLOCKING: line is withdrawn by Graphyard, its findings filed as follow-ups, and one with a blocking finding is escalated to an independent approver rather than reworked. ' : '')
     + (history.withdrawn ? `A previous approval of this head, review ${history.withdrawn.reviewId}, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread${history.withdrawn.threads.length === 1 ? '' : 's'} ${history.withdrawn.threads.join(' ')}: a thread described only in prose, or named by an ID that is neither its thread ID nor one of its listed comment IDs, is not accounted for. `
       + `Name each of ${history.withdrawn.threads.length === 1 ? 'that thread' : 'those threads'} by its thread ID on exactly one of those closing lines. ` : '');
 }
@@ -577,13 +578,19 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
   return checkout;
 }
 
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, memory?: ProjectMemory | null) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null) {
+  let rounds: ReviewRoundStatus | undefined;
+  if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
+    rounds = roundsOrMemory;
+  } else if (roundsOrMemory && !memory) {
+    memory = roundsOrMemory as ProjectMemory;
+  }
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
-    + reviewRoundSection(binding.sha, history)
+    + reviewRoundSection(binding.sha, history, rounds)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
@@ -673,6 +680,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   now?: () => Date;
   /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
   requestId?: string;
+  /** The head, base and policy revision that request binds (GY-710): a launch for anything else is superseded. */
+  request?: { sha: string; baseSha: string; policyRevision: number };
   /** How the profile's agent accounts are checked before the launch, and how its prompt is confirmed. */
   probe?: FleetProbe;
   prompt?: PromptDelivery;
@@ -691,7 +700,7 @@ export async function launchReview(root: string, work: Work, profileName: string
   const reviewerApp = config.reviewer;
   const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
   if (!profile) throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
-  const binding = assertReviewCandidate(work, observedAt);
+  const binding = assertReviewCandidate(work, observedAt, dependencies.request);
   if (binding.author.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
   // One request, one session (GY-124). Under the ledger lock, as one step: records for a superseded
   // head are closed, the launch is refused when the request or the candidate already has a pending
@@ -794,7 +803,9 @@ export async function launchReview(root: string, work: Work, profileName: string
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, role: harness.role, contract: launch.contract }));
+        // The request is the session's own first message, on the runtime's command line (GY-93), read
+        // from the request file in the session's checkout so the typed line stays short (GY-121).
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -1170,9 +1181,13 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // settled record. A closed session carrying the approval the control plane is still waiting for
   // on this exact head is therefore re-read, and a dismissal reopens it as an unanswered session,
   // so the request is relaunched instead of waiting on a verdict that no longer exists.
+  // A change request the loop withdrew past the review-round cap (GY-1118) is reopened the same way,
+  // so the same head is reviewed again rather than the request standing answered by a withdrawn verdict.
   for (const record of ledger.reviews) {
-    if (record.state !== 'completed' || record.verdict?.state !== 'APPROVED') continue;
-    const request = dependencies.work?.find(item => item.key === record.key)?.autoDispatch?.review;
+    if (record.state !== 'completed' || (record.verdict?.state !== 'APPROVED' && record.verdict?.state !== 'CHANGES_REQUESTED')) continue;
+    const owner = dependencies.work?.find(item => item.key === record.key), request = owner?.autoDispatch?.review;
+    // Only past the cap is a change request ever withdrawn; before it, the head goes back to a worker.
+    if (record.verdict.state === 'CHANGES_REQUESTED' && !(owner && pastReviewCap(owner, reviewRoundCapOf(config)))) continue;
     if (!request || request.state !== 'requested' || request.sha !== record.sha || request.baseSha !== record.baseSha || request.policyRevision !== record.policyRevision) continue;
     if ((await observe(record, reviewer, new Set()))?.state !== 'DISMISSED') continue;
     record.verdict = { ...record.verdict, state: 'DISMISSED' };
@@ -1212,8 +1227,8 @@ async function approvalGaps(repository: string, record: ReviewRecord, reviewId: 
     return unaccountedThreads(review?.body, record.threadsListed, !!record.criteriaOnly, record.threadAliases);
   } catch (error) { return `the approval could not be read to check which listed threads it accounts for (${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)})`; }
 }
-/** Withdraw an approval as the reviewer App that gave it: GitHub's review dismissal, with a short-lived reviewer token. */
-async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer'], repository: string, pr: number, reviewId: number, message: string) {
+/** Withdraw a verdict as the reviewer App that gave it — an incomplete approval, or a change request past the review-round cap (GY-1118): GitHub's review dismissal, with a short-lived reviewer token. */
+export async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer'], repository: string, pr: number, reviewId: number, message: string) {
   if (!reviewerApp) throw new Error('no reviewer App is registered');
   const { token } = await mintReviewerToken(await readReviewerCredential(root, reviewerApp.credentialFile), repository);
   const response = await fetch(`https://api.github.com/repos/${repository}/pulls/${pr}/reviews/${reviewId}/dismissals`, { method: 'PUT', signal: AbortSignal.timeout(15_000),
