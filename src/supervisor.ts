@@ -210,14 +210,13 @@ async function postAssignment(url: string, token: string, path: string, body: un
 }
 
 /**
- * The worker protocol a supervisor follows when its session is gone: record the cause on the
- * assignment, withdraw that report, then release the lease.
+ * The worker protocol a supervisor follows when its session is gone: release the lease with the
+ * cause, in one lease-authorised mutation.
  *
- * The blocked report is the one free-text entry a worker writes to the append-only ledger, and
- * the one Graphyard already reads back as the explanation for an attempt that ended early, so it
- * is where the cause belongs. It is withdrawn in the same breath because a standing blocker would
- * leave the freed item waiting for somebody to clear a condition that is already over: the event
- * keeps the cause, and the release ends the attempt as released rather than as a silent lapse.
+ * The cause rides on the release and is kept on its event, so the ledger still says why the
+ * attempt ended early, and the attempt ends as released rather than as a silent lapse. It is not
+ * a blocked report: a blocked report ends the attempt and stands on the item (GY-1008), which
+ * would leave the freed item waiting for somebody to clear a condition that is already over.
  *
  * The assignment comes from this supervisor's own `watch KEY EPOCH --` command line and its
  * credential from its own environment, so no caller has to supply either; a supervisor that can
@@ -228,10 +227,7 @@ export function assignmentSurrender(epoch: number, argv: string[] = process.argv
   const url = env.GRAPHYARD_URL, token = env.GRAPHYARD_TOKEN;
   if (!assignment || Number(assignment.epoch) !== epoch || !url || !token) return undefined;
   return async (cause: string) => {
-    const reason = `Watch supervisor ended attempt ${epoch}: ${cause}`.slice(0, 2000);
-    await post(url, token, `work/${assignment.key}/blocked`, { epoch, reason });
-    await post(url, token, `work/${assignment.key}/blocked`, { epoch, reason: null });
-    await post(url, token, `work/${assignment.key}/release`, { epoch });
+    await post(url, token, `work/${assignment.key}/release`, { epoch, cause: `Watch supervisor ended attempt ${epoch}: ${cause}`.slice(0, 2000) });
   };
 }
 
@@ -277,6 +273,11 @@ export function renewalGraceMs(error: unknown): number | null {
   return Number.isFinite(ms) && ms > 0 ? ms : null;
 }
 
+/**
+ * The one line the watch supervisor prints before its first control-plane call, naming the item and
+ * epoch from its argv; the launcher quotes it as the starting detail of a supervisor still setting up (GY-1033).
+ */
+export const setupLine = (subject: string, epoch: number) => `graphyard: establishing containment for ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
 export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
   let deadline = 0, granted = 0;

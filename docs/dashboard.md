@@ -28,7 +28,7 @@ Running rows offer:
 
 ## Settings › Agents: the fleet panel
 
-**Can launch now?**: per role, can it launch, else why and when. **Accounts** is one table with one chip per account, first that applies: Disabled, No role, Spent, Launch failing (failed smoke test, role hold, or a start failure within the hour), Unavailable, Working, Idle; times are local with a countdown (`web/agent-status.ts`). **Account details** holds each card; a quota reading over an hour old (`quotaStaleThresholdMs` in `web/pages/fleet.tsx`) is marked **old probe**, a failed smoke test **probe failed**. Settings pages share `web/components/page-layout.tsx`; operator identity ids wait behind **Identifiers**.
+**Can launch now?**: per role, can it launch, else why and when. **Accounts** lists CLI accounts grouped under their provider plan (Claude, Codex, Z.AI, Cursor, Muse, Antigravity). Each plan with reported usage shows a bar per usage window (percent used and reset countdown) or an explicit "usage not reported by <provider>" notice. CLI accounts that share a plan (e.g. `pi-X` and `opencode-X` sharing a Z.AI coding-plan key) group together and share one plan budget. Each account row shows its status chip, first that applies: Disabled, No role, Spent, Launch failing (failed smoke test, role hold, or a start failure within the hour), Unavailable, Working, Idle; times are local with a countdown (`web/agent-status.ts`). **Account details** holds each card with capability, login, and probe freshness; a quota reading over an hour old (`quotaStaleThresholdMs` in `web/pages/fleet.tsx`) is marked **old probe**, a failed smoke test **probe failed**. Settings pages share `web/components/page-layout.tsx`; operator identity ids wait behind **Identifiers**.
 
 ## The status sentence
 
