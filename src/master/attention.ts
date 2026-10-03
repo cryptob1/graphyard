@@ -164,14 +164,13 @@ export function fleetStatus(fleet: FleetView | null | undefined) {
     roles: account.roles.map(entry => `${entry.role} (${entry.preference} of ${entry.of})`), liveSessions: account.liveSessions.map(session => ({ role: session.role, work: session.work, since: session.since })),
     loggedIn: account.loggedIn, quota: account.quota, usage: account.usage, resetsAt: account.resetsAt, observedAt: account.observedAt, eligible: account.eligible, ineligible: account.ineligible,
     smoke: account.smoke ? { result: account.smoke.result, at: account.smoke.at, reason: account.smoke.reason } : null, heldFrom: account.held ?? [] }));
-  // Two lines the registry view lists are no configuration the installation lacks (GY-1086): a role
-  // at its concurrency limit is the fleet working at the limit the registry sets, a wait for a slot
-  // (GY-190) that the concurrency attention names when it starves work; and the master role is
-  // opt-in (GY-898), never proposed, so the loop itself records its absence as a wait, not a fault.
-  // Both stay on the fleet view and its roles.
-  const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.filter(text => !roleAtCapacity(text) && !masterRoleUnnamed(text)).map(text => ({ subject: 'fleet', text,
+  // A role at its limit is raised only for its sessions that carry no work (GY-950): a capacity fault, not configuration.
+  // A role at its limit with all sessions on work is no fault (GY-1086), nor is the opt-in master role when unconfigured.
+  const fullRoleOnWork = (text: string) => /^role \S+ is at its concurrency limit\b/.test(text) && !/carrying no work/.test(text);
+  const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.filter(text => !fullRoleOnWork(text) && !masterRoleUnnamed(text)).map(text => /^role \S+ is at its concurrency limit\b/.test(text) ? { subject: 'fleet', text,
+    ...agentOwner('master', 'graphyard master registry session end ID --reason REASON for each session it names, once its runtime has nothing to do'), ...classified('fleet-capacity') } : { subject: 'fleet', text,
     ...agentOwner('master', /is not configured/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON' : /serves no role/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --reason REASON, or graphyard master registry account remove NAME --reason REASON'
-      : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)'), ...classified('fleet') })) : [];
+      : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)'), ...classified('fleet') }) : [];
   return { attentionItems, fleet: { configured: fleet.configured, revision: fleet.revision, updatedAt: fleet.updatedAt, host: fleet.host, runtimes: fleet.runtimes.map(runtime => runtime.name), accounts, roles: fleet.roles,
     ineligible: accounts.filter(account => !account.eligible).map(account => ({ account: account.account, reason: account.ineligible })), recentSelections: fleet.sessions.slice(-10).map(session => ({ at: session.selectedAt, role: session.role, account: session.account, work: session.work, reason: session.reason, endedAt: session.endedAt })),
     refusals: fleet.refusals.slice(-5), next: fleet.configured ? null : 'No role is configured in the agent registry, so sessions launch from local profiles; run graphyard master registry propose --apply' } };
