@@ -350,6 +350,22 @@ export interface ExecutorRestartResult {
 export const executorRestartTimeoutMs = 120_000;
 export const executorClaimWaitMs = 30_000;
 
+/** The executors on this host holding a claimed action: the control plane's live claims, then each record's own in-flight note. */
+async function heldClaims(config: ExecutorFleetConfig, deps: RestartExecutorsDeps, local: ExecutorRegistration[], alive: (pid: number) => boolean): Promise<ExecutorRestartResult['held']> {
+  const queue = await deps.actions();
+  const liveClaims = (queue.queue?.executors ?? []).filter(entry => entry.host === config.hostId);
+  const rows = queue.actions ?? [];
+  const held: ExecutorRestartResult['held'] = liveClaims.map(entry => {
+    const row = rows.find(candidate => candidate.state === 'claimed' && candidate.claim?.executor === entry.executor && candidate.claim.host === entry.host);
+    return { name: entry.executor, host: entry.host, key: row?.key ?? null, kind: row?.kind ?? null, id: row?.id ?? null, since: row?.claim?.claimedAt ?? null };
+  });
+  for (const registration of local) {
+    if (registration.inFlight && registration.state !== 'stopped' && !held.some(entry => entry.name === registration.name) && alive(registration.pid))
+      held.push({ name: registration.name, host: registration.host, key: registration.inFlight.key, kind: registration.inFlight.kind, id: registration.inFlight.id, since: registration.inFlight.since });
+  }
+  return held;
+}
+
 /**
  * `graphyard master executors restart`: stop and start every executor registered on this host
  * through its supervisor, and wait for each to register again on the coordinator's release.
@@ -373,7 +389,7 @@ export async function restartExecutors(config: ExecutorFleetConfig, deps: Restar
   const timeoutMs = deps.timeoutMs ?? executorRestartTimeoutMs, claimWaitMs = Math.min(deps.claimWaitMs ?? executorClaimWaitMs, timeoutMs);
 
   // The fence first: from here no executor on this host starts a claim, and one already announced is waited for.
-  const raised = await raiseRestartFence(config, { now: now(), expiresInMs: claimWaitMs + timeoutMs + 60_000, alive });
+  const raised = await raiseRestartFence(config, { now: now(), expiresInMs: claimWaitMs + 2 * timeoutMs + 60_000, alive });
   if ('standing' in raised) return empty('refused', `Restart refused: another restart on ${config.hostId} (pid ${raised.standing.pid}, since ${raised.standing.at}) holds the fence at ${restartFenceFile(config)}; wait for it to finish`);
   try {
     let local: ExecutorRegistration[];
@@ -389,21 +405,20 @@ export async function restartExecutors(config: ExecutorFleetConfig, deps: Restar
     }
 
     // The refusal reads the control plane: a claim is a lease the queue holds, and this host's
-    // records only say what each executor believed when it last wrote.
-    const queue = await deps.actions();
-    const liveClaims = (queue.queue?.executors ?? []).filter(entry => entry.host === config.hostId);
-    const rows = queue.actions ?? [];
-    const held: ExecutorRestartResult['held'] = liveClaims.map(entry => {
-      const row = rows.find(candidate => candidate.state === 'claimed' && candidate.claim?.executor === entry.executor && candidate.claim.host === entry.host);
-      return { name: entry.executor, host: entry.host, key: row?.key ?? null, kind: row?.kind ?? null, id: row?.id ?? null, since: row?.claim?.claimedAt ?? null };
-    });
-    for (const registration of local) {
-      if (registration.inFlight && registration.state !== 'stopped' && !held.some(entry => entry.name === registration.name) && (alive(registration.pid)))
-        held.push({ name: registration.name, host: registration.host, key: registration.inFlight.key, kind: registration.inFlight.kind, id: registration.inFlight.id, since: registration.inFlight.since });
-    }
-    if (held.length) {
-      const named = held.map(entry => `${entry.name} holds ${entry.kind ?? 'an action'}${entry.key ? ` for ${entry.key}` : ''}${entry.since ? ` since ${entry.since}` : ''}`).join('; ');
-      return { ...empty('refused', `Restart refused while an executor on ${config.hostId} holds a claimed action: ${named}. Wait for it to settle, then run ${executorRestartCommand} again`), held };
+    // records only say what each executor believed when it last wrote. A held claim is waited
+    // for, inside the fence and within the restart's own timeout (GY-916): the fence keeps any new
+    // claim from starting, so a busy fleet's claims settle and the restart goes ahead, and only a
+    // claim still held at the deadline refuses it.
+    const heldDeadline = now() + timeoutMs;
+    for (;;) {
+      const held = await heldClaims(config, deps, local, alive);
+      if (!held.length) break;
+      if (now() >= heldDeadline) {
+        const named = held.map(entry => `${entry.name} holds ${entry.kind ?? 'an action'}${entry.key ? ` for ${entry.key}` : ''}${entry.since ? ` since ${entry.since}` : ''}`).join('; ');
+        return { ...empty('refused', `Restart refused while an executor on ${config.hostId} holds a claimed action: ${named}. Wait for it to settle, then run ${executorRestartCommand} again`), held };
+      }
+      await sleep(deps.pollMs ?? 1000);
+      local = (await readExecutorRegistrations(config)).filter(registration => registration.host === config.hostId);
     }
 
     const restarted: RestartedExecutor[] = [], unsupervised: ExecutorRestartResult['unsupervised'] = [], forgotten: string[] = [];

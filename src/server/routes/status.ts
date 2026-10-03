@@ -5,7 +5,7 @@ import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
-import { describeUnserved, executorRegistry, executorReport } from '../../model/executor-presence.js';
+import { describeUnserved, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopRegistry, reportedLoopMerger } from '../../model/executor-presence.js';
 import { installationSettingsUrl } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
@@ -59,7 +59,8 @@ export const statusRoutes = defineRoutes('status', [
         openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length };
       // The fleet as the dashboard needs it (GY-105): how many executors are alive, and each kind
       // of pending action none of them serves, with its wait and what to start.
-      const executors = executorReport(visibleWork, executorRegistry(engine), observedAt);
+      // A pending merge row waits on a loop that merges, never on an executor (GY-916).
+      const executors = executorReport(visibleWork, executorRegistry(engine), observedAt, undefined, await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt));
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
         executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, starvedJobs, jobs, githubBudget, webhooks,
         // The installation facts the master and doctor raise as attention: capacity variables
@@ -176,6 +177,9 @@ export const statusRoutes = defineRoutes('status', [
       // export; no product reader asks for it, as it grows with the ledger.
       const requested = url.searchParams.get('view') ?? req.headers[coordinationViewHeader.toLowerCase()];
       const view = z.enum(['bounded', 'full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'bounded');
+      // The loop's own read is its presence (GY-916): it merges while it lives, however long nothing is mergeable.
+      const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
+      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval }, new Date());
       // Bounded catch-up: items that predate the per-item timeline gain one from their own
       // ledger before the snapshot every speed report is derived from is read. The ledger is read
       // outside the coordination lock, one run at a time; it converges and then costs one small

@@ -37,7 +37,7 @@ import { withReviewerDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
-import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
+import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
@@ -764,10 +764,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       restartSelf: async () => {
         const unit = detectLoopSupervisorUnit();
         if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
-        // --no-block queues the restart and returns: the hand-off is systemd's stop signal, which
-        // the loop takes during its wait, not a call this process must survive.
-        await run('systemctl', ['--user', '--no-block', 'restart', unit]);
+        // --no-block queues the restart; systemd's stop then ends this wait, and reaches this process too (upgrade.ts restartEndedBySupervisorStop).
+        await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
       },
+      alignUnit: () => alignRunningLoopUnit(root, current()),
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },

@@ -202,8 +202,8 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     fake.diffPaths = ['src/daemon/run.ts'];
     const refusedFleet = recording(fake, checkout, 'refuse');
     const blocked = await performSelfUpgrade(master, busy, refusedFleet.deps());
-    assert.equal(blocked.outcome, 'failed');
-    assert.match(blocked.outcome === 'failed' ? blocked.reason : '', /the executors were not restarted: .*exec-1 holds merge for GY-7/);
+    assert.equal(blocked.outcome, 'pending', 'a refused fleet restart is owed, not failed (GY-916)');
+    assert.match(blocked.outcome === 'pending' ? blocked.reason : '', /the executors were not restarted: .*exec-1 holds merge for GY-7/);
     assert.equal(fake.checkoutTo, busyTip, 'the checkout moved before the refused restart');
     assert.deepEqual(busy.upgrade.pending, { from: newer, to: busyTip, code: true }, 'the restarts stay owed on the cursor');
     assert.equal(busy.upgrade.alignedRelease, null, 'and the release is not marked aligned');
@@ -223,7 +223,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     fake.nextTip = owedTip;
     owing.deployment = verified(owedTip);
     fake.diffPaths = ['src/daemon/run.ts'];
-    assert.equal((await performSelfUpgrade(master, owing, recording(fake, checkout, 'refuse').deps())).outcome, 'failed');
+    assert.equal((await performSelfUpgrade(master, owing, recording(fake, checkout, 'refuse').deps())).outcome, 'pending');
     assert.equal(owing.upgrade.pending?.code, true);
     fake.nextTip = owedDocsTip;
     owing.deployment = verified(owedDocsTip);

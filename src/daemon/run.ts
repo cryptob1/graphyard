@@ -87,11 +87,23 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   return noted;
 }
 
-/** A watchdog window too short for the configured interval is recorded once, not obeyed silently. */
+/**
+ * A watchdog window too short for the configured interval is recorded once, not obeyed silently:
+ * once per process start at most, and not again while the same refusal stands on the cursor.
+ * Once the installed unit's window covers the interval — the alignment step rewrites a drifted
+ * unit before it re-executes the loop (GY-916) — the standing refusal is cleared, so a mismatch is
+ * converged rather than faulted at every start.
+ */
 export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof watchdogPlan>, at: string, persist: DaemonEffects['persist']) {
-  if (!plan.refusal) return [];
+  if (!plan.refusal) {
+    if (!plan.supervised || plan.windowMs === null) return [];
+    const cleared = Object.entries(state.actions).filter(([key, action]) => key.startsWith('escalation:watchdog:') && action.state === 'failed')
+      .map(([key, action]) => storeAction(state, key, { ...action, state: 'done', detail: `Cleared: the supervisor's watchdog window is now ${Math.round(plan.windowMs! / 1000)}s, longer than two cycle intervals; it was: ${action.detail}`, cycle: state.cycle, at }, 'action:config'));
+    if (cleared.length) await persist(state);
+    return cleared;
+  }
   const key = `escalation:watchdog:${plan.windowMs}`;
-  if (state.actions[key]) return [];
+  if (state.actions[key]?.state === 'failed') return [];
   const entry = storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at }, 'action:config');
   await persist(state);
   return [entry];
