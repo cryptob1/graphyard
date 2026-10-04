@@ -27,7 +27,7 @@ A profile's `accounts` lists [agent environments](onboarding.md#agent-environmen
 
 A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise an attention item until a start.
 
-A runtime's limit notice (never agent text), even while auto-retrying, makes the loop commit worker changes as unpushed `WIP:`, record `capacity.exhausted`, relaunch on the next account or await reset.
+On a runtime's limit notice (never agent text), even mid-retry, the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on another account or awaits reset.
 
 ## The loop's own master session
 
