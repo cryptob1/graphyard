@@ -64,10 +64,22 @@ test('manual:review-followups-triaged GY-1141.2: migrateToParents ends lapsed le
     origin: { reviewFollowUps: { parent: 'GY-100', findings: [{ path: 'src/a.ts', text: 'f1' }] } },
   } as unknown as Work;
 
+  // Answers the bounded locked read (src/store/locked-read.ts, GY-1027): the listing, the cluster
+  // id, the open items' projections and the whole documents its focus names.
+  const items = [parent, followUp];
+  const cluster = `gy-1141-mock:${Math.random()}`;
   const mockDb = {
-    query: async (sql: string) => {
+    query: async (sql: string, values: unknown[] = []) => {
       if (sql.includes('FROM events WHERE kind=$1')) return { rows: [] };
-      if (sql.includes('SELECT document FROM work_items')) return { rows: [{ document: parent }, { document: followUp }] };
+      if (sql.includes('AS focus FROM work_items')) {
+        const named = values[0] as string[];
+        return { rows: items.map((work, index) => ({ number: index + 1, id: work.id, wx: '1', ix: '1', settled: false, focus: named.includes(work.id) || named.includes(work.key) })) };
+      }
+      if (sql.includes('AS cluster')) return { rows: [{ cluster }] };
+      if (sql.includes('x.document::text AS text')) {
+        return { rows: (values[0] as number[]).map(number => ({ id: items[number - 1].id, wx: '1', text: JSON.stringify(items[number - 1]) })) };
+      }
+      if (sql.includes('SELECT number, document FROM work_items')) return { rows: (values[0] as number[]).map(number => ({ number, document: items[number - 1] })) };
       return { rows: [] };
     },
   };
