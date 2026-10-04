@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
@@ -212,7 +212,8 @@ test('unit:host-seal-key-recovers-interrupted-write — a sealing key a killed f
   const home = await temporaryDirectory('seal-recovery');
   await mkdir(join(home, 'seal'), { recursive: true });
   // The private key file was created, then the process died before every byte or the public half was written.
-  await writeFile(join(home, 'seal', 'cut-host.pem'), '-----BEGIN PRIVATE KEY-----\nMIIG', { mode: 0o600 });
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  await writeFile(join(home, 'seal', 'cut-host.pem'), privateKey.slice(0, privateKey.indexOf('\n') + 5), { mode: 0o600 });
   const replaced = await hostSealKey('cut-host', home);
   assert.match(replaced, /^-----BEGIN PUBLIC KEY-----/);
   const secret = `sealed-${randomUUID()}`;
