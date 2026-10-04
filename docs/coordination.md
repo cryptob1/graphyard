@@ -13,7 +13,7 @@ A criterion states an outcome and its proofs:
 
 ## Revise requirements explicitly
 
-`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first (a plannedFiles-only widening excepted), as prior evidence, review and authorization lapse.
+`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the document against `expectedPolicyRevision`; stop the worker first, plannedFiles-only widenings excepted: prior evidence, review and authorization lapse.
 
 ## Dispatch optimistically, smallest scope first
 
@@ -31,7 +31,7 @@ The gate is the reviewer's approval of the exact head plus required CI; threads 
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass, as do `tests/helpers/timing-baseline.json` lines of tests the change touches; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items; carried files (another item's unlanded commits) are no ejection (GY-871). A worker cannot widen `plannedFiles`; a scope request or audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
+`plannedFiles` also bounds what a candidate may change. At `complete`, on every new head and at landing, files inside scope and new files pass, as do `tests/helpers/timing-baseline.json` lines of top-level tests (`tests/*.test.ts`) the change touches; every other file must match the bound base byte-for-byte. A deletion, revert or rewrite is refused, naming the files and their shipping items; carried files (another item's unlanded commits) are no ejection (GY-871). A worker cannot widen `plannedFiles`; a scope request or audited revision can. Asks over 20 files in one directory, or past the 100-entry cap, become their deepest common directory (`tests/`), naming the files covered; pending asks merge into one decision.
 
 One landability verdict, `evaluateLandability` (`src/model/landability.ts`), is the single authority on whether a candidate can land: the build and acceptance gates are its refusals, and the merge queue ejects an entry only for a reason it gives. It is computed from live facts keyed by candidate SHA and policy revision, never stored; each refusal records its version and inputs on the gate and the ejection. A landability ejection is not sticky: once the verdict is landable, the same head re-enters the queue. The control plane publishes the verdict to GitHub as one check run, `graphyard/landable`, on every candidate head (GY-887): `success` when landable, `failure` with every refusal reason as its summary otherwise, recomputed on each observation (new head, check result, review, evidence, policy revision) and rewritten only when it changes. Merge-group, repair-lane and revert heads carry it too. Required by protection, it is still never an input to the verdict it reports.
 
@@ -51,8 +51,8 @@ The full suite is CI's gate, not the worker's (GY-853). Every worker request say
 
 ## Ship in under thirty minutes
 
-The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never weaker gates.
+The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance; never weaker gates.
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
+`graphyard diagnose GY-N` explains the refusing gate and what else holds it; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.

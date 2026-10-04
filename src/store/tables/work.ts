@@ -9,6 +9,10 @@ export const workItems = defineTable({
   id uuid PRIMARY KEY, number bigserial UNIQUE, document jsonb NOT NULL
 );`,
 });
+// The retro artefacts' payload-id index (events_retro_id) is not built in this DDL: a plain build
+// inside the migration's transaction would hold writes to the whole ledger while it scans it, and
+// retro-synthesis.ts builds it CONCURRENTLY once the server has started (GY-1048). This note stays
+// outside the DDL string because migrationDigests hashes the DDL verbatim (store/schema.ts).
 export const events = defineTable({
   name: 'events', orderBy: 'seq', serial: 'seq',
   ddl: `CREATE TABLE IF NOT EXISTS events (
