@@ -21,6 +21,8 @@ Every worker, reviewer and producer Graphyard launches starts with a project-mem
 - Recurring fault classes with their sanctioned remedies.
 - Merges to main after the session's base, with their files (the last 24 hours when the base is not a remembered merge).
 
+An entry that would overrun the budget is skipped, not the end of its section: later, shorter entries are still added. An oversized decision is cut to the words that fit and marked `…`; it is shown when it is the first decision or at least five words remain.
+
 The loop updates it only from decisions it sees applied (never a refusal), answered human requests, recurring fault classes and merges — never from an agent's claim — and keeps it in its cursor and `.graphyard/project-memory.json`. `graphyard master status` reports it as `projectMemory`, and the Workers page shows it.
 
 ## Risk lanes
