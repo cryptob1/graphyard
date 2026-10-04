@@ -3185,6 +3185,22 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     requireCurrent(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
     if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
   };
+  // The merge gate's success writes — the passing check and the request that GitHub merge the head —
+  // are bound to what they act on, not to the item's revision (GY-1112): the job still holds the
+  // item, which still has the same candidate, policy and all-gates authorization, every gate still
+  // passes, and the observation is fresh. Any other save (an executor claiming one of the item's
+  // action rows, a session update) changed nothing the write depends on, and refusing over it kept
+  // the blocked-auto-merge probe from ever reaching GitHub on consecutive observations.
+  const mergeGuard = (snapshot: Work) => async () => {
+    const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
+      WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
+    const row = result.rows[0], current = row?.document as Work | undefined;
+    const bound = (a: Work, b: Work) => a.candidate!.sha === b.candidate?.sha && a.candidate!.baseSha === b.candidate?.baseSha && a.candidate!.pr === b.candidate?.pr
+      && a.policyRevision === b.policyRevision && a.mergeAuthorization?.sha === b.mergeAuthorization?.sha && a.mergeAuthorization?.baseSha === b.mergeAuthorization?.baseSha
+      && a.mergeAuthorization?.policyRevision === b.mergeAuthorization?.policyRevision;
+    requireCurrent(current && bound(snapshot, current) && mergeAuthorized(current), 'Candidate, policy or merge authorization changed before publication; retry');
+    requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
+  };
   // A feature whose permission the last preflight found missing is not attempted: the job is
   // held with the operator-facing reason instead of retrying into a 403. Adapters without a
   // preflight (test doubles) hold nothing.
@@ -3396,7 +3412,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           if (typeof github.mergeQueueState === 'function') {
             // The check and GitHub's queue move together (GY-258): an authorized, requested head is
             // published as passed and handed to GitHub to merge; anything else is failed and taken out.
-            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), mergeAuthorized(work) ? mergeGuard(work) : guard(work, work.gates.every(g => g.passed) && !work.violations.length));
             if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
           }
           else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
