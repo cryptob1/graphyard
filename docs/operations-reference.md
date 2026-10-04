@@ -19,7 +19,7 @@ On the worker, `graphyard master settle-containment GY-N "reason"` verifies noth
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643: 55% own-change, 33% conflicts.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643: 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
 
 ## Retro synthesis
 
@@ -84,9 +84,9 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 
 ### Host memory
 
-Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`), naming waits; CI, shells unbounded.
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`), naming waits; CI unbounded.
 
-Below max(10% RAM, 4 GB) available, launches defer (`Launches deferred`, `escalation:dispatch:memory`; a `memory` item (class `resources`) naming top consumers; one `memory-pressure` fault per dip) until 1 GB above; running ones continue.
+Below max(10% RAM, 4 GB) available, launches defer (`escalation:dispatch:memory`; a `resources` item `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
 
 ## Bootstrap mode for a self-proving change
 
