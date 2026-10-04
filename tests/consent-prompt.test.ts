@@ -159,12 +159,14 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
 
     // A pane read that fails rules nothing out: an idle runtime whose screen could not be read is
     // still starting and read again, so the dialog behind it is found, never taken as started. The
-    // folder dialog stays detected: it is the safety net for a trust record the runtime ignored.
+    // folder dialog stays detected: it is the safety net for a trust record the runtime ignored, and
+    // fails the launch naming it even for a worker that would be held on any other prompt (GY-1152).
     const flaky = new ConsentPane('claude', folderDialog);
     let unread = 3;
     const flakyRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read' && unread-- > 0) throw new Error('herdr: pane read failed'); return flaky.run(command, args); };
-    const found = await awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', flakyRun, { ...flaky.bounds(), holdConsent: true });
-    assert.equal(found.state, 'consent'); assert.equal(found.awaiting!.kind, 'folder');
+    await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', flakyRun, { ...flaky.bounds(), holdConsent: true }),
+      (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && /stopped at a workspace-trust prompt/.test(error.message));
+    assert.equal(unread, -1, 'the dialog was found once a read succeeded');
     const blind = new ConsentPane('claude', folderDialog);
     const blindRun = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'read') throw new Error('herdr: pane read failed'); return blind.run(command, args); };
     await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', blindRun, { ...blind.bounds(), holdConsent: true }),
@@ -173,7 +175,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
     // Without a hold the same launch is refused as awaiting consent, carrying the prompt's text.
     const refusedPane = new ConsentPane('claude', folderDialog);
     await assert.rejects(awaitRuntimeStart('w1V:pC1', 'claude', 'GY=/s; claude', refusedPane.run, refusedPane.bounds()),
-      (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && error.screen.startsWith('Do you trust the files in this folder?') && /outside the launcher's consent allow-list: "Do you trust the files in this folder\?/.test(error.message));
+      (error: unknown) => error instanceof SessionStartError && error.startCase === 'awaiting consent' && error.screen.startsWith('Do you trust the files in this folder?') && /workspace-trust prompt in pane w1V:pC1 although its launch records the folder trusted, so the launch failed rather than holding the lease for a human: "Do you trust the files in this folder\?/.test(error.message));
 
     // The worker launch itself: dispatchWork reports the session awaiting consent, not started.
     const { root, token, cleanup } = await installed();
@@ -315,9 +317,8 @@ test('integration:unconsented-session-releases-its-slot — the watch supervisor
     assert.equal(renewals, 3, 'no renewal after the hold outlived its bound');
     assert.equal(renewedAfterRelease, 0);
     assert.deepEqual(reads.every(pane => pane === 'w1V:pC1'), true, 'the supervisor reads its own pane');
-    assert.deepEqual(posted.map(entry => entry.path), ['work/GY-130/blocked', 'work/GY-130/blocked', 'work/GY-130/release']);
-    assert.match(posted[0].body.reason, /^Watch supervisor ended attempt 1: its session never took its request: it waited on a credential consent prompt outside the launcher's allow-list .* — "Sign in with ChatGPT/);
-    assert.equal(posted[1].body.reason, null, 'the cause is recorded, then withdrawn, so no standing blocker holds the freed item');
+    assert.deepEqual(posted.map(entry => entry.path), ['work/GY-130/release'], 'one release carries the cause, so no standing blocker holds the freed item');
+    assert.match(posted[0].body.cause, /^Watch supervisor ended attempt 1: its session never took its request: it waited on a credential consent prompt outside the launcher's allow-list .* — "Sign in with ChatGPT/);
 
     // The lease has ended and the item is dispatchable again, for this profile or another.
     assert.equal(item.lease, null); assert.equal(item.blocker, null);

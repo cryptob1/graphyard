@@ -320,6 +320,65 @@ export const apiSuite = (token: string, fetcher: typeof fetch = fetch): Suite =>
   return { name: 'api', passed: !failures.length, detail: failures.length ? failures.join('; ') : 'created, replayed and listed a work item, and read the board and status, on the UAT deployment' };
 } });
 
+/** The slice of Playwright's chromium the browser suite drives; tests substitute their own. */
+export interface BrowserLauncher { launch(options: { headless: boolean }): Promise<BrowserSession> }
+export interface BrowserSession { newPage(): Promise<BrowserPage>; close(): Promise<void> }
+export interface BrowserPage {
+  on(event: 'pageerror', listener: (error: Error) => void): unknown;
+  on(event: 'response', listener: (response: { url(): string; status(): number }) => void): unknown;
+  goto(url: string, options: { waitUntil: 'load'; timeout: number }): Promise<unknown>;
+  getByLabel(text: string): { fill(value: string): Promise<void> };
+  getByRole(role: 'button' | 'navigation' | 'heading', options: { name: string; exact?: boolean; level?: number }): BrowserLocator;
+}
+export interface BrowserLocator { click(): Promise<void>; waitFor(options: { state: 'visible'; timeout: number }): Promise<void>; getByRole: BrowserPage['getByRole'] }
+
+/**
+ * The scenario suite that drives the UAT deployment in a real browser, the way an operator meets
+ * it: it loads the dashboard UAT serves, signs in with the UAT principal's token, waits for the
+ * control plane to verify it and render the primary navigation, and opens the Work view. Any
+ * uncaught page error, or any answer of 500 or above from the UAT origin, fails it, as does a
+ * step that never renders. The runner's own checkout serves nothing here: every page, script and
+ * API call comes from the UAT deployment.
+ */
+export const browserSuite = (token: string, launcher?: BrowserLauncher, timeoutMs = 60_000): Suite => ({ name: 'browser', run: async url => {
+  const failures: string[] = [];
+  const chromium = launcher ?? (await import('@playwright/test')).chromium as unknown as BrowserLauncher;
+  const browser = await chromium.launch({ headless: true });
+  const origin = new URL(url).origin;
+  try {
+    const page = await browser.newPage();
+    page.on('pageerror', error => failures.push(`page error: ${error.message}`));
+    page.on('response', response => { if (response.status() >= 500 && response.url().startsWith(origin)) failures.push(`${new URL(response.url()).pathname} answered ${response.status()}`); });
+    let step = `load ${url}`;
+    try {
+      await page.goto(url, { waitUntil: 'load', timeout: timeoutMs });
+      step = 'sign in with the UAT token';
+      await page.getByLabel('Access token').fill(token);
+      await page.getByRole('button', { name: 'Open control plane' }).click();
+      step = 'render the primary navigation after sign-in';
+      const navigation = page.getByRole('navigation', { name: 'Primary' });
+      await navigation.waitFor({ state: 'visible', timeout: timeoutMs });
+      step = 'open the Work view';
+      await navigation.getByRole('button', { name: 'Work', exact: true }).click();
+      await page.getByRole('heading', { name: 'Work', exact: true, level: 1 }).waitFor({ state: 'visible', timeout: timeoutMs });
+    } catch (error) { failures.unshift(`could not ${step}: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`); }
+  } finally { await browser.close(); }
+  return { name: 'browser', passed: !failures.length, detail: failures.length ? failures.join('; ') : 'loaded the dashboard, signed in and opened the Work view in a browser on the UAT deployment' };
+} });
+
+/**
+ * Run the browser suite as a `release validate --suite` command: `GRAPHYARD_UAT_URL` is the
+ * deployment the validation set, `GRAPHYARD_UAT_TOKEN` the UAT principal the api suite also uses.
+ */
+export async function runBrowserSuite(env: NodeJS.ProcessEnv = process.env) {
+  const url = env.GRAPHYARD_UAT_URL, token = env.GRAPHYARD_UAT_TOKEN;
+  if (!url || !token) throw new Error('The browser suite needs GRAPHYARD_UAT_URL and GRAPHYARD_UAT_TOKEN');
+  const result = await browserSuite(token).run(url, null as never);
+  console.log(result.detail);
+  if (!result.passed) process.exitCode = 1;
+  return result;
+}
+
 export async function readServed(url: string, fetcher: typeof fetch = fetch) {
   try { const response = await fetcher(new URL('/healthz', url)); return response.ok ? servedRevision(await response.json()) : null; } catch { return null; }
 }
@@ -350,11 +409,42 @@ export async function validate(candidate: ReleaseCandidate, url: string, suites:
   return assessUat(candidate, { deployedSha: candidate.sha, suites: results, now: clock() });
 }
 
-/** Deploy a candidate to UAT: `release/uat` moves to its exact SHA. */
-export function deployToUat(git: Git, id: string, base: string) {
+/**
+ * How long after its cut a candidate UAT serves without a verdict counts as still under validation:
+ * longer than the workflow's cut, long-suite and uat jobs together (10 + 45 + 120 minutes), so a
+ * validation that crashed without recording blocks the next deploy for at most this long.
+ */
+export const uatValidationWindowMs = 4 * 3_600_000;
+
+/**
+ * Pure: whether `release/uat` may move to a candidate, given the commit it holds now. UAT serving
+ * another candidate that has no verdict yet, cut within the validation window, is a validation in
+ * progress: moving UAT under it would fail that validation and file a spurious follow-up, so the
+ * deploy is refused. Otherwise the push is leased on the observed tip, so a concurrent deploy that
+ * moved the branch in between is refused rather than overwritten.
+ */
+export function assessUatDeploy(candidate: ReleaseCandidate, ledger: Ledger, uatTip: string | null, now: Date) {
+  if (!uatTip || uatTip === candidate.sha) return { deploy: true as const, expected: uatTip };
+  const there = ledger.candidates.filter(entry => entry.sha === uatTip);
+  const pending = there.some(entry => ledger.uat.some(record => record.id === entry.id)) ? undefined
+    : there.find(entry => now.getTime() - Date.parse(entry.cutAt) < uatValidationWindowMs);
+  if (pending) return { deploy: false as const, refusal: `UAT serves candidate ${pending.id} (${pending.sha}), whose validation has no verdict yet; moving release/uat now would fail it. Wait for its verdict, or until ${new Date(Date.parse(pending.cutAt) + uatValidationWindowMs).toISOString()} if that validation was abandoned` };
+  return { deploy: true as const, expected: uatTip };
+}
+
+const remoteTip = (git: Git, branch: string) => git(['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s/)[0] || null;
+
+/**
+ * Deploy a candidate to UAT: `release/uat` moves to its exact SHA, unless another candidate's
+ * validation is still running there, and only from the tip it was observed at.
+ */
+export function deployToUat(git: Git, id: string, base: string, now = new Date()) {
   syncLedger(git, base);
-  const candidate = findCandidate(readLedger(git), id);
-  deployBranch(git, uatBranch, candidate.sha);
+  const ledger = readLedger(git);
+  const candidate = findCandidate(ledger, id);
+  const assessment = assessUatDeploy(candidate, ledger, remoteTip(git, uatBranch), now);
+  if (!assessment.deploy) throw new Error(assessment.refusal);
+  deployBranch(git, uatBranch, candidate.sha, assessment.expected);
   return { candidate: candidate.id, sha: candidate.sha, branch: uatBranch };
 }
 

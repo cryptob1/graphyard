@@ -1,12 +1,13 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
 import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchSort } from '../coordination.js';
+import { blockerView } from '../model/blocker-class.js';
 import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { type Work, carriedBindings, pendingReleases, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, ejectedTipRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
+import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, ejectedTipRestore, restoredApproval, unpublishableEntry, refusedReconciliation, blockedPastProbe, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
@@ -244,7 +245,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.filter(entry => entry.sequence > placement.sequence).map(entry => entry.key) } } : {}) } : null;
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
     const queueRefusal = work.observation?.merged ? null : work.observation?.githubQueue?.refused ?? null;
-    const mergeRefusal = queueRefusal && queueRefusal.head === work.candidate?.sha ? queueRefusal : null;
+    // A refusal on a head BLOCKED with every gate passing past its bound is named once, by master
+    // status's merge-blocked item with GitHub's answer in it (GY-1112), not a second time here.
+    const pastProbe = work.observation?.githubQueue && work.candidate ? blockedPastProbe(work, work.observation.githubQueue, now) : null;
+    const mergeRefusal = queueRefusal && queueRefusal.head === work.candidate?.sha && !pastProbe ? queueRefusal : null;
     const [attention, cause]: [string | null, WorkAttentionCause | null] = containmentAttention ? containmentAttention
       : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
       : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
@@ -294,6 +298,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
       // an approval GitHub dismissed for a merge-base change that the control plane restored.
       contamination, restoredApproval: approvalRestored,
+      // The standing blocker's class, the loop's last probe of it and when it runs next (GY-1008).
+      blocker: blockerView(work),
       scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now),

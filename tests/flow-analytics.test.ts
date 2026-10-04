@@ -496,12 +496,11 @@ test('integration:flow-analytics-edge-cases', async () => {
 test('integration:flow-analytics-operations', async () => {
   const slice = 'gy35-ops';
   const now = Date.now();
-  // A blocker is reported from the live attempt: `submit` ends the lease it needs.
+  // A blocker is reported from the live attempt, and recording it ends that attempt (GY-1008).
   let blocked = await released(slice);
   blocked = await engine.execute(worker, 'claim', blocked.id, {}, randomUUID());
   blocked = await engine.execute(worker, 'workspace', blocked.id, { epoch: blocked.epoch, host: 'machine-a', path: `/tmp/${blocked.id}`, branch: `graphyard/${blocked.key.toLowerCase()}` }, randomUUID());
-  await engine.execute(worker, 'blocked', blocked.id, { epoch: blocked.epoch, reason: 'Waiting on an external provider decision' }, randomUUID());
-  blocked = await engine.execute(worker, 'submit', blocked.id, { epoch: blocked.epoch, pr: ++pullRequest }, randomUUID());
+  blocked = await engine.execute(worker, 'blocked', blocked.id, { epoch: blocked.epoch, reason: 'Waiting on an external provider decision' }, randomUUID());
   const root = await released(slice);
   const middle = await released(slice, { dependencies: [root.id] });
   const leaf = await released(slice, { dependencies: [middle.id] });
@@ -521,8 +520,7 @@ test('integration:flow-analytics-operations', async () => {
   let longBlocked = await released(slice);
   longBlocked = await engine.execute(second, 'claim', longBlocked.id, {}, randomUUID());
   longBlocked = await engine.execute(second, 'workspace', longBlocked.id, { epoch: longBlocked.epoch, host: 'machine-a', path: `/tmp/${longBlocked.id}`, branch: `graphyard/${longBlocked.key.toLowerCase()}` }, randomUUID());
-  await engine.execute(second, 'blocked', longBlocked.id, { epoch: longBlocked.epoch, reason: longReason }, randomUUID());
-  longBlocked = await engine.execute(second, 'submit', longBlocked.id, { epoch: longBlocked.epoch, pr: ++pullRequest }, randomUUID());
+  longBlocked = await engine.execute(second, 'blocked', longBlocked.id, { epoch: longBlocked.epoch, reason: longReason }, randomUUID());
 
   const { report, dataset } = await analyse({ slice });
   const operations = report.operations;
