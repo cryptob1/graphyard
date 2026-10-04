@@ -62,7 +62,7 @@ Immutable, per-cycle and webhook-driven reads: [not repeated](protocol/github-we
 
 ### What a pause means for gates
 
-A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
+A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old. A merge stalled only on observation freshness is observed, not reworked or ejected ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
@@ -80,7 +80,7 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
 - **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a row a delta extends, an item's newest save, a delivery event or the revision a delivery cites, a row of an item merged but not done, or a row the flow projection has not read. Each batch appends a `ledger.compacted` event with counts per kind. Postgres reuses the space; only `VACUUM FULL` returns it to the volume.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a delta-extended row, an item's newest save, a delivery event or cited revision, an uncompleted merged item's row, or an unread flow-projection row. Each batch appends a `ledger.compacted` event with counts per kind. Only `VACUUM FULL` returns space to the volume.
 
 ## Bootstrap mode for a self-proving change
 
@@ -120,7 +120,7 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) share one pace per token. Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, review requests 15+ min stale, never-observed, due, waits, sessions. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
-Reconcile reads live items once per pass, locks only its batch, skips writer-held rows, ignores lease renewals. Contended batches rerun twice at most, halved, then defer; deferrals and ticks over 5 s warn. One tick per server, shared by resyncs, uses one pool connection.
+Reconcile opens on [cached stand-ins](operations.md#safety-facts-that-never-change), reads each live item whole once per pass, unlocked, and row-locks only its batch, skipping writer-held rows and ignoring lease renewals. Contended batches rerun twice at most, halved, then defer a tick; deferrals and >5 s ticks warn. One tick per server, shared by resyncs, uses one pool connection.
 
 ### Concurrent reconciliation
 

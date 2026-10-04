@@ -23,10 +23,11 @@ import { blockedFeatures, controlPlanePermissions, describeShortfall, permission
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
+import { docsSyncAdoption, outsideDocs, overlappingPaths, type DocsSync } from './model/docs-sync.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
-import { firstObservationOwed, observationBandLag, observationClaim, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
+import { firstObservationOwed, observationBandLag, observationClaim, observationClaimBatch, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -2221,8 +2222,41 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (!conflict) return record({ head: candidate!.sha, trigger: undefined, stale: { head: candidate!.sha, base: branch.tip, policyRevision: work.policyRevision, at: new Date().toISOString(),
       reading: `GitHub reported ${candidate!.sha.slice(0, 12)} conflicting with base branch tip ${branch.tip.slice(0, 12)}, but a test merge of the two is clean; the reading is stale and nothing was refreshed` } });
     // The confirmed conflict is the refresh's whole outcome: the provider merge onto the branch
-    // would be refused the same way, and nothing is written to it.
-    return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
+    // would be refused the same way, and nothing is written to it. The paths both sides changed
+    // are recorded with it (GY-566): the loop sends a conflict confined to docs pages to a
+    // docs-sync session rather than back to a worker.
+    const conflictPaths = overlappingPaths(await this.sideFiles(branch.tip, candidate!.sha), await this.sideFiles(candidate!.sha, branch.tip));
+    return record({ conflictPaths, conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${conflict}. Run graphyard sync ${work.key}, resolve it and push; the approval and proofs bound to ${candidate!.sha.slice(0, 12)} do not survive the resolution.` });
+  }
+  /**
+   * Records a docs-sync head (GY-566) as the outcome of the refresh whose conflict it resolved: the
+   * reviewed head and the base tip the conflict was confirmed on, the merge as GitHub describes it,
+   * and the patch-ids of the change's own diff outside docs/ on each side, from which the engine
+   * decides whether the approval is kept (model/docs-sync.ts `docsSyncCarry`).
+   */
+  async docsSyncRefresh(work: Work, adoption: NonNullable<ReturnType<typeof docsSyncAdoption>>): Promise<BaseRefresh> {
+    const { from, base, head, to } = adoption;
+    const merge = { ...await this.describeMerge(from.sha, head, from.baseSha, base), conflicts: true };
+    const commit = await this.request(`/commits/${base}`);
+    const docsSync: DocsSync = { paths: adoption.paths, to, reviewed: await this.nonDocsPatchId(from.baseSha, from.sha), synced: await this.nonDocsPatchId(base, head) };
+    return { from, base, baseTree: typeof commit?.commit?.tree?.sha === 'string' ? commit.commit.tree.sha : '', policyRevision: work.policyRevision, at: new Date().toISOString(),
+      head, conflict: null, merge, carry: null, trigger: 'docs sync', docsSync };
+  }
+  /** The paths `head` changed against its merge base with `base`, or null when GitHub could not list them completely. */
+  async sideFiles(base: string, head: string): Promise<string[] | null> {
+    try {
+      const files = (await this.request(`/compare/${base}...${head}`))?.files;
+      if (!Array.isArray(files) || files.length >= compareFileCap) return null;
+      return [...new Set(files.flatMap((file: any) => [file?.filename, file?.previous_filename]).filter((path: unknown): path is string => typeof path === 'string'))];
+    } catch { return null; }
+  }
+  /** The patch-id of `head`'s own change outside docs/ (GY-566); null when GitHub could not list the change completely. */
+  async nonDocsPatchId(base: string, head: string): Promise<string | null> {
+    try {
+      const files = base === head ? [] : (await this.request(`/compare/${base}...${head}`))?.files;
+      if (!Array.isArray(files) || files.length >= compareFileCap) return null;
+      return patchId(files.filter((file: any) => outsideDocs(String(file?.filename ?? '')) || (typeof file?.previous_filename === 'string' && outsideDocs(file.previous_filename))));
+    } catch { return null; }
   }
   /**
    * Whether `head` merges cleanly onto `base`, without writing to any branch a person or a check
@@ -2997,7 +3031,7 @@ const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.
  * missing or older than that is raised as attention naming the head, its lag, and what the
  * workers have actually been achieving.
  */
-export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
+export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null; mergeQueue?: { batchSize?: number; parallelTips?: number } | null } | null | undefined,
   snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
   const throughput = coordinator?.githubBudget?.throughput ?? null;
   const reading = coordinator?.githubBudget ?? null;
@@ -3024,8 +3058,9 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
     .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
   const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
   const headStale = !!head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs);
-  // Lag per band against its bound (GY-1114); a stale head is the item below, not counted twice.
-  const lag = observationBandLag(snapshot.work, now, headStale ? head!.key : null);
+  // Lag per band against its bound (GY-1114); a stale head is the item below, not counted twice. The
+  // merge band spans the queue positions the workers claim with the merge path (GY-1178).
+  const lag = observationBandLag(snapshot.work, now, headStale ? head!.key : null, observationClaimBatch(coordinator?.mergeQueue?.batchSize, coordinator?.mergeQueue?.parallelTips));
   const report = { budget, jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
     p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs, oldestUnobservedSubmission, bands: lag.bands };
   const attention: AttentionItem[] = headStale && head
@@ -3072,7 +3107,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   const all = await engine.store.list();
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
   // A job an observation webhook made due is claimed ahead of all of it by `takeJob` itself (GY-806).
-  const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
+  const band = observationClaimBatch(engine.mergeBatchSize, engine.parallelTips);
   // Review-requested items past half their bound join the protected prefix (GY-1114).
   const plan = observationClaim(all, band, Date.now(), budgetTight(github.budget?.()));
   const job = await engine.store.takeJob(plan.order, plan.headCount);
@@ -3153,6 +3188,11 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       if (idle) { github.recordDeferral(work.id, idle); await engine.store.deferJob(job.work_id, job.token, idle.until, idle.reason, observed); return true; }
       const previous = work.observation ?? null;
       const observation = await github.observe(work, all);
+      // A head pushed over a confirmed conflict by a docs-sync session (GY-566) is recorded as that
+      // refresh's outcome before the observation binds it, so its carry is decided from the reviewed
+      // head the approval was given on.
+      const synced = docsSyncAdoption(work, observation);
+      if (synced) work = await engine.bindBaseRefresh(work.id, work.revision, await github.docsSyncRefresh(work, synced), job.token);
       work = await engine.observe(work.id, work.revision, observation, job.token);
       observed = true;
       // A peer git shows landed while its item records it unlanded is delivered now (GY-744).
@@ -3200,8 +3240,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
               work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
                 const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
                 if (!jobRow) return itemToUpdate;
-                const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-                const cur = all.find(w => w.id === itemToUpdate.id);
+                // Only this item is read under the coordination lock (GY-1027).
+                const cur: Work | undefined = (await db.query('SELECT document FROM work_items WHERE id=$1', [itemToUpdate.id])).rows[0]?.document;
                 if (!cur) return itemToUpdate;
                 const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
                 if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
