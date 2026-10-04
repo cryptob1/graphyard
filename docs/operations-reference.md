@@ -62,7 +62,7 @@ Immutable, per-cycle and webhook-driven reads: [not repeated](protocol/github-we
 
 ### What a pause means for gates
 
-A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old.
+A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old. A merge stalled only on observation freshness is observed, not reworked or ejected ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
@@ -79,8 +79,8 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 ## Storage retention
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
-- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, ≤2,000 rows per phase batch, never a row a delta extends, an item's newest save, a delivery event or its cited revision, an item merged but not done, or one the flow projection has not read; each batch appends `ledger.compacted`. Only `VACUUM FULL` returns space to the volume.
+- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a delta-extended row, an item's newest save, a delivery event or cited revision, an uncompleted merged item's row, or an unread flow-projection row. Each batch appends a `ledger.compacted` event with counts per kind. Only `VACUUM FULL` returns space to the volume.
 
 ### Host memory
 

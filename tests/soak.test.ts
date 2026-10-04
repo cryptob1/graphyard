@@ -26,6 +26,7 @@ import { headlessConfinementWrapper, sessionConfinement } from '../src/master/la
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import type { HostMemoryReading } from '../src/master-resources.js';
+import { staleObservationReason } from '../src/daemon/cycle-delivery.js';
 import { adoptHeadlessRuns } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
@@ -468,10 +469,14 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * produced: `stuck` is the item whose published tip GitHub answers with a head other than the
  * record's, so every guarded merge attempt refuses with one unchanged message, and `lostCarry` is
  * the item whose carried review GitHub stops holding once the tip's carry decision bound it, so the
- * re-post cannot use it.
+ * re-post cannot use it. `starved` stages GY-1099's observation starvation: each named item's
+ * evidence is held until every other gate passes, and from then until GitHub merges it the
+ * observation workers never reach its polled job, so its merge gate refuses only for a stale
+ * observation; only a prioritized wake is claimed. `dropFirst` is the item whose first prioritized
+ * wake is lost too, so the loop must ask again in the next observation window.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -487,7 +492,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless && !options.blockers;
+  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved;
   // The documentation day's world (GY-574): the project keeps the 12,000-word budget and its base
   // sits 15 words under it, within the 3% warning — so the loop's headroom step counts it, and the
   // queue tips whose entries grow the pages are what the day judges.
@@ -1066,7 +1071,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       producerRuns.push({ requestId, state: 'pending', requestedAt: at, closedAt: null, resolution: null });
     }
   };
+  // GY-1099: the starved items' evidence, held until their other gates pass (see `starved` above).
+  const starvedProof = new Map<string, Work>();
   const requestProof: DaemonEffects['requestProof'] = work => {
+    if (options.starved?.items.includes(numberOf(work))) { starvedProof.set(work.id, work); return; }
     pending.push(async () => {
       const current = (await store.list()).find(item => item.id === work.id)!;
       if (!current.candidate || current.candidate.sha !== work.candidate?.sha || current.stage === 'done') return;
@@ -1117,6 +1125,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
   const refuseMerge: DaemonEffects['refuseMerge'] = (work, reason, since) => api(principals.coordinator, 'POST', `work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since });
+  // GY-1099: the prioritized observation a merge refused only for a stale observation is owed, through the resync route as `daemonEffects` wires it.
+  const observeRequests: { key: string; sha: string; at: number }[] = [];
+  const observeCandidate: DaemonEffects['observeCandidate'] = async work => {
+    observeRequests.push({ key: work.key, sha: work.candidate!.sha, at: clock.now() - dayStart });
+    return await api(principals.coordinator, 'POST', `work/${work.id}/resync`, { prioritized: true });
+  };
   // The diagnostician (GY-439), faked: its run answers from the evidence the prompt carries, and
   // its filing and deciding ride the same routes the production wiring uses, as the master's
   // operator-agent identity.
@@ -1139,7 +1153,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge, refuseMerge, docsSync,
+    snapshot, dispatch, requestProof, approver, merge, refuseMerge, docsSync, observeCandidate,
     closeSession: pane => {
       const name = herdr.agents.get(pane)?.name ?? '';
       if ((options.regression?.includes('approvers-left-open') && /approver/.test(name)) || (options.regression?.includes('docs-syncs-left-open') && /docs-sync/.test(name))) return;
@@ -1429,6 +1443,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const stale: { stuckArmedAt: number | null; stuckHead: string | null; stuckReported: boolean; lostAt: number | null; carried: { reviewer: string; reviewId: number; originalSha: string } | null } =
     { stuckArmedAt: null, stuckHead: null, stuckReported: false, lostAt: null, carried: null };
   const releasedScope = new Set<number>();
+  // GY-1099: when each starved item's starvation armed and its evidence landed, the prioritized
+  // wakes the world dropped or let through, and any other open item seen merge-ready but stale.
+  const starvation = { armed: new Map<string, number>(), released: new Set<string>(), evidenced: new Map<string, number>(), dropped: [] as string[], claimed: [] as { key: string; at: number }[], peersStale: [] as string[] };
   const restoreLines: string[] = [];
   // GY-852: the reassigned item's own pane and the pane the reused name came to hold.
   const reassign = { pane: null as string | null, phantom: null as string | null, phantomGone: false };
@@ -1666,6 +1683,25 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       // webhook-woken job that is due before any polled one, and re-observes each within the minute.
       // Only the day that asserts them runs them (`github806`): every other scenario keeps main's pass.
       if (options.github806) for (const delivery of github.completedChecks(now)) webhook.deliveries += (await wakeFromWebhook(store.pool, { all: false, prs: [delivery.pr], shas: [delivery.sha], branches: [] }, true)).length;
+      // GY-1099: the observation workers never reach a starved item's polled job until GitHub has
+      // merged it; a prioritized wake is claimed, except the dropped item's first one.
+      if (options.starved) {
+        const mergedOnGitHub = (id: string) => github.merges.some(entry => entry.key === items.find(item => item.id === id)!.key);
+        const starved = [...starvation.armed.keys()].filter(id => !mergedOnGitHub(id));
+        // Once GitHub has merged it, the workers reach its polled job again, which reads the merge.
+        for (const id of [...starvation.armed.keys()].filter(id => mergedOnGitHub(id) && !starvation.released.has(id))) {
+          await store.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [id]);
+          starvation.released.add(id);
+        }
+        const dropping = items[options.starved.dropFirst - 1];
+        if (starved.includes(dropping.id) && !starvation.dropped.length && (await store.webhookDue()).includes(dropping.id)) {
+          await store.pool.query('UPDATE jobs SET webhook_at=NULL WHERE work_id=$1', [dropping.id]);
+          starvation.dropped.push(`+${Math.round(elapsed / minute)} min ${dropping.key}`);
+        }
+        const prioritized = new Set(await store.webhookDue());
+        for (const id of starved) if (prioritized.has(id)) starvation.claimed.push({ key: items.find(item => item.id === id)!.key, at: elapsed });
+        await store.pool.query(`UPDATE jobs SET available_at=now() + interval '1 day' WHERE work_id = ANY($1::uuid[]) AND NOT (work_id = ANY($2::uuid[]))`, [starved, [...prioritized]]);
+      }
       const dueNow = await due(), woken = (await store.webhookDue()).filter(id => dueNow.has(id));
       let claims = 0;
       for (let guard = 0; guard < 200 && await jobsDue(); guard++) {
@@ -1700,6 +1736,25 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const sha = item.candidate?.sha, refused = (item.gates ?? []).flatMap(gate => gate.passed ? [] : gate.reasons)
           .find(reason => /would revert \d+ files? outside its planned files/.test(reason));
         if (sha && refused && !landingRefusals.some(entry => entry.key === item.key && entry.sha === sha)) landingRefusals.push({ key: item.key, sha, elapsed });
+      }
+      // GY-1099: a starved item is armed once every gate but acceptance and merge passes on a
+      // fresh observation; its evidence lands three minutes later, on an observation by then stale.
+      if (options.starved) for (const item of await store.list()) {
+        if (item.stage === 'done') continue;
+        if (!options.starved.items.includes(numberOf(item))) {
+          const merge = item.gates.find(gate => gate.name === 'merge');
+          if (item.stage === 'merge' && merge?.reasons.includes(staleObservationReason)) starvation.peersStale.push(`+${Math.round(elapsed / minute)} min ${item.key}`);
+          continue;
+        }
+        const held = starvedProof.get(item.id);
+        if (!held || !item.candidate || held.candidate?.sha !== item.candidate.sha) continue;
+        if (!starvation.armed.has(item.id) && item.gates.every(gate => gate.passed || gate.name === 'acceptance' || gate.name === 'merge')) starvation.armed.set(item.id, elapsed);
+        const armedAt = starvation.armed.get(item.id);
+        if (armedAt !== undefined && !starvation.evidenced.has(item.id) && elapsed - armedAt >= 3 * minute) {
+          await engine.execute(principals.producer, 'evidence', item.id, { proof: PROOF, sha: item.candidate.sha, baseSha: item.candidate.baseSha, policyRevision: item.policyRevision, result: 'pass', executed: 4, skipped: 0,
+            exercise: { criterion: 'AC-1', behaviour: `item ${numberOf(item)}'s change`, result: 'fail', executed: 1 } }, id());
+          starvation.evidenced.set(item.id, elapsed);
+        }
       }
       // GY-831: arm the staged faults once, from the record the loop itself produced. The stuck
       // item's fault holds only the published tip it was armed on — a rework round's new head is
@@ -1884,7 +1939,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
-    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
+    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
     wakes, staleMerges, restartLog };
 }
 
@@ -2546,6 +2601,59 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
     `only the staged items were refused: ${JSON.stringify(others)}`);
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 200, `the day runs inside its budget (${seconds.toFixed(1)} s)`);
+});
+
+test('unit:soak-invariants-hold — merges refused only for a stale observation keep their place and are observed, never reworked or ejected: one prioritized request per observation window, stopping once they merge, with no peer starved and every invariant holding', { timeout: 600_000 }, async () => {
+  // GY-1099 in the real loop: three items whose observation workers never reach them once every
+  // other gate passes, so each guarded merge refuses only for a stale observation past the
+  // ten-minute bound. The loop must ask for a prioritized observation of each through the resync
+  // route instead of the GY-831 rework, keep each in place, and ask again only once per
+  // observation window: item four's first prioritized wake is lost, so it is asked for twice.
+  const began = performance.now();
+  const starved = [2, 4, 5], dropFirst = 4;
+  const far = 100 * hour;
+  const { items, final, github, violations, failures, lost, state, observeRequests, starvation, escalations, dayStart } = await simulateDay({ hours: 4, starved: { items: starved, dropFirst },
+    plan: { items: 6, leftovers: 2, releaseEveryMs: 10 * minute, workMs: 15 * minute, rework: new Set(), deaths: new Set(), slowRecompute: 0, unstable: 0, exhaustedReviewer: 0, breaksMain: 0, infrastructure: new Set(),
+      flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), split: { at: far, item: 6 }, blind: { from: far, to: far }, notice: far, deploys: [],
+      heldJob: { at: [], forMs: 0 }, dirtyCheckout: { from: far, to: far }, outOfQueue: { item: 6, afterMs: far } } });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the starved observations');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const keys = starved.map(n => items[n - 1].key);
+  assert.deepEqual([...starvation.armed.keys()].map(id => items.find(item => item.id === id)!.key).sort(), [...keys].sort(), 'every staged item was starved once its other gates passed');
+  assert.deepEqual(starvation.dropped.map(entry => entry.split(' ').pop()), [items[dropFirst - 1].key], 'the dropped item lost exactly its first prioritized wake');
+
+  for (const key of keys) {
+    const item = final.find(entry => entry.key === key)!;
+    // Kept in place: never marked for rework, never ejected, never refused to the control plane.
+    assert.equal(item.pipeline?.reworkRounds ?? 0, 0, `${key} was never sent back for rework`);
+    assert.ok(!(item.queueHistory ?? []).some(entry => entry.event === 'ejected'), `${key} was never ejected: ${JSON.stringify(item.queueHistory)}`);
+    assert.ok(!item.mergeRefusal, `${key} was never reported as a merge refusal`);
+    assert.ok(!escalations.some(detail => detail.includes(key) && /for a rework decision/.test(detail)), `${key} raised no rework attention`);
+    // Observed instead: each request came past the bound, at most one per observation window, and
+    // none after GitHub merged it.
+    const requests = observeRequests.filter(entry => entry.key === key);
+    const evidenced = starvation.evidenced.get(item.id)!;
+    const merged = github.merges.find(entry => entry.key === key)!;
+    assert.ok(merged, `${key} merged`);
+    assert.equal(requests.length, key === items[dropFirst - 1].key ? 2 : 1, `${key}: one prioritized request per wake the world needed: ${JSON.stringify(requests)}`);
+    assert.ok(requests[0].at - evidenced >= 10 * minute, `${key}: the first request waited out the ten-minute bound (+${Math.round((requests[0].at - evidenced) / minute)} min)`);
+    for (let index = 1; index < requests.length; index++) assert.ok(requests[index].at - requests[index - 1].at >= 2 * minute, `${key}: asked again only in the next observation window: ${JSON.stringify(requests)}`);
+    assert.ok(requests.every(entry => dayStart + entry.at <= merged.at), `${key}: no request came after GitHub merged it: ${JSON.stringify(requests)}`);
+    assert.ok(requests.every(entry => entry.sha === item.candidate!.sha), `${key}: every request named the candidate that merged`);
+    assert.ok(starvation.claimed.some(entry => entry.key === key && entry.at >= requests.at(-1)!.at), `${key}: the last prioritized wake was claimed ahead of the backlog`);
+    // The loop's own record: one attributable refresh action for the standing refusal, bounded.
+    const marker = Object.entries(state.actions).filter(([action]) => action.endsWith(':repeated:observe') && action.includes(item.id));
+    assert.equal(marker.length, 1, `${key}: one observation marker: ${JSON.stringify(marker)}`);
+    assert.ok(marker[0][1].kind === 'refresh' && marker[0][1].state === 'done' && marker[0][1].attempts === requests.length, `${key}: the marker counts its requests: ${JSON.stringify(marker[0][1])}`);
+    assert.match(marker[0][1].detail, /neither marked for rework nor ejected/);
+  }
+  assert.ok(observeRequests.every(request => keys.includes(request.key)), `only the starved items were observed on request: ${JSON.stringify(observeRequests)}`);
+  // The prioritized wakes starved no peer: no other item was ever merge-ready on a stale observation.
+  assert.deepEqual(starvation.peersStale, [], 'no other candidate waited on a stale observation');
+  const seconds = (performance.now() - began) / 1000;
+  assert.ok(seconds < 200, `the starved day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
 test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 360_000 }, async () => {
