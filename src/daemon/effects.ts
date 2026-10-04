@@ -33,7 +33,7 @@ import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
-import { withReviewerDefaults } from '../master.js';
+import { withRoleDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
@@ -633,7 +633,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return followUpThreadIds((await readReviewLedger(root)).reviews, work, reviewer ? { reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
     },
     closeSession: pane => closeHerdrPane(pane, run),
-    reclaimResources: (work, agents) => reclaimResources(root, withReviewerDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
+    reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
@@ -734,7 +734,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     controlPlane: coordinatorStatus,
     reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
       // Imported when first read: the status report imports this module, so a static import would be a cycle.
-      const reported = await (await import('../cli/master-status.js')).reportedAttention(root, withReviewerDefaults(current()), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
+      const reported = await (await import('../cli/master-status.js')).reportedAttention(root, withRoleDefaults(current()), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
         runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true,
         // The intervention report takes the server close to a minute (GY-377): the cycle uses the
         // cached copy and refreshes it detached from itself, which is also the copy master status reads.
