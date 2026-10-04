@@ -13,9 +13,9 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 **An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
 
-**A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`). Merge-base dismissals in motion are not review-convergence faults until they stand past 30 min (`mergeBaseDismissalWaitBoundMs`).
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`: `restored` once GitHub shows it, else `unpublished` (`failure`); a second, candidate unchanged → `escalated` in `master status`). A tip behind an unlanded departed entry awaits its restored head (`Restoring after predecessor ejection`); another item's carried files (`Carried from another item's tip`) are neither rework nor ejection. Landed peers deliver at once (`landing.landed`).
+**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`). A tip behind an unlanded departed entry awaits its restored head (`Restoring after predecessor ejection`); another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
 
 #### A contaminated branch
 
@@ -41,11 +41,11 @@ If a harness classifier refuses routine administration, `master harness claude -
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop, on code changes (`upgrade` attention if dirty; `releaseLag`).
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop (`upgrade` attention if dirty).
 
 A `resync` completes only on an observation newer than its claim (`POST /api/work/:id/resync` `{ since }` wakes observation; else `no observation newer than the claim was saved`).
 
-A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`). Failed cycles back off; one item's throw fails only its `isolated:KIND:ITEM-ID` action.
+A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
 
 ## Resources and disk
 
@@ -59,7 +59,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `s
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen standing faults. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity). Scope requests count past 15 min open, or refused with no approver left. Sandbox or `workflows`-permission refusal blockers are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen standing faults. Workless sessions raise `fleet-capacity`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
 
 ## Pipeline speed
 

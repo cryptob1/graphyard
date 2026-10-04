@@ -11,12 +11,12 @@ Producers ever assigned the item or in its slice: `evidence.producer.refused`. L
 
 | Trigger | Raised when |
 | --- | --- |
-| `lease-loss` | An unexplained lapse (no submission, `blocked` report, stopped-worker attestation or exhaustion record) |
+| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no provider-exhaustion record |
 | `evidence-policy-conflict` | Trusted evidence for another policy revision |
 | `security-concern` | A lead's `escalate` ruling |
 | `requirement-weakening` | A revision retires a criterion or narrows proofs |
 
-Unresolved triggers drop merge authorization. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`). Meanwhile a replacement may claim; delivery waits.
+Unresolved triggers drop merge authorization. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). Meanwhile a replacement may claim; delivery waits.
 
 ### Who may settle what
 
