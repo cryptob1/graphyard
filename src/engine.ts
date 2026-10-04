@@ -98,10 +98,18 @@ const commands = {
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
+  // GY-860 AC-2: `failure` releases a claim whose worktree the host could not create. The attempt
+  // is undone — the epoch returns, the untouched reservation and timeline entry go, the lease is
+  // released — and the ledger keeps the git message, so the failure is on the item without
+  // consuming an attempt or cooling off the profile.
   // `cause` is why the attempt ended, for a release its watch supervisor makes after the session is
   // gone (GY-1008): it is kept on the release event and never stands as a blocker on the item.
-  release: z.object({ epoch, cause: z.string().trim().min(1).max(2000).optional() }).strict(),
-  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
+  release: z.object({ epoch, cause: z.string().trim().min(1).max(2000).optional(), failure: z.object({ message: z.string().trim().min(1).max(2000) }).strict().optional() }).strict(),
+  // GY-860: what this allocation released before it could create its worktree — an earlier
+  // attempt's worktree that still held the branch, with the refs and uncommitted diff it carried.
+  // The record is the item's preserved-attempt history, kept on the ledger.
+  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name'),
+    preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
   submit: z.object({ epoch, pr: z.number().int().positive(), documentation: z.string().trim().min(1).max(1000).optional() }).strict(),
@@ -1150,7 +1158,26 @@ export class Engine {
         demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
         work.containmentQuarantine = null;
       }
-      if (command === 'release') { endAttempt(work, data.epoch, 'released', now); work.lease = null; }
+      if (command === 'release') {
+        // GY-860 AC-2: a release carrying a workspace failure keeps the git message on the item and,
+        // while the attempt is still the untouched claim it released, undoes it: the timeline entry
+        // and the reservation go, the epoch returns, and the next dispatch claims it afresh. An
+        // attempt that already did work is only ended — its release is an ordinary attempt end.
+        // Untouched means nothing but the worktree command ever held this epoch: the lease was never
+        // renewed, no session was launched under it and nothing was submitted, so no delayed
+        // command from another holder can reach the epoch number when it is claimed again.
+        const timeline = pipelineTimeline(work);
+        const open = data.failure ? timeline.attempts.find(entry => entry.epoch === data.epoch && entry.endedAt === null) : undefined;
+        const untouched = open && work.lease && Date.parse(work.lease.expiresAt) === Date.parse(open.claimedAt) + this.leaseSeconds * 1000
+          && work.containmentQuarantine?.epoch !== data.epoch && work.submission?.epoch !== data.epoch ? open : undefined;
+        if (data.failure) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.failed', JSON.stringify({ details: { epoch: data.epoch, message: data.failure.message, at: now.toISOString() } })]);
+        if (untouched && work.epoch === data.epoch) {
+          timeline.attempts.splice(timeline.attempts.indexOf(untouched), 1);
+          work.workspaces = work.workspaces.filter(w => w.epoch !== data.epoch);
+          work.epoch = data.epoch - 1;
+        } else endAttempt(work, data.epoch, 'released', now);
+        work.lease = null;
+      }
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
       if (command === 'blocked') {
         work.blocker = data.reason;
@@ -1340,7 +1367,11 @@ export class Engine {
         demand(!work.workspaces.some(w => w.epoch === data.epoch), 'This assignment already has a workspace');
         demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
         if (work.submission) demand(data.branch === work.workspaces.find(w => w.epoch === work!.submission!.epoch)?.branch, 'Rework must use the already linked PR branch in a fresh workspace');
-        work.workspaces.push({ ...data, owner: actor.id });
+        const { preserved, ...workspace } = data;
+        work.workspaces.push({ ...workspace, owner: actor.id });
+        // The preserved-attempt record (GY-860): what the released holder of this branch carried —
+        // its refs and uncommitted diff — is kept on the item's ledger, never discarded silently.
+        if (data.preserved) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.preserved', JSON.stringify({ details: { epoch: data.epoch, branch: data.branch, ...data.preserved } })]);
       }
       if (command === 'submit') {
         demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');
