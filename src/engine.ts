@@ -38,7 +38,8 @@ import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentReques
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
-import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
@@ -171,7 +172,7 @@ const actionSettleSchema = z.object({ executor: executorName.optional(), result:
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
-const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional() }).strict();
+const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 // The merge request names the executor instance that recorded it — one daemon process or one
 // interactive `master merge` request — bound here to the principal that authenticates it (GY-92).
@@ -1194,7 +1195,18 @@ export class Engine {
       if (command === 'dispatchblock') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; a dispatch failure is recorded only while no attempt holds the item`, 409);
-        work.blocker = data.reason; recordIntervention(work, 'blocked');
+        // GY-1082: only an item awaiting a dispatch can fail one, and a standing blocker is never
+        // overwritten. The failures are not taken on the caller's word: the item's own attempt
+        // record must show its last `dispatchFailureBlockAfter` attempts each claimed and ended
+        // without a submission. The loop supplies only the cause in git's words, which no other
+        // record holds; the blocker names the attempts the control plane verified.
+        demand(work.ready && (!work.submission || work.reworkRequested), `${work.key} is not awaiting a dispatch; a dispatch failure is recorded only on ready work with no submission or with rework requested`, 409);
+        demand(!work.blocker, `${work.key} already carries a blocker; clear it before recording a dispatch failure`, 409);
+        const failed = pipelineTimeline(work).attempts.slice(-dispatchFailureBlockAfter);
+        demand(failed.length === dispatchFailureBlockAfter && failed.every(attempt => attempt.endedAt && (attempt.end === 'released' || attempt.end === 'expired')),
+          `${work.key}'s last ${dispatchFailureBlockAfter} attempts did not each end without a submission; a dispatch failure is recorded only after that many failed attempts in a row`, 409);
+        const verified = ` [attempts ${failed.map(attempt => attempt.epoch).join(', ')} each ended without a submission]`;
+        work.blocker = `${data.reason.slice(0, 2000 - verified.length)}${verified}`; recordIntervention(work, 'blocked');
       }
       if (command === 'autoscope') {
         // The loop asks, the control plane decides. The verdict is recomputed here from the item's
@@ -1621,7 +1633,8 @@ export class Engine {
     const wake = data.wake !== false;
     // The observation job only exists for an item with a candidate to observe; waking it for one
     // without a submission would schedule a read of nothing.
-    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
+    // `prioritized` claims the job ahead of the polled backlog, as a webhook wake is (GY-1099).
+    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id, data.prioritized === true); });
     if (wake) await this.reconcile();
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
     // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
@@ -1670,7 +1683,10 @@ export class Engine {
       const standing = await this.enqueueRequest(work.id, db);
       if (!standing || standing.sha !== request.sha || standing.baseSha !== request.baseSha || standing.policyRevision !== request.policyRevision)
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'merge.enqueue.requested', JSON.stringify({ details: request })]);
-      await wakeJob(db, work.id);
+      // The enqueue is the observation job's, and the authorization holds only while the
+      // observation is under two minutes old: the wake is claimed ahead of the polled backlog, so a
+      // candidate observed on request is not left to go stale again behind it (GY-1099).
+      await wakeJob(db, work.id, true);
       const result = { key: work.key, revision: work.revision, enqueue: standing && standing.sha === request.sha && standing.baseSha === request.baseSha && standing.policyRevision === request.policyRevision ? standing : request };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
