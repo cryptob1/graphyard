@@ -19,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 type Triage = { findings: number[]; path: string; status: 'addressed' | 'declined'; resolution: string };
 const triage: Triage[] = [
   { findings: [1], path: 'deploy/systemd/graphyard-secrets-bus.service', status: 'declined',
-    resolution: 'Restricting the proxy to the GitHub credential is not expressible: xdg-dbus-proxy filters by bus name, method and object path, and keyring items are numbered paths in the operator\'s collection that name no service, so no rule admits the GitHub login alone. The exposure is now stated where an operator installs the proxy (the unit file and docs/operations.md#worker-host-keyring-proxy): keep other secrets out of that keyring on a worker host, or leave the proxy uninstalled and use GH_TOKEN, which sessions already receive. Replacing the keyring with a session-scoped token is a launcher design change beyond these follow-ups.' },
+    resolution: 'Restricted as far as D-Bus rules allow: GY-1039, merged since, moved the filter to graphyard-secrets-bus-filter.service and admits only the Secret Service methods a credential read needs, and gives the bus only to sessions without a credential of their own. Restricting it to the GitHub item alone is not expressible: xdg-dbus-proxy filters by bus name, method and object path, and keyring items are numbered paths that name no service. The remaining exposure is stated in the unit file and docs/operations.md#worker-host-keyring-proxy; a per-session credential broker is a design of its own.' },
   { findings: [2], path: 'src/store/locked-read.ts', status: 'addressed',
     resolution: 'Addressed by GY-1027\'s later revisions before it merged: an open item that is not the focus, a batch\'s own row or related to them is a cached compact projection (coordinationDocumentSql), not its document.' },
   { findings: [3, 13, 16, 22, 23, 24, 26, 28, 32, 35, 37, 40, 44], path: 'src/store/locked-read.ts', status: 'declined',
@@ -29,7 +29,7 @@ const triage: Triage[] = [
   { findings: [5], path: 'tests/coordinator-os-confinement.test.ts', status: 'addressed',
     resolution: 'The unit:allocated-checkout-re-exposed title has its space after the em dash again.' },
   { findings: [6, 14, 20], path: 'src/master/profiles.ts', status: 'addressed',
-    resolution: 'docs/operations.md#worker-host-keyring-proxy documents the install step for graphyard-secrets-bus.service, its default socket, the GRAPHYARD_SECRETS_BUS override and the fallback without it; docs/master-agent-sessions.md links it (that page is at its word budget).' },
+    resolution: 'docs/operations.md#worker-host-keyring-proxy documents the install step for the graphyard-secrets-bus socket, forwarder and filter units, its default socket, the GRAPHYARD_SECRETS_BUS override and the fallback without it; docs/master-agent-sessions.md links it (that page is at its word budget).' },
   { findings: [7, 8], path: 'src/engine.ts', status: 'addressed',
     resolution: 'observeSubmission (outside the coordination lock) reads every open submitted peer whole (withWhole) before the submit-time landing check, so a carried peer\'s observation.scopeFiles are there to detect a dropped file.' },
   { findings: [9, 17, 46], path: 'src/store/locked-read.ts', status: 'addressed',

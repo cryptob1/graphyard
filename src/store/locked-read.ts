@@ -31,7 +31,7 @@ import { coordinationDocumentSql, coordinationRecords, coordinationRelevance, co
  * requested heads, and only the recent tails of its histories and sessions; a settled summary is
  * smaller still. A decision that reads any of these on another item — a landing check reading a peer's
  * `observation.scopeFiles`, say — must read that item whole (`readWhole`), whatever its overlap.
- * tests/locked-read-followups.test.ts holds a projection to this contract.
+ * `unit:projection-contract` in tests/review-followups-gy-1042.test.ts holds a projection to this contract.
  */
 export type Queryable = { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> };
 
@@ -135,6 +135,9 @@ export async function warmLockedReads(db: Queryable) { await lockedRows(db, []);
 /**
  * `works` with each stand-in `wanted` selects replaced by its document, read whole (GY-1042): for a
  * decision outside the coordination lock that reads, on other items, what a projection leaves out.
+ * The documents are a second read after the listing, with no version check, so a peer written in
+ * between is read at its newer version; that suits a pre-check whose result a later observation
+ * re-derives, not a decision that must see one consistent board.
  */
 export async function withWhole(db: Queryable, works: readonly Work[], wanted: (work: Work) => boolean): Promise<Work[]> {
   const ids = works.filter(work => isStandIn(work) && wanted(work)).map(work => work.id);
