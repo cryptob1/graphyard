@@ -115,6 +115,12 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    */
   refuseMerge?: (work: Work, reason: string, since: string) => Promise<Work>;
   /**
+   * GY-1099. Asks the control plane for an observation of this candidate claimed ahead of the
+   * polled backlog: what a merge refused only for a stale GitHub observation is owed instead of a
+   * rework or an ejection.
+   */
+  observeCandidate?: (work: Work) => Promise<unknown>;
+  /**
    * The deployed release and which deliveries it serves. The containment the previous observation
    * retained is handed back so the cycle re-derives only what the release has not already been
    * shown to contain (see `observeDeployment`).
@@ -670,6 +676,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     merge: work => mergeExecutor(current(), snapshot, mutate, deps.executor, randomUUID(), run)(work),
     refuseMerge: (work, reason, since) => mutate(`work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since }),
+    observeCandidate: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     publishProductionEnvironment: async () => {
