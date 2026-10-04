@@ -16,17 +16,24 @@ import { candidateWorkflowFile, promotionWorkflowFile, type DeliveryPolicy, type
 
 export const candidateWorkflowName = 'Graphyard release candidate';
 export const promotionWorkflowName = 'Graphyard promotion';
+/** The artifact the candidate run leaves for the promotion it triggers: the id of the candidate it validated. */
+const candidateArtifact = 'graphyard-candidate';
 
 /**
  * The Graphyard commit the generated workflows run the CLI from: the build's own commit when the
- * deployment stamps one, else the newest commit of this checkout that origin/main already holds, so
- * the pin names a ref GitHub can serve (package.json's version has no published tag or package).
+ * deployment stamps one that origin/main holds, else the newest commit of this checkout that
+ * origin/main already holds, so the pin names a ref GitHub can serve (package.json's version has
+ * no published tag or package). A stamp from a local or branch deploy that never reached
+ * origin/main falls back to that merge-base; without a checkout to check against, the stamp stands.
  */
 export function publishedCliCommit(env: Record<string, string | undefined> = process.env, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): string {
   const root = fileURLToPath(new URL('../..', import.meta.url));
   let published: string | null = null;
   try { published = run('git', ['-C', root, 'merge-base', 'HEAD', 'origin/main']).trim(); } catch { /* no origin/main: fall back to HEAD */ }
-  const commit = buildIdentity(env).commit ?? (published && /^[0-9a-f]{40}$/i.test(published) ? published.toLowerCase() : cliCommit(root, run));
+  if (published && !/^[0-9a-f]{40}$/i.test(published)) published = null;
+  const stamped = buildIdentity(env).commit;
+  const reachable = (commit: string) => { try { run('git', ['-C', root, 'merge-base', '--is-ancestor', commit, 'origin/main']); return true; } catch { return false; } };
+  const commit = stamped && (!published || reachable(stamped)) ? stamped : (published?.toLowerCase() ?? cliCommit(root, run));
   if (!commit) throw new Error('Cannot pin the Graphyard CLI the generated workflows run: this install is not a Git checkout and GRAPHYARD_BUILD_SHA is unset. Set GRAPHYARD_BUILD_SHA to the Graphyard commit this install was built from, then rerun graphyard init --scan --apply');
   return commit;
 }
@@ -35,6 +42,7 @@ export function publishedCliCommit(env: Record<string, string | undefined> = pro
  * The Graphyard CLI the generated workflows run, pinned to the exact commit that rendered them: a
  * floating CLI could change promotion semantics under a pinned candidate. A re-apply after an
  * upgrade re-renders the pin, so an upgrade is a reviewed diff to the workflow.
+ * renderReleasePipeline resolves it once per install and hands it to both renderers.
  */
 export const pinnedCli = (commit = publishedCliCommit()) => `npx -y github:cryptob1/graphyard#${commit}`;
 
@@ -69,6 +77,9 @@ function stackSetup(stack: PipelineOptions['stack']) {
  * Railway services track release/uat and release/production, which `release uat` and `release
  * promote` have already moved, so the Railway step only names that; the command adapter runs the
  * operator's own command with the SHA, and nothing is invented when none is configured.
+ * The wait for Railway's build is deliberately the next step's `--wait` against /healthz rather
+ * than a Railway API poll: serving the candidate SHA is the condition that matters, it also catches
+ * a service tracking the wrong branch, and it keeps a Railway token out of the UAT job.
  */
 function deployStep(policy: DeliveryPolicy, environment: 'uat' | 'production', sha: string) {
   const branch = environment === 'uat' ? 'release/uat' : 'release/production';
@@ -178,6 +189,12 @@ ${deployStep(policy, 'uat', '${{ needs.candidate.outputs.sha }}')}
           UAT_URL: \${{ vars.UAT_URL }}
           GRAPHYARD_URL: \${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: \${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+      - name: Hand the validated candidate's id to the promotion workflow
+        # The promotion this run triggers promotes exactly this candidate, never whichever is newest.
+        shell: bash
+        run: echo "\${{ needs.candidate.outputs.id }}" > ${candidateArtifact}.txt
+      - uses: actions/upload-artifact@v4
+        with: { name: ${candidateArtifact}, path: ${candidateArtifact}.txt, retention-days: 7 }
 `;
 }
 
@@ -212,17 +229,26 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
     environment: production
     steps:
       - uses: actions/checkout@v4
         with: { ref: ${base}, fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
+      - name: Fetch the id of the candidate the triggering run validated
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${candidateArtifact}
+          run-id: \${{ github.event.workflow_run.id }}
+          github-token: \${{ github.token }}
       - name: Promote the UAT-passed candidate by its exact SHA
         id: promote
         shell: bash
         run: |
           set -euo pipefail
+          if [ -f ${candidateArtifact}.txt ]; then CANDIDATE="$(cat ${candidateArtifact}.txt)"; fi
           ${cli} release promote "\${CANDIDATE:-latest}" --base ${base} | tee promote.json
           echo "sha=$(node -p "require('./promote.json').sha")" >> "$GITHUB_OUTPUT"
         env:
@@ -238,6 +264,8 @@ ${deployStep(policy, 'production', '${{ steps.promote.outputs.sha }}')}
 /** The generated files for a policy: both workflows under the candidate model, none under per-PR. */
 export function renderReleasePipeline(policy: DeliveryPolicy, options: PipelineOptions = {}): { path: string; content: string }[] {
   if (policy.mode === 'per-pr') return [];
+  // The pin is resolved once here, so the renderers below shell out to git at most once per install.
+  options = { ...options, cli: options.cli ?? pinnedCli() };
   return [
     { path: candidateWorkflowFile, content: renderCandidateWorkflow(policy, options) },
     { path: promotionWorkflowFile, content: renderPromotionWorkflow(policy, options) },

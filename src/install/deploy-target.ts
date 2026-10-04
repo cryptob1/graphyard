@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { ghJson, headSha, type GitHubCli } from './github.js';
-import type { Transport } from './transport.js';
+import { shellQuote, type Transport } from './transport.js';
 import type { PlanAction, PreflightItem } from './types.js';
 import { type DeliveryPolicy, type DeploymentAdapterName } from '../model/delivery-policy.js';
 
@@ -53,30 +53,44 @@ const costNote = (resource: string) => `Costs money: ${resource} bills your Rail
 const railwayProjectName = (ctx: DeploymentContext) => ctx.policy.deploy.project ?? `${ctx.repository.split('/')[1]}-app`;
 const railwayService = (ctx: DeploymentContext, environment: ReleaseEnvironment) => `${ctx.repository.split('/')[1]}-${environment}`;
 
-function railwayActions(ctx: DeploymentContext): PlanAction[] {
+/**
+ * A Railway action's invocations as argument vectors, so a project or workspace name with spaces
+ * stays one argument; `command` is only their display form, quoted the way a shell would need it.
+ */
+type RailwayAction = PlanAction & { steps: string[][] };
+const shellWord = (word: string) => /^[\w@%+=:,./-]+$/.test(word) ? word : shellQuote(word);
+const displayed = (steps: string[][]) => steps.map(step => step.map(shellWord).join(' ')).join(' && ');
+const planned = ({ steps: _steps, ...action }: RailwayAction): PlanAction => action;
+
+function railwayActions(ctx: DeploymentContext): RailwayAction[] {
   const state = (id: string) => ctx.created.includes(id) ? 'satisfied' as const : 'create' as const;
   const project = ctx.policy.deploy.project;
-  const workspace = ctx.workspace ? ` --workspace ${ctx.workspace}` : '';
+  const workspace = ctx.workspace ? ['--workspace', ctx.workspace] : [];
+  const link = [['railway', 'link', '--project', project ?? '']];
+  const init = [['railway', 'init', '--name', railwayProjectName(ctx), ...workspace]];
   return [
     project
-      ? { id: 'release.railway.project', target: 'provider', state: 'satisfied', title: `Use the existing Railway project ${project} for the application's uat and production environments`, command: `railway link --project ${project}` }
-      : { id: 'release.railway.project', target: 'provider', state: state('release.railway.project'), title: `Create the Railway project ${railwayProjectName(ctx)} that holds the application's uat and production environments`, command: `railway init --name ${railwayProjectName(ctx)}${workspace}`,
+      ? { id: 'release.railway.project', target: 'provider', state: 'satisfied', title: `Use the existing Railway project ${project} for the application's uat and production environments`, steps: link, command: displayed(link) }
+      : { id: 'release.railway.project', target: 'provider', state: state('release.railway.project'), title: `Create the Railway project ${railwayProjectName(ctx)} that holds the application's uat and production environments`, steps: init, command: displayed(init),
         human: 'Opens a billable Railway project on your account. Approve it, then rerun --apply with --create-environments, or name an existing project as delivery.deploy.project in graphyard.json.' },
-    ...releaseEnvironments.map(environment => ({
-      id: `release.railway.${environment}`, target: 'provider' as const, state: state(`release.railway.${environment}`),
-      title: `Create the Railway ${environment} environment with service ${railwayService(ctx, environment)} deploying ${releaseBranchNames[environment]} (never ${ctx.baseBranch})${environment === 'uat' ? ', holding no GITHUB_* credential' : ''}`,
-      command: `railway environment new ${environment} && railway add --service ${railwayService(ctx, environment)} --repo ${ctx.repository} && railway environment ${environment} && railway service ${railwayService(ctx, environment)} && railway domain`,
-      human: `${costNote(`the ${environment} environment and its running service`)} After it exists, set the service's source branch to ${releaseBranchNames[environment]} and store its URL as ${environment === 'uat' ? 'UAT_URL' : 'PRODUCTION_URL'} on the ${environment} GitHub environment.`,
-    })),
+    ...releaseEnvironments.map(environment => {
+      const service = railwayService(ctx, environment);
+      const steps = [['railway', 'environment', 'new', environment], ['railway', 'add', '--service', service, '--repo', ctx.repository], ['railway', 'environment', environment], ['railway', 'service', service], ['railway', 'domain']];
+      return {
+        id: `release.railway.${environment}`, target: 'provider' as const, state: state(`release.railway.${environment}`),
+        title: `Create the Railway ${environment} environment with service ${service} deploying ${releaseBranchNames[environment]} (never ${ctx.baseBranch})${environment === 'uat' ? ', holding no GITHUB_* credential' : ''}`,
+        steps, command: displayed(steps),
+        // The Railway CLI has no command that sets a service's source branch, so that stays the
+        // operator's step; `release validate` and `release verify` refuse a service serving another SHA.
+        human: `${costNote(`the ${environment} environment and its running service`)} After it exists, set the service's source branch to ${releaseBranchNames[environment]} and store its URL as ${environment === 'uat' ? 'UAT_URL' : 'PRODUCTION_URL'} on the ${environment} GitHub environment.`,
+      };
+    }),
   ];
 }
 
-async function runRailway(ctx: DeploymentContext, command: string) {
-  // Each `a && b` segment is one railway invocation, run in the Graphyard-owned link directory.
-  for (const segment of command.split(' && ')) {
-    const [program, ...args] = segment.trim().split(/\s+/);
-    await ctx.transport.exec(program, args, { cwd: ctx.railwayDir, timeout: 600_000 });
-  }
+async function runRailway(ctx: DeploymentContext, steps: string[][]) {
+  // Each step is one railway invocation, run in the Graphyard-owned link directory.
+  for (const [program, ...args] of steps) await ctx.transport.exec(program, args, { cwd: ctx.railwayDir, timeout: 600_000 });
 }
 
 export const railwayDeploymentAdapter: DeploymentAdapter = {
@@ -90,14 +104,14 @@ export const railwayDeploymentAdapter: DeploymentAdapter = {
       ? { name: 'Release deployment (railway)', ok: true, detail }
       : { name: 'Release deployment (railway)', ok: false, detail: 'the railway CLI is missing or not authenticated', fix: 'Install the Railway CLI (npm i -g @railway/cli) and run: railway login' }];
   },
-  plan: railwayActions,
+  plan: ctx => railwayActions(ctx).map(planned),
   async provision(ctx, options) {
     const actions = railwayActions(ctx), wanted = actions.filter(action => action.state !== 'satisfied');
-    if (!options.createPaid || !wanted.length) return { created: [], pending: wanted };
+    if (!options.createPaid || !wanted.length) return { created: [], pending: wanted.map(planned) };
     await mkdir(ctx.railwayDir, { recursive: true, mode: 0o700 });
     const created: string[] = [];
-    if (ctx.policy.deploy.project) await runRailway(ctx, actions[0].command!);
-    for (const action of wanted) { await runRailway(ctx, action.command!); created.push(action.id); }
+    if (ctx.policy.deploy.project) await runRailway(ctx, actions[0].steps);
+    for (const action of wanted) { await runRailway(ctx, action.steps); created.push(action.id); }
     return { created, pending: [] };
   },
 };
@@ -151,7 +165,7 @@ export function wiringActions(ctx: DeploymentContext, observed: Awaited<ReturnTy
       command: `gh api --method POST repos/${ctx.repository}/git/refs -f ref=refs/heads/${releaseBranchNames.uat} -f sha=<${ctx.baseBranch} tip>` },
     { id: 'release.github-environments', target: 'github', state: environmentsThere ? 'satisfied' : 'create',
       title: 'Create the uat and production GitHub environments the generated workflows deploy through (UAT_URL and PRODUCTION_URL are stored on them)',
-      command: `gh api --method PUT repos/${ctx.repository}/environments/uat (and environments/production)` },
+      command: releaseEnvironments.map(environment => `gh api --method PUT repos/${ctx.repository}/environments/${environment}`).join(' && ') },
   ];
 }
 

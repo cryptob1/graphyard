@@ -249,6 +249,8 @@ const fastCheck = /^(?:build|compile|typecheck|type-check|types|tsc|lint|eslint|
 const longSuite = /e2e|end-to-end|integration|soak|load|stress|perf|benchmark|acceptance|recover|chart|smoke|browser|playwright|cypress|selenium|visual/i;
 /** Scripts that are tooling, not checks: servers, watchers, lifecycle hooks. */
 const notACheck = /watch|^(?:dev|start|serve|preview|prepare|deploy|release|format|clean)(?::|$)|^(?:pre|post)[a-z]/i;
+/** A script body that runs several commands or scripts in sequence or in parallel. */
+const chainsCommands = /&&|\|\||;|\b(?:npm-run-all|run-s|run-p|concurrently)\b|\b(?:npm|yarn|pnpm) run\b/;
 const checkLike = /^(?:build|typecheck|type-check|lint|test|check|e2e|integration|soak)(?::|$)/i;
 
 /**
@@ -261,11 +263,13 @@ const checkLike = /^(?:build|typecheck|type-check|lint|test|check|e2e|integratio
 export function classifyChecks(input: ScanInput, stack: StackDetection = detectStack(input)): { preMerge: GateCheck[]; perCandidate: GateCheck[] } {
   const preMerge: GateCheck[] = [], perCandidate: GateCheck[] = [];
   const known = (check: string) => [...preMerge, ...perCandidate].some(entry => entry.check === check);
-  const place = (check: string, command: string | null, source: GateCheck['source']) => {
+  const place = (check: string, command: string | null, source: GateCheck['source'], body?: string) => {
     if (known(check)) return;
     const text = `${check} ${command ?? ''}`;
     if (longSuite.test(text)) perCandidate.push({ check, command, source, reason: 'an integration, end-to-end or soak suite: it runs against the pinned candidate SHA' });
-    else if (fastCheck.test(check)) preMerge.push({ check, command, source, reason: 'build, typecheck, lint or fast unit check: required on every pull request' });
+    // A fast name is trusted, but a body that chains other commands may be a slow catch-all, which
+    // the confirmation screen names rather than letting it keep the merge gate slow unnoticed.
+    else if (fastCheck.test(check)) preMerge.push({ check, command, source, reason: `build, typecheck, lint or fast unit check: required on every pull request${body && chainsCommands.test(body) ? `; its script chains several commands (${body.length > 80 ? `${body.slice(0, 77)}...` : body}), so confirm it is fast or move it to perCandidate in graphyard.json` : ''}` });
     else perCandidate.push({ check, command, source, reason: 'not recognisably fast, so it runs per candidate; move it to preMerge in graphyard.json to require it on pull requests' });
   };
   const pkg = parseJson(input, 'package.json');
@@ -273,7 +277,7 @@ export function classifyChecks(input: ScanInput, stack: StackDetection = detectS
     const scripts: Record<string, unknown> = pkg.scripts ?? {};
     for (const [name, body] of Object.entries(scripts)) {
       if (typeof body !== 'string' || !body || notACheck.test(name)) continue;
-      if (checkLike.test(name) || longSuite.test(name)) place(name, `npm run ${name}`, 'script');
+      if (checkLike.test(name) || longSuite.test(name)) place(name, `npm run ${name}`, 'script', body);
     }
   } else for (const command of stack.commands) place(command.check, command.command, 'script');
   // A browser framework the scripts never run is still the repository's E2E suite.
