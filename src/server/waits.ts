@@ -8,6 +8,7 @@ import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
 import type { Services } from './routes.js';
+import { lockedWork } from '../store/locked-read.js';
 
 /**
  * The two waits that must stall nothing but the item that has them (GY-89): a session whose
@@ -20,7 +21,7 @@ import type { Services } from './routes.js';
 type Db = pg.PoolClient;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const findWork = async (db: Db, id: string): Promise<{ work: Work | undefined; all: Work[] }> => {
-  const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+  const all = await lockedWork(db, [id]);
   return { work: all.find(item => item.id === id || item.key === id), all };
 };
 async function receipt(db: Db, actor: Principal, key: string, fingerprint: string) {

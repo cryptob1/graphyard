@@ -103,17 +103,7 @@ export const coordinationTrimSql = (kept: string, keep: number) => `jsonb_build_
   'actionHistory', GREATEST(0, ${length("d.document->'actionQueue'->'history'")} - ${keep}),
   'sessions', ${length("d.document->'sessions'")} - ${length(`${kept}->'sessions'`)})`;
 
-/**
- * The items a reconciliation pass can change (GY-727): everything that is not a settled delivery.
- * `settled` is the work index's own flag, kept current beside every write by the same trigger, so
- * the filter is an index lookup that never reads a document: the pass reads only these documents,
- * once, and takes a settled delivery's summary from the index instead of its document.
- */
-export const reconcileCandidatesSql = `SELECT w.id, w.number, w.document FROM work_items w
-  WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) ORDER BY w.number`;
-/** The settled deliveries' summaries: the rest of the fleet a batch evaluates its items against. */
-export const reconcileSettledSql = 'SELECT i.id, i.number, i.summary FROM work_index i WHERE i.settled ORDER BY i.number';
-/** Items a pass already read that moved since, read again: the only documents a pass reads twice. */
+/** Items a pass reads whole after its opening stand-ins (GY-727, GY-1027): each batch's own items, and those that moved since. */
 export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS version, w.document FROM work_items w WHERE w.id = ANY($1::uuid[])';
 /**
  * The versions of the rows a pass can be affected by, never their documents: the pass's own

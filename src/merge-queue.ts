@@ -5,6 +5,7 @@ import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { evaluateLandability, landabilityEjection, type LandabilityAudit, type LandabilityVerdict } from './model/landability.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
+import type { DocsSync } from './model/docs-sync.js';
 import { ciCheckName } from './model/ci-refusal.js';
 import { attributeDocsOverflow, docsBudgetProof, docsOverflowReason, ownDocsOverflow, type DocsWordBudget, type DocsWordCount } from './model/documentation.js';
 
@@ -558,6 +559,14 @@ export interface BaseRefresh {
   head: string | null;
   /** Why the base could not be merged into the candidate, named for the worker; null on success. */
   conflict: string | null;
+  /**
+   * With a confirmed conflict (GY-566): the paths both the head and the base changed since their
+   * merge base, which hold every conflicted path; null when GitHub could not list either side.
+   * The loop routes a conflict confined to docs pages to a docs-sync session (model/docs-sync.ts).
+   */
+  conflictPaths?: string[] | null;
+  /** Set when the head is a docs-sync of `from` onto `base` (GY-566): what the carry was decided from. */
+  docsSync?: DocsSync | null;
   /** How Graphyard produced the head, as GitHub reports the commit; null when nothing was merged. */
   merge?: TipMerge | null;
   /** Which bindings of the replaced head carried onto it, decided once when the refresh was bound. */
@@ -584,7 +593,7 @@ export interface BaseRefresh {
   stale?: StaleMergeability | null;
 }
 /** Why a branch was written by the control plane rather than by its worker (GY-375). */
-export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair';
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync';
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head
@@ -1504,8 +1513,11 @@ export const mergeStallMs = 5 * 60_000;
 export function mergeStalls(work: Work[], now: number): { key: string; pr: number; head: string; mergeStateStatus: string; requestedAt: string; ageMs: number; text: string; next: string }[] {
   return work.flatMap(item => {
     const state = item.observation?.githubQueue, candidate = item.candidate;
-    if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || state.refused || !state.requestedAt
+    if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || !state.requestedAt
       || state.head !== candidate.sha) return [];
+    const unanswered = blockedPastProbe(item, state, now);
+    if (unanswered) return [unanswered];
+    if (state.refused) return [];
     const blocked = blockedMergeStall(item, state, now);
     if (blocked) return [blocked];
     if (!mergeableNow(state)) return [];
@@ -1516,6 +1528,25 @@ export function mergeStalls(work: Work[], now: number): { key: string; pr: numbe
       text: `merge-stalled: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been requested for merge for ${Math.floor(ageMs / 60_000)} minutes (since ${state.requestedAt}) while GitHub reports mergeStateStatus ${status}, and no refusal is recorded: GitHub was asked to merge a pull request it reports mergeable and has not`,
       next: `graphyard master create files the control-plane defect for merge state ${status} on ${item.key}; gh pr view ${candidate.pr} shows what GitHub is waiting on` }];
   });
+}
+/** How long an authorized head may stay BLOCKED with every gate passing before master status raises it (GY-1112). */
+export const blockedAuthorizedStallMs = 30 * 60_000;
+/**
+ * GY-1112. A head GitHub reports BLOCKED with every gate passing, its merge requested more than
+ * `blockedAuthorizedStallMs` ago: the blocked-auto-merge probe has asked GitHub to merge it, and
+ * either GitHub refused (its message is the last answer) or it accepted and still has not merged.
+ * On 2026-10-02 GY-794 headed a 17-entry queue so for over 40 minutes with nothing raised.
+ */
+export function blockedPastProbe(item: Work, state: GitHubMergeQueueState, now: number) {
+  const candidate = item.candidate!;
+  if (!state.requestedAt || state.queue || state.head !== candidate.sha || item.observation?.merged || state.mergeStateStatus !== 'BLOCKED' || !mergeAuthorized(item)) return null;
+  const ageMs = now - Date.parse(state.requestedAt!);
+  if (!(ageMs > blockedAuthorizedStallMs)) return null;
+  const answer = state.refused && state.refused.head === state.head ? `GitHub's last answer (${state.refused.at}): ${state.refused.reason}`
+    : 'GitHub\'s last answer: no refusal recorded; it accepted the request and has not merged';
+  return { key: item.key, pr: candidate.pr, head: state.head, mergeStateStatus: 'BLOCKED', requestedAt: state.requestedAt!, ageMs,
+    text: `merge-blocked: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been BLOCKED with every gate passing for ${Math.floor(ageMs / 60_000)} minutes (merge requested ${state.requestedAt}); ${answer}`,
+    next: `gh pr view ${candidate.pr} shows the rule GitHub enforces; graphyard master create files the defect if no rule explains it` };
 }
 /** How long a merge may stay pending under auto-merge on a head GitHub reports BLOCKED before master status names why (GY-430). */
 export const blockedMergeStallMs = 10 * 60_000;

@@ -338,7 +338,7 @@ test('integration:speed-reconcile-latency — a GitHub webhook delivery wakes th
   const main = await read('src/server/main.ts');
   const interval = Number(main.match(/\}, (\d+)\);\s*\n\s*http\.listen/)?.[1]);
   assert.ok(interval > 0 && interval <= 60_000, `the reconciliation tick is ${interval} ms`);
-  assert.match(main, /startObservationWorkers\(engine, github\)/);
+  assert.match(main, /startObservationWorkers\(engine, github, capacity\.concurrency\)/);
   assert.match(main, /GRAPHYARD_OBSERVATION_CONCURRENCY/);
   assert.match(main, /Promise\.all\(Array\.from\(\{ length: Math\.max\(1, Math\.floor\(concurrency\)\) \}, worker\)\)/);
   assert.match(await read('docs/protocol/github-webhook.md'), /wakes durable jobs/);
