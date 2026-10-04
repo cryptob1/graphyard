@@ -13,7 +13,7 @@ Per concurrent session: a worker identity and host ID (`install --workers`), or:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`. Masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([merge gate, candidates](delivery.md#managed-repositories)), never `.graphyard/`. Masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
 
 ### Documentation policy
 

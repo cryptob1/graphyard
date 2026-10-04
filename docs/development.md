@@ -17,11 +17,15 @@ npm ci && npm run build && npm test
 
 ## CI
 
-`test` aggregates shards balanced by `tests/helpers/timing-baseline.json`; pull requests run affected tests (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).
+`test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); pull requests run affected tests (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).
 
 ## Documentation
 
 `docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page. A page over its cap fails CI; the total only warns, and at 97% the loop files one trim item.
+
+### Documentation that rarely conflicts
+
+Add self-contained paragraphs rather than rewording shared sentences. A candidate conflicting with base only in `docs/**/*.md` gets docs-sync, not rework: base merges in, both sides kept in budget, approval kept if the non-docs diff is unchanged; five conflicts on one path in 24 hours raise attention.
 
 ## Trusted contracts
 

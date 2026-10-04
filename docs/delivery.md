@@ -8,12 +8,16 @@ Records which release each environment should run, verified only by service-scop
 Graphyard's own deployment: main → candidate → uat → production. `.railway/railway.ts` deploys `release/uat` and `release/production`, which only `graphyard release` moves, always to a candidate's exact SHA.
 
 - `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with the items it carries; merges never pause. `.github/workflows/release-candidate.yml` cuts every six hours or on demand and runs the [long suites](github.md#pre-merge-gate-and-release-candidate-validation).
-- `release uat ID` deploys to `uat` (own Postgres, no `GITHUB_*` credentials).
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits for UAT's `/healthz` `commit` to match, runs endpoint, API (`GRAPHYARD_UAT_TOKEN`) and suite checks, and records `rc-uat/ID`. Suites get `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`.
+- `release uat ID` deploys to `uat` (own Postgres, no `GITHUB_*` credentials), refused while UAT serves an unjudged candidate cut within four hours; its push is leased on the observed tip.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits for UAT's `/healthz` `commit` to match, runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (dashboard sign-in, Work view) and suite checks, and records `rc-uat/ID`. Suites get `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`.
 - `release promote ID` requires that passing record, deploys the SHA to production (leased on the last promoted SHA) and records `rc-production/ID`; `release verify --url URL` confirms production serves it.
 - A failed candidate files one follow-up item (`release follow-up ID` retries); fix forward.
 
 `release status` lists candidates; `release GY-N EPOCH` still gives up an item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN` and `GRAPHYARD_RELEASE_TOKEN`.
+
+## Managed repositories
+
+Installed repositories get the same model. `init --scan` splits checks into `delivery.mergeGate` (pull requests: build, typecheck, lint, fast unit; the rest per candidate); `--apply` writes `delivery` to `graphyard.json` and renders, on every apply, `graphyard-release-candidate.yml` (`release cut` on `candidateSchedule`, `--candidate-cron CRON|off`, default six hours; per-candidate checks at the exact SHA; `release uat`; `release validate`) and `graphyard-promotion.yml` (`release promote` only from a UAT-passed SHA, then `release verify`). Both pin the installing CLI (`GRAPHYARD_BUILD_SHA`). `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset leaves workflows ungenerated). UAT reports the SHA at `/healthz` as `commit` or `revision`. `--delivery per-pr` (or `"mode": "per-pr"`) keeps every check required per pull request. `install --plan` lists release branches, environments and adapter resources; `human` ones are created only by `--apply --create-environments`.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}

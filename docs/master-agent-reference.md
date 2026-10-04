@@ -49,7 +49,7 @@ A `dispatch` or `request-review` finding a session already answering the head co
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `run.worktreeRemovalLimit` per cycle) and stale, unheld [test temp entries](operations-reference.md#control-plane-resources) in `/tmp`; `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
+`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `run.worktreeRemovalLimit` per cycle) and stale, unheld [test temp entries](operations-reference.md#control-plane-resources) in `/tmp`; unowned non-`working` panes on a profile name, seen twice 60 s apart, close; `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
 
 ## Recovery
 

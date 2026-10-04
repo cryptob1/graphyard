@@ -11,7 +11,7 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 
 | Variable | Purpose
 | --- | ---
-| `GRAPHYARD_PRINCIPALS` | Principals JSON (`role`, `sessionKind`); operator declared `human`, rotation refuses the rest
+| `GRAPHYARD_PRINCIPALS` | Principals JSON (`role`, `sessionKind`); operator declared `human`, rotation refuses the rest; an AI `admin` judging retro artefacts declares `sessionKind: "ai"`
 | `GRAPHYARD_MAX_SLICE_LEADS` | Slice leads (default 3)
 | `GRAPHYARD_MAX_ENGINEERS_PER_LEAD` | Engineers per lead (default 2)
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (default 1)

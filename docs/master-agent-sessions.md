@@ -11,7 +11,7 @@
 
 ### Approval modes
 
-`"approvals": "auto"` adds: Claude Code `--permission-mode bypassPermissions`, `.claude.json` trust; Codex `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir`; Cursor `--force --trust`, run and logged in as `agent` (not `cursor` or `cursor-agent`); opencode allow-all `OPENCODE_PERMISSION`; Gemini, Qwen `--yolo`; Copilot `--allow-all-tools --allow-all-paths`; Muse `--approval-mode never --trust-workspace`; Antigravity `agy` `--dangerously-skip-permissions`, `--prompt-interactive`; Pi none. `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in arguments.
+`"approvals": "auto"` adds: Claude Code `--permission-mode bypassPermissions`, `.claude.json` trust; Codex `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir`; Cursor `--force --trust`, run and logged in as `agent` (not `cursor` or `cursor-agent`); opencode allow-all `OPENCODE_PERMISSION`; Gemini, Qwen `--yolo`; Copilot `--allow-all-tools --allow-all-paths`; Muse `--approval-mode never --trust-workspace`; Antigravity `agy` `--dangerously-skip-permissions`, `trustedWorkspaces`, `--prompt-interactive`; Pi none. `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in arguments.
 
 ### The coordinator checkout is confined at the OS level
 
@@ -39,13 +39,13 @@ GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`); its supervisor prints `graphyard: establishing containment for GY-N epoch E` first. Refusals quote the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s)`, releasing pane, supervisor and claim.
+The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`); its supervisor prints `graphyard: establishing containment for GY-N epoch E` first. Refusals quote the pane's last non-empty line and are retried, releasing pane, supervisor and claim.
 
 OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fixtures/opencode-1.18-start-screen.txt)).
 
 #### First-run consent prompts
 
-On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
+On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
 
 ### Acknowledgement, resume and idle sessions
 
@@ -61,4 +61,4 @@ Ending a session closes its pane; each cycle closes ≤**6** more launched **on 
 
 ### The dispatcher's own state
 
-The dispatcher bounds its own state where it composes it, each cut marked with an ellipsis; a cursor failing its schema is repaired, not fatal, logged once with the path that failed. A tick failure is attributed and surfaced: `dispatch.lastFailure`. Three consecutive failures raise one attention item (no reviewer or producer session is being launched for any item); `graphyard master restart` repairs the cursor. A session that exits at launch is classified from its pane: `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so `herdr pane read` decides: a provider limit notice fails over exactly as a mid-session exhaustion does; otherwise it is refused with the pane's last words and retried.
+Its state is bounded (cuts marked `…`); a cursor failing its schema is repaired and logged. Tick failures surface as `dispatch.lastFailure`; three in a row raise attention (`graphyard master restart` repairs the cursor). A runtime exiting **at launch** is classified by `herdr pane read`: a limit notice fails over; otherwise refused with its last words and retried.

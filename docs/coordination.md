@@ -19,7 +19,7 @@ Reviewer approval of the exact head plus required CI gates landing; threads are 
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` bounds changes: at `complete`, new heads and landings, files inside scope, new files, touched `tests/helpers/timing-baseline.json` lines pass; other files must match base byte-for-byte. Carried files (unlanded commits) never eject; scope requests or audited revisions widen it.
+`plannedFiles` bounds changes: at `complete`, new heads and landings, files inside scope, new files, touched `tests/helpers/timing-baseline.json` lines of top-level tests pass; other files must match base byte-for-byte. Carried files (unlanded commits) never eject; scope requests or audited revisions widen it.
 
 `evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals, published as required check `graphyard/landable` (`success` or `failure`), never a verdict input.
 
@@ -37,4 +37,4 @@ The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own 
 
 ## Ship in under thirty minutes
 
-[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance, never weaker gates. `graphyard diagnose GY-N` names refusing gate, other holds; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).
+[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance, never weaker gates. `graphyard diagnose GY-N` names refusing gate, other holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).

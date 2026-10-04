@@ -23,7 +23,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Retro synthesis
 
-`GRAPHYARD_INTERVENTION_PATTERNS=1`: scans group refusal/rework interventions by cause; at the threshold → unapplied drafts (`retro.drafted`): wording, mechanical check, producer-method correction, fault-catalogue entry. An AI operator agent with `decision:approve` (not human, drafter, recorder) [approves](protocol/work-commands.md)/refuses each, applied at registry revision. Requirements → [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete` (`409`); catalogue entries count under fault classes. Recurrence after application redrafts (`recurredAfter`).
+`GRAPHYARD_INTERVENTION_PATTERNS=1`: scans group refusal/rework interventions by cause; at the threshold → unapplied drafts (`retro.drafted`) (wording, check, producer method, fault-catalogue entry). An AI operator agent with `decision:approve` (not human, drafter, recorder) [approves](protocol/work-commands.md)/refuses each, applied at registry revision. Requirements → [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete` (`409`); catalogue entries count under fault classes.
 
 ## Flaky CI check
 
@@ -72,7 +72,7 @@ Hour without deliveries: `master status` points to `https://github.com/settings/
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes (warns <25%) and 2h-idle temp cleanup; `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes (warns <25%) and 2h-idle temp cleanup; `loaded-revision` counts code moves.
 
 ## Storage retention
 
@@ -113,7 +113,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, claiming webhook jobs, merge path, stale review requests, remainder. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s. Reconcile locks only its batch rows; contended batches back off, then defer.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s. Reconcile opens on cached stand-ins, reads items whole unlocked, row-locks only its batch; contended batches back off, then defer.
 
 ### Concurrent reconciliation
 
