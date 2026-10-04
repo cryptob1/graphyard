@@ -210,7 +210,10 @@ export const workspaceCommands = defineCommands([
     help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier attempt\'s hold on the branch is preserved and released'],
     async run(context, work) {
       const { args, api, print } = context;
-      const mutate = workMutation(context, work);
+      // GRAPHYARD_REQUEST_ID retries this command as a whole, so each write takes its own key from
+      // it (GY-1059): the failure release never reuses the reservation's, and a heartbeat is never replayed.
+      const request = process.env.GRAPHYARD_REQUEST_ID;
+      const mutate = (name: string, data: unknown) => api(`work/${work.id}/${name}`, data, request && name !== 'heartbeat' ? `${request}:worktree-${name}` : randomUUID());
       const epoch = Number(args[0]); const root = context.repositoryRoot();
       const status = await api('status');
       assertRepository((await discover(root)).repository, status.repository);
@@ -228,11 +231,12 @@ export const workspaceCommands = defineCommands([
       // GY-860: an earlier attempt's hold is recorded with the reservation and released; the branch never moves.
       const now = Date.parse(status.now ?? '') || Date.now();
       const released = await reserveReleasingHold(root, branch, path, runChild, mutate, epoch, context.individualHostId(), work, now);
-      await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
-      // GY-1078: a mid-am or mid-bisect session worktree the release leaves is reclaimed; failures carry git's stderr.
+      // GY-1078: a mid-bisect session worktree the release leaves is reclaimed; failures carry git's stderr.
       let reclaimed: ReclaimedHolder[] = [];
       try {
+        // A full or read-only volume is the host's failure too (GY-1059), so it costs no attempt.
+        await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
         if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, now, { checkouts: !!work.submission });
         for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
         if (!released?.reused) gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
