@@ -199,20 +199,26 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
   let attempt = 0; let state = null as SudoState | null;
   // The older page offers GitHub Mobile as a button; the passkey-first page keeps that button
   // hidden and offers a "Use GitHub Mobile" link under "Having problems?". A rendered control is
-  // activated first, and an anchor whose click fails is followed through its href instead.
+  // activated first, and an anchor whose click fails is followed through its href instead. When a
+  // rendered button's click fails, the link of the same label is located and tried as well.
   const issue = (label: string) => {
     if (attempt >= maxAttempts) throw new Error(`GitHub Mobile confirmation was re-issued ${attempt} times without approval; approve the prompt on your device and rerun master browser ${options.flow}`);
     const button = page.locate('button', label);
-    const link = button && button.visible !== false ? null : page.locate('link', label);
-    const controls = [button, link].filter((control): control is Located => !!control);
+    const rendered = !!button && button.visible !== false;
+    const controls = [button, rendered ? null : page.locate('link', label)].filter((control): control is Located => !!control);
     if (!controls.length) throw new Error(`Confirm-access page offers no "${label}" control; only GitHub Mobile confirmation is automated, so confirm access in your own browser and rerun master browser ${options.flow}`);
     controls.sort((a, b) => Number(b.visible !== false) - Number(a.visible !== false));
     attempt += 1;
     const failures: string[] = [];
-    for (const control of controls) {
+    for (let index = 0; index < controls.length; index += 1) {
+      const control = controls[index];
       try { page.click(control.selector); page.wait(Math.min(pollMs, 1_000)); return; }
       catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
       if (control.href) { page.open(control.href); return; }
+      if (rendered && control === button) {
+        const link = page.locate('link', label);
+        if (link && link.selector !== button.selector) controls.push(link);
+      }
     }
     throw new Error(`Confirm-access "${label}" could not be activated (${failures.join('; ')}); confirm access in your own browser and rerun master browser ${options.flow}`);
   };
