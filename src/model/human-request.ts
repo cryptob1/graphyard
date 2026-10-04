@@ -253,13 +253,16 @@ export const operatorApprovalRule: HumanOnlyRule = {
         rule: operatorApprovalRule.kind, work: work.key, id: work.id, title: work.title, request,
         waitedMs: Math.max(0, now - Date.parse(decision.requestedAt)), decision: operatorApprovalLabel,
         refusal: operatorCredentialRefusal({ id: 'an agent identity', role: 'operator-agent' })!,
-        choices: [{ label: `Approve and deliver ${work.key}`, input: 'none', declines: false, body: { decision: decision.id, reason: 'Approved by the operator' }, note: 'reason' }],
+        // Declining is the operator's considered refusal on the same route (`{ action: 'refuse' }`,
+        // server/decision-refusal.ts): terminal, with their reason, as Decline is on a park request.
+        choices: [{ label: `Approve and deliver ${work.key}`, input: 'none', declines: false, body: { decision: decision.id, reason: 'Approved by the operator' }, note: 'reason' },
+          { label: 'Decline', input: 'none', declines: true, body: { action: 'refuse', decision: decision.id, reason: 'Declined by the operator' }, note: 'reason' }],
         answer: {
           cli: `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve ${work.key} ${decision.id} REASON`,
-          decline: `graphyard master withdraw ${work.key} ${decision.id} REASON, run by the identity that requested it`,
-          dashboard: 'Work → Needs you → Approve',
+          decline: `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master refuse ${work.key} ${decision.id} REASON`,
+          dashboard: 'Work → Needs you → Approve or Decline',
           api: `POST /api/work/${work.key}/approve {"decision":"${decision.id}","reason":"…"}`,
-          post: { command: 'approve', body: { decision: decision.id }, field: 'reason', submit: `Approve and deliver ${work.key}`, decline: null },
+          post: { command: 'approve', body: { decision: decision.id }, field: 'reason', submit: `Approve and deliver ${work.key}`, decline: { body: { action: 'refuse', decision: decision.id }, submit: 'Decline' } },
         },
       }];
     });
