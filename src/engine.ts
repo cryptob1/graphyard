@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { stableJson } from './model/stable-json.js';
+import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, StaleWrite, save, rewriteDocument, lockItem, wakeJob, documentBefore, eventWorkSql } from './store.js';
-import { reconcileItemLockSql, reconcileRereadSql, reconcileRowsSql, reconcileSettledByIdSql, reconcileVersionsSql } from './store/coordination-sql.js';
+import { reconcileItemLockSql, reconcileRereadSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
@@ -38,12 +38,14 @@ import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentReques
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
-import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
+import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -567,7 +569,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
@@ -597,7 +599,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === rerun.sha && entry.check === rerun.check && entry.failedRunId === rerun.failedRunId);
@@ -640,7 +642,7 @@ export class Engine {
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const all: Work[] = (await this.store.leasePool.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all = await lockedWork(this.store.leasePool, [id]);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
@@ -755,7 +757,7 @@ export class Engine {
     const write = async () => (await this.store.pool.query(`WITH live AS (
         SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
           ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
-        FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
+        FROM work_items WHERE id = ${workIdByRef('$1')} AND document->'lease'->>'owner'=$2
           AND (document->'lease'->>'epoch')::int=$5 AND (document->'lease'->>'expiresAt')::timestamptz>=$6::timestamptz LIMIT 1),
       recorded AS (INSERT INTO events(work_id,actor,kind,payload) SELECT id, $2, $3, $4::jsonb FROM live RETURNING work_id)
       SELECT live.grace_until, clock_timestamp() AS now FROM live JOIN recorded ON recorded.work_id=live.id`,
@@ -807,7 +809,7 @@ export class Engine {
         demand(receipt.fingerprint === fingerprint, idempotencyMismatch);
         return receipt.result as Work;
       }
-      const work: Work | undefined = (await db.query("SELECT document FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [id])).rows[0]?.document;
+      const work: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document;
       demandWork(work);
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);
@@ -837,7 +839,7 @@ export class Engine {
         if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, receipt.result as Work, this.repository);
         return receipt.result as Work;
       }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
       // Set by the requirements command: the revision was a purely additive planned-files
@@ -1243,7 +1245,18 @@ export class Engine {
       if (command === 'dispatchblock') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; a dispatch failure is recorded only while no attempt holds the item`, 409);
-        work.blocker = data.reason; recordIntervention(work, 'blocked');
+        // GY-1082: only an item awaiting a dispatch can fail one, and a standing blocker is never
+        // overwritten. The failures are not taken on the caller's word: the item's own attempt
+        // record must show its last `dispatchFailureBlockAfter` attempts each claimed and ended
+        // without a submission. The loop supplies only the cause in git's words, which no other
+        // record holds; the blocker names the attempts the control plane verified.
+        demand(work.ready && (!work.submission || work.reworkRequested), `${work.key} is not awaiting a dispatch; a dispatch failure is recorded only on ready work with no submission or with rework requested`, 409);
+        demand(!work.blocker, `${work.key} already carries a blocker; clear it before recording a dispatch failure`, 409);
+        const failed = pipelineTimeline(work).attempts.slice(-dispatchFailureBlockAfter);
+        demand(failed.length === dispatchFailureBlockAfter && failed.every(attempt => attempt.endedAt && (attempt.end === 'released' || attempt.end === 'expired')),
+          `${work.key}'s last ${dispatchFailureBlockAfter} attempts did not each end without a submission; a dispatch failure is recorded only after that many failed attempts in a row`, 409);
+        const verified = ` [attempts ${failed.map(attempt => attempt.epoch).join(', ')} each ended without a submission]`;
+        work.blocker = `${data.reason.slice(0, 2000 - verified.length)}${verified}`; recordIntervention(work, 'blocked');
       }
       if (command === 'autoscope') {
         // The loop asks, the control plane decides. The verdict is recomputed here from the item's
@@ -1508,7 +1521,7 @@ export class Engine {
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
   private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string): Promise<Work | undefined> {
-    return (await db.query(`SELECT document FROM work_items WHERE document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
+    return (await db.query(`SELECT document FROM work_items w WHERE w.id IN (SELECT id FROM work_index WHERE NOT settled) AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
   }
   /**
    * Claim the next action for a stateless executor.
@@ -1567,7 +1580,7 @@ export class Engine {
       const transition = settleAction(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, data.result, data.reason, now);
       // A row settled on a delivered item was the last claim holding it open: it is retired with
       // the rest of what the delivery no longer needs, rather than offered again (GY-185).
-      if (work!.stage === 'done') settleDelivered(work!, (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document.id === work!.id ? work! : r.document as Work), now);
+      if (work!.stage === 'done') settleDelivered(work!, (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item), now);
       await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
       if (work!.submission) await wakeJob(db, work!.id);
       const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
@@ -1708,7 +1721,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
       demand(data.expectedRevision <= work.revision, 'Task changed before the merge was requested; retry');
@@ -1759,7 +1772,7 @@ export class Engine {
       const delivered = work.stage === 'done';
       if (!applyRevert(work, mergeSha, revert, now)) return work;
       if (delivered && work.stage !== 'done') {
-        const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+        const all = await lockedWork(db, [work.id]);
         this.evaluate(work, all.map(item => item.id === work.id ? work : item), now);
         await this.recordDispatch(db, work, now);
       }
@@ -1805,7 +1818,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
       const provider = reviewProviderOf(work.policy);
@@ -1833,7 +1846,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
@@ -1954,7 +1967,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
       requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
@@ -2017,7 +2030,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the branch was restored');
       const restore = refresh.restore;
@@ -2100,7 +2113,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done', 'Task changed before the queue ejection');
       requireCurrent(work.queue, 'Queue entry already left the merge queue');
@@ -2126,7 +2139,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
       const request = work.reviewRequest;
@@ -2308,70 +2321,81 @@ export class Engine {
     // Only the pass's candidates and the rows not settled now are versioned: a settled delivery that stays settled is never visited.
     const versionsOf = async (db: PoolClient) => new Map<string, string>((await db.query(reconcileVersionsSql, [candidates])).rows.map(row => [row.id, row.version]));
     const moved = (versions: Map<string, string>, except = new Set<string>()) => [...versions].filter(([id, version]) => !except.has(id) && fleet.get(id)?.version !== version).map(([id]) => id);
-    // Read again mid-pass, a row another writer moved in a way other items read is owed to them on the next pass.
-    const reread = async (db: PoolClient, ids: string[], opening = false) => {
-      if (!ids.length) return;
+    // Read again mid-pass, a row another writer moved in a way other items read is owed to them on the next pass;
+    // read for the pass's own decision (`owe` false), whether any face moved is returned instead.
+    const reread = async (db: PoolClient, ids: string[], owe = true) => {
+      if (!ids.length) return false;
       const rows = (await db.query(reconcileRereadSql, [ids])).rows;
       documentsRead += rows.length;
+      let faceMoved = false;
       for (const row of rows) {
         const face = fleetFace(row.document), before = fleet.get(row.id)?.face;
-        if (!opening && before !== undefined && before !== face) this.reconcileFaceMoved = true;
+        if (before !== undefined && before !== face) { faceMoved = true; if (owe) this.reconcileFaceMoved = true; }
         fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, settled: false, face });
       }
       view();
+      return faceMoved;
     };
     // Evaluated in a batch that has not committed yet: settled against the owed set only once it does.
-    let opened = false, written = new Set<string>(), evaluating: string[] = [];
+    let opened = false, decided = false, changed: string[] = [], config = '', written = new Set<string>(), evaluating: string[] = [], saved: SavedVersion[] = [];
     try {
       for (;;) {
         const opening = !opened, batch = next;
-        written = new Set(); evaluating = []; wroteFace = false;
+        written = new Set(); evaluating = []; saved = []; wroteFace = false;
         let finished: boolean;
         try {
           finished = await this.store.transaction(async (db, now) => {
             if (opening) {
-              const rows = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
-              const config = stableJson({ ciAppIds: this.ciAppIds, batch: this.mergeBatchSize, optimistic: this.optimisticMerge, exclude: this.optimisticExclude, tips: this.parallelTips });
+              // Versions first: a row that moves after them reads as moved, so the first batch reads it again.
+              const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
+              config = stableJson({ ciAppIds: this.ciAppIds, batch: this.mergeBatchSize, optimistic: this.optimisticMerge, exclude: this.optimisticExclude, tips: this.parallelTips });
               // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
               full = !fleet.size || config !== this.reconcileConfig || !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs);
-              const present = new Set(rows.map(row => row.id));
-              let faceMoved = false;
-              for (const id of [...fleet.keys()]) if (!present.has(id)) { fleet.delete(id); faceMoved = true; }
-              const changed = rows.filter(row => { const entry = fleet.get(row.id); return !entry || entry.version !== row.version || entry.settled !== row.settled; });
-              const faces = new Map(changed.map(row => [row.id, fleet.get(row.id)?.face]));
-              const settledIds = changed.filter(row => row.settled).map(row => row.id);
-              if (settledIds.length) {
-                const summaries = (await db.query(reconcileSettledByIdSql, [settledIds])).rows as { id: string; number: string; summary: Work }[];
-                documentsRead += summaries.length;
-                for (const row of summaries) fleet.set(row.id, { number: Number(row.number), work: row.summary, version: '', settled: true, face: fleetFace(row.summary) });
+              if (full) this.reconcileFullAt = now.getTime();
+              const versions = new Map(listed.map(row => [row.id, row]));
+              for (const id of [...fleet.keys()]) if (!versions.has(id)) { fleet.delete(id); this.reconcileFaceMoved = true; }
+              changed = listed.filter(row => { const entry = fleet.get(row.id); return !entry || entry.version !== row.version || entry.settled !== row.settled; }).map(row => row.id);
+              // Under the lock the pass reads no document whole (GY-1027): a row that moved is held as its
+              // stand-in — a settled delivery's summary, an open item's projection, served from the
+              // in-process cache — and the first batch reads the open ones whole, outside the lock.
+              const rows = await lockedRows(db, []);
+              for (const { number, document } of rows) {
+                const row = versions.get(document.id), entry = fleet.get(document.id);
+                if (!row || entry && entry.version === row.version && entry.settled === row.settled) continue;
+                const settled = isSettledSummary(document);
+                if (!settled) { fleet.set(document.id, { number, work: document, version: row.version, settled, face: entry?.face ?? '' }); continue; }
+                const face = fleetFace(document);
+                if (entry?.face !== face) this.reconcileFaceMoved = true;
+                fleet.set(document.id, { number, work: document, version: row.version, settled, face });
               }
-              await reread(db, changed.filter(row => !row.settled).map(row => row.id), true);
-              for (const row of rows) { const entry = fleet.get(row.id); if (entry) { entry.version = row.version; entry.settled = row.settled; } }
-              for (const row of changed) if (fleet.get(row.id)?.face !== faces.get(row.id)) faceMoved = true;
               view();
               // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
-              await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
-              for (const [id, version] of await versionsOf(db)) {
-                const entry = fleet.get(id);
-                if (!entry || entry.version === version) continue;
-                // Written by the sweep just now, from the document the view holds.
-                entry.version = version;
-                const face = fleetFace(entry.work);
-                if (face !== entry.face) { entry.face = face; faceMoved = true; }
+              const swept = await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
+              if (swept.length) {
+                const after = await versionsOf(db);
+                for (const work of swept) { const entry = fleet.get(work.id); if (entry) { entry.work = work; entry.version = after.get(work.id) ?? ''; } }
+                this.reconcileFaceMoved = true;
+                view();
               }
-              faceMoved ||= this.reconcileFaceMoved;
-              this.reconcileFaceMoved = false;
-              const live = rows.filter(row => !row.settled && fleet.has(row.id));
-              const due = full || faceMoved ? new Set(live.map(row => row.id)) : new Set([
-                ...changed.map(row => row.id), ...this.reconcileOwed,
-                ...live.filter(row => { const work = fleet.get(row.id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0; }).map(row => row.id),
-              ]);
-              if (full) { this.reconcileFullAt = now.getTime(); this.reconcileConfig = config; }
-              candidates = live.filter(row => due.has(row.id)).map(row => row.id);
-              this.reconcileOwed.clear();
-              for (const id of candidates) this.reconcileOwed.add(id);
               opened = true;
               return false;
+            }
+            if (!decided) {
+              // The rows the opening held as stand-ins, read whole outside the coordination lock; then the
+              // pass decides what it evaluates: the items whose own row moved, plus every live item when
+              // another's fleet face moved, and the lapsed, escalated and owed ones.
+              const faceMoved = await reread(db, [...fleet].filter(([, entry]) => !entry.settled && isStandIn(entry.work)).map(([id]) => id), false) || this.reconcileFaceMoved;
+              this.reconcileFaceMoved = false;
+              const live = [...fleet].filter(([, entry]) => !entry.settled).sort(([, a], [, b]) => a.number - b.number).map(([id]) => id);
+              const due = full || faceMoved ? new Set(live) : new Set([
+                ...changed, ...this.reconcileOwed,
+                ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0; }),
+              ]);
+              if (full) this.reconcileConfig = config;
+              candidates = live.filter(id => due.has(id));
+              this.reconcileOwed.clear();
+              for (const id of candidates) this.reconcileOwed.add(id);
+              decided = true;
             }
             await reread(db, moved(await versionsOf(db)));
             const started = performance.now();
@@ -2389,7 +2413,7 @@ export class Engine {
               if (locked.version !== fleet.get(id)!.version) {
                 if (written.size) throw new ReconcileContended();
                 await reread(db, [id]);
-              }
+              } else if (isStandIn(fleet.get(id)!.work)) await reread(db, [id]);
               if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) written.add(id);
             }
             if (!written.size) return done;
@@ -2404,8 +2428,11 @@ export class Engine {
               const face = fleetFace(entry.work);
               if (face !== entry.face) { entry.face = face; wroteFace = true; }
             }
+            saved = await savedVersions(db, [...written].map(id => fleet.get(id)!.work));
             return done;
           }, { lane: 'background', coordinationLock: opening, retryStaleWrites: false });
+          // Committed: what this batch saved stands in for its rows in the next locked read (GY-1027).
+          rememberSaved(saved);
         } catch (error) {
           // A batch's own items are row-locked and version-checked, so a stale write there is contention like any other.
           if (!(error instanceof ReconcileContended) && !(error instanceof StaleWrite && !opening)) throw error;
@@ -2458,7 +2485,7 @@ export class Engine {
       await save(db, work, 'graphyard', 'delivery.settled', now);
       return true;
     }
-    const before = stableJson(work);
+    const before = JSON.stringify(work);
     // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
@@ -2515,7 +2542,7 @@ export class Engine {
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-    if (stableJson(work) !== before) {
+    if (jsonChanged(before, work)) {
       for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
@@ -2540,7 +2567,7 @@ export class Engine {
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
         requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
       }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');

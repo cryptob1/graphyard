@@ -39,7 +39,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 export async function lockItem(db: pg.PoolClient, item: string | number): Promise<void> {
   const number = typeof item === 'number' ? item : /^(GY-)?\d+$/i.test(item) ? Number(item.replace(/^GY-/i, ''))
     : uuidPattern.test(String(item)) ? (await db.query('SELECT number FROM work_items WHERE id=$1::uuid LIMIT 1', [item])).rows[0]?.number
-    : (await db.query("SELECT number FROM work_items WHERE document->>'key'=$1 LIMIT 1", [item])).rows[0]?.number;
+    : (await db.query('SELECT number FROM work_index WHERE key=$1 ORDER BY number LIMIT 1', [item])).rows[0]?.number;
   if (number !== undefined) await db.query('SELECT pg_advisory_xact_lock($1, $2::int)', [advisoryLocks.item, Number(number)]);
   else await db.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [advisoryLocks.item, String(item)]);
 }
