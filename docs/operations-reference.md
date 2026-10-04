@@ -84,9 +84,9 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 
 ### Host memory
 
-Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB / 8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`), naming waits; CI, shells unbounded.
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`), naming waits; CI, shells unbounded.
 
-Below max(10% RAM, 4 GB) available, launches defer (`Launches deferred`, `escalation:dispatch:memory`; one `memory` item, class `resources`, naming top consumers; one `memory-pressure` fault per dip) until 1 GB above; running ones continue.
+Below max(10% RAM, 4 GB) available, launches defer (`Launches deferred`, `escalation:dispatch:memory`; a `memory` item (class `resources`) naming top consumers; one `memory-pressure` fault per dip) until 1 GB above; running ones continue.
 
 ## Bootstrap mode for a self-proving change
 
