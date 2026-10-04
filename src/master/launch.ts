@@ -394,6 +394,9 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
         await wait(pollMs);
         continue;
       }
+      // A workspace-trust prompt means the recipe's trust step did not take (GY-1152): the launch
+      // fails naming it, and is never held as a session keeping its lease while it waits.
+      if (prompt.kind === 'folder') throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime stopped at a workspace-trust prompt in pane ${pane} although its launch records the folder trusted, so the launch failed rather than holding the lease for a human: "${prompt.text}"`);
       const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
       // A session held for a human is reported, not refused: it has not taken its request, and it
       // is never counted as started. Everything else refuses the launch with the prompt's own text.
