@@ -598,6 +598,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
       // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
+      // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
       await wakeObservationJob(cycle, item, 'rework');
       return;
     }
