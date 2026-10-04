@@ -211,7 +211,7 @@ const basePlan = {
 };
 /** GY-430: the main day's item whose auto-merge GitHub holds BLOCKED past the bound: one with no other merge-path fault. */
 const blockedMergeItem = 6;
-/** GY-711: the main day's item whose first attempt is fenced and blocked on a covered scope refusal: the fault-free one. */
+/** GY-711: the main day's item whose first attempt blocks on a covered scope refusal and whose second is fenced: the fault-free one. */
 const remedyItem = 2;
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
@@ -752,14 +752,21 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await engine.execute(principal, 'launch', work.id, { epoch, settlementHash }, id());
     }
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
-    // GY-711: the routine-remedy item's first attempt is launched under a containment fence, as a
-    // supervised launch is, and a minute in it reports a scope refusal naming only its own planned
-    // file — the blocker a widening already covers. Both remedies must then fire from the real cycle.
-    if (mainDay && !options.containment && n === remedyItem && attempt === 1) {
+    // GY-711: the routine-remedy item exercises both per-item remedies from the real cycle. Its
+    // first attempt reports, a minute in, a scope refusal naming only its own planned file — the
+    // blocker a widening already covers — and stops on it, as the blocked day's sessions do. Its
+    // second attempt is launched under a containment fence, as a supervised launch is, and submits
+    // without its supervisor lowering it: the lapsed fence of a submitted attempt.
+    if (mainDay && !options.containment && n === remedyItem && attempt === 1)
+      pending.push(async () => {
+        await engine.execute(principal, 'blocked', work.id, { epoch, reason: `${scopeRefusalBlocker}: ${file(n)} is outside the attempt's plannedFiles` }, id());
+        const session = sessions.find(entry => entry.work === work.id && entry.epoch === epoch);
+        if (session) { herdr.kill(session.pane); session.state = 'blocked'; }
+      });
+    if (mainDay && !options.containment && n === remedyItem && attempt === 2) {
       const settlementHash = createHash('sha256').update(`soak-settlement-${key}-${epoch}`).digest('hex');
       await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash }, id());
       await engine.execute(principal, 'launch', work.id, { epoch, settlementHash }, id());
-      pending.push(async () => { await engine.execute(principal, 'blocked', work.id, { epoch, reason: `${scopeRefusalBlocker}: ${file(n)} is outside the attempt's plannedFiles` }, id()); });
     }
     // GY-852: the reassigned item's first session takes the lease and then sits at its prompt for
     // ever, as an idle worker does, so the loop's idle re-prompt and reclaim run against it.
