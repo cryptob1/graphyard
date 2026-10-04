@@ -770,7 +770,7 @@ test('unit:review-followups-filed — a create GitHub data moved past after its 
     let lose = true;
     const server = async (item: any, key: string) => {
       const fingerprint = JSON.stringify(item), receipt = receipts.get(key);
-      if (receipt !== undefined) { if (receipt !== fingerprint) throw new Error('Graphyard refused the follow-up item (409): Idempotency key reused with different input'); return { key: 'GY-201' }; }
+      if (receipt !== undefined) { if (receipt !== fingerprint) throw Object.assign(new Error('Graphyard refused the follow-up item (409): Idempotency key reused with different input'), { keyReuse: true }); return { key: 'GY-201' }; }
       receipts.set(key, fingerprint); made.push(key);
       if (lose) { lose = false; throw new Error('fetch failed: connection reset'); }
       return { key: 'GY-201' };

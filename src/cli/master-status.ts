@@ -10,7 +10,7 @@ import { impliedScopeRequests, type Work } from '../model/work.js';
 import { actionReport, agentRequestReport, sessionReport } from './loop-report.js';
 import { needsHumanActions, routedScopeStatus } from './owed-report.js';
 import { installationMerger } from '../executor.js';
-import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
+import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -43,15 +43,9 @@ import { slowReportReader } from '../master/report-cache.js';
 import { coordinationStep } from './coordination-snapshot.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget daemon metric, read from here as it always was.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
-
-// Observation throughput and the queue head's lag live beside the observation schedule they read;
-// the report reads them from here, as do the tests.
 export { observationThroughputStatus };
-// The attention builders live in `status-attention.ts`; the report reads them from here.
 import { mergeStallAttention } from './status-attention.js';
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
@@ -78,7 +72,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
   const { snapshot, clockOffset } = await coordinationStep(run => timedStep('snapshot', run), masterApi);
   const sections = new ReportSections(); // optional sections (GY-422)
-  // Sessions the dispatcher launched are settled against this snapshot: a head change cancels them here too.
+  // Dispatcher sessions settle against this snapshot: a head change cancels them here.
   try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
   catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
   let producerRecords = (await readProducerLedger(root)).producers;
@@ -109,9 +103,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
-  // The loop's own health comes first: a stalled coordinator is why nothing else moves.
+  // Loop health first: a stalled coordinator is why nothing moves.
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...baseFailureAttention(cycling.baseFailures, master.baseBranch)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
@@ -140,7 +134,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
-  // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
+  // Requests, conflicts, stalls, executors, owed judgments: derivedAttention, which the loop reads too.
   const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The intervention report is slow: status reads the loop's copy, or a bounded live read.

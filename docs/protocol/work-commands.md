@@ -9,6 +9,7 @@ Create with `POST /api/work` ([example](../../examples/work.json)): `title` and 
 - `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`). `graphyard master unblock` rereads and retries a stale-revision refusal, at most three writes, while the same blocker stands; a cleared or changed blocker is reported instead.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; a human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` for an explained `lease-loss`.
 - `rework`, `recover`: `{"reason":…, "previousWorkerStopped":true}`; `admin` (`recover` for a delivered quarantine).
+- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…, "base":SHA}` (coordinator, admin or an operator agent with `intent:unblock`) merges the observed base tip into an open candidate's branch, keeping its approval under the carry rules.
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}` (`release` may carry `"cause"`, kept on its event: a watch supervisor whose session is gone releases this way, leaving no blocker); `blocked` `{"epoch":1,"reason":…,"partialWork":…}`: a reason ends the attempt and releases the lease; null clears while leased.
 - `blocker-probe` `{blocker,class,probe,result,detail,nextAt}`: coordinator; a `pass` clears a routine blocker ([classes](leases.md#blocked-work-unblocks-itself)).
 - `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.

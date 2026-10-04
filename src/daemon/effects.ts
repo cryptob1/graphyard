@@ -35,6 +35,7 @@ import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from 
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { withReviewerDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
+import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
 import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
@@ -68,7 +69,7 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects {
+export interface DaemonEffects extends BaseFailureEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -539,7 +540,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
-  return {
+  return Object.defineProperties({
     agents: () => listHerdrAgents(run).catch(() => []),
     panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
     // A reviewer or producer session ends with its ledger record (GY-205): its Herdr name is not one the registry session determines.
@@ -773,5 +774,5 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
-  };
+  }, Object.getOwnPropertyDescriptors(baseFailureEffects(run, current, asOperatorAgent)));
 }
