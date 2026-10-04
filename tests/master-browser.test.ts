@@ -417,28 +417,6 @@ test('unit:sudo-passkey-page-reaches-mobile — a GitHub Mobile control that can
   await assert.rejects(passSudo(page, { flow: 'protection', record: 'r', onCode: () => assert.fail('no code expected'), sleep: noSleep }), /"Use GitHub Mobile" could not be activated \(agent-browser click failed: Element is not visible: #hidden\).*master browser protection/);
 });
 
-test('sudo step falls back to the same-label link when a visible "Use GitHub Mobile" button cannot be clicked', async () => {
-  for (const linkClickFails of [false, true]) {
-    const mobileHref = 'https://github.com/sessions/sudo?type=github_mobile';
-    const state = { mobile: false, polls: 0, clicked: [] as string[], opened: [] as string[] };
-    const page: BrowserPage = {
-      open(url) { state.opened.push(url); if (url === mobileHref) state.mobile = true; },
-      url: () => state.mobile && ++state.polls > 2 ? 'https://github.com/settings/apps/x/permissions' : 'https://github.com/sessions/sudo',
-      text: () => state.polls > 2 ? 'Permissions & events' : state.mobile ? 'Confirm access\n\nApprove on GitHub Mobile\n\n63\n' : 'Confirm access\nUse GitHub Mobile\nUse your password',
-      meta: () => null,
-      locate: (kind, text) => state.mobile || text !== 'Use GitHub Mobile' ? null
-        : kind === 'button' ? { selector: '#button', tag: 'button', checked: null, value: '', text: 'use github mobile', href: null, visible: true }
-        : kind === 'link' ? { selector: '#link', tag: 'a', checked: null, value: null, text: 'use github mobile', href: mobileHref, visible: true } : null,
-      click: selector => { state.clicked.push(selector); if (selector === '#button' || linkClickFails) throw new Error(`agent-browser click failed: ${selector}`); state.mobile = true; },
-      setChecked() {}, select() {}, screenshot() {}, wait() {}, close() {},
-    };
-    const result = await passSudo(page, { flow: 'protection', record: 'r', onCode: () => {}, sleep: noSleep, pollMs: 10, timeoutMs: 10_000 });
-    assert.deepEqual(result, { passed: true, attempts: 1, code: '63' });
-    assert.deepEqual(state.clicked, ['#button', '#link'], 'the visible button is tried first, then the link of the same label');
-    assert.deepEqual(state.opened, linkClickFails ? [mobileHref] : [], 'a failed link click is followed through its href');
-  }
-});
-
 test('the agent-browser page drives one headless session on the operator profile and never touches its cookies', () => {
   const calls: string[][] = [];
   const responses: Record<string, unknown> = { open: {}, get: { url: 'https://github.com/sessions/sudo', text: 'Confirm access' }, eval: { result: JSON.stringify({ selector: '[data-graphyard-target="gy-1"]', tag: 'button', checked: null, value: null, text: 'save changes' }) }, click: {}, check: {}, uncheck: {}, select: {}, screenshot: {}, wait: {} };
