@@ -330,11 +330,13 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // started one is, and has not read its request (GY-130).
   if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
+  let foreground: 'shell' | 'command' | null | undefined;
+  const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run)));
   // A runtime that printed below its command and handed the terminal back to the shell has exited
   // before it was ready — Cursor's IDE launcher saying "No Cursor IDE installation found", a
   // command not found — and nothing will start in that pane however long the bound (GY-976).
   const printed = outputAfterCommand(screen, command);
-  if (printed && await shellInForeground(pane, run)) return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
+  if (printed && await readForeground() === 'shell') return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
   const prompt = detectConsentPrompt(screen);
   if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
   // A runtime stopped on its own settings warning has not started either, whatever Herdr reports,
@@ -358,12 +360,12 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // spawns the runtime. That launch is starting, given until the ceiling, never refused as absent
   // at the bound (GY-1033). Its detail quotes what the supervisor last printed, if anything. Only
   // a pane whose shell is back in the foreground with nothing printed, or one Herdr cannot
-  // describe, is absent.
-  if ((printed || commandEchoing(last, command)) && await paneForeground(pane, run) === 'command') {
+  // describe, is absent. A pane where Herdr reports a different agent is absent (GY-1053).
+  if (!agent?.agent && (printed || commandEchoing(last, command)) && await readForeground() === 'command') {
     const said = printed?.at(-1);
     return { state: 'starting', agent: null, line, detail: said ? `the launch command is running, its supervisor setting up: "${said}"` : 'the launch command is running, its supervisor still setting up' };
   }
-  return { state: 'absent', agent: null, line, detail: commandEchoing(last, command) ? 'command still echoing' : agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : 'no runtime under the pane' };
+  return { state: 'absent', agent: null, line, detail: agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : commandEchoing(last, command) ? 'command still echoing' : 'no runtime under the pane' };
 }
 export async function awaitRuntimeStart(pane: string, kind: string, command: string, run?: ChildRun, bounds: StartBounds = {}) {
   const timeoutMs = bounds.timeoutMs ?? agentStartTimeoutMs, ceilingMs = Math.max(timeoutMs, bounds.ceilingMs ?? agentStartCeilingMs), pollMs = bounds.pollMs ?? startPollMs;
@@ -392,6 +394,9 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
         await wait(pollMs);
         continue;
       }
+      // A workspace-trust prompt means the recipe's trust step did not take (GY-1152): the launch
+      // fails naming it, and is never held as a session keeping its lease while it waits.
+      if (prompt.kind === 'folder') throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime stopped at a workspace-trust prompt in pane ${pane} although its launch records the folder trusted, so the launch failed rather than holding the lease for a human: "${prompt.text}"`);
       const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
       // A session held for a human is reported, not refused: it has not taken its request, and it
       // is never counted as started. Everything else refuses the launch with the prompt's own text.
