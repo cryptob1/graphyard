@@ -274,8 +274,10 @@ export function renewalGraceMs(error: unknown): number | null {
 }
 
 /**
- * The one line the watch supervisor prints before its first control-plane call, naming the item and
- * epoch from its argv; the launcher quotes it as the starting detail of a supervisor still setting up (GY-1033).
+ * The one line `watch` (src/cli/workspace.ts) prints before its first control-plane call, naming the
+ * item and epoch from its argv; the launcher quotes it as the starting detail of a supervisor still
+ * setting up (GY-1033). \`supervise\` itself never prints it: it lives here, beside the supervisor the
+ * line announces, only so tests can import it without loading the CLI command table.
  */
 export const setupLine = (subject: string, epoch: number) => `graphyard: establishing containment for ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
