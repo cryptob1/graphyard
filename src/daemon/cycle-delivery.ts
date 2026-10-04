@@ -76,13 +76,15 @@ export const repeatedMergeRefusalMs = 10 * 60_000;
  * carry gone, the refusal standing — re-arms the handling and moves the candidate on to the rework
  * action instead of being deduplicated away by the first phase's marker (GY-831 review). A carry
  * re-bound to another review is a phase of its own. A refusal standing only on a stale GitHub
- * observation takes neither step: the candidate keeps its position and is observed (GY-1099).
+ * observation takes neither step: the candidate keeps its position and is observed (GY-1099). Nor
+ * does one standing only on the candidate's wait for its predecessors in the merge queue (GY-1084).
  */
 export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string) {
   const { state, effects, now, performed } = cycle;
   const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
   if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
   if (staleObservationOnly(item)) return requestCandidateObservation(cycle, item, mergeKey, reason, since, minutes);
+  if (queueWaitOnly(item)) return;
   const carry = carriedApproval(item), carried = !!carry;
   const key = `${mergeKey}:repeated:${carry ? `carry:${carry.reviewId ?? 'unnumbered'}:${carry.originalSha}` : 'rework'}`, previous = state.actions[key];
   if (previous?.state === 'done' && previous.since === since) return;
@@ -122,6 +124,18 @@ export function staleObservationOnly(work: Work) {
   const owed = (reason: string) => reason === staleObservationReason || (!work.observation && reason === unverifiedProtectionReason);
   return !work.violations.length && !!merge && !merge.passed && merge.reasons.includes(staleObservationReason) && merge.reasons.every(owed)
     && work.gates.every(gate => gate.name === 'merge' || gate.passed);
+}
+/**
+ * GY-1084. Whether the merge gate refuses this candidate only for its wait behind predecessors in the
+ * merge queue, with at most a stale observation beside it, every other gate passing. The wait ends
+ * when they land or leave and no new head shortens it, so a rework is premature: GY-1005's was marked
+ * for one on 2026-10-01 while it waited for GY-521 and GY-957, and its approver refused it.
+ */
+export function queueWaitOnly(work: Work) {
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  const owed = (reason: string) => reason === staleObservationReason || (!work.observation && reason === unverifiedProtectionReason);
+  return !work.violations.length && !!merge && !merge.passed && merge.reasons.some(queueSequencingReason)
+    && merge.reasons.every(reason => owed(reason) || queueSequencingReason(reason)) && work.gates.every(gate => gate.name === 'merge' || gate.passed);
 }
 /**
  * GY-1099. On 2026-10-02 seven candidates whose every other gate passed were ejected by GY-831's

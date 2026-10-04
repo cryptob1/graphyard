@@ -322,7 +322,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // which waits for one — must not hold this rework.
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
-  const ci = failedCheckRework(work);
+  const ci = failedCheckRework(work) ?? scopeRegressionRework(work);
   if (ci) return { action: 'rework', ...ci };
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
@@ -419,6 +419,14 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
+}
+/** GY-1084. The rework round for a head the build gate refuses for files outside its plannedFiles (regression-guard.ts), or null: unasked, it was owed to a master session as a decision fault every cycle. It waits while a scope request is judged. */
+export function scopeRegressionRework(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate, observation = work.observation;
+  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done' || (work.scopeRequest && work.scopeRequest.decision?.state !== 'refused') || observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  const refused = (work.gates.find(gate => gate.name === 'build')?.reasons ?? []).filter(reason => /^Candidate changes \d+ files? outside its planned files/.test(reason));
+  const named = refused.join('; '), listed /* trimmed before the instructions, which stay whole */ = named.length > 1600 ? `${named.slice(0, named.lastIndexOf(' ', 1600))}…` : named;
+  return refused.length ? { reason: `${work.key}: ${listed}. Only the worker can restore them, so the item returns to a worker; a file the change does need is asked for with scope-request in that round.`, binding: `${candidate.sha}:outside-scope` } : null;
 }
 /**
  * GY-496. A producer request the loop stopped attempting: every automatic session it launched for
@@ -535,6 +543,13 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   }
   return null;
 }
+/** GY-1084. Whether the loop requests an owed row's judgment itself, so nobody else owes it: counted as owed, each rework round it put to its approver was a decision fault (324 on 2026-10-01). */
+export function loopRequestsJudgment(work: Work, row: { kind: string; trigger: string | null }, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): boolean {
+  if (row.kind === 'request-rework') return neededDecision(work, config, exhausted)?.action === 'rework';
+  return row.trigger === 'lease-loss' && !!leaseLossDecision(work);
+}
+/** Whether a request ended on its own timeout (`AbortSignal.timeout`) rather than on an answer: its outcome is unknown (GY-1084). */
+export const timedOut = (error: unknown) => error instanceof Error && (error.name === 'TimeoutError' || /aborted due to timeout/.test(error.message));
 /** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */
 function leaseLossDecision(work: Work): RoutineDecision | null {
   const lost = supersededLeaseLoss(work);

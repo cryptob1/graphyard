@@ -1,7 +1,7 @@
 import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
 import { agentOwner, type AttentionItem, type AttentionOwner } from '../master.js';
 import type { Work } from '../model.js';
-import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
+import { humanNeededActions, type HumanNeededRow, type LoopRequests } from '../model/next-action.js';
 import { decideScopeRequest, scopeRefusalBlocker, terminalScopeRefusal } from '../model/scope.js';
 import { elapsed } from '../model/sessions.js';
 import { routedScopeRequests } from './status-attention.js';
@@ -71,15 +71,22 @@ export function routedScopeStatus<S extends { work: { key: string; attention: st
 }
 
 /**
+ * GY-1084. The fault an owed row restates when it waits on something other than a two-party decision:
+ * an action escalated for failing in a row is the stall `master status` names as `stalled-action`, and
+ * a proof no producer session may run is a `proof-gap`. Each is a fault of its own class, so its owed
+ * line is not a decision fault besides; every other owed row is one (`owed-decision`).
+ */
+const owedFaultKind = (row: HumanNeededRow) => row.trigger === 'stalled-action' ? { kind: 'stalled-action' as const } : row.trigger === 'operator-proof' ? { kind: 'proof-gap' as const } : {};
+/**
  * One attention item per action nobody in the executor loop may run, and per concern carried
  * beside an action that is running. Each names what is waiting, how long it has waited and the
  * command that answers it.
  */
-export function humanNeededAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
-  return humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => ({
+export function humanNeededAttention(snapshot: { work: Work[]; now: string }, loopRequests?: LoopRequests): AttentionItem[] {
+  return humanNeededActions(snapshot.work, new Date(snapshot.now), loopRequests).map(row => ({
     subject: row.key,
     text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
-    ...agentOwner('master', row.resolve, 'approver'),
+    ...agentOwner('master', row.resolve, 'approver'), ...owedFaultKind(row),
   }));
 }
 
@@ -98,14 +105,15 @@ export function needsHumanActions<T extends { waiting: { id: string }[]; idle: {
  * What `master status` adds for work waiting on a judgment: every owed row (counted apart from the
  * queue), the attention items for items whose row does not already carry an attention line — an
  * item says this once, and the rest would be named nowhere at all — and how many attention lines
- * the owed items and scope requests add to the total.
+ * the owed items and scope requests add to the total. A judgment the loop requests itself
+ * (`loopRequests`, GY-1084) is the loop's work in progress and is neither a row nor a line.
  */
-export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { key: string; attention: string | null; routedScope?: string }[], scopeRequests: AttentionItem[]) {
+export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { key: string; attention: string | null; routedScope?: string }[], scopeRequests: AttentionItem[], loopRequests?: LoopRequests) {
   const rowAttention = (key: string) => !!rows.find(row => row.key === key)?.attention;
-  const items = humanNeededAttention(snapshot).filter(item => !rowAttention(item.subject));
+  const items = humanNeededAttention(snapshot, loopRequests).filter(item => !rowAttention(item.subject));
   // The rule refusal's escalation of a request the approver is judging is answered by that decision.
   const routed = (key: string) => rows.find(row => row.key === key)?.routedScope;
-  return { rows: humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => row.source === 'action' && routed(row.key)
+  return { rows: humanNeededActions(snapshot.work, new Date(snapshot.now), loopRequests).map(row => row.source === 'action' && routed(row.key)
     ? { ...row, decision: `the independent approver's judgement of ${row.key}'s routed scope request`, resolve: routed(row.key)! } : row), items,
     counted: items.length + scopeRequests.filter(item => !rowAttention(item.subject)).length };
 }
