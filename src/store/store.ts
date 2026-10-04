@@ -242,11 +242,6 @@ export const webhookWakeTtlMs = 10 * 60_000;
 export const observationStarvedAfterMs = 5 * 60_000;
 
 /**
- * Make an item's observation job due now. A wake never moves a job that is already due later: an
- * item saved every minute would otherwise look freshly due forever and never reach the starvation
- * bound `takeJob` claims ahead of the priority list (2026-09-26: items stuck for an hour on stale reads).
- */
-/**
  * Wake the jobs a verified GitHub webhook delivery names (GY-806): every job when it moved the base
  * branch or a merge-queue ref (`all`), else the items whose pull request, candidate or speculative
  * tip SHA, or candidate branch it names. An observation event also stamps their webhook wake, which
@@ -261,8 +256,21 @@ export async function wakeFromWebhook(db: Pick<pg.PoolClient, 'query'>, subjects
   return woken.rows.map(row => String(row.work_id));
 }
 
-export async function wakeJob(db: pg.PoolClient, id: string) {
-  await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
+/**
+ * Make an item's observation job due now. A wake never moves a job that is already due later: an
+ * item saved every minute would otherwise look freshly due forever and never reach the starvation
+ * bound `takeJob` claims ahead of the priority list (2026-09-26: items stuck for an hour on stale reads).
+ * `prioritized` also stamps the job's webhook wake, so `takeJob` claims it ahead of the polled
+ * backlog as it would a webhook's (GY-1099: a merge refused only for a stale observation). Like a
+ * webhook's, a wake still standing keeps its stamp, so prioritized wakes are claimed oldest first.
+ */
+export async function wakeJob(db: Pick<pg.PoolClient, 'query'>, id: string, prioritized = false) {
+  if (!prioritized) {
+    await db.query('INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1', [id]);
+    return;
+  }
+  await db.query(`INSERT INTO jobs(work_id,webhook_at) VALUES($1,now()) ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1,
+    webhook_at=CASE WHEN jobs.webhook_at IS NULL OR jobs.webhook_at <= now() - ($2::text||' milliseconds')::interval THEN now() ELSE jobs.webhook_at END`, [id, String(webhookWakeTtlMs)]);
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
