@@ -2276,13 +2276,13 @@ export class Engine {
     // Only the pass's candidates and the rows not settled now are versioned: a settled delivery that stays settled is never visited.
     const versionsOf = async (db: PoolClient) => new Map<string, string>((await db.query(reconcileVersionsSql, [candidates])).rows.map(row => [row.id, row.version]));
     const moved = (versions: Map<string, string>, except = new Set<string>()) => [...versions].filter(([id, version]) => !except.has(id) && fleet.get(id)?.version !== version).map(([id]) => id);
-    // Read moved rows again into the view. `guarded`, a move that changed anything another item's
+    // Read moved rows again into the view. Given `guardedAt`, a move that changed anything another item's
     // evaluation reads adopts nothing and answers false: the batch evaluated against the old row.
-    const adopt = async (db: PoolClient, ids: string[], guarded: boolean, now: Date) => {
+    const reread = async (db: PoolClient, ids: string[], guardedAt?: Date) => {
       if (!ids.length) return true;
       const rows = (await db.query(reconcileRereadSql, [ids])).rows as { id: string; number: string; version: string; document: Work }[];
       // A stand-in from the opening read is compared as the same projection of the row read now (GY-1027).
-      if (guarded && rows.some(row => { const seen = fleet.get(row.id); return !seen || contentionView(seen.work, now) !== contentionView(isStandIn(seen.work) ? coordinationProjection(row.document) : row.document, now); })) return false;
+      if (guardedAt && rows.some(row => { const seen = fleet.get(row.id); return !seen || contentionView(seen.work, guardedAt) !== contentionView(isStandIn(seen.work) ? coordinationProjection(row.document) : row.document, guardedAt); })) return false;
       for (const row of rows) fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version });
       view();
       return true;
@@ -2306,7 +2306,7 @@ export class Engine {
             opened = true;
             return false;
           }
-          await adopt(db, moved(await versionsOf(db)), false, now);
+          await reread(db, moved(await versionsOf(db)));
           const started = performance.now();
           let done = true;
           while (next < order.length) {
@@ -2321,15 +2321,15 @@ export class Engine {
             // so after any write a move another item's evaluation reads rolls the batch back to run again instead.
             // A stand-in from the opening read is read whole as the batch reaches it (GY-1027).
             if (row.version !== fleet.get(id)?.version) {
-              if (!await adopt(db, [id], written.size > 0, now)) throw new ReconcileContended();
-            } else if (isStandIn(fleet.get(id)!.work)) await adopt(db, [id], false, now);
+              if (!await reread(db, [id], written.size ? now : undefined)) throw new ReconcileContended();
+            } else if (isStandIn(fleet.get(id)!.work)) await reread(db, [id]);
             evaluated++;
             if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) written.add(id);
           }
           if (!written.size) return done;
           if (!await this.coordinationLockWithin(db, this.reconcileCommitLockWaitMs)) throw new ReconcileContended();
           const versions = await versionsOf(db);
-          if (!await adopt(db, moved(versions, written), true, now)) throw new ReconcileContended();
+          if (!await reread(db, moved(versions, written), now)) throw new ReconcileContended();
           for (const id of written) fleet.get(id)!.version = versions.get(id)!;
           saved = await savedVersions(db, [...written].map(id => fleet.get(id)!.work));
           return done;
