@@ -210,8 +210,7 @@ export const workspaceCommands = defineCommands([
     help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier attempt\'s hold on the branch is preserved and released'],
     async run(context, work) {
       const { args, api, print } = context;
-      // GRAPHYARD_REQUEST_ID retries this command as a whole, so each write takes its own key from
-      // it (GY-1059): the failure release never reuses the reservation's, and a heartbeat is never replayed.
+      // GY-1059: under GRAPHYARD_REQUEST_ID each write keys off it by name, so the failure release never replays the reservation.
       const request = process.env.GRAPHYARD_REQUEST_ID;
       const mutate = (name: string, data: unknown) => api(`work/${work.id}/${name}`, data, request && name !== 'heartbeat' ? `${request}:worktree-${name}` : randomUUID());
       const epoch = Number(args[0]); const root = context.repositoryRoot();
@@ -243,11 +242,8 @@ export const workspaceCommands = defineCommands([
         if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
       }
       catch (error) { await workspaceFailure(mutate, epoch, error); } // GY-860: the host failed, not the attempt
-      // A checkout whose lockfile the reachable install does not match gets its own install now,
-      // so the session never starts on the wrong dependency versions. The lease is kept alive
-      // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
-      // heartbeat means this epoch is no longer held: npm is stopped there and the command fails
-      // rather than reporting a worktree ready for work nobody may do.
+      // A checkout whose lockfile the reachable install does not match gets its own install, under heartbeats
+      // until the session's supervisor takes over; a refused heartbeat stops npm and fails the command.
       const dependencies = await installUnderLease(path, () => mutate('heartbeat', { epoch }), `${work.key} epoch ${epoch}`);
       return print({ path, branch, epoch, dependencies, ...(reclaimed.length ? { reclaimed } : {}) });
     },
