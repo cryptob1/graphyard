@@ -45,7 +45,7 @@ import { coordinationStep } from './coordination-snapshot.js';
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // The cycle-budget daemon metric, read from here as it always was.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module, read from here as it always was.
+// `master scope` lives in its own module, re-exported from here.
 export { approveScopeRequest } from './master-scope.js';
 
 // Observation throughput and the queue head's lag live beside the observation schedule they read;
@@ -78,7 +78,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
   const { snapshot, clockOffset } = await coordinationStep(run => timedStep('snapshot', run), masterApi);
   const sections = new ReportSections(); // optional sections (GY-422)
-  // Sessions the dispatcher launched are settled against this snapshot: a head change cancels them here too.
+  // Sessions the dispatcher launched settle against this snapshot: a head change cancels them too.
   try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
   catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
   let producerRecords = (await readProducerLedger(root)).producers;
@@ -86,7 +86,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const reviews = summarizeReviews(reviewRecords), producers = summarizeProducers(producerRecords);
   // Every request whose last session failed or expired, with its attempts and the next relaunch.
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
-  // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
+  // Setup that silently stops every launch, and the loop's supervision (GY-114), read on the host.
   const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
   // Status reads the cursor as the loop would; the loop logs and persists any repair it makes.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
@@ -131,13 +131,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
-  // refused, and nothing relaunches until it is named here with the command that answers it.
-  // A review every session settled on a dismissal for is the stronger statement of the same
-  // request (GY-100), reported once as the review that cannot be obtained on that commit.
+  // refused, and nothing relaunches until it is named here with the command that answers it. A
+  // review every session settled on a dismissal is the stronger statement of the same request
+  // (GY-100), reported once as the review that cannot be obtained on that commit.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(status.work);
-  // An open item the control plane names no action for. Those waiting on another item or on a
-  // live session are accounted and raise nothing; what is left is named, with what is missing.
+  // An open item the control plane names no action for. Those waiting on another item or a live
+  // session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
@@ -146,31 +146,30 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The intervention report is slow: status reads the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), main red after optimistic merges (GY-500),
   // queue-head lag (GY-492), slow renewals (GY-558).
   const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...landingAttention(snapshot.work), ...health.attention];
-  // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
+  // Exactly one component merges (GY-245): the loop when installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...(sudo ? [...status.attentionItems, { subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [...status.attentionItems])];
-  // First: loop health, dispatcher, unclaimable actions, merger, release lag (GY-437); nothing below moves until they do.
+  // First: loop health, dispatcher, unclaimable actions, merger, release lag (GY-437); nothing below moves before them.
   const ahead = [...loopItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention];
   attentionItems.unshift(...ahead);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
-  // Everything the control plane takes from the operator's own credential alone, from the
-  // human-only rule table, answered on the dashboard's Needs you page (GY-102).
+  // Operator credentials from the human-only rule table (GY-102).
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
   // A standing ledger refusal is attributed first (GY-131); what still reads as a symptom of a
   // resource at its bound is then rewritten to name that resource (GY-132).
   const attributed = ledgerRefusalAttention({ work: status.work, attentionItems: [...nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable), ...decisions.attentionItems],
     counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, unansweredDecisions: decisions.unanswered.length, refusedDecisions: decisions.refused, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, stalledActions: stalled.length, overlongSessions: overlong.length, needsHuman: owed.rows.length, humanOnly: humanOnly.length,
-      // Items with no action, split the way a reader has to read them: one waiting on another
-      // item is the pipeline working, one with nothing moving it is the pipeline stopped.
+      // Items with no action, split the way a reader reads them: one waiting on another item is
+      // the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
@@ -200,6 +199,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     setup, administration, daemon, dispatch,
     // Each session ledger's bound, retention and the room left for live sessions (GY-131).
     ledgers: { reviews: sessionLedgerHeadroom(reviewRecords, reviewLedgerSpec), producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec) },
+    // Doctor runs: accepted, else cursor's.
+    doctor: coordinator?.doctor?.length ? coordinator.doctor : cycling?.doctor?.recent ?? null,
     // The inverted loop: what the control plane says each item needs, who is running it, and
     // every session it can be watched through.
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
@@ -227,8 +228,8 @@ export async function reportedAttention(root: string, master: MasterConfig, mast
     generatedFiles.push({ subject: 'installation', text: `The repository generated-file manifest is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`,
       ...agentOwner('master', `Fix ${generatedManifestScript} so --list prints the generated paths; master status reports the deployment drift again once it does`) });
   }
-  // Per-item reads run bounded-concurrently and each read below is a step of the recorder in force (GY-377);
-  // a section whose route fails is named in `unavailable` and the rest is still built (GY-422).
+  // Per-item reads run bounded-concurrently; each read below is its recorder's step (GY-377); a
+  // section whose route fails is named in `unavailable` and the rest is still built (GY-422).
   const sections = observed.sections ?? new ReportSections();
   const overflow = await sections.optional('escalation contexts', 'GET /api/work/:id/context', () => contextOverflows(masterApi, snapshot.work), () => [] as Awaited<ReturnType<typeof contextOverflows>>);
   const reports = slowReportReader(master, masterApi, observed.reports, observed.reportBoundMs);

@@ -36,6 +36,8 @@ export const operatorAgentRouteGuard: Route = {
       || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+(?:\/[a-z]+)?)?$/.test(url.pathname)
       // Judgement about delivered work is intent (GY-98): recording it and turning it into an item.
       || /^\/api\/judgements(?:\/[^/]+\/work)?$/.test(url.pathname)
+      // The loop's pipeline-doctor run summaries (GY-711): a record of what the doctor found and did, posted as the master's identity.
+      || url.pathname === '/api/doctor'
       // Retro artefacts are judged by an independent agent identity holding decision:approve (GY-970).
       || /^\/api\/retro(?:\/standing|\/[0-9a-f-]{36}\/(?:approve|refuse))?$/.test(url.pathname),
       'Route is not available to operator agents', 403);

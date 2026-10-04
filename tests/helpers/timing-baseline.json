@@ -422,6 +422,7 @@
     "tests/pi-graphyard-tools.test.ts": 342,
     "tests/pi-narrow-roles.test.ts": 2054,
     "tests/pi-runner.test.ts": 938,
+    "tests/pipeline-doctor.test.ts": 900,
     "tests/pipeline-speed.test.ts": 6174,
     "tests/planned-files-derived.test.ts": 1572,
     "tests/pr-links.test.ts": 355,

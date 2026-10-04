@@ -92,10 +92,10 @@ export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' |
   if (!value || /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`${account.name}'s key file ${file} must hold the key alone, on one line`);
   return { [account.key.variable]: value };
 }
-/** A registry account's headless runner: every run reads the account's key afresh, into its own environment only, and every run is confined at its spawn (GY-888). */
-export function registryRunner(account: FleetLaunchAccount): Runner {
+/** A registry account's headless runner: every run reads the account's key afresh, into its own environment only, and every run is confined at its spawn (GY-888). Extra arguments after the account's own narrow the session further (the doctor's tool set). */
+export function registryRunner(account: FleetLaunchAccount, extraArgs: string[] = []): Runner {
   const launch = registryHeadlessLaunch(account);
-  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: launch.args, environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement() }).start(prompt, options) };
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: [...launch.args, ...extraArgs], environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement() }).start(prompt, options) };
 }
 /**
  * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,
