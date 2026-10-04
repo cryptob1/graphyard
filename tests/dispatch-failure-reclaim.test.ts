@@ -315,7 +315,7 @@ test('a rework reclaim keeps the aborted holder\'s unpushed tip under a ref befo
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('the record of a deleted session worktree is removed on a first attempt, and an ordinary checkout is judged like an operation: a dirty or foreign one is named, a clean session one detached', async () => {
+test('the record of a deleted session worktree is removed on a first attempt, and an ordinary checkout is judged like an operation: a dirty one is named, a clean one detached, and one outside the sessions keeps the rework path\'s detach', async () => {
   const branch = 'graphyard/gy-7-3';
   const root = await repository(branch);
   try {
@@ -329,19 +329,26 @@ test('the record of a deleted session worktree is removed on a first attempt, an
     git(root, 'worktree', 'remove', target);
 
     const checkout = await sessionHolder(root, 2, branch);
-    await writeFile(join(checkout, 'scratch.txt'), 'unsaved\n');
+    await writeFile(join(checkout, 'a.txt'), 'unsaved\n');
     assert.throws(() => reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true }), new RegExp(`${checkout} \\(checked out\\) has uncommitted changes`));
     assert.equal(git(checkout, 'symbolic-ref', '--short', 'HEAD'), branch, 'the dirty checkout is left on the branch');
-    await rm(join(checkout, 'scratch.txt'));
+    git(checkout, 'checkout', '--', 'a.txt');
+    await writeFile(join(checkout, 'scratch.txt'), 'scratch\n');
     const [detached] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true });
-    assert.equal(detached.action, 'detached its HEAD');
+    assert.equal(detached.action, 'detached its HEAD', 'an untracked file, which a detach cannot touch, does not hold the checkout');
+    assert.ok(existsSync(join(checkout, 'scratch.txt')));
 
     const foreign = join(root, '..', `${root.split('/').at(-1)}-foreign`);
     git(root, 'worktree', 'add', '-q', foreign, branch);
     try {
-      assert.throws(() => reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true }), new RegExp(`${foreign} \\(checked out\\) is not a session worktree under`));
-      assert.equal(git(foreign, 'symbolic-ref', '--short', 'HEAD'), branch, 'the foreign checkout is left on the branch');
-    } finally { await rm(foreign, { recursive: true, force: true }); }
+      await writeFile(join(foreign, 'a.txt'), 'unsaved\n');
+      assert.throws(() => reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true }), new RegExp(`${foreign} \\(checked out\\) has uncommitted changes`));
+      assert.equal(git(foreign, 'symbolic-ref', '--short', 'HEAD'), branch, 'the dirty foreign checkout is left on the branch');
+      git(foreign, 'checkout', '--', 'a.txt');
+      const [earlier] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true });
+      assert.equal(earlier.action, 'detached its HEAD', 'a clean earlier checkout outside the sessions is detached, as the rework path always did');
+      assert.throws(() => git(foreign, 'symbolic-ref', '--short', 'HEAD'));
+    } finally { git(root, 'worktree', 'remove', '--force', foreign); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

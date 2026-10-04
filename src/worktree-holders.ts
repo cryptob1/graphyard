@@ -84,9 +84,9 @@ export function sessionOf(path: string): { key: string | null; epoch: number | n
   return match ? { key: match[1], epoch: Number(match[2]) } : { key: null, epoch: null };
 }
 
-/** Lines of `git status --porcelain` in `path`, with `--ignored` when asked, or git's failure when it cannot read them. */
-function statusLines(path: string, ignored: boolean) {
-  const args = ['status', '--porcelain', ...(ignored ? ['--ignored'] : [])];
+/** Lines of `git status --porcelain` in `path`, with `--ignored` or tracked files only when asked, or git's failure when it cannot read them. */
+function statusLines(path: string, ignored: boolean, trackedOnly = false) {
+  const args = ['status', '--porcelain', ...(ignored ? ['--ignored'] : []), ...(trackedOnly ? ['--untracked-files=no'] : [])];
   const result = git(args, path);
   return result.status === 0 ? { lines: result.stdout.split('\n').filter(Boolean) } : { failure: gitFailure(args, result) };
 }
@@ -95,8 +95,11 @@ function statusLines(path: string, ignored: boolean) {
  * Frees `branch` for the worktree about to be created at `target`, returning what was reclaimed,
  * or throws naming every holder it may not touch. A holder is reclaimed only when it is a session
  * worktree directly under `<root>/.graphyard/worktrees` belonging to `work`, its epoch holds no
- * live lease on `now`, and it has no uncommitted changes; an ordinary checkout is judged by the
- * same rules as an operation in progress, so a foreign or dirty checkout is named, never changed.
+ * live lease on `now`, and it has no uncommitted changes. An ordinary checkout is judged by the
+ * same rules, except that one outside `.graphyard/worktrees` (the worker's earlier checkout of the
+ * branch, which may be the repository's own) is detached as the rework path always did, and only
+ * changes to tracked files count against it: detaching moves no file, and untracked files are its
+ * owner's scratch. A dirty checkout, or another item's session checkout, is named, never changed.
  * The record of a deleted session worktree is removed. An operation in progress is aborted; on a
  * rework (`options.checkouts`, which also reclaims ordinary checkouts), whose new workspace resets
  * the branch to the remote candidate, the tip the abort leaves is first kept under
@@ -112,12 +115,13 @@ export function reclaimBranchHolders(root: string, branch: string, target: strin
   const live = (holder: BranchHolder) => !!work.lease && work.lease.epoch === holder.epoch && Date.parse(work.lease.expiresAt) > now;
   for (const holder of holders) {
     const name = `${holder.path} (${holder.missing ? 'deleted, still recorded' : holder.via === 'checkout' ? 'checked out' : `${holder.via} in progress`})`;
-    if (resolve(dirname(holder.path)) !== sessions) refusals.push(`${name} is not a session worktree under ${sessions}`);
-    else if (holder.key !== work.key) refusals.push(`${name} belongs to ${holder.key ?? 'no Graphyard item'}, not ${work.key}`);
-    else if (live(holder)) refusals.push(`${name} belongs to ${work.key} epoch ${holder.epoch}, which holds a live lease`);
+    const checkout = holder.via === 'checkout' && !holder.missing, session = resolve(dirname(holder.path)) === sessions;
+    if (!session && !checkout) refusals.push(`${name} is not a session worktree under ${sessions}`);
+    else if (session && holder.key !== work.key) refusals.push(`${name} belongs to ${holder.key ?? 'no Graphyard item'}, not ${work.key}`);
+    else if (session && live(holder)) refusals.push(`${name} belongs to ${work.key} epoch ${holder.epoch}, which holds a live lease`);
     else if (!holder.missing) {
       // An unreadable status is not a clean one: the worktree is left alone and named.
-      const status = statusLines(holder.path, false);
+      const status = statusLines(holder.path, false, checkout);
       if (status.failure) refusals.push(`${name} could not be checked for uncommitted changes (${status.failure})`);
       else if (status.lines!.length) refusals.push(`${name} has uncommitted changes`);
     }
