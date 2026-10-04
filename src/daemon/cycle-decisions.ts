@@ -575,8 +575,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    // GY-1177: a dead proof's re-scope an approver refused is answered by rework, and the narrowing
-    // one applied is resolved, both read from the history — only for an item either could concern.
+    // GY-1177: a refused dead-proof re-scope is answered by rework, an applied one resolved (history-read).
     const rescope = effects.decisions && (coveredDeadProofs(item).length || standingEscalations(item).some(entry => entry.trigger === 'requirement-weakening'))
       ? rescopeOutcomes(item, (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions) : noRescopeOutcomes;
     const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted, rescope);
