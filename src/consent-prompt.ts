@@ -47,12 +47,15 @@ const promptKinds: [ConsentKind, RegExp][] = [
   ['payment', /\b(?:payment|credit card|billing|purchase|subscribe|subscription|upgrade to|pay\b)/i],
   ['credential', /\b(?:password|passphrase|api[ -]?key|access token|sign in|log ?in|login|authenticate|authorization code)\b/i],
   ['hooks', /\bhooks?\b[^\n]*\b(?:trust|new or changed|outside the sandbox)|\btrust\b[^\n]*\bhooks?\b/i],
-  ['folder', /\btrust\b[^\n]*\b(?:folder|directory|workspace|files in)\b|\b(?:folder|directory|workspace)\b[^\n]*\btrust|\ballow\b[^\n]*\bwork in this (?:folder|directory)/i],
+  ['folder', /\btrust\b[^\n]*\b(?:folder|directory|workspace|project|files in)\b|\b(?:folder|directory|workspace)\b[^\n]*\btrust|\ballow\b[^\n]*\bwork in this (?:folder|directory)/i],
   ['telemetry', consentAnswers[1].asks],
   ['trust', /\b(?:do you trust|trust (?:all|this|these)|untrusted)\b/i],
 ];
-/** A numbered choice waiting for a keystroke: `1. Yes`, `› 2) No`. */
-const menuOption = /^\W{0,4}\d[.)]\s+\S/m;
+/**
+ * A choice waiting for a keystroke: numbered (`1. Yes`, `› 2) No`), or a Yes/No option of an
+ * arrow-selected menu, which Antigravity CLI draws unnumbered (`> Yes, I trust this folder`).
+ */
+const menuOption = /^\W{0,4}(?:\d[.)]\s+\S|(?:Yes|No)\b[,.]?(?:\s|$))/m;
 /** The prompts that are never answered by anybody but a human, whatever rule would match them. */
 export const neverAnswered: ConsentKind[] = ['credential', 'payment'];
 /** How much of the screen bottom a dialog is read from, and how much of it a record keeps. */
