@@ -3,9 +3,9 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop` naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route and SQL.
+Restart `graphyard master run` freely; no double dispatch. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, three slowest named. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route, SQL.
 
-Not decision faults: loop-made requests (rework, superseded lease-loss resolves), timed-out requests, approver relaunches; stalled actions, unproducible proofs, scope latency are `stalled-action`, `proof-gap`, `action:scope`.
+Not decision faults: loop-made requests (rework, superseded lease-loss resolves), timeouts, approver relaunches. Stalls, unproducible proofs, slow scope: `stalled-action`, `proof-gap`, `action:scope`.
 
 ### Perpetual master loop
 
@@ -76,13 +76,13 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES` if set, else readable same-host `data_directory` volume size, else advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide, warns <25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES` if set, else readable same-host `data_directory` volume size, else advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
 - **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a delta-extended row, an item's newest save, a delivery event or cited revision, an uncompleted merged item's row, or an unread flow-projection row. Each batch records `ledger.compacted` with counts per kind; only `VACUUM FULL` returns space to the volume.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a delta-extended row, an item's newest save, a delivery event or cited revision, an uncompleted merged item's row, or an unread flow-projection row. Each batch records `ledger.compacted` counts per kind; only `VACUUM FULL` returns space.
 
 ## Bootstrap mode for a self-proving change
 
