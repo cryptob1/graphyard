@@ -227,6 +227,7 @@
     "tests/action-priority.test.ts": 2350,
     "tests/action-queue.test.ts": 13050,
     "tests/action-totality.test.ts": 2354,
+    "tests/agy-folder-trust.test.ts": 491,
     "tests/agent-approval.test.ts": 3132,
     "tests/agent-registry.test.ts": 5815,
     "tests/analytics-truncation.test.ts": 543,
