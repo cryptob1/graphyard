@@ -39,7 +39,7 @@ export class AgentRegistry {
   private async sessionWork(db: Pick<pg.PoolClient, 'query'>, registry: RegistryDocument) {
     const keys = [...new Set(liveSessions(registry).map(session => session.work).filter((key): key is string => !!key))];
     if (!keys.length) return [];
-    return (await db.query("SELECT document FROM work_items WHERE document->>'key' = ANY($1::text[])", [keys])).rows.map(row => row.document);
+    return (await db.query('SELECT w.document FROM work_index i JOIN work_items w ON w.id = i.id WHERE i.key = ANY($1::text[])', [keys])).rows.map(row => row.document);
   }
 
   /** The registry as status and the dashboard show it; `host` judges placement for that executor. */
