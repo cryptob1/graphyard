@@ -3,6 +3,7 @@ import { isClosed, isDelivered } from '../model/closure.js';
 import { foldFollowUpBatch, followUpAppendSchema, followUpEntries, followUpParent, followUpPromotedEvent, followUpPromoteSchema, followUpRecordedEvent, mergeDuplicateFollowUps, mergeFollowUpEntries, openFollowUpItem, triageRecordSchema, untriaged, type FollowUpBatch, type FollowUpBatchRow, type FollowUpEntry } from '../model/machine-backlog.js';
 import { holdFollowUps, releasePromotedFollowUp } from '../model/followups-held.js';
 import { save } from '../store.js';
+import { isStandIn, lockedWork } from '../store/locked-read.js';
 import { closeWork, settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
 import { appendToItem, masterOnly, migrateToParents, readAll, recordDispatch, shipFollowUps, type Db } from './followups-ship.js';
@@ -32,13 +33,20 @@ export async function appendFollowUps(services: Services, caller: Principal, id:
   return services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as { key: string; added: number };
-    const all = await readAll(db);
+    let all = await readAll(db, [id]);
     let work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     masterOnly(actor, work, services, 'append review follow-ups');
     let result: Record<string, unknown> | null = null;
     if (data.parent || !followUpParent(work!)) {
       const approved = work!, open = data.parent ? openFollowUpItem(all, approved.key) : undefined;
-      if (open) work = open;
+      if (open) {
+        if (isStandIn(open)) {
+          all = await readAll(db, [approved.id, open.id]);
+          work = all.find(item => item.id === open.id)!;
+        } else {
+          work = open;
+        }
+      }
       else if (isClosed(approved)) result = { key: approved.key, added: 0, findings: 0, dropped: approved.pendingFollowUps?.dropped?.reason ?? `${approved.key} was closed without shipping, so its follow-ups are dropped` };
       else {
         const batch = await followUpBatch(db, approved);
@@ -168,7 +176,8 @@ export async function migrateFollowUps(services: Services, caller: Principal, ke
     const parents = previous ? await migrateToParents(services, db, actor, now) : null;
     const replay = await receipt(db, actor, key, digest({ migrate: 'followups' })); if (replay) return parents ? { ...replay, parents } : replay;
     if (previous) return { ...previous, already: true, parents };
-    const all = await readAll(db);
+    // The open follow-up items are what the migration writes: found on the compact read, then read whole.
+    const all = await readAll(db, (await readAll(db)).filter(item => item.stage !== 'done' && followUpParent(item)).map(item => item.id));
     const { merged, survivors, closed } = mergeDuplicateFollowUps(all, actor.id, now);
     for (const item of closed) {
       const settled = settleOpenRequests(item, item.closure!, now);
@@ -202,7 +211,7 @@ export async function recordTriage(services: Services, caller: Principal, id: st
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const all = await readAll(db);
+    const all = await readAll(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(untriaged(work!), `${work!.key} is not a machine-filed item awaiting triage`, 409);
     const judgement = data.judgement;

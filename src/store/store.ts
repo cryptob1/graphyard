@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
+import { assertSavable } from './locked-read.js';
 import { advisoryLocks } from './locks.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
@@ -214,7 +215,7 @@ export class Store {
     return (await this.pool.query('SELECT work_id,held_reason,held_until FROM jobs WHERE held_until>now() ORDER BY held_until')).rows as { work_id: string; held_reason: string; held_until: Date }[];
   }
   /** Observation jobs starved of observations three times in a row (GY-506), which `/api/status` reports and master status raises. */
-  async starvedJobs() { return (await this.pool.query(`SELECT w.document->>'key' AS key, j.unobserved, j.error, j.deferred_reason FROM jobs j JOIN work_items w ON w.id=j.work_id WHERE j.unobserved>=3 AND w.document->>'stage'<>'done' ORDER BY w.number LIMIT 50`)).rows as { key: string; unobserved: number; error: string | null; deferred_reason: string | null }[]; }
+  async starvedJobs() { return (await this.pool.query(`SELECT w.document->>'key' AS key, j.unobserved, j.error, j.deferred_reason FROM jobs j JOIN work_items w ON w.id=j.work_id WHERE j.unobserved>=3 AND w.id IN (SELECT id FROM work_index WHERE stage <> 'done') ORDER BY w.number LIMIT 50`)).rows as { key: string; unobserved: number; error: string | null; deferred_reason: string | null }[]; }
   /** A concurrency retry: back within seconds, never an operator error, never silent (GY-506). */
   async retryJob(id: string, token: string, reason: string, observed: boolean) {
     await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=$3,refusals=0, unobserved=CASE WHEN $4::boolean IS TRUE THEN 0 WHEN $4::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=now()+interval '2 seconds' WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, observed]);
@@ -273,9 +274,11 @@ export async function wakeJob(db: Pick<pg.PoolClient, 'query'>, id: string, prio
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
+  assertSavable(work);
   work.revision++;
   work.updatedAt = now.toISOString();
-  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify(work)]);
+  const text = JSON.stringify(work);
+  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, text]);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
-  await appendSave(db, work, actor, kind, details);
+  await appendSave(db, work, actor, kind, details, text);
 }
