@@ -14,6 +14,7 @@ import { closeWork } from '../close.js';
 import { appendFollowUps, followUpsByPr, migrateFollowUps, promoteFollowUp, readFollowUps, recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { issuePushCredential } from '../push-credential.js';
+import { controlPlaneSyncPush } from '../../sync.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -146,6 +147,14 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id]) {
       await refuseLead(context, id, 'push-credential');
       return issuePushCredential(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
+    },
+  },
+  // A base sync carrying the base branch's workflow changes, pushed by the control plane (GY-1098).
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/sync-push$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'sync-push');
+      return controlPlaneSyncPush(context.services, context.actor, decodeURIComponent(id), await parseJson(context, 64 * 1024 * 1024));
     },
   },
   {

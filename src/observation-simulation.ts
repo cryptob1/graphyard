@@ -14,6 +14,14 @@ import { headClaimBand, observationClaimClasses, observationClaimPlan, observati
  * job duration, record the reading at its end and schedule the next at the cadence (the unsettled
  * one for a `changedShare` of readings); an idle worker
  * looks again a second later, as `observationWorkers` does. Returns the worst lag each band reached.
+ *
+ * Without `advance` the fleet is fixed: every item keeps the band, claim class and cadence it starts
+ * with, which models a steady-state fleet (GY-1114's AC-1) but no churn. With `advance`, a reading that
+ * comes back changed may move its item on — a review request approved into the merge queue, say — and
+ * every band, claim class and cadence is read again from the new fleet, so items move between bands as
+ * they would in production (GY-1178). An item entering the merge band is woken, as the loop wakes the
+ * observation job of a step refused on a stale reading (daemon/cycle-delivery.ts), and its lag in a
+ * band is measured from the later of its reading and its entry: how long the band held it stale.
  */
 export interface ObservationSimulation {
   all: Work[]; workers: number; steadyMs: number; jobMs: number; durationMs: number; batchSize?: number; seed?: number; stepMs?: number;
@@ -21,32 +29,63 @@ export interface ObservationSimulation {
   changedShare?: number;
   /** Replaces an item's settled cadence: how a test replays a schedule other than the production one. */
   settledCadence?: (work: Work, band: FreshnessBand, cadenceMs: number) => number;
+  /**
+   * What a changed reading does to its item: the item's next state (evaluated against `fleet`), or
+   * null when it stays as it is. When given, the fleet is reclassified after every change it makes.
+   */
+  advance?: (work: Work, fleet: Work[], at: number) => Work | null;
 }
 export function simulateObservationScheduler(options: ObservationSimulation) {
   const { all, workers, steadyMs, jobMs, durationMs, batchSize = 1, stepMs = 1000, changedShare = 0 } = options;
   let seed = options.seed ?? 1114;
   // A deterministic spread: job durations between half and one and a half times `jobMs`, initial ages across a cadence.
   const random = () => { seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648; return seed / 2_147_483_648; };
-  const start = Date.parse('2026-10-02T12:00:00Z'), date = new Date(start);
-  const classes = observationClaimClasses(all, batchSize, start);
-  const merging = new Set([...predictQueue(all, start).filter(placement => placement.position < headClaimBand(batchSize)).map(placement => placement.id), ...all.filter(mergeAuthorized).map(work => work.id)]);
-  const items = all.filter(work => work.stage !== 'done' && work.submission).map(work => {
-    const band: FreshnessBand = merging.has(work.id) || work.queue?.tips?.length ? 'merge' : reviewRequested(work, all, date) ? 'review' : 'steady';
-    const settled = observationCadence(work, all, date, work.observation, steadyMs).ms;
-    const cadenceMs = options.settledCadence ? options.settledCadence(work, band, settled) : settled;
-    const changedMs = observationCadence(work, all, date, null, steadyMs).ms;
+  const start = Date.parse('2026-10-02T12:00:00Z');
+  let fleet = all;
+  // Each open item's band and cadences, read from the fleet as it stands at `at`.
+  const classify = (at: number) => {
+    const date = new Date(at), headBand = headClaimBand(batchSize);
+    const merging = new Set([...predictQueue(fleet, at).filter(placement => placement.position < headBand).map(placement => placement.id), ...fleet.filter(mergeAuthorized).map(work => work.id)]);
+    return new Map(fleet.filter(work => work.stage !== 'done' && work.submission).map(work => {
+      const band: FreshnessBand = merging.has(work.id) || work.queue?.tips?.length ? 'merge' : reviewRequested(work, fleet, date) ? 'review' : 'steady';
+      const settled = observationCadence(work, fleet, date, work.observation, steadyMs).ms;
+      const cadenceMs = options.settledCadence ? options.settledCadence(work, band, settled) : settled;
+      return [work.id, { band, cadenceMs, changedMs: observationCadence(work, fleet, date, null, steadyMs).ms }] as const;
+    }));
+  };
+  let classes = observationClaimClasses(fleet, batchSize, start);
+  const initial = classify(start);
+  const items = all.filter(work => initial.has(work.id)).map(work => {
+    const { band, cadenceMs, changedMs } = initial.get(work.id)!;
     const observedAt = start - Math.floor(random() * Math.min(cadenceMs, band === 'merge' ? 20_000 : cadenceMs));
-    return { id: work.id, key: work.key, band, cadenceMs, changedMs, observedAt, availableAt: observedAt + cadenceMs, locked: false };
+    return { id: work.id, key: work.key, band, cadenceMs, changedMs, observedAt, availableAt: observedAt + cadenceMs, locked: false, open: true, enteredAt: -Infinity };
   });
   const byId = new Map(items.map(entry => [entry.id, entry]));
   const busy: { until: number; id: string | null; idleUntil: number }[] = Array.from({ length: Math.max(1, Math.floor(workers)) }, () => ({ until: start, id: null, idleUntil: start }));
   const worst = new Map<FreshnessBand, { lagMs: number; key: string | null }>((['merge', 'review', 'steady'] as FreshnessBand[]).map(band => [band, { lagMs: 0, key: null }]));
-  let claims = 0;
+  let claims = 0, changedReadings = 0, bandChanges = 0;
   for (let now = start; now <= start + durationMs; now += stepMs) {
     for (const worker of busy) {
       if (worker.id && worker.until <= now) {
-        const entry = byId.get(worker.id)!;
-        entry.observedAt = worker.until; entry.availableAt = worker.until + (random() < changedShare ? entry.changedMs : entry.cadenceMs); entry.locked = false; worker.id = null;
+        const entry = byId.get(worker.id)!, changed = random() < changedShare;
+        if (changed) changedReadings++;
+        const moved = changed && options.advance ? options.advance(fleet.find(work => work.id === entry.id)!, fleet, worker.until) : null;
+        if (moved) {
+          // The item moved on: the fleet is reclassified, and every open item takes its new band and cadences.
+          fleet = fleet.map(work => work.id === moved.id ? moved : work);
+          classes = observationClaimClasses(fleet, batchSize, worker.until);
+          const next = classify(worker.until);
+          for (const item of items) {
+            const reading = next.get(item.id);
+            if (!reading) { if (item.open) bandChanges++; item.open = false; continue; }
+            if (reading.band !== item.band) {
+              bandChanges++; item.enteredAt = worker.until;
+              if (reading.band === 'merge') item.availableAt = Math.min(item.availableAt, worker.until);
+            }
+            Object.assign(item, { band: reading.band, cadenceMs: reading.cadenceMs, changedMs: reading.changedMs });
+          }
+        }
+        entry.observedAt = worker.until; entry.availableAt = worker.until + (changed ? entry.changedMs : entry.cadenceMs); entry.locked = false; worker.id = null;
       }
       if (worker.id || worker.idleUntil > now) continue;
       const plan = observationClaimPlan(classes, id => byId.get(id)?.observedAt ?? null, now);
@@ -58,7 +97,7 @@ export function simulateObservationScheduler(options: ObservationSimulation) {
         if (entry.availableAt < now - observationStarvedAfterMs) return 2;
         return named !== undefined ? 3 : 4;
       };
-      const due = items.filter(entry => !entry.locked && entry.availableAt <= now).map(entry => ({ entry, tier: tier(entry) }))
+      const due = items.filter(entry => entry.open && !entry.locked && entry.availableAt <= now).map(entry => ({ entry, tier: tier(entry) }))
         .sort((a, b) => a.tier - b.tier || (a.tier === 1 ? a.entry.availableAt - b.entry.availableAt : 0)
           || (position.get(a.entry.id) ?? Infinity) - (position.get(b.entry.id) ?? Infinity) || a.entry.availableAt - b.entry.availableAt);
       const next = due[0]?.entry;
@@ -66,12 +105,16 @@ export function simulateObservationScheduler(options: ObservationSimulation) {
       next.locked = true; worker.id = next.id; worker.until = now + Math.round(jobMs * (0.5 + random())); claims++;
     }
     for (const entry of items) {
-      const lag = now - entry.observedAt, record = worst.get(entry.band)!;
+      if (!entry.open) continue;
+      const lag = now - Math.max(entry.observedAt, entry.enteredAt), record = worst.get(entry.band)!;
       if (lag > record.lagMs) { record.lagMs = lag; record.key = entry.key; }
     }
   }
-  const bands = (['merge', 'review', 'steady'] as FreshnessBand[]).map(band => ({ band, items: items.filter(entry => entry.band === band).length,
+  // A band's item count is its membership at the end of the run; each item stays counted where it ended.
+  const bands = (['merge', 'review', 'steady'] as FreshnessBand[]).map(band => ({ band, items: items.filter(entry => entry.open && entry.band === band).length,
     boundMs: observationFreshnessBounds[band], worstLagMs: worst.get(band)!.lagMs, worstItem: worst.get(band)!.key }));
-  return { bands, claims, claimsPerMinute: Math.round(claims / (durationMs / 60_000) * 10) / 10,
+  // `changedReadings` is how many readings came back changed: the ones a conditional poll pays for in full.
+  // `bandChanges` counts each move of an item into another band, or out of the open fleet.
+  return { bands, claims, claimsPerMinute: Math.round(claims / (durationMs / 60_000) * 10) / 10, changedReadings, bandChanges,
     withinBounds: bands.every(entry => entry.boundMs === null || entry.items === 0 || entry.worstLagMs <= entry.boundMs) };
 }
