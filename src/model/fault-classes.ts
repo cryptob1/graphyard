@@ -52,7 +52,7 @@ export const faultClassMeaning: Record<FaultClass, string> = {
 export const faultCatalogue = {
   'session-liveness': ['session', 'launch-review', 'launch-producer', 'consent-hold', 'overlong-session', 'unanswered-request', 'stuck-request', 'escalation:lease-loss',
     'action:close', 'action:dispatch', 'action:session', 'action:preserve', 'action:wake'],
-  'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'escalation:security-concern', 'action:review'],
+  'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'review-settlement', 'escalation:security-concern', 'action:review'],
   'decision': ['approver-launch', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
     'action:decision', 'action:escalation'],
   'scope': ['scope-request', 'scope-violation', 'escalation:requirement-weakening', 'action:scope'],
@@ -89,7 +89,24 @@ export const classified = (kind: FaultKind): Classified => ({ kind, faultClass: 
  * builder always uses, or the fixed wording of its sentence. The order matters only where two
  * could both match; the first wins.
  */
+/**
+ * The kind of a review launch wait, by its reason (GY-1175): a request no reviewer profile has a slot
+ * for is starved capacity, one a reviewer session already answered waits for the control plane to
+ * settle its verdict, and any other reason (a refused launch, no profile, dispatch) is a review
+ * launch that did not start.
+ */
+export function launchWaitKind(reason: string): FaultKind {
+  if (/every reviewer profile is busy/.test(reason)) return 'concurrency-starved';
+  if (/already answered with .+the control plane settles the request once it reads that verdict/.test(reason)) return 'review-settlement';
+  return 'launch-review';
+}
+const launchWaitLine = /'s review request \S+ on \S+ has waited .+? without a reviewer launch: /s;
+const launchWaitSignature = (kind: FaultKind) => (_: string, text: string) => { const match = launchWaitLine.exec(text); return !!match && launchWaitKind(text.slice(match.index + match[0].length)) === kind; };
 const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
+  // The review launch-wait line (GY-710) names a reason another builder may word; it is matched first.
+  ['concurrency-starved', launchWaitSignature('concurrency-starved')],
+  ['review-settlement', launchWaitSignature('review-settlement')],
+  ['launch-review', launchWaitSignature('launch-review')],
   ['resource-bound', (subject, text) => subject.startsWith('resource:') || /is held by a registered resource at its bound/.test(text)],
   ['ledger-refusal', (_, text) => /cannot be requested because the .+ refused the write/.test(text)],
   ['disk-pressure', subject => subject === 'disk'],
