@@ -155,17 +155,13 @@ export const workspaceCommands = defineCommands([
       '  sync GY-N --restore           The same, then restore every such file to the base in one new',
       '                                commit naming them; push it plainly. A force push is never',
       '                                needed or allowed',
-      '  sync GY-N --push-via-control-plane COMMIT',
-      '                                Have the control plane push a base-sync merge whose push was',
-      '                                refused for the workflows permission',
+      '  sync GY-N --push-via-control-plane COMMIT  Control plane pushes a refused workflow base sync',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
       // so the item never presents as a ready-gate refusal or an unexplained lapse (GY-134).
-      try { await (context.args.includes('--push-via-control-plane') ? pushViaControlPlane : syncWork)(context, work); }
-      catch (error) {
-        const failure = environmentFailure(error);
-        const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
+      try { await (context.args.includes('--push-via-control-plane') ? pushViaControlPlane : syncWork)(context, work); } catch (error) {
+        const failure = environmentFailure(error); const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
         if (!failure || epoch === undefined) throw error;
         const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
         const partialWork = keepBlockedWork(work, epoch); await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) });
