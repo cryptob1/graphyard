@@ -36,6 +36,7 @@ export async function assembleStatusSections<
   probe: any;
   observation: any;
   health: any;
+  hs: { report: unknown };
   merger: any;
   setup: any;
   administration: any;
@@ -60,7 +61,7 @@ export async function assembleStatusSections<
   approvals: Parameters<typeof loopAttestations>[1];
 }) {
   const {
-    master, snapshot, coordinator, cli, mergeQueue, probe, observation, health,
+    master, snapshot, coordinator, cli, mergeQueue, probe, observation, health, hs,
     merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, executors, releases, lag, status, disk, managedRoot, inventory, reclaimPlan,
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals,
@@ -70,6 +71,7 @@ export async function assembleStatusSections<
     ...directMergeLine(coordinator),
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
+    conflictHotspots: hs.report,
     merger: { merger: merger.merger, detail: merger.detail },
     autoMerge: master.autoMerge,
     ...optimisticStatus(master, snapshot.work),
