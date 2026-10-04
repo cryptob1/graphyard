@@ -61,7 +61,7 @@ export const faultCatalogue = {
   'deployment': ['production', 'throughput', 'action:deployment', 'action:smoke'],
   'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'workflow-permission', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
-  'merge': ['base-conflict', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
+  'merge': ['base-conflict', 'base-failure', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
   'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'fleet-capacity', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
