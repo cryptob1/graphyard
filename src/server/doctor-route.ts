@@ -38,16 +38,15 @@ export const doctorRoute: Route = {
     // The summary and its per-item events land in one transaction: a run is recorded whole or
     // not at all, and the loop posts a refused run again.
     await engine.store.transaction(async db => {
+      // The named items are read once, by key through the work index, never by scanning documents.
+      const items = perItem.size ? (await db.query('SELECT i.id, i.key FROM work_index i WHERE i.key = ANY($1::text[])', [[...perItem.keys()]])).rows as { id: string; key: string }[] : [];
       // An operator identity appends history only for the items inside its scope, judged before
       // anything is written, so a refused run leaves the ledger exactly as it was.
-      if (actor.role === 'operator-agent' && perItem.size) {
-        const referenced = (await db.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [[...perItem.keys()]])).rows as { id: string; key: string }[];
-        const outside = referenced.filter(item => !operatorScopeIncludes(actor, item)).map(item => item.key);
+      if (actor.role === 'operator-agent') {
+        const outside = items.filter(item => !operatorScopeIncludes(actor, item)).map(item => item.key);
         demand(!outside.length, `Work item is outside this operator-agent scope: ${outside.join(', ')}`, 403);
       }
       await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, doctorRunEvent, JSON.stringify(run)]);
-      if (!perItem.size) return;
-      const items = (await db.query(`SELECT id, document->>'key' AS key FROM work_items WHERE document->>'key' = ANY($1)`, [[...perItem.keys()]])).rows as { id: string; key: string }[];
       for (const entry of perItem.values()) {
         const item = items.find(candidate => candidate.key === entry.subject);
         if (item) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, actor.id, doctorFindingEvent, JSON.stringify(entry)]);
