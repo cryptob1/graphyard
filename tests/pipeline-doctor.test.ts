@@ -448,7 +448,7 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   const db: { query(sql: string, params?: any[]): Promise<any> } = { query: async (sql, params = []) => {
     if (sql.includes('VALUES(NULL')) { inserts.push({ workId: null, kind: params[1], payload: JSON.parse(params[2]) }); return { rowCount: 1 }; }
     if (sql.includes('INSERT INTO events')) { inserts.push({ workId: params[0], kind: params[2], payload: JSON.parse(params[3]) }); return { rowCount: 1 }; }
-    if (sql.includes('work_items')) return { rows };
+    if (sql.includes('FROM work_index')) return { rows };
     return { rows: [] };
   } };
   const postedRun: DoctorRunRecord = { at: at(60_000), state: 'reported', runs: [], detail: 'stuck and fixed',
