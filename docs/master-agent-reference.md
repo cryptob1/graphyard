@@ -21,7 +21,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
 
-**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Re-post is no new verdict (`observation.dismissedReviewIds`). Within 30 min (`mergeBaseDismissalWaitBoundMs`), merge-base dismissals in motion (republishing speculative tips or restoring approvals) are not review-convergence faults unless standing past the bound.
+**A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Re-post is no new verdict (`observation.dismissedReviewIds`). Merge-base dismissals in motion (tips republishing, approvals restoring) are review-convergence faults only past 30 min (`mergeBaseDismissalWaitBoundMs`).
 
 **A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`): `restored` once GitHub shows it, else `unpublished` (`failure`); a second, candidate unchanged, escalates (`escalated`, `master status`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are neither rework nor ejection. Git decides landing (`landing.landed`); landed peers deliver immediately.
 
@@ -45,13 +45,13 @@ Permission flows read `GET /api/github/installation` (App credential, not gh). E
 
 ## Harness permissions
 
-A harness classifier refuses routine administration; `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
+A harness classifier refuses routine administration; `master harness claude --apply` (or `codex`) writes rules to `.claude/settings.local.json`.
 
 ## Typed actions and executors
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0 for systemd; one killed mid-action is named in `master status`. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, `deactivating` units.
 
-A `resync` needs a fresh observation: `POST /api/work/:id/resync` with `{ since }` (claim time) wakes the item's observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, the claim fails at once (`no observation newer than the claim was saved`, plus its condition). Failures against a scheduled job with no hold or error stall after thirty minutes; held, failed or missing, after three. Row bookkeeping (claim, renew, settle) never refuses a prior observation read.
+A `resync` needs a fresh observation: `POST /api/work/:id/resync` with `{ since }` (claim time) wakes the item's observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, the claim fails at once (`no observation newer than the claim was saved`, plus its condition). Failures against a scheduled job with no hold or error stall after thirty minutes; held, failed or missing, after three. Row bookkeeping never refuses a prior observation read.
 
 A `dispatch` or `request-review` finding a session already answering the requested head completes on it; a settled standing verdict blocks a second reviewer until dismissed; busy or reserved worker profiles wait thirty minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
@@ -71,9 +71,9 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ## Research and diagnosis
 
-With `run.research` set, features (or `"research": true`) get one read-only Pi briefing per revision. Build follows recommendations, differing answers rework, failure never blocks; product questions need humans.
+With `run.research`, features (or `"research": true`) get one read-only Pi briefing per revision; build follows it, failure never blocks; product questions need humans.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. Branch restores under 30m and restart-resumed merges are self-handled, not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; recurrences re-file. Branch restores under 30m and restart-resumed merges are not `merge` faults.
 
 ## Fault classes
 
