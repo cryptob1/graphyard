@@ -383,6 +383,7 @@
     "tests/live-scope-widening.test.ts": 3195,
     "tests/live-throughput.test.ts": 7399,
     "tests/liveness-invariant.test.ts": 4845,
+    "tests/locked-read.test.ts": 8600,
     "tests/loop-self-upgrade.test.ts": 2098,
     "tests/loop-silence-owner.test.ts": 1282,
     "tests/machine-backlog-routes.test.ts": 2271,
