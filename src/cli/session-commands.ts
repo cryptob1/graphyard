@@ -1,5 +1,5 @@
-import { constants as cryptoConstants, createDecipheriv, generateKeyPairSync, privateDecrypt } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { constants as cryptoConstants, createDecipheriv, createPublicKey, generateKeyPairSync, privateDecrypt, randomUUID } from 'node:crypto';
+import { chmod, link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Work } from '../model.js';
 import { humanDecisionKinds, type HumanChoice, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
@@ -150,16 +150,42 @@ export function parkArgs(words: readonly string[]) {
   return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined };
 }
 
-/** This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600; the public half is returned. */
+/**
+ * This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600;
+ * the public half is returned. Each half is written whole to a scratch name and then moved into
+ * place, so a process killed mid-write never leaves a partial key under the real name. A key file
+ * an older version left truncated is replaced; a whole one missing its public half keeps its key.
+ */
 export async function hostSealKey(hostId: string, home = configHome()) {
   const path = join(home, 'seal', `${hostId}.pem`);
-  try { return (await readFile(`${path}.pub`, 'utf8')).trim(); } catch { /* first use on this host */ }
-  const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  try { return (await readFile(`${path}.pub`, 'utf8')).trim(); } catch { /* first use on this host, or an interrupted one */ }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await writeFile(path, privateKey, { mode: 0o600, flag: 'wx' });
-  await chmod(path, 0o600);
-  await writeFile(`${path}.pub`, publicKey, { mode: 0o644 });
+  const publicKey = await sealPublicHalf(path) ?? await createSealKey(path);
+  const scratch = `${path}.pub.${randomUUID()}.tmp`;
+  await writeFile(scratch, publicKey, { mode: 0o644 });
+  await rename(scratch, `${path}.pub`);
   return publicKey.trim();
+}
+
+/** The public half of the private key at `path`, or undefined when there is none; a malformed one is removed. */
+async function sealPublicHalf(path: string) {
+  let pem: string;
+  try { pem = await readFile(path, 'utf8'); } catch { return undefined; }
+  try { return createPublicKey(pem).export({ type: 'spki', format: 'pem' }) as string; } catch { await rm(path, { force: true }); return undefined; }
+}
+
+/** A new private key under `path`, published by a hard link so it appears whole or not at all; a concurrent first use keeps whichever landed first. */
+async function createSealKey(path: string): Promise<string> {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  const scratch = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(scratch, privateKey, { mode: 0o600, flag: 'wx' });
+    await chmod(scratch, 0o600);
+    await link(scratch, path).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
+  } finally { await rm(scratch, { force: true }); }
+  const publicKey = await sealPublicHalf(path);
+  if (!publicKey) throw new Error(`The sealing key at ${path} could not be created`);
+  return publicKey;
 }
 
 /** Open a value sealed to this host (server/waits.ts `sealToHost`). */
