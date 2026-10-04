@@ -281,3 +281,62 @@ test('manual:fault-class-resources — GY-1130: recurring resources faults from 
   assert.deepEqual(candidateFaults, [], 'None of the 5 recurring resources faults recur against the candidate');
 });
 
+
+test('manual:fault-class-resources — GY-1165: unknown-status worker panes and a recordless producer pane are reclaimed, so the seven names free themselves', async () => {
+  const directory = await temporaryDirectory('gy-1165-recurrence');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  const t0 = Date.parse('2026-10-03T17:31:17.735Z');
+  // The six worker profiles and the producer profile the seven instances name, each holding its one name.
+  const held = [
+    ['claude-quinary', 'graphyard-opencode-3', 'w1V:pG86'], ['claude-senary', 'graphyard-opencode-4', 'w1V:pG87'],
+    ['claude-primary', 'graphyard-claude-1', 'w1V:pG8F'], ['claude-secondary', 'graphyard-claude-2', 'w1V:pG89'],
+    ['opencode-primary', 'graphyard-opencode-1', 'w1V:pG5Q'], ['cursor-secondary', 'graphyard-cursor-2', 'w1V:pG7B'],
+  ] as const;
+  const config = {
+    workers: held.map(([name, principal]) => ({ name, principal, agentName: principal, mode: 'launch' as const })),
+    producers: [{ name: 'claude-producer-2', agentName: 'produce-claude-2' }], reviewers: [],
+  };
+  // Every worker pane reports `unknown` (its runtime stopped reporting) with no live lease, settled
+  // well past the bound; the idle producer pane has no ledger record left (reaped at retention).
+  const agents = [...held.map(([, principal, pane]) => agent(principal, 'unknown', pane)), agent('produce-claude-2', 'idle', 'w1V:pG8C')];
+  const work = held.map(([, principal]) => workerItem(principal, { startedAt: t0 - 3_600_000, endedAt: t0 - 15 * 60_000, state: 'done' }));
+  const state: ResourceInputs = { now: t0, reviews: [], producers: [], agents, work, plane: null, loop: null, revision: null, disk: null, profiles: config };
+  const instances = [...held.map(([name]) => `resource:agent-names:${name}`), 'resource:agent-names:claude-producer-2'].sort();
+
+  // 1. REPRODUCE: the state raises all seven instances.
+  assert.deepEqual(faults(state).sort(), instances);
+
+  // 2. BASE: the base pass closed a worker pane only when Herdr reported idle, done or blocked, and a
+  // reviewer or producer pane only when a ledger record settled on its name. Each holder fails one of
+  // those gates, so two passes the grace apart closed none of them and the faults re-raised every pass.
+  const baseFinished = ['idle', 'done', 'blocked'];
+  assert.ok(held.every(([, principal]) => !baseFinished.includes(agents.find(entry => entry.name === principal)!.agent_status!)), 'every worker pane is outside the base\'s finished statuses');
+  assert.equal((await readProducerLedger(directory)).producers.filter(record => record.agentName === 'produce-claude-2').length, 0, 'the producer pane has no record to settle on');
+
+  // 3. CANDIDATE: two passes the grace apart close all seven panes, and nothing earlier.
+  const closed = new Set<string>();
+  const closePane = (pane: string) => { closed.add(pane); };
+  const first = await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: t0, closePane });
+  assert.equal(first.closed.length, 0, 'the first sighting only starts the grace clock');
+  const early = await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: t0 + finishedSessionGraceMs - 1, closePane });
+  assert.equal(early.closed.length, 0, 'a pass inside the grace closes nothing');
+  const second = await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: t0 + finishedSessionGraceMs, closePane });
+  assert.deepEqual(second.closed.map(entry => entry.pane).sort(), [...held.map(([, , pane]) => pane), 'w1V:pG8C'].sort());
+  assert.match(second.closed.find(entry => entry.pane === 'w1V:pG8C')!.reason, /left no record/);
+
+  // 4. NON-RECURRENCE: with the closed panes gone, none of the seven instances is raised.
+  assert.deepEqual(faults({ ...state, now: t0 + finishedSessionGraceMs, agents: agents.filter(entry => !closed.has(entry.pane_id!)) }), []);
+});
+
+test('manual:fault-class-resources — GY-1165: the widened reclaim still spares a running pane and a live lease', async () => {
+  const directory = await temporaryDirectory('gy-1165-spared');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  const config = { workers, producers, reviewers: [] };
+  // A running recordless producer (a launch whose record has not landed) and an unknown worker under a live lease.
+  const agents = [agent('produce-claude-2', 'working', 'w1V:pW1'), agent('graphyard-opencode-1', 'unknown', 'w1V:pW2')];
+  const work = [workerItem('graphyard-opencode-1', { startedAt: now - 3_600_000, state: 'running' }, { expiresAt: now + 3_600_000 })];
+  const closed: string[] = [];
+  for (const at of [now, now + finishedSessionGraceMs, now + 2 * finishedSessionGraceMs])
+    await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: at, closePane: pane => { closed.push(pane); } });
+  assert.deepEqual(closed, []);
+});
