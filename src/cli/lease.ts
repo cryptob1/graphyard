@@ -7,6 +7,25 @@ import { defineCommands, workMutation, type CliCommand } from './registry.js';
 import { verifyCommand } from './verify.js';
 import { completeCommand } from './complete.js';
 
+/**
+ * Keeps what a blocked attempt had not committed (GY-1008), run from its own worktree: when the
+ * checkout is on the branch registered for `epoch`, uncommitted changes become one WIP commit on it.
+ * Null when this checkout is not that attempt's, so a blocker recorded from elsewhere touches nothing.
+ */
+export function keepBlockedWork(work: { key: string; workspaces?: { epoch: number; branch: string; path: string }[] }, epoch: number, cwd = process.cwd()) {
+  const git = (...args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const workspace = work.workspaces?.find(entry => entry.epoch === epoch);
+  const branch = git('symbolic-ref', '--short', 'HEAD').stdout?.trim();
+  if (!workspace || !branch || branch !== workspace.branch) return null;
+  const described = { branch, path: workspace.path };
+  const head = () => git('rev-parse', 'HEAD').stdout.trim();
+  if (!git('status', '--porcelain').stdout?.trim()) return { state: 'clean' as const, commit: head(), ...described, detail: 'the worktree held no uncommitted change; every commit of the attempt is on its branch' };
+  const added = git('add', '-A');
+  const committed = added.status === 0 ? git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@localhost', 'commit', '--no-verify', '-m', `WIP: ${work.key} attempt ${epoch} blocked`) : added;
+  if (committed.status === 0) return { state: 'committed' as const, commit: head(), ...described, detail: 'uncommitted changes were committed on the attempt branch, unpushed' };
+  return { state: 'not-applicable' as const, ...described, detail: `uncommitted changes could not be committed and were left in the worktree: ${(committed.stderr || committed.stdout || '').trim()}`.slice(0, 500) };
+}
+
 /** The candidate a run actually tested: the producer request the session was launched for, or else the checkout's own HEAD. */
 export type TestedBinding = { source: string; sha: string; baseSha?: string; policyRevision?: number };
 
@@ -87,8 +106,14 @@ export const leaseCommands = defineCommands([
   {
     name: 'blocked',
     scope: 'work',
-    help: ["  blocked GY-N EPOCH REASON     Set blocker; use '-' to clear"],
-    run: async (context, work) => context.print(await workMutation(context, work)('blocked', { epoch: Number(context.args[0]), reason: context.args[1] === '-' ? null : context.args.slice(1).join(' ') })),
+    help: ["  blocked GY-N EPOCH REASON     Set blocker and end this attempt, keeping uncommitted work", "                                as a WIP commit; the loop clears routine causes itself; '-' clears"],
+    // A blocker ends the attempt (GY-1008): what it had not committed is kept first, as a WIP commit
+    // on its own branch, so the next attempt's request can name it.
+    run: async (context, work) => {
+      const epoch = Number(context.args[0]), reason = context.args[1] === '-' ? null : context.args.slice(1).join(' ');
+      const partialWork = reason ? keepBlockedWork(work, epoch) : null;
+      return context.print(await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) }));
+    },
   },
   verifyCommand,
   completeCommand,
