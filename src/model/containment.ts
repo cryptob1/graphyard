@@ -1,6 +1,8 @@
 import type { Work } from '../model.js';
+import { containmentGraceMs } from '../quarantine.js';
 
-export const containmentGraceMs = 120_000;
+/* One window for fault counting, settlement and status: quarantine.ts owns it (GY-1179). */
+export { containmentGraceMs };
 
 export type ContainmentPhase =
   | { state: 'live'; owner: string; epoch: number; expiresAt: string }
