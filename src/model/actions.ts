@@ -55,18 +55,14 @@ export interface ActionClaim {
   attempt: number;
 }
 export interface ActionRecord {
-  at: string; event: ActionEvent;
-  requester: string; executor: string | null;
-  result: string | null; reason: string;
+  at: string; event: ActionEvent; requester: string; executor: string | null; result: string | null; reason: string;
 }
 export interface ActionRow {
-  id: string; kind: NextActionKind;
+  id: string; kind: NextActionKind; inputs: NextActionInputs;
   /** The item the action is about, by id and key. */
   work: string; key: string;
-  inputs: NextActionInputs;
   gate: string | null; refusal: string | null; reason: string; binding: string;
-  requestedBy: string; requestedAt: string;
-  state: ActionState; claim: ActionClaim | null; attempts: number;
+  requestedBy: string; requestedAt: string; state: ActionState; claim: ActionClaim | null; attempts: number;
   /** A failed attempt waits this long before the row is offered again. */
   retryAt?: string;
   /**
@@ -76,8 +72,7 @@ export interface ActionRow {
    * `actionStall` recomputes it from the history so the two can never disagree.
    */
   stall?: ActionStall;
-  resolvedAt?: string; result?: 'done' | 'failed'; resolution?: string;
-  history: ActionRecord[];
+  resolvedAt?: string; result?: 'done' | 'failed'; resolution?: string; history: ActionRecord[];
 }
 export interface ActionQueue { actions: ActionRow[]; history: ActionRow[] }
 export interface ActionTransition { event: ActionEvent; action: ActionRow }
@@ -105,8 +100,7 @@ const record = (row: ActionRow, entry: ActionRecord) => { row.history = [...row.
 /** The queue as it stands, created on first use so legacy documents gain one at their next evaluation. */
 export function actionQueue(work: Work): ActionQueue {
   work.actionQueue ??= { actions: [], history: [] };
-  work.actionQueue.actions ??= [];
-  work.actionQueue.history ??= [];
+  work.actionQueue.actions ??= []; work.actionQueue.history ??= [];
   return work.actionQueue;
 }
 
@@ -207,7 +201,30 @@ export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
 }
 
 /**
- * Every row an executor may take now, oldest request first, so the queue is served fairly.
+ * Whether a row is what stands between its item and the merge: a `resync` or `merge` row on an item
+ * already at the merge stage. Every other gate has passed, so nothing but this row holds it.
+ */
+export const unblocksMerge = (work: Work, row: ActionRow) => work.stage === 'merge' && (row.kind === 'resync' || row.kind === 'merge');
+
+/**
+ * The order executors claim rows in (GY-1132): the item's priority first, then rows that unblock a
+ * merge before any other kind, then the oldest request, then the id so the order is total.
+ *
+ * Age alone let 34 dispatch rows, hours old and failing on every attempt for want of a worker,
+ * hold a P0 item's resync for 25 minutes. Age still decides among peers, so the row open longest
+ * among its priority and kind is taken first and none of them starves; a failed row waits out its
+ * `retryAt` (`claimable`), and the rows behind it are claimed meanwhile. `claimCandidatesSql`
+ * orders the items it finds by the same key, read from each item's first row in this order.
+ */
+export const claimOrder = (a: { work: Work; row: ActionRow }, b: { work: Work; row: ActionRow }): number =>
+  (a.work.priority ?? 2) - (b.work.priority ?? 2)
+  || Number(!unblocksMerge(a.work, a.row)) - Number(!unblocksMerge(b.work, b.row))
+  || Date.parse(a.row.requestedAt) - Date.parse(b.row.requestedAt)
+  || a.row.id.localeCompare(b.row.id);
+
+/**
+ * Every row an executor may take now, in claim order (`claimOrder`): priority, rows that unblock a
+ * merge, then the oldest request.
  *
  * A delivered item owes nothing an executor can run but the deployment that carries it: whatever
  * else it still holds is left over from before it was delivered, and running it is refused every
@@ -218,11 +235,11 @@ export function openActions(all: Work[], now: Date, kinds?: readonly NextActionK
     .filter(row => work.stage !== 'done' || row.kind === 'verify-deployment')
     .filter(row => claimable(row, now) && (!kinds || kinds.includes(row.kind)))
     .map(row => ({ work, row })))
-    .sort((a, b) => Date.parse(a.row.requestedAt) - Date.parse(b.row.requestedAt) || a.row.id.localeCompare(b.row.id));
+    .sort(claimOrder);
 }
 
 /**
- * Claim the oldest open row this executor can run, under a bounded lease.
+ * Claim the first open row this executor can run, in claim order, under a bounded lease.
  *
  * Called inside the coordination transaction, so two executors reading the same queue at the same
  * instant are serialized: the first writes the claim, the second sees it and takes the next row.
@@ -235,9 +252,7 @@ export function claimAction(all: Work[], executor: { id: string; host: string; p
   const at = now.toISOString();
   const superseded = row.state === 'claimed' ? row.claim?.executor ?? null : null;
   if (superseded) record(row, { at, event: 'reclaimed', requester: row.requestedBy, executor: superseded, result: null, reason: `claim by ${superseded} expired without a result` });
-  row.attempts += 1;
-  row.state = 'claimed';
-  delete row.retryAt;
+  row.attempts += 1; row.state = 'claimed'; delete row.retryAt;
   row.claim = { executor: executor.id, host: executor.host, principal: executor.principal, claimedAt: at, expiresAt: new Date(now.getTime() + (options.leaseMs ?? actionClaimMs)).toISOString(), attempt: row.attempts };
   record(row, { at, event: 'claimed', requester: row.requestedBy, executor: executor.id, result: null, reason: `attempt ${row.attempts} claimed by ${executor.id} on ${executor.host}` });
   return { work, row };
@@ -262,8 +277,7 @@ export function renewClaim(work: Work, id: string, renewer: { executor: string; 
   // put two executors inside one action, which is the thing the lease exists to prevent.
   demand(claimLive(row!, now), 'Action claim expired; another executor may already be running it', 409);
   row!.claim!.expiresAt = new Date(now.getTime() + leaseMs).toISOString();
-  row!.claim!.renewedAt = now.toISOString();
-  row!.claim!.renewals = (row!.claim!.renewals ?? 0) + 1;
+  row!.claim!.renewedAt = now.toISOString(); row!.claim!.renewals = (row!.claim!.renewals ?? 0) + 1;
   return row!;
 }
 
@@ -283,10 +297,8 @@ export function settleAction(work: Work, id: string, settler: { executor: string
   // so without this any coordinator could settle another executor's claim by naming it.
   demand((row!.claim!.principal ?? principal) === principal, `Action was claimed with the credential of ${row!.claim!.principal}; another credential cannot settle it`, 409);
   demand(claimLive(row!, now), 'Action claim expired; another executor may already be running it', 409);
-  const at = now.toISOString();
-  const event: ActionEvent = result === 'done' ? 'completed' : 'failed';
-  row!.state = result === 'done' ? 'done' : 'pending';
-  row!.claim = null;
+  const at = now.toISOString(), event: ActionEvent = result === 'done' ? 'completed' : 'failed';
+  row!.state = result === 'done' ? 'done' : 'pending'; row!.claim = null;
   row!.resolvedAt = at; row!.result = result; row!.resolution = reason;
   // The attempt is on the history before the row is judged: what it failed with is part of what
   // says whether this row is retrying or stalling.
