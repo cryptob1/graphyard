@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from './model.js';
@@ -130,8 +130,16 @@ export function reclaimBranchHolders(root: string, branch: string, target: strin
   const reclaimed: ReclaimedHolder[] = [];
   for (const holder of holders) {
     if (holder.missing) {
-      // Only this record goes; a git that will not remove a missing worktree prunes the stale records instead.
-      if (git(['worktree', 'remove', holder.path], root).status !== 0) gitOrThrow(['worktree', 'prune'], root);
+      // Only this record goes. A git that will not remove a missing worktree has its admin directory
+      // deleted instead: `git worktree prune` would also drop every other stale record in the repository.
+      const removed = git(['worktree', 'remove', holder.path], root);
+      if (removed.status !== 0) {
+        const record = worktreeRecord(root, holder.path);
+        if (!record) throw new Error(`${gitFailure(['worktree', 'remove', holder.path], removed)}, and no worktree record under the repository's admin directory names ${holder.path}`);
+        // A lock is somebody's decision to keep the record; it is named, never overridden.
+        if (existsSync(resolve(record, 'locked'))) throw new Error(`${gitFailure(['worktree', 'remove', holder.path], removed)}; its record ${record} is locked, so it is left alone. Unlock it with git worktree unlock before retrying.`);
+        rmSync(record, { recursive: true, force: true });
+      }
       reclaimed.push({ ...holder, action: 'removed the record of the deleted worktree' });
       continue;
     }
@@ -152,6 +160,20 @@ export function reclaimBranchHolders(root: string, branch: string, target: strin
     reclaimed.push({ ...holder, action: `aborted the ${holder.via}${kept} and detached its HEAD (${why})` });
   }
   return reclaimed;
+}
+
+/** The admin directory (`<common-dir>/worktrees/<name>`) recording the worktree at `path`, found by its `gitdir` file. */
+export function worktreeRecord(root: string, path: string): string | null {
+  const common = resolve(root, gitOrThrow(['rev-parse', '--git-common-dir'], root).trim()), records = resolve(common, 'worktrees');
+  let names: string[];
+  try { names = readdirSync(records); } catch { return null; }
+  const target = resolve(path, '.git');
+  for (const name of names) {
+    let gitdir: string;
+    try { gitdir = readFileSync(resolve(records, name, 'gitdir'), 'utf8').trim(); } catch { continue; }
+    if (resolve(records, name, gitdir) === target) return resolve(records, name);
+  }
+  return null;
 }
 
 /**

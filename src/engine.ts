@@ -1202,10 +1202,20 @@ export class Engine {
         // record holds; the blocker names the attempts the control plane verified.
         demand(work.ready && (!work.submission || work.reworkRequested), `${work.key} is not awaiting a dispatch; a dispatch failure is recorded only on ready work with no submission or with rework requested`, 409);
         demand(!work.blocker, `${work.key} already carries a blocker; clear it before recording a dispatch failure`, 409);
+        // GY-1193: a lease that lapsed without a release still has its attempt open until some command
+        // notices; this one is such a command, so the attempt ends here at the lease's own deadline.
+        if (work.lease) endLapsedAttempt(work, work.lease, now);
+        // A launch that never got going never renewed its lease, so its attempt ended within one lease
+        // term of its claim (plus the launch fence a containment acknowledgement may take). A worker
+        // that ran longer and then released, by choice or by reporting a blocker, is not a dispatch
+        // failure, and an attempt that long breaks the run.
+        const failedWithin = this.leaseSeconds * 1000 + this.launchFence;
         const failed = pipelineTimeline(work).attempts.slice(-dispatchFailureBlockAfter);
         demand(failed.length === dispatchFailureBlockAfter && failed.every(attempt => attempt.endedAt && (attempt.end === 'released' || attempt.end === 'expired')),
           `${work.key}'s last ${dispatchFailureBlockAfter} attempts did not each end without a submission; a dispatch failure is recorded only after that many failed attempts in a row`, 409);
-        const verified = ` [attempts ${failed.map(attempt => attempt.epoch).join(', ')} each ended without a submission]`;
+        const lasted = failed.filter(attempt => Date.parse(attempt.endedAt!) - Date.parse(attempt.claimedAt) > failedWithin);
+        demand(!lasted.length, `${work.key}'s attempt${lasted.length === 1 ? '' : 's'} ${lasted.map(attempt => attempt.epoch).join(', ')} ran longer than ${failedWithin / 1000}s before ending, longer than a launch that never got going; a dispatch failure is recorded only after ${dispatchFailureBlockAfter} such launches in a row`, 409);
+        const verified = ` [attempts ${failed.map(attempt => attempt.epoch).join(', ')} each ended without a submission within ${failedWithin / 1000}s of its claim]`;
         work.blocker = `${data.reason.slice(0, 2000 - verified.length)}${verified}`; recordIntervention(work, 'blocked');
       }
       if (command === 'autoscope') {
