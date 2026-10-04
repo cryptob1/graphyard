@@ -71,7 +71,7 @@ test('unit:followup-key-reuse-resolved — key reuse with a changed body links t
     const config = await loadMasterConfig(root), board = [work(), earlierFollowUp()];
     // The control plane holds a receipt for the approval's key with a body this attempt no longer sends.
     const sent: string[] = [];
-    const server = async (_item: unknown, key: string) => { sent.push(key); throw new Error(keyReuse); };
+    const server = async (_item: unknown, key: string) => { sent.push(key); throw Object.assign(new Error(keyReuse), { keyReuse: true }); };
     let clock = Date.parse('2026-09-26T11:00:00Z');
     const now = () => new Date(clock);
     const first = await reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: board, threadsRun: github(), createFollowUpItem: server, now });
@@ -100,7 +100,7 @@ test('unit:followup-key-reuse-resolved — with no item for the approval, the bo
     await launch(root);
     const config = await loadMasterConfig(root), approvalKey = followUpCreateKey('owner/project', 64, 77);
     const sent: { key: string; item: any }[] = [];
-    const server = async (item: any, key: string) => { sent.push({ key, item }); if (key === approvalKey) throw new Error(keyReuse); return { key: 'GY-301' }; };
+    const server = async (item: any, key: string) => { sent.push({ key, item }); if (key === approvalKey) throw Object.assign(new Error(keyReuse), { keyReuse: true }); return { key: 'GY-301' }; };
     const first = await reconcileReviews(root, config, { run: herdrRun, observe: verdict, work: [work()], threadsRun: github(), createFollowUpItem: server });
     assert.equal(first.reviews[0].followUps!.item, 'GY-301');
     assert.equal(first.reviews[0].followUps!.failure, undefined);
