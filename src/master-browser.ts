@@ -33,7 +33,7 @@ export function missingPermissions(actual: Record<string, unknown> | null | unde
   return Object.entries(desired).filter(([name, wanted]) => level(actual?.[name]) < level(wanted)).map(([name, wanted]) => `${name}: ${String(actual?.[name] ?? 'none')} to ${wanted}`);
 }
 
-export interface Located { selector: string; tag: string; checked: boolean | null; value: string | null; text: string }
+export interface Located { selector: string; tag: string; checked: boolean | null; value: string | null; text: string; href?: string | null; visible?: boolean }
 /** The page operations a flow needs. Exact, never fuzzy: a control is found by its own label or name. */
 export interface BrowserPage {
   open(url: string): void;
@@ -55,9 +55,12 @@ const locateScript = (kind: string, text: string) => `(() => {
   const kind = ${JSON.stringify(kind)}, wanted = ${JSON.stringify(text)};
   const norm = value => String(value ?? '').replace(/\\s+/g, ' ').trim().toLowerCase();
   const target = norm(wanted);
+  // A rendered match wins over a hidden one: GitHub keeps hidden controls with the same label.
+  const shown = candidate => candidate.getClientRects().length > 0 && getComputedStyle(candidate).visibility !== 'hidden';
+  const pick = matches => matches.find(shown) ?? matches[0] ?? null;
   let element = null;
-  if (kind === 'button') element = [...document.querySelectorAll('button, input[type=submit], input[type=button], a[role=button], summary')].find(candidate => norm(candidate.tagName === 'INPUT' ? candidate.value : candidate.textContent) === target) ?? null;
-  else if (kind === 'link') element = [...document.querySelectorAll('a[href]')].find(candidate => norm(candidate.textContent) === target) ?? null;
+  if (kind === 'button') element = pick([...document.querySelectorAll('button, input[type=submit], input[type=button], a[role=button], summary')].filter(candidate => norm(candidate.tagName === 'INPUT' ? candidate.value : candidate.textContent) === target));
+  else if (kind === 'link') element = pick([...document.querySelectorAll('a[href]')].filter(candidate => norm(candidate.textContent) === target));
   else if (kind === 'label') {
     const label = [...document.querySelectorAll('label')].find(candidate => norm(candidate.textContent).startsWith(target));
     element = label ? label.control ?? (label.htmlFor ? document.getElementById(label.htmlFor) : null) ?? label.querySelector('input, select') : null;
@@ -65,7 +68,7 @@ const locateScript = (kind: string, text: string) => `(() => {
   if (!element) return 'null';
   const marker = 'gy-' + String((window.__graphyardLocated = (window.__graphyardLocated ?? 0) + 1));
   element.setAttribute('data-graphyard-target', marker);
-  return JSON.stringify({ selector: '[data-graphyard-target="' + marker + '"]', tag: element.tagName.toLowerCase(), checked: 'checked' in element ? !!element.checked : null, value: 'value' in element ? String(element.value) : null, text: norm(element.textContent) });
+  return JSON.stringify({ selector: '[data-graphyard-target="' + marker + '"]', tag: element.tagName.toLowerCase(), checked: 'checked' in element ? !!element.checked : null, value: 'value' in element ? String(element.value) : null, text: norm(element.textContent), href: element.tagName === 'A' && element.href ? element.href : null, visible: shown(element) });
 })()`;
 
 export type AgentBrowserRun = (args: string[]) => string;
@@ -74,12 +77,27 @@ const agentBrowserRun: AgentBrowserRun = args => execFileSync('agent-browser', a
 export function agentBrowserArguments(browser: MasterBrowser, session: string) {
   return ['--json', '--session', session, '--profile', browser.profile, ...(browser.executable ? ['--executable-path', browser.executable] : [])];
 }
+/**
+ * What agent-browser itself said when a command failed. A non-zero exit still prints its JSON
+ * verdict, and stderr carries the rest; the spawn message only repeats the command line.
+ */
+export function agentBrowserError(error: unknown) {
+  const failure = error as { stdout?: unknown; stderr?: unknown; message?: unknown } | null;
+  const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8').trim() : typeof value === 'string' ? value.trim() : '';
+  const stdout = text(failure?.stdout), stderr = text(failure?.stderr);
+  if (stdout) {
+    try { const parsed = JSON.parse(stdout); if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) return parsed.error.trim(); } catch { /* not its JSON verdict */ }
+  }
+  if (stderr) return stderr;
+  if (stdout) return stdout;
+  return error instanceof Error ? error.message : String(error);
+}
 export function agentBrowserPage(browser: MasterBrowser, session: string, run: AgentBrowserRun = agentBrowserRun): BrowserPage {
   const prefix = agentBrowserArguments(browser, session);
   const invoke = (...args: string[]) => {
     let parsed: any;
     try { parsed = JSON.parse(run([...prefix, ...args])); }
-    catch (error) { throw new Error(`agent-browser ${args[0]} failed: ${error instanceof Error ? error.message : String(error)}`); }
+    catch (error) { throw new Error(`agent-browser ${args[0]} failed: ${agentBrowserError(error)}`); }
     if (parsed?.success !== true) throw new Error(`agent-browser ${args[0]} refused: ${parsed?.error ?? 'unknown error'}`);
     return parsed.data ?? {};
   };
@@ -179,11 +197,24 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
   const timeoutMs = options.timeoutMs ?? 180_000, pollMs = options.pollMs ?? 3_000, maxAttempts = options.maxAttempts ?? 3;
   const started = now().getTime(), deadline = new Date(started + timeoutMs).toISOString();
   let attempt = 0; let state = null as SudoState | null;
+  // The older page offers GitHub Mobile as a button; the passkey-first page keeps that button
+  // hidden and offers a "Use GitHub Mobile" link under "Having problems?". A rendered control is
+  // activated first, and an anchor whose click fails is followed through its href instead.
   const issue = (label: string) => {
     if (attempt >= maxAttempts) throw new Error(`GitHub Mobile confirmation was re-issued ${attempt} times without approval; approve the prompt on your device and rerun master browser ${options.flow}`);
     const button = page.locate('button', label);
-    if (!button) throw new Error(`Confirm-access page offers no "${label}" control; only GitHub Mobile confirmation is automated, so confirm access in your own browser and rerun master browser ${options.flow}`);
-    attempt += 1; page.click(button.selector); page.wait(Math.min(pollMs, 1_000));
+    const link = button && button.visible !== false ? null : page.locate('link', label);
+    const controls = [button, link].filter((control): control is Located => !!control);
+    if (!controls.length) throw new Error(`Confirm-access page offers no "${label}" control; only GitHub Mobile confirmation is automated, so confirm access in your own browser and rerun master browser ${options.flow}`);
+    controls.sort((a, b) => Number(b.visible !== false) - Number(a.visible !== false));
+    attempt += 1;
+    const failures: string[] = [];
+    for (const control of controls) {
+      try { page.click(control.selector); page.wait(Math.min(pollMs, 1_000)); return; }
+      catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+      if (control.href) { page.open(control.href); return; }
+    }
+    throw new Error(`Confirm-access "${label}" could not be activated (${failures.join('; ')}); confirm access in your own browser and rerun master browser ${options.flow}`);
   };
   for (;;) {
     const detected = detectSudo(page.url(), page.text());
