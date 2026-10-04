@@ -365,21 +365,41 @@ test('unit:agent-name-reclaim-closes-pane-after-record-reaped — a producer pan
   assert.deepEqual(faults(reading({ now: t1166 + 2 * finishedSessionGraceMs, agents: run.remaining })), []);
 });
 
-test('integration:resources-reclaimed-within-bound — GY-1166: retention and the reclaim of a pane with no recognized status both land inside the name bound', async () => {
-  // A producer session settled; Herdr could not be read on the pass that crossed retention, so its record was reaped before any pass saw the pane.
-  const settled = t1166 - ledgerRetentionMs - 60_000;
-  const directory = await ledgerRoot('gy-1166-bound', [ledgerRecord('produce-claude-2', 'completed', settled)]);
-  const profiles = { workers: gy1165Profiles.workers.slice(0, 1), reviewers: [], producers: gy1165Producers.slice(0, 1) };
-  const blind = await reclaimResources(directory, profiles, { work: [], agents: null }, { tmpRoot: directory, now: t1166 - 60_000, closePane: () => {} });
+test('integration:resources-reclaimed-within-bound — GY-1166: retention keeps a held name\'s evidence, and a pane with no record or no recognized status is given back inside the name bound', async () => {
+  const profiles = { workers: gy1165Profiles.workers.slice(0, 1), reviewers: [], producers: gy1165Producers.slice(0, 2) };
+  const settled = t1166 - ledgerRetentionMs - 120_000;
+  // produce-claude-4's record crossed retention on a pass that could not read Herdr, so it was reaped before any pass saw its pane.
+  const directory = await ledgerRoot('gy-1166-bound', [ledgerRecord('produce-claude-4', 'failed', settled, 'w1V:pG8D')]);
+  const blind = await reclaimResources(directory, profiles, { work: [], agents: null }, { tmpRoot: directory, now: t1166 - 120_000, closePane: () => {} });
   assert.equal(blind.reaped.producer, 1);
-  assert.deepEqual((await readProducerLedger(directory)).producers, []);
-  // The pane on the reaped name, and a worker pane Herdr reports 'unknown', are both given back within nameReclaimBoundMs of the first sighting.
-  const agents = [held('produce-claude-2', 'w1V:pG8C', 'idle'), held('graphyard-claude-1', 'w1V:pG8F', 'unknown')];
+  // produce-claude-2 settled past retention too, while its pane was still winding down.
+  const kept = ledgerRecord('produce-claude-2', 'completed', settled, 'w1V:pG8C');
+  await saveProducerLedger(directory, { version: 1, producers: [kept] });
   const work = [workerItem('graphyard-claude-1', { startedAt: t1166 - 3_600_000, endedAt: t1166 - 20 * 60_000, state: 'finished' })];
-  const run = await passes(directory, 2, 2 * finishedSessionGraceMs, agents, work, profiles);
-  assert.deepEqual(run.closed.sort(), ['w1V:pG8C', 'w1V:pG8F']);
-  assert.ok(2 * finishedSessionGraceMs < nameReclaimBoundMs, 'the close lands inside the name bound');
-  assert.deepEqual(faults(inputs({ now: t1166 + 2 * finishedSessionGraceMs, agents: run.remaining, work, profiles })), []);
+  const closed: string[] = [];
+  const pass = async (at: number, agents: HerdrAgent[]) => reclaimResources(directory, profiles, { work, agents: agents.filter(entry => !closed.includes(entry.pane_id!)) },
+    { tmpRoot: directory, now: at, closePane: pane => { closed.push(pane); } });
+  const recordless = held('produce-claude-4', 'w1V:pG8D', 'idle'), unknown = held('graphyard-claude-1', 'w1V:pG8F', 'unknown');
+
+  // First sighting: produce-claude-2 is still working, so its record — the close decision's evidence — outlives retention.
+  const first = await pass(t1166 - 60_000, [held('produce-claude-2', 'w1V:pG8C', 'working'), recordless, unknown]);
+  assert.deepEqual([first.closed, first.reaped.producer], [[], 0]);
+  assert.deepEqual((await readProducerLedger(directory)).producers.map(entry => entry.id), [kept.id], 'the newest record on a held name is not reaped');
+  // 60s on: the panes with no record or no recognized status are still inside the launch bound, so nothing closes yet.
+  const finishedAgents = [held('produce-claude-2', 'w1V:pG8C', 'idle'), recordless, unknown];
+  const second = await pass(t1166, finishedAgents);
+  assert.deepEqual(second.closed, [], 'a pane unowned for less than unownedPaneConfirmMs is never taken for a leak');
+  // 120s after the first sighting: all three are given back, each close reported with its evidence, and the kept record reaped with its pane.
+  const third = await pass(t1166 + 60_000, finishedAgents);
+  assert.deepEqual(closed.sort(), ['w1V:pG8C', 'w1V:pG8D', 'w1V:pG8F']);
+  const reason = (name: string) => third.closed.find(entry => entry.name === name)!.reason;
+  assert.match(reason('produce-claude-2'), /its producer session completed/, 'the close read the record retention would otherwise have reaped');
+  assert.match(reason('produce-claude-4'), /no producer record holds the name \(its record was reaped or never written\)/);
+  assert.match(reason('graphyard-claude-1'), /Herdr reports it unknown/);
+  assert.equal(third.reaped.producer, 1);
+  assert.deepEqual((await readProducerLedger(directory)).producers, []);
+  assert.ok(t1166 + 60_000 - (t1166 - 60_000) === unownedPaneConfirmMs && unownedPaneConfirmMs < nameReclaimBoundMs, 'every close lands inside the name bound');
+  assert.deepEqual(faults(inputs({ now: t1166 + 60_000, agents: [], work, profiles })), []);
 });
 
 test('unit:agent-name-reclaim-closes-unknown-status-holder — a worker pane Herdr reports unknown or without a status, unowned, is closed by the reclaim pass and by the loop\'s close step', async () => {
