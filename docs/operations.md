@@ -39,6 +39,7 @@ Never attest a stop you have not confirmed. Merged work changes only through a f
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
 - Only guarded or audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
+- Under the coordination lock a write reads whole only its item, overlapping open items and dependencies; the rest are cached projections or `work_index` summaries, so at 1,000 items claims, heartbeats, submissions and registry selects hold it under 500 ms and a reconcile pass under 5 s.
 - History is append-only; only routine rows past their retention window are [compacted](operations-reference.md#storage-retention), each batch audited.
 
 ## Deeper references
