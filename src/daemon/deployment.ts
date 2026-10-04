@@ -87,6 +87,8 @@ export const productionEnvironmentRecord = (environment: unknown, production: st
 
 /** GitHub's node ids are opaque base64-like tokens; anything else is not sent inside a query. */
 const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
+/** A deployment's latest states while it is still being deployed: it has served nothing yet. */
+const underwayStates = new Set(['pending', 'queued', 'waiting', 'in_progress']);
 /** How many of a deployment's statuses the batched read asks for, to tell whether it ever reached success. */
 const deploymentStatusHistory = 20;
 /**
@@ -151,6 +153,8 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // Whether a production deployment newer than the one being read has been listed: a release
     // Railway marked inactive is served only while nothing newer was deployed to production.
     let newerProduction = false;
+    // Whether a newer release attempt still underway, never yet successful, was passed over.
+    let underway = false;
     // Environments named like production under another identity, reported when no release is found
     // so an unconfigured Railway installation is told the name to configure rather than left pending.
     const namesake = new Set<string>();
@@ -194,11 +198,14 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       // Newest first: the first success is the release. An attempt whose status cannot be read may
       // be the newest success, so no older release is taken past it: the observation is
       // unavailable, and every delivery stays pending. A deployment that reached success and was
-      // later marked inactive is the release only when it is the newest production deployment of
-      // all: Railway deactivates it minutes after success though production still serves it, while
-      // GitHub deactivates it when a newer deployment succeeds. Behind any newer production record
-      // — a successful one, a failed attempt, one whose status is unread or not a release — an
-      // inactive deployment is never taken, so a superseded or rolled-back release is not served.
+      // later marked inactive is the release only when every newer production deployment is a
+      // release attempt still underway that has never reached success: Railway deactivates it minutes
+      // after success though production still serves it, and a successor still building has served
+      // nothing yet (GY-1106: on 2026-10-02 every release deactivated before its successor started
+      // was refused for as long as that successor built). GitHub deactivates it when a newer
+      // deployment succeeds. Behind any other newer production record — a successful one, a failed
+      // attempt, one whose status is unread or not a release — an inactive deployment is never
+      // taken, so a superseded or rolled-back release is not served.
       for (const { deployment, candidate } of records) {
         if (candidate) {
           const index = candidates.indexOf(deployment);
@@ -206,9 +213,10 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
           if (state === undefined) return unavailable(`The status of ${production} deployment ${deployment.id} could not be read, so no older release is taken to be the one production serves${states.failure ? `: ${states.failure}` : ''}`);
           if (typeof deployment.sha === 'string' && (state === 'success' || (state === 'inactive' && states.succeeded[index] && !newerProduction))) {
             sha = deployment.sha.toLowerCase(); source = 'github-deployment';
-            if (state === 'inactive') inactive = `${production} deployment ${deployment.id} reached success and was later marked inactive with no newer ${production} deployment, so it is the release production serves`;
+            if (state === 'inactive') inactive = `${production} deployment ${deployment.id} reached success and was later marked inactive${underway ? `; every newer ${production} deployment is still underway` : ` with no newer ${production} deployment`}, so it is the release production serves`;
             break;
           }
+          if (underwayStates.has(state) && !states.succeeded[index]) { underway = true; continue; }
         }
         newerProduction = true;
       }

@@ -9,7 +9,6 @@ import { masterConfigSchema, masterSettingsFromArgs, type MasterConfig, type Mas
 import type { Work } from '../src/model.js';
 import { deploymentStep } from '../src/daemon/cycle-delivery.js';
 import type { Cycle } from '../src/daemon/cycle.js';
-import type { ChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -583,6 +582,21 @@ test('unit:deployment-observation-inactive-release — the newest production dep
     status = { 3: deactivated };
     assert.equal((await observe()).source, 'unavailable');
 
+    // A newer attempt still underway has served nothing: the deactivated release behind it is served (GY-1106).
+    records = [production(6, mid), production(3, release)];
+    for (const latest of ['queued', 'in_progress', 'pending']) {
+      status = { 6: { latest, history: latest === 'pending' ? [] : [latest] }, 3: deactivated };
+      const building = await observe();
+      assert.equal(building.sha, release, `behind a newer ${latest} attempt`);
+      assert.match(building.reason!, /deployment 3 reached success and was later marked inactive; every newer graphyard \/ production deployment is still underway/);
+    }
+    // But not behind an underway attempt that once reached success, nor behind a failure further up.
+    status = { 6: { latest: 'in_progress', history: ['in_progress', 'success'] }, 3: deactivated };
+    assert.equal((await observe()).source, 'unavailable');
+    records = [production(7, old), production(6, mid), production(3, release)];
+    status = { 7: { latest: 'in_progress', history: ['in_progress'] }, 6: { latest: 'failure', history: ['failure'] }, 3: deactivated };
+    assert.equal((await observe()).source, 'unavailable');
+
     // Inactive without ever reaching success is never a release.
     records = [production(3, release)];
     status = { 3: { latest: 'inactive', history: ['inactive', 'error'] } };
@@ -597,300 +611,83 @@ test('unit:deployment-observation-inactive-release — the newest production dep
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
 
-// GY-1106 names these tests for its proof: manual:fault-class-deployment. The master loop filed 3
-// deployment faults in 24 hours on 2 October 2026. Every instance shared the same cause:
-//
-//   - Deployment observation read the GitHub deployments listing without filtering by the configured
-//     production environment (repos/:repo/deployments?per_page=100&page=N).
-//   - Non-production deployments — in particular, hundreds of CI proof reporting deployments
-//     (environment: 'graphyard-reporting') — filled all 5 pages (500 records) of the listing bound.
-//   - Although Railway had successfully deployed each merged change to 'graphyard / production', the
-//     unfiltered listing window was completely consumed by CI reporting records, hiding the production
-//     releases past the 5-page bound.
-//   - The observation concluded that none of the newest 500 deployments was a successful release of
-//     the managed base branch, marking the observation unavailable and recording action:deployment
-//     as a recurring deployment fault on the subject deployment:<mergeSha>.
-//
-// The candidate filters the GitHub deployment listing by environment (environment=...), so non-production
-// deployments never enter the listing window, and the successful production release is observed immediately.
-//
-// Each instance listed on the item is replayed below from the ledger and GitHub as they stood when
-// the loop recorded it. Against the base each subtest fails: the instance reproduces.
-
-interface FaultInstance {
-  id: string;
-  subject: string;
-  sha: string;
-  at: string;
-  itemKey: string;
-  pr: number;
-  deploymentId: number;
-}
-
-const faultInstances: FaultInstance[] = [
-  {
-    id: 'action:deployment|deployment:55e693f8de263b78850ca4675357cc5ebb6ed1f5|2026-10-02T06:40:15.237Z',
-    subject: 'deployment:55e693f8de263b78850ca4675357cc5ebb6ed1f5',
-    sha: '55e693f8de263b78850ca4675357cc5ebb6ed1f5',
-    at: '2026-10-02T06:40:15.237Z',
-    itemKey: 'GY-468',
-    pr: 348,
-    deploymentId: 6801787363,
-  },
-  {
-    id: 'action:deployment|deployment:74710c912d97b074ce1cc4b1af338000749c3dfc|2026-10-02T07:25:37.243Z',
-    subject: 'deployment:74710c912d97b074ce1cc4b1af338000749c3dfc',
-    sha: '74710c912d97b074ce1cc4b1af338000749c3dfc',
-    at: '2026-10-02T07:25:37.243Z',
-    itemKey: 'GY-966',
-    pr: 511,
-    deploymentId: 6803222981,
-  },
-  {
-    id: 'action:deployment|deployment:625bd412a391f1114bcfa8200e4b8612462b8b4d|2026-10-02T08:00:02.292Z',
-    subject: 'deployment:625bd412a391f1114bcfa8200e4b8612462b8b4d',
-    sha: '625bd412a391f1114bcfa8200e4b8612462b8b4d',
-    at: '2026-10-02T08:00:02.292Z',
-    itemKey: 'GY-1074',
-    pr: 541,
-    deploymentId: 6803801669,
-  },
+// GY-1106 (manual:fault-class-deployment): the master loop filed 3 deployment faults in 24 hours on
+// 2026-10-02. GitHub's records of cryptob1/graphyard's `graphyard / production` deployments, as
+// they stood, are replayed below. Each instance is one release Railway marked inactive though
+// production still served it: 7ef4cb702d (deployment 6801819653, inactive 06:39:37, fault 06:40:15),
+// 74710c912d (6803222981, inactive 07:23:43, fault 07:25:37) and 625bd412a3 (6803801669, inactive
+// 07:59:17, fault 08:00:02). GY-1107 took such a release while nothing newer was deployed. The cause
+// all three share remained: the same release was refused again the moment the next deployment
+// started building, so every release flipped inactive before its successor faulted once more, for
+// as long as that successor was underway (07:07:08 to 07:08:44, 07:28:42 to 07:29:59 and 08:06:03
+// to 08:07:17). An attempt still underway has served nothing, so the release it would replace is
+// still the one production serves.
+const recordedProduction: { id: number; created: string; statuses: [state: string, at: string][] }[] = [
+  { id: 6801707540, created: '2026-10-02T05:05:39Z', statuses: [['in_progress', '2026-10-02T05:05:39Z'], ['success', '2026-10-02T05:06:54Z'], ['inactive', '2026-10-02T05:14:02Z']] },
+  { id: 6801787363, created: '2026-10-02T05:12:39Z', statuses: [['in_progress', '2026-10-02T05:12:39Z'], ['success', '2026-10-02T05:13:59Z'], ['inactive', '2026-10-02T05:16:38Z']] },
+  { id: 6801819653, created: '2026-10-02T05:15:33Z', statuses: [['in_progress', '2026-10-02T05:15:33Z'], ['success', '2026-10-02T05:16:35Z'], ['inactive', '2026-10-02T06:39:37Z']] },
+  { id: 6803222981, created: '2026-10-02T07:07:08Z', statuses: [['in_progress', '2026-10-02T07:07:08Z'], ['success', '2026-10-02T07:08:44Z'], ['inactive', '2026-10-02T07:23:43Z']] },
+  { id: 6803529800, created: '2026-10-02T07:28:42Z', statuses: [['in_progress', '2026-10-02T07:28:42Z'], ['success', '2026-10-02T07:29:59Z'], ['inactive', '2026-10-02T07:48:04Z']] },
+  { id: 6803801669, created: '2026-10-02T07:46:32Z', statuses: [['in_progress', '2026-10-02T07:46:33Z'], ['success', '2026-10-02T07:48:00Z'], ['inactive', '2026-10-02T07:59:17Z']] },
+  { id: 6804095387, created: '2026-10-02T08:06:02Z', statuses: [['in_progress', '2026-10-02T08:06:03Z'], ['success', '2026-10-02T08:07:17Z'], ['inactive', '2026-10-02T08:10:03Z']] },
+];
+const recordedInstances = [
+  { id: 'action:deployment|deployment:55e693f8de263b78850ca4675357cc5ebb6ed1f5|2026-10-02T06:40:15.237Z', subject: 6801787363, release: 6801819653, at: '2026-10-02T06:40:15.237Z', building: '2026-10-02T07:08:00Z' },
+  { id: 'action:deployment|deployment:74710c912d97b074ce1cc4b1af338000749c3dfc|2026-10-02T07:25:37.243Z', subject: 6803222981, release: 6803222981, at: '2026-10-02T07:25:37.243Z', building: '2026-10-02T07:29:00Z' },
+  { id: 'action:deployment|deployment:625bd412a391f1114bcfa8200e4b8612462b8b4d|2026-10-02T08:00:02.292Z', subject: 6803801669, release: 6803801669, at: '2026-10-02T08:00:02.292Z', building: '2026-10-02T08:06:30Z' },
 ];
 
-function faultConfig(): MasterConfig {
-  return masterConfigSchema.parse({
-    version: 1,
-    url: 'https://graphyard.example',
-    credentialFile: '/outside/coordinator.token',
-    cliPath: launcher,
-    repository: 'cryptob1/graphyard',
-    baseBranch: 'main',
-    githubAppId: 1234,
-    hostId: 'vishrog',
-    masterAgentName: 'graphyard-master',
-    autoMerge: true,
-    mergeMethod: 'merge',
-    workers: [],
-    run: {
-      productionEnvironment: 'graphyard / production',
-    },
-  });
-}
-
-function faultDeliveredItem(instance: FaultInstance): Work {
-  return {
-    id: `work-${instance.itemKey}`,
-    key: instance.itemKey,
-    title: instance.itemKey,
-    description: '',
-    type: 'feature',
-    priority: 1,
-    dependencies: [],
-    criteria: [],
-    policy: { checks: ['test'], review: true },
-    plannedFiles: [],
-    stage: 'done',
-    revision: 1,
-    policyRevision: 1,
-    createdAt: instance.at,
-    updatedAt: instance.at,
-    stageEnteredAt: instance.at,
-    ready: false,
-    epoch: 1,
-    lease: null,
-    workspaces: [],
-    candidate: null,
-    submission: { epoch: 1, pr: instance.pr },
-    reworkRequested: false,
-    scenarioRequirements: [],
-    evidence: [],
-    observation: null,
-    blocker: null,
-    gates: [],
-    violations: [],
-    delivery: { mergedAt: instance.at, mergeSha: instance.sha, authorizationRevision: 1 },
-  } as unknown as Work;
-}
-
-/**
- * Creates a mock runner representing GitHub and local git at the time of the incident:
- * - Local git confirms the commit is an ancestor of main (mocked for shallow environments).
- * - GitHub deployments listing:
- *     - If filtered by environment ('graphyard / production'): returns the production deployment.
- *     - If unfiltered (base behavior): returns 500 non-production CI reporting deployments across 5 pages.
- * - GitHub status query: returns 'SUCCESS' for the production deployment.
- */
-function createIncidentRunner(instance: FaultInstance) {
-  const requests: string[] = [];
-  const run: ChildRun = async (command: string, args: string[]) => {
-    requests.push(`${command} ${args.join(' ')}`);
-    if (command === 'git') {
-      if (args.includes('fetch')) return '';
-      if (args.includes('merge-base')) return '';
-      return '';
-    }
-    if (command === 'gh') {
-      // Status read via GraphQL: gh api graphql -f query=...
-      if (args[0] === 'api' && args[1] === 'graphql') {
-        return JSON.stringify({
-          data: {
-            nodes: [
-              {
-                databaseId: instance.deploymentId,
-                latestStatus: { state: 'SUCCESS' },
-                statuses: { nodes: [{ state: 'SUCCESS' }] },
-              },
-            ],
-          },
-        });
-      }
-      // Deployments listing: gh api repos/.../deployments?...
-      const target = args[1] ?? '';
-      if (args[0] === 'api' && target.includes('/deployments?')) {
-        const isEnvironmentFiltered = target.includes(`environment=${encodeURIComponent('graphyard / production')}`)
-          || target.includes('environment=graphyard%20%2F%20production');
-        if (isEnvironmentFiltered) {
-          // When filtered by environment, GitHub returns only deployments matching the production environment
-          return JSON.stringify([
-            {
-              id: instance.deploymentId,
-              node_id: `DE_${instance.deploymentId}`,
-              sha: instance.sha,
-              ref: instance.sha,
-              environment: 'graphyard / production',
-            },
-          ]);
-        }
-        // Unfiltered listing (base behavior): 500 non-production CI reporting records fill the 5 pages
-        const pageMatch = /[?&]page=(\d+)/.exec(target);
-        const page = pageMatch ? Number(pageMatch[1]) : 1;
-        return JSON.stringify(
-          Array.from({ length: 100 }, (_, index) => ({
-            id: 900_000 + (page - 1) * 100 + index,
-            node_id: `DE_rep_${page}_${index}`,
-            sha: '0'.repeat(40),
-            ref: 'main',
-            environment: 'graphyard-reporting',
-          })),
-        );
-      }
-    }
-    throw new Error(`Unexpected command: ${command} ${args.join(' ')}`);
+/** GitHub as it answered at `moment`: the production deployments created by then, each with the statuses posted by then. */
+function recordedGitHub(shas: string[], moment: string) {
+  const sha = (id: number) => shas[recordedProduction.findIndex(record => record.id === id)];
+  const posted = (id: number) => recordedProduction.find(record => record.id === id)!.statuses.filter(([, at]) => at <= moment).map(([state]) => state).reverse();
+  const records = recordedProduction.filter(record => record.created <= moment).reverse()
+    .map(record => ({ id: record.id, sha: sha(record.id), ref: sha(record.id), environment: 'graphyard / production' }));
+  return (command: string, args: string[]) => {
+    if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const listed = pagedListing(records, { honourFilter: true, listings: [] })(args[1]);
+    if (listed !== null) return listed;
+    const asked = statusRead(args);
+    if (asked) return JSON.stringify({ data: { nodes: asked.map(id => { const history = posted(id); return { databaseId: id, latestStatus: history.length ? { state: history[0].toUpperCase() } : null, statuses: { nodes: history.map(state => ({ state: state.toUpperCase() })) } }; }) } });
+    throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
   };
-  return { run, requests };
 }
 
-test('manual:fault-class-deployment — the item lists 3 instances, and every one is replayed below', () => {
-  assert.equal(new Set(faultInstances.map(inst => inst.id)).size, 3);
-  assert.deepEqual(faultInstances.map(inst => inst.itemKey), ['GY-468', 'GY-966', 'GY-1074']);
-  assert.deepEqual(new Set(faultInstances.map(inst => inst.subject)).size, 3);
-});
+for (const instance of recordedInstances) {
+  test(`manual:fault-class-deployment — ${instance.id}: the release Railway marked inactive is still observed as served while the next deployment is building`, async () => {
+    // One commit per recorded production deployment, in order, so containment is real git ancestry.
+    const fixture = await deliveredHistory(recordedProduction.length);
+    try {
+      await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+      const index = (id: number) => recordedProduction.findIndex(record => record.id === id);
+      const delivered = fixture.delivered.slice(0, index(instance.subject) + 1);
+      const subject = delivered.at(-1)!;
+      const release = fixture.shas[index(instance.release)];
+      const configured = config(fixture.token, { run: { productionEnvironment: 'graphyard / production' } });
+      const observeAt = (moment: string) => observeDeployment(configured, delivered, recordedGitHub(fixture.shas, moment), fetch, () => Date.parse(moment), { root: fixture.checkout });
 
-for (const instance of faultInstances) {
-  test(`manual:fault-class-deployment — ${instance.id} does not recur when deployment listing is filtered by environment`, async () => {
-    const master = faultConfig();
-    const state = emptyDaemonState(master);
-    const item = faultDeliveredItem(instance);
-    const { run, requests } = createIncidentRunner(instance);
+      // At the instance's own moment the release was the newest production deployment, inactive (GY-1107's case).
+      const atFault = await observeAt(instance.at);
+      assert.equal(atFault.source, 'github-deployment');
+      assert.equal(atFault.sha, release);
 
-    const performed: any[] = [];
-    const cycle: Cycle = {
-      config: master,
-      state,
-      effects: {
-        observeDeployment: async (delivered: Work[], retained: any) =>
-          observeDeployment(master, delivered, run, fetch, () => Date.parse(instance.at), {
-            root: process.cwd(),
-            retained,
-          }),
-        persist: async () => {},
-        publishProductionEnvironment: async () => {},
-        recordDeployment: async () => {},
-      } as any,
-      now: () => Date.parse(instance.at),
-      snapshot: { work: [item], now: instance.at },
-      performed,
-      isolate: async (_step: unknown, _work: unknown, _key: unknown, action: () => Promise<unknown>) => action(),
-    } as any;
+      // While its successor builds, the release still serves: the deployment step records no fault.
+      const state = emptyDaemonState(configured);
+      const performed: unknown[] = [];
+      const moment = Date.parse(instance.building);
+      await deploymentStep({ config: configured, state, now: () => moment, performed, snapshot: { work: delivered },
+        effects: { observeDeployment: (work: Work[], retained: ContainmentRetention | null) => observeDeployment(configured, work, recordedGitHub(fixture.shas, instance.building), fetch, () => moment, { root: fixture.checkout, retained }), persist: async () => undefined },
+        isolate: async (_step: unknown, _work: unknown, _key: unknown, action: () => Promise<unknown>) => action() } as unknown as Cycle);
+      assert.equal(state.deployment?.source, 'github-deployment', state.deployment?.reason ?? undefined);
+      assert.equal(state.deployment?.sha, release);
+      assert.ok(state.deployment?.deployed.includes(subject.key), `${subject.key} is served by the release`);
+      const action = state.actions[`deployment:${subject.delivery!.mergeSha}`];
+      assert.equal(action?.state, 'done', action?.detail);
+      assert.match(state.deployment!.reason ?? '', /reached success and was later marked inactive; every newer graphyard \/ production deployment is still underway/);
 
-    await deploymentStep(cycle);
-
-    // Against candidate: observation finds the release and verifies the deployed commit
-    assert.equal(state.deployment?.source, 'github-deployment');
-    assert.equal(state.deployment?.sha, instance.sha);
-    assert.deepEqual(state.deployment?.deployed, [instance.itemKey]);
-    assert.deepEqual(state.deployment?.pending, []);
-
-    // Against candidate: the deployment action succeeds, raising no fault
-    const action = state.actions[instance.subject];
-    assert.ok(action, `action ${instance.subject} was recorded`);
-    assert.equal(action.state, 'done', 'deployment action completed successfully');
-    assert.equal(action.faultClass, undefined, 'no deployment fault is recorded');
-
-    // Verify that the query passed the environment filter
-    const listRequests = requests.filter(req => req.includes('/deployments?'));
-    assert.ok(listRequests.length >= 1, 'at least one deployments listing request was made');
-    for (const req of listRequests) {
-      assert.match(req, /environment=/, 'GitHub deployments query is filtered by environment');
-    }
+      // Once the successor succeeds it is the release, and the older one is not asserted.
+      const after = await observeAt(recordedProduction[index(instance.release) + 1].statuses[1][1]);
+      assert.equal(after.sha, fixture.shas[index(instance.release) + 1]);
+    } finally { await rm(fixture.directory, { recursive: true, force: true }); }
   });
 }
-
-for (const instance of faultInstances) {
-  test(`manual:fault-class-deployment — reproduction against base: ${instance.id} fails when 500 non-production records hide the release`, async () => {
-    const master = faultConfig();
-    const item = faultDeliveredItem(instance);
-
-    // Simulate base behavior by answering only unfiltered queries with 500 CI reporting records
-    let unfilteredPagesRequested = 0;
-    const baseRun: ChildRun = async (command: string, args: string[]) => {
-      if (command === 'git') {
-        if (args.includes('fetch')) return '';
-        if (args.includes('merge-base')) return '';
-        return '';
-      }
-      if (command === 'gh') {
-        const target = args[1] ?? '';
-        if (args[0] === 'api' && target.includes('/deployments?')) {
-          unfilteredPagesRequested++;
-          const pageMatch = /[?&]page=(\d+)/.exec(target);
-          const page = pageMatch ? Number(pageMatch[1]) : 1;
-          return JSON.stringify(
-            Array.from({ length: 100 }, (_, index) => ({
-              id: 900_000 + (page - 1) * 100 + index,
-              node_id: `DE_rep_${page}_${index}`,
-              sha: '0'.repeat(40),
-              ref: 'main',
-              environment: 'graphyard-reporting',
-            })),
-          );
-        }
-      }
-      throw new Error(`Unexpected command: ${command} ${args.join(' ')}`);
-    };
-
-    // Force unfiltered URL to simulate base code that did not pass environment parameter
-    const simulateBaseRunner: ChildRun = async (command, args) => {
-      if (command === 'gh' && args[0] === 'api' && args[1]?.includes('/deployments?')) {
-        const strippedUrl = args[1].replace(/environment=[^&]*&/, '');
-        return baseRun(command, [args[0], strippedUrl, ...args.slice(2)]);
-      }
-      return baseRun(command, args);
-    };
-
-    const observation = await observeDeployment(master, [item], simulateBaseRunner, fetch, () => Date.parse(instance.at), {
-      root: process.cwd(),
-    });
-
-    // Exactly reproduces the base failure recorded in GY-1106:
-    assert.equal(observation.source, 'unavailable');
-    assert.equal(observation.sha, null);
-    assert.equal(unfilteredPagesRequested, 5, 'base reads all 5 pages looking for the release');
-    assert.match(
-      observation.reason!,
-      /None of the newest 500 GitHub deployment\(s\) is a successful graphyard \/ production release of the managed base branch, and older ones are past the 5-page read bound, so the release production serves is not known/,
-      'reproduces the exact fault message recorded on GY-1106',
-    );
-  });
-}
-
