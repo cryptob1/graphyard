@@ -51,13 +51,13 @@ import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } f
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
-import { queuePlacement } from '../src/merge-queue.js';
+import { blockedAuthorizedStallMs, queuePlacement } from '../src/merge-queue.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
 import { classifyBlocker, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
 import { followUpEntries, followUpParent, hasShipped } from '../src/model/machine-backlog.js';
 import { repeatedClientErrorLimit } from '../src/retry-stop.js';
-import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, clock, protectionOnlyCheck, statusContext, clockSql, hour, minute, sha } from './helpers/soak-world.js';
+import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, clock, protectionOnlyCheck, statusContext, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
 import { itemLane, lanes, laneSpeedTargets } from '../src/model/policy.js';
@@ -205,6 +205,14 @@ const basePlan = {
 };
 /** GY-430: the main day's item whose auto-merge GitHub holds BLOCKED past the bound: one with no other merge-path fault. */
 const blockedMergeItem = 6;
+/**
+ * How long GitHub holds the blocked item BLOCKED after its required check passed (GY-1181): past
+ * master status's ten-minute stall bound (GY-430), the ten-minute blocked-auto-merge probe, and the
+ * thirty-minute merge-blocked attention bound (GY-1112), so the probe repeats over many cycles.
+ */
+const blockedMergeMs = 35 * minute;
+/** GitHub's answer to a head-bound merge of a pull request it reports BLOCKED: the rule it enforces. */
+const blockedMergeRefusal = 'Repository rule violations found: At least 1 approving review is required by reviewers with write access.';
 const file = (n: number) => `src/soak/item-${n}.ts`;
 const files = (n: number) => basePlan.infrastructure.has(n) ? [file(n), `tests/helpers/soak-item-${n}.ts`] : [file(n)];
 const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
@@ -508,6 +516,18 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const headless = options.headless ? { pi: new SimulatedPi(), root: await temporaryDirectory('soak-runs'), applied: [] as string[], submitted: [] as string[],
     runs: new Map<string, number>(), launched: new Map<number, number>(), settling: new Map<string, Promise<RunRecord>>(), restarts: 0, adoptedLive: 0, adoptedEnded: 0 } : null;
   const adapter = github.adapter();
+  // GY-1181: the blocked-auto-merge probe asks GitHub for a head-bound merge now (mergeNow), and
+  // GitHub refuses one of a pull request it reports BLOCKED, naming the rule it enforces.
+  const probeRefusals: { key: string; head: string; at: number }[] = [];
+  const enqueueAll = adapter.enqueuePullRequest.bind(adapter);
+  adapter.enqueuePullRequest = async (state, head, mergeNow = false) => {
+    const pr = github.prs.get(Number(state.pullRequestId.slice(3)))!;
+    if (mergeNow && pr.head === head && github.mergeState(pr, clock.now()) === 'BLOCKED') {
+      probeRefusals.push({ key: pr.key, head, at: clock.now() });
+      throw new Error(blockedMergeRefusal);
+    }
+    return enqueueAll(state, head, mergeNow);
+  };
   // GY-883: the low-lane item's observation lists its changed files as scope files, the way the
   // real adapter reports them; every other item keeps the empty list, an unknown change, so it
   // rides high and keeps the full path.
@@ -609,7 +629,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
   if (plan.unstable) github.unstable.add(items[plan.unstable - 1].key);
   if (plan.slowRecompute) github.slowRecompute.add(items[plan.slowRecompute - 1].key);
-  if (plan.blockedMerge) github.blockedMerge.add(items[plan.blockedMerge - 1].key);
+  if (plan.blockedMerge) github.slowMergeable.set(items[plan.blockedMerge - 1].key, blockedMergeMs);
   github.exhaustedProfiles.add('claude-reviewer');
   if (plan.flaky.rerunPasses) github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes');
   if (plan.flaky.rerunFails) github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
@@ -1390,6 +1410,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // GY-430: every merge-stalled line master status would show, read after each cycle of the day
   // that sets `plan.blockedMerge`.
   const mergeStallSightings: { subject: string; text: string; at: number }[] = [];
+  // GY-1181: the blocked item's master status row after each cycle — the refusal it names, if any — beside its merge state.
+  const blockedRows: { at: number; read: number; attention: string | null; refused: string | null; requestedAt: string | null }[] = [];
   // GY-498: the parallel-tip window as the day saw it — how many entries held a published tip at
   // once, which successor tips were chained onto a predecessor's, and every tip per entry, so the
   // test can watch the window fill, a failure isolate its entry, and the suffix rebuild without it.
@@ -1779,7 +1801,15 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       for (const key of Object.keys(state.actions)) actionKeys.add(key);
       blockerKeysPeak = Math.max(blockerKeysPeak, Object.keys(state.actions).filter(key => key.startsWith('blocker:')).length);
       // Only the day that holds a merge BLOCKED pays for the extra snapshot read each cycle.
-      if (plan.blockedMerge) mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
+      if (plan.blockedMerge) {
+        const read = await snapshot(), at = clock.now(), blockedKey = items[plan.blockedMerge - 1].key, blocked = read.work.find(item => item.key === blockedKey);
+        mergeStallSightings.push(...mergeStallAttention(read).map(line => ({ subject: line.subject, text: line.text, at })));
+        if (blocked && !blocked.observation?.merged && blocked.stage !== 'done') {
+          const row: any = (buildMasterStatus(read, [], []) as any).work.find((entry: any) => entry.key === blockedKey);
+          const queue = blocked.observation?.githubQueue;
+          blockedRows.push({ at, read: Date.parse(read.now), attention: row?.attention ?? null, refused: queue?.refused?.reason ?? null, requestedAt: queue?.requestedAt ?? null });
+        }
+      }
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
       // them so the world never acts on a half-finished launch.
       await launcher.idle();
@@ -1863,7 +1893,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, blockedRows, probeRefusals, restoreLines, master,
     followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
     wakes, staleMerges, restartLog };
 }
@@ -1963,19 +1993,48 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.merges.some(entry => entry.key === items[basePlan.clean - 1].key && entry.state === 'CLEAN' && entry.mode === 'immediate'), `a CLEAN pull request merged at once: ${JSON.stringify(github.merges)}`);
   assert.ok(github.merges.some(entry => entry.key === items[basePlan.unstable - 1].key && entry.state === 'UNSTABLE' && entry.mode === 'immediate'), 'an UNSTABLE pull request merged at once');
   assert.ok(github.merges.some(entry => entry.key === items[basePlan.slowRecompute - 1].key && entry.mode === 'auto-merge'), 'one GitHub reported BLOCKED when asked was set to auto-merge, and GitHub merged it once it recomputed');
-  // GY-430: the auto-merge GitHub held BLOCKED past ten minutes was named by master status on every
-  // cycle past the bound and on none after it merged; the six-minute recompute never was, and the
-  // line is derived per read, one per item, so nothing about it accumulates over the day.
+  // GY-430, GY-1112, GY-1181: GitHub held one authorized auto-merge BLOCKED past thirty minutes. Past
+  // ten, master status named it on every read until it merged: first as the merge-stalled line, and
+  // once the blocked-auto-merge probe asked GitHub to merge the head now and GitHub refused, by that
+  // refusal on its row — recorded once per head on the ledger however many cycles the probe repeated
+  // — and, past thirty minutes, by exactly one merge-blocked attention item naming GitHub's answer.
+  // The six-minute recompute never was, and every line is derived per read, so nothing accumulates.
   const blockedKey = items[blockedMergeItem - 1].key, blockedLanding = github.merges.find(entry => entry.key === blockedKey);
   assert.equal(blockedLanding?.mode, 'auto-merge', `${blockedKey} was set to auto-merge while GitHub reported it BLOCKED: ${JSON.stringify(blockedLanding)}`);
   const blockedSightings = day.mergeStallSightings.filter(line => line.subject === blockedKey);
-  assert.ok(blockedSightings.length >= Math.floor((blockedMergeMs - 10 * minute) / minute) - 1, `master status named ${blockedKey}'s BLOCKED auto-merge while it stood past ten minutes: ${blockedSightings.length} sighting(s)`);
-  for (const line of blockedSightings) {
+  const stalledLines = blockedSightings.filter(line => line.text.startsWith('merge-stalled:')), blockedLines = blockedSightings.filter(line => line.text.startsWith('merge-blocked:'));
+  assert.equal(stalledLines.length + blockedLines.length, blockedSightings.length, `only merge-stalled and merge-blocked lines name ${blockedKey}: ${blockedSightings.map(line => line.text).join(' | ')}`);
+  for (const line of stalledLines) {
     assert.match(line.text, new RegExp(`^merge-stalled: ${blockedKey} pull request #\\d+ at [0-9a-f]{12} has been set to auto-merge for (\\d+) minutes .* while GitHub reports mergeStateStatus BLOCKED: .+`), line.text);
     assert.ok(Number(/for (\d+) minutes/.exec(line.text)![1]) >= 10 && line.at < blockedLanding!.at, `only past the bound and before the merge: ${line.text}`);
   }
   assert.equal(new Set(blockedSightings.map(line => line.at)).size, blockedSightings.length, 'one line per read, never repeated within one');
   assert.deepEqual(day.mergeStallSightings.filter(line => line.subject !== blockedKey).map(line => line.text), [], 'no other merge stood stalled; the six-minute recompute stayed under the bound');
+  // The probe reached GitHub on many cycles while the head stood BLOCKED, and GitHub refused each.
+  const probes = day.probeRefusals.filter(entry => entry.key === blockedKey);
+  assert.ok(probes.length >= 10 && probes.every(entry => entry.at < blockedLanding!.at), `the probe asked GitHub to merge ${blockedKey} on many cycles before it merged: ${probes.length}`);
+  assert.ok(day.probeRefusals.every(entry => entry.key === blockedKey), `no other head was probed: ${[...new Set(day.probeRefusals.map(entry => entry.key))].join(', ')}`);
+  const probedHeads = [...new Set(probes.map(entry => entry.head))];
+  const blockedItem = final.find(item => item.key === blockedKey)!;
+  const refusalLedger = (await store.pool.query("SELECT payload->'details'->>'head' AS head, payload->'details'->>'reason' AS reason FROM events WHERE work_id=$1 AND kind='merge.enqueue.refused' ORDER BY seq", [blockedItem.id])).rows as { head: string; reason: string }[];
+  assert.deepEqual(refusalLedger.map(row => row.head), probedHeads, `one ledger refusal per probed head, however many cycles repeated it: ${JSON.stringify(refusalLedger)}`);
+  for (const row of refusalLedger) assert.equal(row.reason, `GitHub refused to enqueue ${blockedKey}: ${blockedMergeRefusal}`);
+  // Past the probe bound, every read names the item until it merged: the stall line, the refusal on its row, or the merge-blocked line.
+  const rows = day.blockedRows.filter(row => row.requestedAt && row.read - Date.parse(row.requestedAt) > 11 * minute);
+  assert.ok(rows.length >= Math.floor((blockedMergeMs - 12 * minute) / minute) - 2, `master status read ${blockedKey} on every cycle past the probe bound: ${rows.length}`);
+  for (const row of rows) {
+    const named = blockedSightings.some(line => line.at === row.at) || (!!row.refused && (row.attention ?? '').includes(`GitHub refused the merge request for ${blockedKey}`));
+    assert.ok(named, `master status named ${blockedKey} at +${Math.round((row.at - Date.parse(row.requestedAt!)) / minute)} min past its request: ${JSON.stringify(row)}`);
+  }
+  // Past thirty minutes, one merge-blocked attention item per read, naming the pull request and GitHub's last answer.
+  const past = day.blockedRows.filter(row => row.requestedAt && row.read - Date.parse(row.requestedAt) > blockedAuthorizedStallMs);
+  assert.ok(past.length >= Math.floor((blockedMergeMs - blockedAuthorizedStallMs) / minute) - 2, `the head stood BLOCKED past thirty minutes on several reads: ${past.length}`);
+  for (const row of past) assert.equal(blockedLines.filter(line => line.at === row.at).length, 1, `one merge-blocked item at +${Math.round((row.at - Date.parse(row.requestedAt!)) / minute)} min`);
+  assert.equal(blockedLines.length, past.length, 'merge-blocked only past thirty minutes');
+  for (const line of blockedLines) {
+    assert.match(line.text, new RegExp(`^merge-blocked: ${blockedKey} pull request #\\d+ at [0-9a-f]{12} has been BLOCKED with every gate passing for (3\\d) minutes`), line.text);
+    assert.ok(line.text.endsWith(`GitHub refused to enqueue ${blockedKey}: ${blockedMergeRefusal}`), line.text);
+  }
   // GY-516's rerun-fails round is absent from that total by design: the out-of-queue merge (GY-756)
   // moves the base under the flaky tip while its failed rerun stands, and the queue rebuilds the
   // tip, so the round is superseded rather than skipped — the path itself is exercised, with its
