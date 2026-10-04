@@ -194,9 +194,79 @@ export function unexercisedFindings(work: Work, sha: string | undefined = work.c
   // A trusted pass recorded since answers the finding: the proof is proven on this head after all.
   return [...findings.values()].filter(({ proof }) => !(sha === work.candidate?.sha && currentEvidence(work, proof)?.result === 'pass'));
 }
-/** One finding as a rework names it: the proof, the criterion, and the mutation that survived. */
-export const unexercisedDetail = (entry: UnexercisedFinding, sha: string) =>
-  `${entry.proof} was recorded as not exercising ${entry.criteria.length ? entry.criteria.join(', ') : 'its criterion'} on ${short(sha)}: ${entry.behaviour ? `the mutation removing "${entry.behaviour}" survived` : 'no surviving-mutation run was recorded'} — ${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}`;
+/**
+ * GY-1177. The remedy a nonexercising finding names at its proof-criterion binding: the finding is
+ * about the binding, not only the change, so quoting the surviving mutation alone sent worker after
+ * worker to rework a change whose criterion its proof could never see (GY-1132, GY-1131, GY-1142).
+ * Two remedies converge: make the proof's test fail when the criterion's statement is removed
+ * (strengthen the test to assert it), or re-bind the criterion to a proof that asserts it.
+ */
+export function nonexercisingRemedy(work: Pick<Work, 'criteria'>, proof: string, criteria: readonly string[]): string {
+  const statements = criteria.map(id => work.criteria.find(criterion => criterion.id === id)).filter((criterion): criterion is Work['criteria'][number] => !!criterion);
+  const stated = statements.length ? statements.map(criterion => `${criterion.id} states "${criterion.text.length > 300 ? `${criterion.text.slice(0, 299)}…` : criterion.text}"`).join('; ') : 'its criterion states a behaviour';
+  const ids = statements.length ? statements.map(criterion => criterion.id).join(', ') : 'the criterion';
+  return `${stated}. Remedy: make ${proof}'s test fail when that statement is removed (strengthen the test to assert ${ids}'s statement, with the behaviour removed wherever it lives — the change's lines or the base code carrying it), or re-bind ${ids} to a proof that asserts it`;
+}
+/** One finding as a rework names it: the proof, the criterion, the mutation that survived, and the remedy at the binding (GY-1177). */
+export const unexercisedDetail = (entry: UnexercisedFinding, sha: string, work?: Pick<Work, 'criteria'>) =>
+  `${entry.proof} was recorded as not exercising ${entry.criteria.length ? entry.criteria.join(', ') : 'its criterion'} on ${short(sha)}: ${entry.behaviour ? `the mutation removing "${entry.behaviour}" survived` : 'no surviving-mutation run was recorded'} — ${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}${work ? `. ${nonexercisingRemedy(work, entry.proof, entry.criteria)}` : ''}`;
+
+/**
+ * GY-1177. A dead proof: a mechanical proof recorded as not exercising a criterion whose behaviour
+ * the criterion's other proofs already prove on the candidate with trusted, exercised evidence. No
+ * production round can revive it — the criterion is proven, only this binding is dead — so the loop
+ * requests the criterion's re-scope (retire the unexercisable proof from it, a requirements
+ * revision the independent approver judges) instead of reworking the change again.
+ */
+export interface DeadProof { proof: string; criteria: string[]; covering: string[]; finding: UnexercisedFinding }
+/**
+ * `refused` names the dead proofs whose re-scope the approver already refused (refusedRescopes in
+ * daemon/decisions.ts): that judgement says the covering proofs do not assert the criterion, so
+ * such a proof is no longer dead but the worker's to fix, and the finding returns as rework.
+ */
+export function coveredDeadProofs(work: Work, now = new Date(), refused: readonly string[] = []): DeadProof[] {
+  if (!work.candidate) return [];
+  const findings = unexercisedFindings(work).filter(entry => mechanicalProof(entry.proof) && !refused.includes(entry.proof));
+  const dead = new Set(findings.map(entry => entry.proof));
+  // Exercised: a trusted pass of a unit or integration proof was trusted only beside a failing
+  // stripped run for this criterion (GY-135); a manual pass carries the cases it judged.
+  const exercised = (proof: string, criterion: string) => {
+    const evidence = currentEvidence(work, proof, now);
+    if (!evidence || !evidenceProves(proof, evidence) || dead.has(proof)) return false;
+    if (attestedProof(proof)) return evidence.executed > 0;
+    return evidence.exercise?.result === 'fail' && evidence.exercise.executed > 0 && (!evidence.exercise.criterion || evidence.exercise.criterion === criterion);
+  };
+  return findings.flatMap(entry => {
+    const criteria = entry.criteria.map(id => work.criteria.find(criterion => criterion.id === id && !criterion.bootstrap && criterion.proofs.includes(entry.proof)));
+    if (!criteria.length || criteria.some(criterion => !criterion)) return [];
+    const covering = new Set<string>();
+    for (const criterion of criteria) {
+      const others = criterion!.proofs.filter(proof => proof !== entry.proof);
+      if (!others.length || !others.every(proof => exercised(proof, criterion!.id))) return [];
+      others.forEach(proof => covering.add(proof));
+    }
+    return [{ proof: entry.proof, criteria: criteria.map(criterion => criterion!.id), covering: [...covering], finding: entry }];
+  });
+}
+/**
+ * Whether a requirements input retires `proof`: every criterion is the item's own with only proofs
+ * removed, and `proof` is among them. A refused re-scope carries exactly such an input.
+ */
+export function retiresProof(work: Pick<Work, 'criteria'>, criteria: readonly { id: string; text: string; proofs: readonly string[] }[], proof: string): boolean {
+  const revised = (id: string) => criteria.find(entry => entry.id === id);
+  return criteria.length === work.criteria.length
+    && work.criteria.every(criterion => { const entry = revised(criterion.id); return !!entry && entry.text === criterion.text && entry.proofs.every(name => criterion.proofs.includes(name)); })
+    && work.criteria.some(criterion => criterion.proofs.includes(proof) && !revised(criterion.id)!.proofs.includes(proof));
+}
+/** The criteria with every covered dead proof retired: the requirements revision a re-scope asks for. */
+export const rescopedCriteria = (work: Pick<Work, 'criteria'>, dead: readonly DeadProof[]): Work['criteria'] =>
+  work.criteria.map(criterion => {
+    const retired = dead.filter(entry => entry.criteria.includes(criterion.id)).map(entry => entry.proof);
+    return retired.length ? { ...criterion, proofs: criterion.proofs.filter(proof => !retired.includes(proof)) } : criterion;
+  });
+/** One dead proof as a re-scope names it. */
+export const deadProofDetail = (entry: DeadProof, sha: string) =>
+  `${entry.criteria.join(', ')} ${entry.criteria.length === 1 ? 'is' : 'are'} already proven on ${short(sha)} by ${entry.covering.join(', ')} with trusted, exercised evidence, while ${entry.proof} was recorded as not exercising ${entry.criteria.length === 1 ? 'it' : 'them'}${entry.finding.behaviour ? ` (the mutation removing "${entry.finding.behaviour}" survived)` : ''}: retire ${entry.proof} from ${entry.criteria.join(', ')} rather than rework the change again`;
 
 /**
  * The rework detail for a head one of whose unit or integration groups has nothing left but proofs
@@ -210,7 +280,34 @@ export function unexercisedRework(work: Work, decisions: ProducerGroupDecision[]
   const groups = decisions.filter(decision => decision.state === 'request' && decision.group !== 'manual' && decision.unproven.length
     && decision.unproven.every(proof => findings.some(entry => entry.proof === proof)));
   if (!groups.length) return null;
-  return findings.filter(entry => groups.some(decision => decision.unproven.includes(entry.proof))).map(entry => unexercisedDetail(entry, work.candidate!.sha)).join('; ');
+  // GY-1177: a dead proof whose criterion is proven otherwise is answered by its re-scope, not by rework.
+  const dead = new Set(coveredDeadProofs(work).map(entry => entry.proof));
+  const reworked = findings.filter(entry => !dead.has(entry.proof) && groups.some(decision => decision.unproven.includes(entry.proof)));
+  return reworked.length ? reworked.map(entry => unexercisedDetail(entry, work.candidate!.sha, work)).join('; ') : null;
+}
+/**
+ * GY-1177. The re-scope a head whose unit or integration groups have nothing left but dead proofs
+ * waits on, or null: the loop requests the requirements revision retiring them (daemon/decisions.ts
+ * rescopeDecision), so the planner names that wait rather than a rework or a producer relaunch.
+ */
+export function deadProofRescope(work: Work, decisions: ProducerGroupDecision[]): string | null {
+  if (!work.candidate) return null;
+  const dead = coveredDeadProofs(work);
+  const groups = decisions.filter(decision => decision.state === 'request' && decision.group !== 'manual' && decision.unproven.length
+    && decision.unproven.every(proof => dead.some(entry => entry.proof === proof)));
+  if (!groups.length) return null;
+  return `the loop requests the criterion re-scope: ${dead.filter(entry => groups.some(decision => decision.unproven.includes(entry.proof))).map(entry => deadProofDetail(entry, work.candidate!.sha)).join('; ')}`;
+}
+/**
+ * GY-1177. The planner's step for a head whose unit or integration groups have nothing left but
+ * proofs recorded as not exercising their criterion: the rework, or the re-scope wait when every
+ * such proof is a dead one whose criterion its other proofs already prove. Null when neither applies.
+ */
+export function unexercisedStep(work: Work, decisions: ProducerGroupDecision[]): { step: 'failed'; detail: string; mechanical: true } | { step: 'wait'; detail: string } | null {
+  const rework = unexercisedRework(work, decisions);
+  if (rework) return { step: 'failed', detail: rework, mechanical: true };
+  const rescope = deadProofRescope(work, decisions);
+  return rescope ? { step: 'wait', detail: rescope } : null;
 }
 
 /** The live producer request bound to the current head for one group, or null. */

@@ -4,7 +4,7 @@ import type { Work } from './work.js';
 import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations, requiredProofs } from './bootstrap.js';
 import { evidenceBindsCandidate } from './carry.js';
-import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
+import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof, mechanicalProof, nonexercisingRemedy, unexercisedFindings } from './mechanical-proofs.js';
 import { queuedRegressions, regressionRefusals, staleTipRegressions } from '../regression-guard.js';
 import { itemLane, laneRequiresProof } from './policy.js';
 
@@ -124,8 +124,15 @@ function acceptanceFamily(work: Work, all: Work[], now: Date): (LandabilityReaso
   // proofs are required — low none of their producer-run or manual ones, medium no manual one,
   // high all — while an e2e proof and an inherited obligation are required in every lane.
   const lane = itemLane(work);
+  // GY-1177: a mechanical proof the producer recorded as not exercising its criterion names the
+  // criterion's statement and the remedy at the binding, not only the evidence it lacks.
+  const unexercised = unexercisedFindings(work).filter(entry => mechanicalProof(entry.proof));
+  const nonexercising = (proof: string, criterion: string) => {
+    const entry = unexercised.find(finding => finding.proof === proof && finding.criteria.includes(criterion));
+    return entry ? `; it was recorded as not exercising ${criterion}${entry.behaviour ? ` (the mutation removing "${entry.behaviour}" survived)` : ''}. ${nonexercisingRemedy(work, proof, [criterion])}` : '';
+  };
   for (const ac of work.criteria.filter(criterion => !criterion.bootstrap)) for (const proof of ac.proofs) {
-    if (laneRequiresProof(lane, proof) && unproven(proof)) reasons.push({ gate: 'acceptance', reason: `${ac.id}: ${demanded(proof)}`, proof });
+    if (laneRequiresProof(lane, proof) && unproven(proof)) reasons.push({ gate: 'acceptance', reason: `${ac.id}: ${demanded(proof)}${nonexercising(proof, ac.id)}`, proof });
   }
   for (const obligation of inheritedObligations(work, all)) {
     if (unproven(obligation.proof)) reasons.push({ gate: 'acceptance', reason: `Bootstrap obligation inherited from ${obligation.key} ${obligation.criterionId}: ${demanded(obligation.proof)}`, proof: obligation.proof });

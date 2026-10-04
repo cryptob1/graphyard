@@ -11,8 +11,8 @@ import { evaluate, exerciseRefusal, type Evidence, type Observation, type Princi
 import { producerPrompt, proofOutcome } from '../src/producer.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { nextAction } from '../src/model/next-action.js';
-import { neededDecision } from '../src/daemon/decisions.js';
+import { actionAccount, nextAction } from '../src/model/next-action.js';
+import { neededDecision, rescopeOutcomes, routineDecision } from '../src/daemon/decisions.js';
 import { describeDispatch } from '../src/master/status.js';
 import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 
@@ -207,4 +207,110 @@ test('unit:nonexercising-proof-named master status names the item as awaiting re
   const plain = describeDispatch(work, { pending: [], completed: [] }, { producers: { pending: [], completed: [session] }, failures: [] }, clock.getTime());
   const bare = { ...plain!, producers: plain!.producers.map(({ unexercised: _unexercised, ...entry }: any) => entry) };
   assert.match(unansweredRequestAttention([{ key: work.key, dispatch: bare as any }])[0].text, /^Producer request for unit proofs for GY-421 has stood unanswered/);
+});
+
+// GY-1177: the stripped-tree run removes the criterion's behaviour wherever it lives, and a
+// nonexercising finding is resolved at the proof-criterion binding instead of looping rework.
+test('unit:exercise-covers-base-behaviour the producer may remove a criterion\'s behaviour from the base code carrying it, and a pass beside that failing run is trusted', async () => {
+  const prompt = producerPrompt({ repository: 'owner/project', cliPath: '/cli.mjs' }, { key: 'GY-1', pr: 1, ...binding, group: 'unit', proofs: [UNIT], checkout: '/managed/proof/GY-1' }, { principal: producer.id });
+  const flat = prompt.replace(/\s+/g, ' ');
+  assert.match(flat, /remove the behaviour the criterion the proof is attached to describes wherever it lives/);
+  assert.match(flat, /the base code carrying it/);
+  assert.doesNotMatch(flat, /revert or stub exactly the lines of the change/, 'the mutation is no longer confined to the change\'s lines');
+  assert.match(flat, /A pass beside such a failing stripped run is trusted whichever of the two you removed/);
+  const docs = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
+  const start = docs.indexOf('### Proofs must exercise their criterion');
+  const section = docs.slice(start, docs.indexOf('\n### ', start + 1)).replace(/\*\*/g, '').replace(/\s+/g, ' ');
+  for (const phrase of ['wherever it lives', 'the base code carrying it', 'predates the change', 'A pass beside such a failing stripped run is trusted'])
+    assert.ok(section.includes(phrase), `docs state ${phrase}`);
+  // A preserved invariant: behaviour the base already carried, removed from the base code, fails the proof — trusted.
+  const work = { key: 'GY-1132', criteria: [{ id: 'AC-2', text: 'A failing row yields to others during its retryAt backoff', proofs: [UNIT] }] } as unknown as Work;
+  assert.equal(exerciseRefusal(work, [work], { proof: UNIT, result: 'pass', exercise: { criterion: 'AC-2', behaviour: 'the retryAt backoff exclusion in the base claim order', result: 'fail', executed: 3 } }), null);
+});
+
+const COVER = 'unit:tmp-reclaim-covered';
+function withCover(options: { cover?: 'trusted' | 'missing' | 'failed' } = {}): Work {
+  const work = unexercisedItem();
+  work.criteria = [{ id: 'AC-3', text: 'An old tsx directory is reclaimed', proofs: [UNIT, COVER] }];
+  if (options.cover !== 'missing') work.evidence.push({ id: '00000000-0000-4000-8000-000000000002', proof: COVER, sha: head, baseSha: base, policyRevision: 1, producer: 'proof-runner', trusted: true,
+    result: options.cover === 'failed' ? 'fail' : 'pass', executed: 2, skipped: 0, at: ago(4), ...(options.cover === 'failed' ? {} : { exercise: { criterion: 'AC-3', behaviour: 'the age check in reclaimTmp()', result: 'fail', executed: 2 } }) } as Evidence);
+  const graded = evaluate(work, [work], clock, [CI_APP]);
+  const copy = structuredClone({ ...work, stage: graded.stage, gates: graded.gates, violations: graded.violations });
+  reconcileAutoDispatch(copy, [copy], clock);
+  return copy;
+}
+
+test('unit:nonexercising-finding-names-remedy the rework and the acceptance refusal name the criterion\'s statement and both remedies', () => {
+  const work = unexercisedItem();
+  const remedies = (text: string, where: string) => {
+    for (const named of [UNIT, 'AC-3', MUTATION, 'An old tsx directory is reclaimed']) assert.ok(text.includes(named), `${where} names ${named}: ${text}`);
+    assert.match(text, /make unit:tmp-reclaim's test fail when that statement is removed \(strengthen the test/, `${where} names the strengthen remedy`);
+    assert.match(text, /re-bind AC-3 to a proof that asserts it/, `${where} names the re-bind remedy`);
+  };
+  const action = nextAction(work, [work], clock)!;
+  assert.equal(action.kind, 'request-rework');
+  remedies(action.inputs.kind === 'request-rework' ? action.inputs.detail : '', 'the planner\'s rework');
+  const decision = neededDecision(work, { autoMerge: true })!;
+  assert.equal(decision.action, 'rework');
+  remedies(decision.reason, 'the loop\'s rework decision');
+  const acceptance = work.gates.find(gate => gate.name === 'acceptance')!;
+  const refusal = acceptance.reasons.find(reason => reason.startsWith(`AC-3: ${UNIT} needs trusted passing evidence`))!;
+  assert.ok(refusal, `acceptance refuses on ${UNIT}: ${acceptance.reasons.join(' | ')}`);
+  remedies(refusal, 'the acceptance refusal');
+  // A proof with no finding keeps the plain refusal.
+  const plain = unexercisedItem({ finding: false });
+  assert.doesNotMatch(plain.gates.find(gate => gate.name === 'acceptance')!.reasons.join(' '), /Remedy/);
+});
+
+test('unit:covered-criterion-rescopes-dead-proof a criterion its other proofs already prove re-scopes the dead proof instead of reworking production', () => {
+  const work = withCover();
+  const decision = neededDecision(work, { autoMerge: true })!;
+  assert.equal(decision.action, 'requirements', `a re-scope, not a production round: ${decision.reason}`);
+  assert.deepEqual((decision.input as { criteria: Work['criteria'] }).criteria, [{ id: 'AC-3', text: 'An old tsx directory is reclaimed', proofs: [COVER] }], 'only the dead proof is retired from the criterion');
+  for (const named of [UNIT, COVER, 'AC-3', 'retire']) assert.ok(decision.reason.includes(named), `the re-scope names ${named}: ${decision.reason}`);
+  assert.equal(decision.binding, `${head}:rescope:AC-3:${UNIT}`);
+  // It attests nothing about a worker, so the loop requests it with the worker's lease standing or not.
+  assert.equal(routineDecision(work, { autoMerge: true }, clock.getTime())?.action, 'requirements');
+  // The planner waits on the re-scope rather than naming a rework or a producer relaunch.
+  const account = actionAccount(work, [work], clock);
+  assert.equal(account.action, null, `no rework or producer relaunch is named: ${JSON.stringify(account.action)}`);
+  assert.match(account.wait?.detail ?? '', /the loop requests the criterion re-scope: .*retire unit:tmp-reclaim from AC-3/);
+  // Covering proofs that are missing or failed prove nothing: the finding stays the worker's to rework.
+  for (const cover of ['missing', 'failed'] as const) {
+    const uncovered = withCover({ cover });
+    const reworked = neededDecision(uncovered, { autoMerge: true })!;
+    assert.equal(reworked.action, 'rework', `with the covering proof ${cover} the change is reworked: ${reworked.reason}`);
+  }
+  // A criterion with no other proof has nothing covering it.
+  assert.equal(neededDecision(unexercisedItem(), { autoMerge: true })!.action, 'rework');
+  // Refused: the approver judged the covering proofs do not assert the statement, so the finding
+  // returns to the worker as rework naming the remedy — never the same re-scope waited on for ever.
+  const input = { expectedPolicyRevision: work.policyRevision, criteria: (decision.input as { criteria: Work['criteria'] }).criteria, dependencies: [], plannedFiles: work.plannedFiles };
+  const refusedHistory = [{ action: 'requirements', state: 'refused', input }];
+  const refused = rescopeOutcomes(work, refusedHistory);
+  assert.deepEqual(refused, { refused: [UNIT], applied: null }, 'the refused re-scope is read from the decision history');
+  const reworked = neededDecision(work, { autoMerge: true }, [], refused)!;
+  assert.equal(reworked.action, 'rework', `a refused re-scope returns the head as rework: ${reworked.reason}`);
+  assert.match(reworked.reason, /An approver refused retiring it from the criterion/);
+  assert.match(reworked.reason, /re-bind AC-3 to a proof that asserts it/);
+  assert.equal(routineDecision(work, { autoMerge: true }, clock.getTime(), null, [], refused)?.action, 'rework');
+  // A refusal at another policy revision, a pending one, or one retiring another proof does not stand.
+  for (const other of [[{ ...refusedHistory[0], input: { ...input, expectedPolicyRevision: work.policyRevision + 1 } }], [{ ...refusedHistory[0], state: 'requested' }],
+    [{ ...refusedHistory[0], input: { ...input, criteria: [{ ...input.criteria[0], proofs: [UNIT] }] } }]])
+    assert.deepEqual(rescopeOutcomes(work, other).refused, []);
+  // Applied: the engine records the narrowing as requirement-weakening, which holds the merge gate;
+  // it was the loop's own re-scope, already judged, so the loop asks for its resolution as well.
+  const narrowed = structuredClone(work);
+  narrowed.criteria = input.criteria;
+  narrowed.escalations = [{ trigger: 'requirement-weakening', reason: 'Requirement revision retires no criterion and narrows proofs for AC-3', at: ago(1), actor: 'graphyard-master-operator' }] as Work['escalations'];
+  const appliedHistory = [{ id: 'rescope-1', action: 'requirements', state: 'applied', input, reason: decision.reason }];
+  const outcomes = rescopeOutcomes(narrowed, appliedHistory);
+  assert.deepEqual(outcomes, { refused: [], applied: { id: 'rescope-1' } });
+  const resolve = routineDecision(narrowed, { autoMerge: true }, clock.getTime(), null, [], outcomes)!;
+  assert.equal(resolve.action, 'resolve', 'the narrowing the approved re-scope raised is resolved, never left for a person');
+  assert.deepEqual(resolve.input, { trigger: 'requirement-weakening' });
+  assert.match(resolve.reason, /re-scope decision rescope-1/);
+  // A narrowing no re-scope made — another revision applied since, or one that is no re-scope — is not the loop's to resolve.
+  for (const other of [[...appliedHistory, { id: 'later', action: 'requirements', state: 'applied', input, reason: 'A master narrowed it' }], [{ ...appliedHistory[0], reason: 'A master narrowed it' }]])
+    assert.notEqual(neededDecision(narrowed, { autoMerge: true }, [], rescopeOutcomes(narrowed, other))?.action, 'resolve');
 });
