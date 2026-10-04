@@ -30,13 +30,11 @@ import { buildPipelineStatus, reconcileLedgers } from './master-status-pipeline.
 import { assembleReportedAttention, assembleStatusSections } from './master-status-sections.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
-// The cycle-budget daemon metric, read from here as it always was.
+// Read from here as they always were.
 export { cycleBudget } from '../daemon/metrics.js';
-// `master scope` lives in its own module, read from here as it always was.
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput and the queue head's lag live beside the observation schedule they read;
-// the report reads them from here, as do the tests.
+// Observation throughput lives beside the schedule it reads.
 export { observationThroughputStatus };
 // The attention builders live in `status-attention.ts`; the report reads them from here.
 import { mergeStallAttention } from './status-attention.js';
@@ -108,13 +106,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // live session are accounted and raise nothing; what is left is named, with what is missing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
-  // Requests, conflicts, stalls, executors and owed judgments: derivedAttention, which the loop reads too.
+  // Requests, conflicts, stalls, executors, owed judgments: derivedAttention, which the loop reads too.
   const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
-      // The intervention report is slow: status reads the loop's copy, or a bounded live read.
+      // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a red main post-merge (GY-500),
   // queue-head lag (GY-492), slow renewals (GY-558).
   const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
   const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...landingAttention(snapshot.work), ...health.attention];
@@ -146,7 +144,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     master, snapshot, coordinator, cli, mergeQueue, probe, observation, health,
     merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, executors, releases, lag, status, disk, managedRoot, inventory, reclaimPlan,
-    runtime, reviewRuntime, humanOnly, masterApi, decisions,
+    runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],
   });
   return {
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
@@ -159,7 +157,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     backlog,
     interventions: interventions.summary,
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
-    // The commits no reviewer session has ever obtained a verdict on, with the dismissed review.
+    // Commits no reviewer session ever got a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     ...sectionsReport,
   };

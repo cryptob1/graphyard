@@ -8,6 +8,7 @@ import { reviewLedgerSpec, sessionLedgerHeadroom } from '../reviewer.js';
 import { producerLedgerSpec } from '../producer.js';
 import { actionReport, sessionReport } from './loop-report.js';
 import { needsHumanActions } from './owed-report.js';
+import { loopAttestations } from './hand-actions.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
 import { agentRequestReport } from './loop-report.js';
 import { timedStep } from '../master/timings.js';
@@ -56,12 +57,13 @@ export async function assembleStatusSections<
   humanOnly: HumanRequestRow[];
   masterApi: any;
   decisions: any;
+  approvals: Parameters<typeof loopAttestations>[1];
 }) {
   const {
     master, snapshot, coordinator, cli, mergeQueue, probe, observation, health,
     merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, executors, releases, lag, status, disk, managedRoot, inventory, reclaimPlan,
-    runtime, reviewRuntime, humanOnly, masterApi, decisions,
+    runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals,
   } = inputs;
 
   return {
@@ -101,6 +103,8 @@ export async function assembleStatusSections<
       producers: sessionLedgerHeadroom(producerRecords, producerLedgerSpec),
     },
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
+    // Decisions the loop requests itself, never a person (GY-521).
+    loopDecisions: { attestations: loopAttestations(snapshot, approvals) },
     executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] },
     sessions: sessionReport(snapshot),
     releaseLag: lag.report,
