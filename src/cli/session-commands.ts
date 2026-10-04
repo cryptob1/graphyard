@@ -1,5 +1,5 @@
 import { constants as cryptoConstants, createDecipheriv, createPublicKey, generateKeyPairSync, privateDecrypt, randomUUID } from 'node:crypto';
-import { chmod, link, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Work } from '../model.js';
 import { humanDecisionKinds, type HumanChoice, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
@@ -154,11 +154,16 @@ export function parkArgs(words: readonly string[]) {
  * This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600;
  * the public half is returned. Each half is written whole to a scratch name and then moved into
  * place, so a process killed mid-write never leaves a partial key under the real name. A key file
- * an older version left truncated is replaced; a whole one missing its public half keeps its key.
+ * an older version left truncated is replaced; a whole one missing its public half keeps its key,
+ * and a public half an older version left truncated is derived again from the private key.
  */
 export async function hostSealKey(hostId: string, home = configHome()) {
   const path = join(home, 'seal', `${hostId}.pem`);
-  try { return (await readFile(`${path}.pub`, 'utf8')).trim(); } catch { /* first use on this host, or an interrupted one */ }
+  try {
+    const stored = (await readFile(`${path}.pub`, 'utf8')).trim();
+    createPublicKey(stored);
+    return stored;
+  } catch { /* first use on this host, or an interrupted one */ }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const publicKey = await sealPublicHalf(path) ?? await createSealKey(path);
   const scratch = `${path}.pub.${randomUUID()}.tmp`;
@@ -174,19 +179,30 @@ async function sealPublicHalf(path: string) {
   try { return createPublicKey(pem).export({ type: 'spki', format: 'pem' }) as string; } catch { await rm(path, { force: true }); return undefined; }
 }
 
-/** A new private key under `path`, published by a hard link so it appears whole or not at all; a concurrent first use keeps whichever landed first. */
+/**
+ * A new private key under `path`, published by a hard link so it appears whole or not at all; a
+ * concurrent first use keeps whichever landed first. Where the filesystem has no hard links (some
+ * FUSE or network mounts), the whole scratch file is renamed into place unless a key already landed.
+ */
 async function createSealKey(path: string): Promise<string> {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
   const scratch = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(scratch, privateKey, { mode: 0o600, flag: 'wx' });
     await chmod(scratch, 0o600);
-    await link(scratch, path).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
+    await link(scratch, path).catch(async (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EEXIST') return;
+      if (!noHardLinks.has(error.code ?? '')) throw error;
+      if (!await stat(path).then(() => true, () => false)) await rename(scratch, path);
+    });
   } finally { await rm(scratch, { force: true }); }
   const publicKey = await sealPublicHalf(path);
   if (!publicKey) throw new Error(`The sealing key at ${path} could not be created`);
   return publicKey;
 }
+
+/** The `link()` errors of a filesystem that has no hard links. */
+const noHardLinks = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS']);
 
 /** Open a value sealed to this host (server/waits.ts `sealToHost`). */
 export async function unsealOnHost(sealed: string, hostId: string, home = configHome()) {

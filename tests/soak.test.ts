@@ -53,6 +53,7 @@ import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { queuePlacement } from '../src/merge-queue.js';
+import { ChildProcessError } from '../src/child-runner.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
 import { classifyBlocker, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
 import { shipHeldFollowUps, type ShipFollowUps, type ShipRuns } from '../src/reviewer.js';
@@ -472,7 +473,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * wake is lost too, so the loop must ask again in the next observation window.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -673,6 +674,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     return done;
   };
   const attempts = new Map<string, number>();
+  // GY-860: the claims whose worktree the host could not build, and any cycle that cooled a profile off for one.
+  const workspaceFailures: { key: string; epoch: number; profile: string; at: number }[] = [], workspaceCooled: string[] = [];
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
   // GY-1078: launches that fail after the claim, as the launcher's do when `worktree` cannot create
   // the attempt's worktree: the epoch is claimed, released, and the failure carries git's stderr.
@@ -724,6 +727,17 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
+    // GY-860: for part of the day an earlier attempt's worktree holds this item's branch where the
+    // host cannot free it. The worktree command releases the claim as a workspace failure with
+    // git's message, which hands the epoch back, and fails the way the real child runner reports
+    // it: the command line, then the command's stderr.
+    if (options.workspaceFailure?.item === n && clock.now() - dayStart < options.workspaceFailure.until) {
+      const held = `Git worktree creation failed: fatal: 'graphyard/${key.toLowerCase()}-${epoch}' is already used by worktree at /tmp/soak/${key}-held`;
+      await engine.execute(principal, 'release', work.id, { epoch, failure: { message: held } }, id());
+      workspaceFailures.push({ key, epoch, profile: profile.name, at: clock.now() - dayStart });
+      throw new ChildProcessError(process.execPath, ['graphyard.mjs', 'worktree', key, String(epoch), 'main'], { stdout: '', status: 1, signal: null, timedOut: false,
+        stderr: `${held}. The claim was released as a workspace failure, so the attempt costs nothing; inspect the event and repair the host before it redispatches.\n` });
+    }
     const failure = failureOf(n, key, epoch);
     if (options.dispatchFailing) failing.launches.push({ key, epoch, at: clock.now(), failure });
     if (failure !== null) {
@@ -1817,6 +1831,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
           headless.adoptedEnded++; await run.settled; headless.settling.delete(run.directory); await new Promise(resolve => setImmediate(resolve));
         }
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
         if (options.blockers) blockerActions.push(...result.actions.filter(action => action.kind === 'blocker').map(action => ({ elapsed, work: action.work, state: action.state, detail: action.detail })));
@@ -1918,7 +1933,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
+    decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
     wakes, staleMerges, restartLog };
 }
@@ -2337,6 +2352,16 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.equal(await new Engine(store).loadParallelTips(), reconfigure.window, 'a restarted control plane reads the window back from the installation ledger');
   const status = await api(principals.coordinator, 'GET', 'status');
   assert.equal(status.mergeQueue.parallelTips, reconfigure.window, 'status reports the narrowed window');
+  // GY-1131: the entries waiting behind the window are verified when work lands behind them, not at
+  // their turn. Across the day each landing is examined at most once per entry, a clean one is
+  // published as the entry's tip, and no entry is conflict-ejected when its turn comes.
+  const verified = github.landingRefreshes;
+  assert.ok(verified.some(entry => entry.outcome !== 'skipped'), `a waiting entry was merged onto a landing behind it: ${JSON.stringify(verified.map(entry => [entry.key, entry.outcome]))}`);
+  const perLanding = new Map<string, number>();
+  for (const entry of verified) perLanding.set(`${entry.key}@${entry.landing}`, (perLanding.get(`${entry.key}@${entry.landing}`) ?? 0) + 1);
+  assert.deepEqual([...perLanding].filter(([, count]) => count > 1), [], 'at most one verification per entry per landing');
+  assert.deepEqual(verified.filter(entry => entry.outcome === 'skipped' && entry.overlap.length), [], 'only a disjoint landing is skipped');
+  assert.deepEqual(final.flatMap(item => (item.queueHistory ?? []).filter(entry => entry.event === 'ejected' && /without resolving a conflict/.test(entry.reason ?? '')).map(entry => `${item.key}: ${entry.reason}`)), [], 'no entry was conflict-ejected at its turn');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
@@ -2840,6 +2865,41 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+test('unit:soak-invariants-hold — an item whose worktree the host cannot build for part of the day spends no attempt and cools no profile: it retries on a doubling backoff and is delivered, with every invariant holding', { timeout: 300_000 }, async () => {
+  // GY-860 AC-2: the item's dispatch fails with a workspace failure — the real child runner's
+  // message, carrying git's text — for its first hour. Each failure releases the claim with the
+  // message, so the epoch comes back; the loop cools off no profile and retries on a doubling
+  // backoff instead of every cycle. Once the host is repaired the item is dispatched and delivered.
+  const n = 2, until = hour;
+  const { items, final, violations, failures, lost, state, sessions, workspaceFailures, workspaceCooled, dayStart } = await simulateDay({
+    hours: 6, workspaceFailure: { item: n, until },
+    plan: { items: 4, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+  });
+  const key = items[n - 1].key;
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered, the one whose workspace failed included');
+  assert.deepEqual(violations, [], 'every system invariant holds across the workspace failures');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+
+  assert.ok(workspaceFailures.length >= 2, `the scenario ran: ${JSON.stringify(workspaceFailures)}`);
+  // The epoch does not climb: every failed claim held the same epoch, and so did the delivering attempt.
+  const epochs = new Set(workspaceFailures.map(entry => entry.epoch));
+  assert.equal(epochs.size, 1, `each workspace failure handed the epoch back: ${[...epochs].join(', ')}`);
+  assert.deepEqual(sessions.filter(session => session.key === key).map(session => session.epoch), [...epochs], 'the attempt that delivered it holds the epoch the failures handed back');
+  // The profile stays in rotation: no cycle cooled one off for the workspace, and the profile that
+  // failed is the one that later delivered.
+  assert.deepEqual(workspaceCooled, [], 'no profile was cooled off for a workspace failure');
+  const first = workspaceFailures[0];
+  assert.ok(sessions.some(session => session.profile.name === first.profile && session.dispatchAt - dayStart > first.at), `${first.profile}, whose launch failed on the workspace, was dispatched to again`);
+  // A doubling backoff, not a retry every cycle: the gaps between failures grow.
+  const gaps = workspaceFailures.slice(1).map((entry, index) => entry.at - workspaceFailures[index].at);
+  assert.ok(gaps.every((gap, index) => index === 0 || gap >= gaps[index - 1]), `the retries back off: ${gaps.map(gap => Math.round(gap / minute)).join(', ')} min`);
+  assert.ok(workspaceFailures.length <= 8, `an hour of failures is a handful of retries, not one per cycle: ${workspaceFailures.length}`);
+  // The item's dispatch record keeps git's message.
+  const failedRecord = Object.entries(state.actions).find(([action, entry]) => action.startsWith(`dispatch:${items[n - 1].id}:`) && /already used by worktree/.test(entry.detail));
+  assert.ok(!failedRecord || /workspace could not be prepared/.test(failedRecord[1].detail), 'a kept failure record names the workspace, not the profile');
 });
 
 test('unit:soak-invariants-hold — blocked work unblocks itself: every routine blocker is re-checked each cycle and cleared only once its cause is gone, the scope and decision blockers reach their approver, a repeating blocker is left to the master, and no approver session or cursor row outlives its blocker', { timeout: 600_000 }, async () => {
