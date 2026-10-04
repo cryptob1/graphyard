@@ -1,8 +1,8 @@
 import type { Work } from '../model.js';
-import { containmentGraceMs } from '../quarantine.js';
 
-/* One window for fault counting, settlement and status: quarantine.ts owns it (GY-1179). */
-export { containmentGraceMs };
+/* One window for fault counting, settlement and status: the dependency-free model layer owns it and
+   quarantine.ts imports it, so the browser bundle never loads node-only modules for it (GY-1179). */
+export const containmentGraceMs = 120_000;
 
 export type ContainmentPhase =
   | { state: 'live'; owner: string; epoch: number; expiresAt: string }
