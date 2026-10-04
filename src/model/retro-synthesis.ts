@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { gateRefusalCatalogue } from './refusal-catalogue.js';
 import { faultClasses, type FaultClass } from './fault-classes.js';
 import type { Intervention, InterventionPolicy } from './interventions.js';
-import type { Observation, Work } from './work.js';
 
 // ---------------------------------------------------------------------------
 // Retro synthesis (GY-970).
@@ -216,35 +215,7 @@ export function classifyGateRefusals(gates: readonly { name: string; passed: boo
   return classified;
 }
 
-/** Whether a changed path is one the item plans or one of its documentation paths (a trailing `/` is a directory). */
-const pathAllowed = (path: string, allowed: readonly string[]) => allowed.some(entry => entry.endsWith('/') ? path.startsWith(entry) : path === entry);
-
-/** One applied check run against a submission's observed candidate: null when it passes, else why it refuses. */
-export function runRetroCheck(rule: RetroCheckRule, work: Pick<Work, 'plannedFiles'> & { documentation?: { paths?: string[] } | null }, observation: Pick<Observation, 'files' | 'conflicting' | 'checks'>): string | null {
-  if (rule === 'planned-files') {
-    const outside = observation.files.filter(path => !pathAllowed(path, [...work.plannedFiles, ...(work.documentation?.paths ?? [])]));
-    return outside.length ? `changes ${outside.length} file(s) outside plannedFiles: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ', …' : ''}` : null;
-  }
-  if (rule === 'merges-onto-base') return observation.conflicting ? 'does not merge onto the current base without a conflict; run graphyard sync first' : null;
-  const failed = observation.checks.filter(check => check.result === 'failure');
-  return failed.length ? `has failed checks on its head: ${failed.map(check => check.name).join(', ')}` : null;
-}
-
-/**
- * The applied retro checks a submission fails. Every check registered by an approved
- * `mechanical-check` artefact runs against the candidate the control plane observed for the
- * submission; the submit command refuses one that fails any of them, so the refusal the check was
- * drafted to prevent is met by the worker at submission rather than by a gate later.
- */
-export function retroCheckRefusals(work: Parameters<typeof runRetroCheck>[1], observation: Parameters<typeof runRetroCheck>[2], artefacts: readonly RetroArtefact[]) {
-  const refusals: string[] = [];
-  for (const artefact of artefacts) {
-    if (artefact.state !== 'applied' || artefact.kind !== 'mechanical-check' || !artefact.check?.rule) continue;
-    const refusal = runRetroCheck(artefact.check.rule, work, observation);
-    if (refusal) refusals.push(`retro check ${artefact.check.id} (closing ${artefact.pattern.label}): the candidate ${refusal}`);
-  }
-  return refusals;
-}
+export { runRetroCheck, retroCheckRefusals } from './retro-checks.js';
 
 const day = 86_400_000;
 /**
@@ -288,9 +259,14 @@ export { draftPrevention } from './retro-prevention.js';
 
 export const retroJudgementSchema = z.object({ reason: z.string().trim().min(1).max(2000) }).strict();
 
-/** Separation of duties for a retro approval: null when the approver is an agent identity independent of the draft. */
-export function retroApprovalConflict(artefact: Pick<RetroArtefact, 'id' | 'draftedBy'>, approver: { id: string; sessionKind?: string }): string | null {
+/**
+ * Separation of duties for a retro approval: null when the approver is an agent identity independent
+ * of the draft. A configured principal judges only when it declares an AI session; one that declares
+ * none fails closed, as a human session does. An operator agent is an agent identity by construction.
+ */
+export function retroApprovalConflict(artefact: Pick<RetroArtefact, 'id' | 'draftedBy'>, approver: { id: string; role?: string; sessionKind?: string }): string | null {
   if (approver.sessionKind === 'human') return `Retro artefacts are judged by an independent agent identity; ${approver.id} is a human session`;
+  if (approver.role !== 'operator-agent' && approver.sessionKind !== 'ai') return `Retro artefacts are judged by an independent agent identity; ${approver.id} declares no AI session`;
   if (approver.id === artefact.draftedBy) return `Self-approval refused: ${approver.id} drafted retro artefact ${artefact.id}; a second, independent agent identity must approve it`;
   return null;
 }

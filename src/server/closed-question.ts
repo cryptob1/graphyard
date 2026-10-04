@@ -5,6 +5,7 @@ import { appliedThreshold, closedQuestionFor, closedQuestionRefusal, closedQuest
 import { boundState, type StateReaders } from '../closed-question.js';
 import { save } from '../store.js';
 import type { Services } from './routes.js';
+import { lockedWork } from '../store/locked-read.js';
 
 /**
  * Judging a closed-question proof (GY-109). The control plane binds the state the declaration
@@ -17,7 +18,7 @@ import type { Services } from './routes.js';
 type Db = pg.PoolClient;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const findWork = async (db: Db, id: string): Promise<{ work: Work | undefined; all: Work[] }> => {
-  const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+  const all = await lockedWork(db, [id]);
   return { work: all.find(item => item.id === id || item.key === id), all };
 };
 const bound = (work: Work, data: { sha: string; baseSha: string; policyRevision: number }) =>
