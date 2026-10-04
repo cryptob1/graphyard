@@ -75,7 +75,7 @@ const triage: TriageEntry[] = [
     path: 'src/master/environments.ts:226',
     description: "Restrict Z.AI probing to Z.AI credentials; avoid leaking non-Z.AI keys (e.g. OpenRouter) to api.z.ai",
     status: 'addressed',
-    reasonOrResolution: "Added isZaiAccount check in src/master/environments.ts: only reads key file or auth.json generic key and transmits to api.z.ai if the account plan, keyVariable, or profile is confirmed to be Z.AI. Non-Z.AI OpenCode accounts report loggedIn without sending credentials to api.z.ai.",
+    reasonOrResolution: "Addressed by GY-1158 on main, which this branch adopts in src/master/environments.ts: a named key file is read as Z.AI's only when its variable or name is Z.AI's, generic auth.json keys are no longer sent, and an OpenCode account without Z.AI evidence reports its login from opencode/auth.json without probing api.z.ai. Test GY-1159.5 pins that no non-Z.AI credential reaches api.z.ai.",
   },
 ];
 
@@ -238,10 +238,12 @@ test('manual:review-followups-triaged GY-1159.5: OpenCode accounts configured fo
   const home = join(directory, 'opencode-home');
   await mkdir(home, { recursive: true });
 
-  // 1. Configure OpenRouter credentials in key file and auth.json
+  // 1. Configure OpenRouter credentials in a key file and where OpenCode stores provider logins
   const openrouterKey = 'sk-or-v1-super-secret-openrouter-key-12345';
   await writeFile(join(home, 'openrouter.key'), openrouterKey);
   await writeFile(join(home, 'auth.json'), JSON.stringify({ key: openrouterKey }));
+  await mkdir(join(home, 'opencode'), { recursive: true });
+  await writeFile(join(home, 'opencode', 'auth.json'), JSON.stringify({ openrouter: { type: 'api', key: openrouterKey } }));
 
   let fetchCalls: { url: string; headers: Record<string, string> }[] = [];
   const mockFetch = (async (url: string | URL | Request, init?: RequestInit) => {
