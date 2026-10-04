@@ -42,6 +42,8 @@ export const installRecordSchema = z.object({
   github: z.object({ appId: z.number().int().positive(), installationId: z.number().int().positive(), slug: z.string().min(1), webhookFingerprint: z.string().length(12), ciAppIds: z.array(z.number().int().positive()).default([]) }).nullable().default(null),
   reviewers: z.array(z.object({ name: z.string().min(1), appId: z.number().int().positive(), botUserId: z.number().int().positive() })).default([]),
   profiles: z.array(z.object({ name: z.string().min(1), principal: z.string().min(1), kind: z.string().min(1), role: z.enum(['worker', 'reviewer', 'master']) })).default([]),
+  /** The release pipeline's deployment adapter and the plan actions --apply created for it (GY-1102). */
+  release: z.object({ adapter: z.enum(['railway', 'command']), created: z.array(z.string()).default([]) }).strict().optional(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 }).strict();
