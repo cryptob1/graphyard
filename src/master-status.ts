@@ -1,4 +1,3 @@
-export { loopMemoryAttention } from './master-resources.js';
 import { agentOwner, buildMasterStatus, concurrencyAttention, inventoryWorktrees, roleConcurrency, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { ActionRow } from './model/actions.js';
 import { classified, classifyAttention, groupFaults } from './model/fault-classes.js';

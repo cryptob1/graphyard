@@ -15,7 +15,7 @@ import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
-import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
+import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { approverLaunchAttention, directMergeLine, docsBudgetAttention, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
@@ -29,7 +29,7 @@ import { nameUnresolvedThreads } from '../merge-queue.js';
 import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
 import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
-import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, loopMemoryAttention, resourceStatus } from '../master-status.js';
+import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { contextOverflows } from '../model/escalation-context.js';
 import { interventionSummary, interventionSummaryRoute } from './intervention-status.js';

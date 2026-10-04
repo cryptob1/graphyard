@@ -20,7 +20,7 @@ import { answeredByPendingSession, independentProducerProfiles, launchProducer, 
 import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
-export { hostMemoryHold } from './master-resources.js';
+export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
