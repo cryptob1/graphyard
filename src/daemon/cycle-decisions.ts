@@ -506,6 +506,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
+      // The shared memory takes the approver's judgement as it settled, never a refusal (GY-1125).
       recordSettledDecision(state.projectMemory, watch, judged, stamp);
       await note(`${base}:settled`, item, 'decision', 'done', step.detail);
       if (judged) await noteScopeOutcome(item, watch, judged);
@@ -575,6 +576,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
   const wake = effects.observe && observationWaker(effects.observe);
+  const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
     let item = read;
     const assessment = assessments[item.id];
@@ -593,25 +595,18 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       return;
     }
-    let key = decisionKey(item, decision);
-    needed.add(key);
+    let key = decisionKey(item, decision); needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
     let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment);
-    if (fresh && again?.action !== 'rework') {
-      const waitKey = `wait:rework:${item.id}`, detail = `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`;
-      if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail);
-      return;
-    }
+    if (fresh && again?.action !== 'rework') return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`);
     if (fresh && again) { item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key); wait = reworkObservationWait(item, now(), pause); }
     const watch = state.approvals[key];
     if (wait) {
-      const waitKey = `wait:rework:${item.id}`;
-      if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
+      await noteWait(item, wait);
       // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
-      await wakeObservationJob(cycle, item, 'rework');
-      return;
+      return wakeObservationJob(cycle, item, 'rework');
     }
     // A settled watch is supervised no more; an unclosed registry session is retried.
     if (watch) {
