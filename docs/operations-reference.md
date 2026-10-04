@@ -45,7 +45,7 @@ A required check failing on a tip or head reruns once per sha (*rerun failed job
 | --- | --- |
 | `merge` | near queue head, gates passing: 20 s |
 | `active` | awaiting check, review, base refresh, rework: 1 min |
-| `steady` | unchanged: 5 min, stretched by fleet bound |
+| `steady` | unchanged: 5 min, stretched by fleet bound; review requests ≤ 10 min |
 | `idle` | awaiting dispatch/escalation: 5 min, stretched if unchanged |
 
 Unchanged non-merge candidates: **at most 40%** (`steadyStateShare`).
@@ -118,7 +118,7 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤ half pool) share one pace per token (budget above reserve, less others' spend, to reset). Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, never-observed, five-minute-due, review/rework waits, running sessions, `available_at`; tight, idle items await webhooks. `observationThroughput`: budget, pace, head lag, oldest unobserved (`github` past 120s). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) share one pace per token. Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, review requests 15+ min stale, never-observed, due, waits, sessions. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
 Reconcile reads each live item once per pass and locks only its batch rows, so other items' mutations never wait. Contended batches back off, then defer a tick; deferrals and ticks over 5 s log warnings.
 
