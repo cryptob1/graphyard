@@ -197,11 +197,14 @@ export function writeRecord(git: Git, tag: string, sha: string, record: unknown,
  * Point an environment branch at the exact candidate SHA; the environment deploys that commit.
  * Given the SHA the branch is expected to hold (the last candidate promoted there), the push is
  * leased on it, so a branch someone moved by hand is refused rather than silently overwritten.
+ * `null` means the branch was observed absent: the push is leased on that absence, so a branch
+ * created in between (a concurrent first deploy) is refused too. Only `undefined` pushes unleased.
  */
 export const deployBranch = (git: Git, branch: string, sha: string, expected?: string | null) => {
   assertSha(sha, 'candidate');
   if (expected) assertSha(expected, 'expected branch tip');
-  git(['push', expected ? `--force-with-lease=refs/heads/${branch}:${expected}` : '--force', 'origin', `${sha}:refs/heads/${branch}`]);
+  const lease = expected === undefined ? '--force' : `--force-with-lease=refs/heads/${branch}:${expected ?? ''}`;
+  git(['push', lease, 'origin', `${sha}:refs/heads/${branch}`]);
 };
 
 export function firstParentCommits(git: Git, tip: string, since: string | null): CommitSummary[] {
@@ -384,6 +387,32 @@ export async function validate(candidate: ReleaseCandidate, url: string, suites:
 export const uatValidationWindowMs = 4 * 3_600_000;
 
 /**
+ * Pure: the longest a release-candidate workflow can run up to and including its `uat` job — the
+ * heaviest `needs` chain of `timeout-minutes` ending there — so a test can hold
+ * `uatValidationWindowMs` above it and a timeout that grows fails loudly instead of silently
+ * voiding the guard. Reads only the workflow's top-level jobs, their `needs` and `timeout-minutes`.
+ */
+export function uatValidationCeilingMs(workflow: string, job = 'uat') {
+  const jobs = new Map<string, { needs: string[]; minutes: number }>();
+  const section = workflow.split(/^jobs:\s*$/m)[1] ?? '';
+  for (const block of section.split(/^(?= {2}[\w-]+:\s*$)/m)) {
+    const name = /^ {2}([\w-]+):\s*$/m.exec(block)?.[1];
+    if (!name) continue;
+    const needs = /^ {4}needs:\s*(.+)$/m.exec(block)?.[1].replace(/[[\]]/g, '').split(',').map(entry => entry.trim()).filter(Boolean) ?? [];
+    const minutes = Number(/^ {4}timeout-minutes:\s*(\d+)/m.exec(block)?.[1]);
+    if (!Number.isFinite(minutes)) throw new Error(`Workflow job ${name} declares no timeout-minutes, so the UAT validation window cannot bound it`);
+    jobs.set(name, { needs, minutes });
+  }
+  const path = (name: string, seen: string[]): number => {
+    const entry = jobs.get(name);
+    if (!entry) throw new Error(`Workflow has no job ${name}`);
+    if (seen.includes(name)) throw new Error(`Workflow jobs depend on each other in a cycle through ${name}`);
+    return entry.minutes + Math.max(0, ...entry.needs.map(need => path(need, [...seen, name])));
+  };
+  return path(job, []) * 60_000;
+}
+
+/**
  * Pure: whether `release/uat` may move to a candidate, given the commit it holds now. UAT serving
  * another candidate that has no verdict yet, cut within the validation window, is a validation in
  * progress: moving UAT under it would fail that validation and file a spurious follow-up, so the
@@ -399,6 +428,11 @@ export function assessUatDeploy(candidate: ReleaseCandidate, ledger: Ledger, uat
   return { deploy: true as const, expected: uatTip };
 }
 
+/**
+ * The branch's tip on the remote, observed after `syncLedger`, so the two are not one atomic read:
+ * a candidate deployed in between is judged against the ledger as fetched. The lease on this tip
+ * still refuses to overwrite a branch that moved; with one deployer (the workflow) the gap is moot.
+ */
 const remoteTip = (git: Git, branch: string) => git(['ls-remote', 'origin', `refs/heads/${branch}`]).split(/\s/)[0] || null;
 
 /**
@@ -444,7 +478,7 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   const candidate = findCandidate(ledger, id);
   const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
-  deployBranch(git, productionBranch, candidate.sha, ledger.production[0]?.sha ?? null);
+  deployBranch(git, productionBranch, candidate.sha, ledger.production[0]?.sha);
   if (!ledger.production.some(record => record.id === candidate.id)) writeRecord(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch };
 }
