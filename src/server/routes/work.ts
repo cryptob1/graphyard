@@ -1,4 +1,4 @@
-import { demand, type Principal } from '../../model.js';
+import { demand, Refusal, type Principal } from '../../model.js';
 import { flagPathRefusal, RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
@@ -14,7 +14,7 @@ import { closeWork } from '../close.js';
 import { appendFollowUps, followUpsByPr, migrateFollowUps, promoteFollowUp, readFollowUps, recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { issuePushCredential } from '../push-credential.js';
-import { controlPlaneSyncPush } from '../../sync.js';
+import { controlPlaneSyncPush, syncPushBodyLimit, syncPushTooLarge } from '../../sync.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -154,7 +154,11 @@ export const workRoutes = defineRoutes('work', [
     method: 'POST', path: /^\/api\/work\/([^/]+)\/sync-push$/,
     async handle(context, [id]) {
       await refuseLead(context, id, 'sync-push');
-      return controlPlaneSyncPush(context.services, context.actor, decodeURIComponent(id), await parseJson(context, 64 * 1024 * 1024));
+      const body = await parseJson(context, syncPushBodyLimit).catch((error: unknown) => {
+        if (error instanceof Refusal && error.status === 413) throw new Refusal(syncPushTooLarge(), 413);
+        throw error;
+      });
+      return controlPlaneSyncPush(context.services, context.actor, decodeURIComponent(id), body);
     },
   },
   {

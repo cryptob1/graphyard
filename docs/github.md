@@ -29,7 +29,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Workflow base syncs
 
-Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)), so a base sync with the base's workflow changes pushes plainly. If GitHub refuses it, `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT when it fast-forwards the branch, merges `origin/BASE` and keeps that base's workflow files (plannedFiles aside), else names differing paths; history records `sync.workflow-push` (worker, epoch).
+Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)), so a base sync carrying workflow changes pushes plainly. If refused, `sync GY-N --push-via-control-plane COMMIT` (`sync` names it) has the control plane push it when it fast-forwards the branch, merges a commit in `origin/BASE` and keeps its workflow files (plannedFiles aside), else names differing paths; history records `sync.workflow-push`.
 
 ## Require the check
 

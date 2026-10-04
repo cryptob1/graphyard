@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Principal, Work } from '../src/model.js';
-import { controlPlaneSyncPush, type GitDataApi } from '../src/sync.js';
+import { controlPlaneSyncPush, syncPushBodyLimit, syncPushTooLarge, type GitDataApi } from '../src/sync.js';
+import { baseWorkflowChanges } from '../src/cli/workspace.js';
+import { workRoutes } from '../src/server/routes/work.js';
+import { matchRoute, type RouteContext } from '../src/server/routes.js';
+import { Refusal } from '../src/model.js';
 import { describeSyncCommit, gitDateToIso } from '../src/cli/sync-push.js';
 import { controlPlanePermissions, permissionTable, requiredPermissions } from '../src/github-permissions.js';
 import { workerPushPermissions } from '../src/worker-credential.js';
@@ -204,4 +208,22 @@ test('unit:workflow-sync-push-attributed — the App declares workflows: write, 
     assert.equal(event.payload.from, request.parents[0]); assert.equal(event.payload.base, request.parents[1]);
     assert.ok(Number.isFinite(Date.parse(event.payload.at)));
   } finally { await cleanup(); }
+});
+
+test('manual:review-followups-triaged GY-1203 — sync names the control-plane push when its merge carries the base\'s workflow changes, and an oversized sync-push is refused by size, not by a generic parse error', async () => {
+  const { git, cleanup } = await stranded();
+  try {
+    const cwd = git('rev-parse', '--show-toplevel');
+    const quietly = (...args: string[]) => { const result = spawnSync('git', args, { cwd, encoding: 'utf8' }); return { status: result.status, stdout: result.stdout }; };
+    assert.deepEqual(baseWorkflowChanges(quietly, git('rev-parse', 'HEAD')), ['.github/workflows/ci.yml', '.github/workflows/rc.yml'], 'the merge takes both workflow files from main');
+    assert.deepEqual(baseWorkflowChanges(quietly, git('rev-parse', 'HEAD^1')), [], 'a plain commit carries no base workflow changes');
+  } finally { await cleanup(); }
+
+  assert.match(syncPushTooLarge(), /exceeds the 64 MiB the control plane reads/);
+  assert.match(syncPushTooLarge(syncPushBodyLimit + 1), /\(65 MiB\) exceeds the 64 MiB/);
+  const route = workRoutes.routes.find(candidate => matchRoute(candidate, 'POST', '/api/work/GY-1098/sync-push'))!;
+  let limit: number | undefined;
+  const context = { actor: worker, body: async (bytes?: number) => { limit = bytes; throw new Refusal('Request exceeds size limit', 413); } } as unknown as RouteContext;
+  await assert.rejects(route.handle(context, ['GY-1098']), (error: Refusal) => { assert.equal(error.status, 413); assert.equal(error.message, syncPushTooLarge()); return true; });
+  assert.equal(limit, syncPushBodyLimit);
 });

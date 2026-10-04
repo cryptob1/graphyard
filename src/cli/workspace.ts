@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { setupLine, supervise, systemdContainment } from '../supervisor.js';
-import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
+import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, workflowsDirectory, type GeneratedManifest } from '../sync.js';
 import { managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
@@ -55,6 +55,14 @@ async function agentsRenderers(cwd: string) {
 }
 
 const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
+
+/** The workflow files a two-parent merge at HEAD takes from the base it merged: changed against its first parent, matching its second. */
+export function baseWorkflowChanges(quietly: (...gitArgs: string[]) => { status: number | null; stdout: string }, head: string): string[] {
+  if (quietly('rev-parse', '-q', '--verify', `${head}^2`).status !== 0) return [];
+  const changed = quietly('diff', '--name-only', '-z', '--no-renames', `${head}^1`, head, '--', workflowsDirectory).stdout.split('\0').filter(Boolean);
+  const fromBase = new Set(quietly('diff', '--name-only', '-z', '--no-renames', `${head}^2`, head, '--', workflowsDirectory).stdout.split('\0').filter(Boolean));
+  return changed.filter(path => !fromBase.has(path)).sort();
+}
 
 async function syncWork({ api, print, base: serverUrl, args }: CliContext, work: any) {
   // The canonical way to take the base branch: a merge keeps the worker's history and makes every
@@ -134,10 +142,15 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR.
   if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read });
 
-  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
-    files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
+  const head = git('rev-parse', 'HEAD');
+  // A merge that brings the base's workflow changes is the push GitHub may refuse for want of
+  // `workflows`; sync never pushes, so it names the control-plane route up front (GY-1203).
+  const syncedWorkflows = baseWorkflowChanges(quietly, head);
+  const workflowPush = syncedWorkflows.length ? ` This merge carries origin/${baseBranch}'s workflow changes (${syncedWorkflows.join(', ')}); if GitHub refuses the push "without \`workflows\` permission", run sync ${work.key} --push-via-control-plane ${head.slice(0, 12)} instead of retrying.` : '';
+  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head, merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
+    files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`), ...(syncedWorkflows.length ? { workflows: syncedWorkflows } : {}),
     next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so a plain push updates the PR; a force push is never needed or allowed. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
-      : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
+      : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.${workflowPush}` });
   if (refused.length) process.exitCode = 1;
 }
 

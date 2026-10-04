@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import type { CliContext } from './context.js';
-import type { SyncPushOutcome, SyncPushRequest } from '../sync.js';
+import { syncPushBodyLimit, syncPushTooLarge, type SyncPushOutcome, type SyncPushRequest } from '../sync.js';
 
 type Git = (...args: string[]) => string;
 type GitBytes = (...args: string[]) => Buffer;
@@ -76,9 +76,14 @@ export async function pushViaControlPlane({ api, print, args }: CliContext, work
   if (!workspace) throw new Error(`Run sync ${work.key} --push-via-control-plane from the workspace branch registered for ${work.key}; ${branch} is not one`);
   const commit = git('rev-parse', '--verify', `${named}^{commit}`);
   const request = describeSyncCommit(git, (...gitArgs) => run(gitArgs), commit, workspace.epoch);
+  // Refused here, before the upload, with the same sentence the server gives an oversized body.
+  const size = Buffer.byteLength(JSON.stringify(request));
+  if (size > syncPushBodyLimit) throw new Error(syncPushTooLarge(size));
   const outcome = await api(`work/${work.id}/sync-push`, request, randomUUID()) as SyncPushOutcome;
   // The local remote-tracking ref follows the push the control plane made, so the next plain push fast-forwards.
+  // A failed fetch never masks the push that succeeded; the worker is told to refresh the ref instead.
+  let tracking: string | null = null;
   try { run(['fetch', '--quiet', 'origin', `refs/heads/${outcome.branch}:refs/remotes/origin/${outcome.branch}`]); }
-  catch { /* A failure of the local remote-tracking fetch does not mask the successful push on the control plane */ }
-  print({ ...outcome, next: `The control plane pushed ${commit.slice(0, 12)} to ${outcome.branch}. Later commits that leave .github/workflows alone push plainly; then complete ${work.key} ${outcome.epoch} PR.` });
+  catch (error) { tracking = `The push succeeded, but refreshing origin/${outcome.branch} failed (${error instanceof Error ? error.message : String(error)}); run git fetch origin before the next push. `; }
+  print({ ...outcome, ...(tracking ? { trackingRefStale: true } : {}), next: `${tracking ?? ''}The control plane pushed ${commit.slice(0, 12)} to ${outcome.branch}. Later commits that leave .github/workflows alone push plainly; then complete ${work.key} ${outcome.epoch} PR.` });
 }
