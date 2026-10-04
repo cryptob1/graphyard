@@ -14,6 +14,7 @@ The control-plane App holds (`src/github-permissions.ts`):
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
+| Workflows | Read and write | push base syncs carrying the base's workflow changes (workflow sync) |
 
 A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
@@ -25,6 +26,10 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
 `graphyard master reviewer setup` creates it (Pull requests write, reads otherwise). Review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Grants recheck every five minutes and 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
+
+## Workflow base syncs
+
+Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)), so a base sync with the base's workflow changes pushes plainly. If GitHub refuses it, `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT when it fast-forwards the branch, merges `origin/BASE` and keeps that base's workflow files (plannedFiles aside), else names differing paths; history records `sync.workflow-push` (worker, epoch).
 
 ## Require the check
 
@@ -51,10 +56,6 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 ### Optimistic merges
 
 `mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), so an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
-
-### Pre-merge gate and release-candidate validation
-
-The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): the build, the docs check and the Node and browser suites, every job bounded so the set finishes in under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA: each [release candidate](delivery.md#release-candidates), or a dispatched `sha` or `rc-*` tag alone.
 
 ### Proofs in CI
 
