@@ -12,6 +12,7 @@ import { carriedApproval, evidenceBindsCandidate, type Observation, type Princip
 import { evaluateLandability } from '../src/model/landability.js';
 import { neededDecision } from '../src/daemon/decisions.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
+import { restoreWaitBoundMs } from '../src/daemon/faults.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -377,10 +378,10 @@ test('unit:landability-holds-conflicting-entry — landability refuses an entry 
 });
 
 /** The base-conflict faults the master loop's fault classes count this cycle, read from the records the engine persisted. */
-async function baseConflictFaults() {
+async function baseConflictFaults(now = Date.now()) {
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/outside/graphyard.mjs',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  return cycleFaults(emptyDaemonState(config), await store.list(), Date.now(), { config }).filter(fault => fault.kind === 'base-conflict').map(fault => fault.subject);
+  return cycleFaults(emptyDaemonState(config), await store.list(), now, { config }).filter(fault => fault.kind === 'base-conflict').map(fault => fault.subject);
 }
 
 test('unit:base-conflict-class-quiet-after-refresh — an entry refreshed at the landing never raises the base-conflict fault class on its way to landing, and a conflict is observed at the landing, never at the entry\'s turn', async () => {
@@ -405,6 +406,10 @@ test('unit:base-conflict-class-quiet-after-refresh — an entry refreshed at the
   await conflicted.run(conflicted.b); await conflicted.run(conflicted.c);
   const b = await reload(conflicted.b);
   assert.notEqual(predictQueue(await store.list(), Date.now()).find(entry => entry.id === b.id)?.position, 0, 'B has not reached its turn');
-  assert.deepEqual((await baseConflictFaults()).filter(subject => [conflicted.a.key, conflicted.b.key, conflicted.c.key].includes(subject)), [conflicted.b.key],
+  assert.equal(b.baseRefresh?.trigger, 'conflict confirmed', 'the landing confirmed the conflict while B waits');
+  // GY-1129: the class holds a confirmed conflict back while its owed rework is in motion
+  // (baseConflictInMotion), so read it once that grace has passed: it names B and only B.
+  const lapsed = Date.parse(b.baseRefresh!.at) + restoreWaitBoundMs + 1_000;
+  assert.deepEqual((await baseConflictFaults(lapsed)).filter(subject => [conflicted.a.key, conflicted.b.key, conflicted.c.key].includes(subject)), [conflicted.b.key],
     'the conflict is observed at the landing, on B alone; C, refreshed cleanly, stays quiet');
 });
