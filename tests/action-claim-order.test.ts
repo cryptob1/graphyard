@@ -52,6 +52,18 @@ async function candidates(all: Work[], kinds?: readonly NextActionKind[]) {
   for (const work of all) await store.pool.query('INSERT INTO work_items(id, document) VALUES($1, $2)', [work.id, JSON.stringify(work)]);
   return (await store.pool.query(claimCandidatesSql, claimCandidatesParams(undefined, kinds))).rows.map(row => row.id as string);
 }
+/**
+ * One claim as `Engine.claimNextAction` makes it: the SQL lists the candidate items, only those
+ * documents are loaded and claimed from, and the claimed item and every item whose row stepped
+ * aside are written back — so a row backing off elsewhere is invisible to the claim.
+ */
+async function claimThroughCandidates(all: Work[], kinds: readonly NextActionKind[]) {
+  const listed = new Set(await candidates(all, kinds));
+  const loaded = (await store.pool.query('SELECT document FROM work_items WHERE id = ANY($1::uuid[])', [[...listed]])).rows.map(row => row.document as Work);
+  const claimed = claimAction(loaded, executor, new Date(), { kinds });
+  for (const saved of claimed ? [claimed.work, ...claimed.yielded] : []) all.splice(all.findIndex(work => work.id === saved.id), 1, saved);
+  return claimed;
+}
 /** The items `openActions` would serve, in order of their first row. */
 const servedItems = (all: Work[], now: Date, kinds?: readonly NextActionKind[]) => [...new Set(openActions(all, now, kinds).map(entry => entry.work.id))];
 
@@ -128,6 +140,30 @@ test('unit:failing-dispatch-row-yields-to-others — a dispatch row that failed 
   fail(others[0], noWorker(others[0].key), retryAt);
   assert.equal(claimAction(all, executor, retryAt, { kinds: ['dispatch'] })?.row.id, rowOf(failing).id, 'the failing row is claimed on the next turn');
   fail(failing, noWorker(failing.key), retryAt);
+
+  // The yield is decided from the row, not from the other rows the claim loaded: driven through
+  // the candidate SQL, where a row backing off is never loaded, a P0 resync this executor failed
+  // steps aside once and is then taken, not left behind each further row the executor fails.
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
+  const resync = item({ priority: 0, stage: 'merge', kind: 'resync', requestedAt: minutesAgo(30) });
+  const stalled = [0, 1, 2].map(index => item({ priority: 2, stage: 'ready', kind: 'dispatch', requestedAt: minutesAgo(600 - index) }));
+  const fleet = [resync, ...stalled];
+  const kinds: NextActionKind[] = ['dispatch', 'resync'];
+  const backOff = (work: Work) => { rowOf(work).retryAt = new Date(Date.now() + 3_600_000).toISOString(); };
+  // Claims through the SQL write back the documents they loaded, as the engine saves them.
+  const current = (work: Work) => fleet.find(saved => saved.id === work.id)!;
+  assert.equal(claimAction(fleet, executor, minutesAgo(25), { kinds })?.row.id, rowOf(resync).id, 'the P0 resync is claimed first');
+  fail(resync, 'the base moved while resyncing', minutesAgo(25));
+  assert.equal(claimAction(fleet, executor, minutesAgo(25), { kinds })?.row.id, rowOf(stalled[0]).id, 'while it backs off, the executor takes a dispatch row');
+  fail(stalled[0], noWorker(stalled[0].key), minutesAgo(25)); backOff(stalled[0]);
+  assert.equal(claimable(rowOf(resync), new Date()), true, 'the resync is back from its backoff');
+  const passedOnce = await claimThroughCandidates(fleet, kinds);
+  assert.equal(passedOnce?.row.id, rowOf(stalled[1]).id, 'the resync steps aside once for the executor whose attempt on it failed');
+  assert.deepEqual(passedOnce!.yielded.map(work => work.id), [resync.id], 'the item whose row stepped aside is saved with the claim');
+  fail(current(stalled[1]), noWorker(stalled[1].key), new Date()); backOff(current(stalled[1]));
+  const resumed = await claimThroughCandidates(fleet, kinds);
+  assert.equal(resumed?.row.id, rowOf(resync).id, 'it is taken on the next claim, ahead of the dispatch row behind it, though the rows the executor failed since are not loaded');
+  assert.equal(rowOf(current(resync)).yielded, undefined, 'claiming it clears the mark, so its next failure yields once again');
 
   // With nothing else claimable, the same executor takes it again rather than idling.
   const alone = [failing];
