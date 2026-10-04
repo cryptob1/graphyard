@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFile, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -81,7 +82,6 @@ export interface InstallSession {
 
 /** The committed delivery policy, or the one `init --scan` would propose for this checkout. */
 export async function repositoryDelivery(root: string): Promise<{ policy: DeliveryPolicy; committed: boolean }> {
-  const { readFile } = await import('node:fs/promises');
   let text: string | null = null;
   try { text = await readFile(resolve(root, repositoryConfigFile), 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   const committed = text === null ? undefined : parseRepositoryConfig(text).delivery;
@@ -184,7 +184,6 @@ export async function materializeInstall(session: InstallSession): Promise<Insta
 
 /** Generated once and reused: a re-apply must not lock a running database out of itself. */
 async function stableDatabasePassword(directory: string, create: boolean) {
-  const { readFile, writeFile } = await import('node:fs/promises');
   const file = `${directory}/database.password`;
   try { const value = (await readFile(file, 'utf8')).trim(); if (value.length >= 32) return value; }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; }

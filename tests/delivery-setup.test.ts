@@ -7,7 +7,8 @@ import { classifyChecks, describeMergeGate, detectStack } from '../src/onboardin
 import { applyDelivery, applyProposal, repositoryScanDifference, saveProposal, scanProposal } from '../src/repository-setup.js';
 import { candidateWorkflowFile, deliveryPolicySchema, promotionWorkflowFile, requiredPullRequestChecks, type DeliveryPolicy } from '../src/model/delivery-policy.js';
 import { parseRepositoryConfig } from '../src/model/documentation.js';
-import { candidateWorkflowName, pinnedCli, publishedCliCommit, renderCandidateWorkflow, renderPromotionWorkflow, suiteJobId } from '../src/install/release-pipeline.js';
+import { candidateWorkflowName, pinnedCli, publishedCliCommit, renderCandidateWorkflow, renderPromotionWorkflow, renderReleasePipeline, suiteJobId } from '../src/install/release-pipeline.js';
+import { railwayDeploymentAdapter, wiringActions, type DeploymentContext } from '../src/install/deploy-target.js';
 import { assessPromotion, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { fileURLToPath } from 'node:url';
@@ -157,7 +158,7 @@ test('unit:setup-generates-candidate-and-promotion-workflows — the generated w
   assert.ok(pinned, `the workflows run the CLI commit that rendered them, never a floating or version ref: ${cli}`);
   assert.doesNotThrow(() => execFileSync('git', ['cat-file', '-e', `${pinned}^{commit}`], { cwd: fileURLToPath(new URL('..', import.meta.url)), stdio: 'ignore' }), 'the pinned commit exists');
   const stamped = 'a'.repeat(40);
-  assert.equal(publishedCliCommit({ GRAPHYARD_BUILD_SHA: stamped }), stamped, 'a build that stamps its commit pins that commit');
+  assert.equal(publishedCliCommit({ GRAPHYARD_BUILD_SHA: stamped }, () => { throw new Error('not a git checkout'); }), stamped, 'a build that stamps its commit pins that commit');
   assert.equal(publishedCliCommit({}, (_command, args) => args.includes('merge-base') ? `${'b'.repeat(40)}\n` : 'c'.repeat(40)), 'b'.repeat(40), 'a checkout pins its newest commit origin/main already holds');
   assert.throws(() => publishedCliCommit({}, () => { throw new Error('not a git checkout'); }), /GRAPHYARD_BUILD_SHA/, 'no resolvable commit refuses rather than rendering an unresolvable pin');
   for (const policy of [railwayPolicy(), railwayPolicy({ adapter: 'command', project: null, uat: './deploy.sh uat', production: './deploy.sh production' })]) {
@@ -199,10 +200,13 @@ test('unit:setup-generates-candidate-and-promotion-workflows — the generated w
     // Promotion follows only a successful candidate run, and production gets the promoted SHA.
     const promotion = renderPromotionWorkflow(policy);
     assert.match(triggersOf(promotion), new RegExp(`workflow_run:\\n {4}workflows: \\['${candidateWorkflowName}'\\]\\n {4}types: \\[completed\\]`));
-    const promote = jobsOf(promotion).get('promote')!;
-    assert.match(promote, /if: github\.event_name == 'workflow_dispatch' \|\| github\.event\.workflow_run\.conclusion == 'success'/);
+    const promote = jobsOf(promotion).get('promote')!, resolve = jobsOf(promotion).get('candidate')!;
+    assert.match(resolve, /if: github\.event_name == 'workflow_dispatch' \|\| github\.event\.workflow_run\.conclusion == 'success'/);
+    assert.match(resolve, /CANDIDATE="\$\{CANDIDATE:-latest\}"/);
+    assert.match(promote, /needs: candidate\n {4}if: needs\.candidate\.outputs\.id != ''/);
     assert.match(promote, /environment: production/);
-    assert.match(promote, /release promote "\$\{CANDIDATE:-latest\}"/);
+    assert.match(promote, /release promote "\$CANDIDATE"/);
+    assert.match(promote, /CANDIDATE: \$\{\{ needs\.candidate\.outputs\.id \}\}/);
     assert.match(promote, /GRAPHYARD_CANDIDATE_SHA: \$\{\{ steps\.promote\.outputs\.sha \}\}/);
     assert.match(promote, adapter === 'railway' ? /tracks release\/production/ : / {10}\.\/deploy\.sh production\n/);
     assert.ok(promote.indexOf('release promote') < promote.indexOf('GRAPHYARD_CANDIDATE_SHA'), 'production deploys only after promotion accepted the candidate');
@@ -320,4 +324,65 @@ test('unit:install-plan-lists-candidate-environments — install --plan lists ev
     // An explicit --required-check still wins over the policy.
     assert.deepEqual((await prepareInstall(perPr.root, { repository: 'owner/project', provider: 'compose', requiredChecks: ['lint'] }, perPr.deps, 'plan')).requiredChecks, ['lint']);
   } finally { await perPr.cleanup(); }
+});
+
+// GY-1190: the follow-ups from GY-1102's review.
+test('GY-1190 follow-ups — reachable pin, one pin resolution per render, exact-candidate promotion, argv-safe railway names, full listed commands, chained-script warning', async () => {
+  // A stamped build pins its own commit only when origin/main holds it; otherwise the merge-base.
+  const stamped = 'a'.repeat(40), base = 'b'.repeat(40);
+  const git = (reachable: boolean) => (_command: string, args: string[]) => {
+    if (args.includes('--is-ancestor')) { if (!reachable) throw new Error('not an ancestor'); return ''; }
+    return args.includes('merge-base') ? `${base}\n` : 'c'.repeat(40);
+  };
+  assert.equal(publishedCliCommit({ GRAPHYARD_BUILD_SHA: stamped }, git(true)), stamped);
+  assert.equal(publishedCliCommit({ GRAPHYARD_BUILD_SHA: stamped }, git(false)), base, 'a stamp origin/main never received falls back to the merge-base');
+
+  // The pipeline resolves the pin once and both workflows carry it.
+  const cli = 'npx -y github:cryptob1/graphyard#' + 'd'.repeat(40);
+  const files = renderReleasePipeline(railwayPolicy(), { stack: 'node', cli });
+  assert.equal(files.length, 2);
+  for (const file of files) assert.ok(file.content.includes(cli));
+
+  // The promotion a candidate run triggers promotes the candidate that run validated, not `latest`.
+  const uat = jobsOf(renderCandidateWorkflow(railwayPolicy(), { cli })).get('uat')!;
+  assert.match(uat, /> graphyard-candidate\.txt/);
+  assert.match(uat, /actions\/upload-artifact@v4\n {8}with: \{ name: graphyard-candidate/);
+  const resolve = jobsOf(renderPromotionWorkflow(railwayPolicy(), { cli })).get('candidate')!;
+  assert.match(resolve, /actions: read/);
+  assert.match(resolve, /if: github\.event_name == 'workflow_run'\n(?: {8}#.*\n)? {8}continue-on-error: true\n {8}uses: actions\/download-artifact@v4/);
+  assert.match(resolve, /run-id: \$\{\{ github\.event\.workflow_run\.id \}\}/);
+  assert.match(resolve, /elif \[ -f graphyard-candidate\.txt \]; then CANDIDATE="\$\(cat graphyard-candidate\.txt\)";/);
+  // A triggering run that validated no candidate (so uploaded no artifact) promotes nothing rather than failing or promoting `latest`.
+  assert.match(resolve, /else CANDIDATE=''; echo "The triggering run validated no candidate; nothing to promote\."; fi/);
+  const promote = jobsOf(renderPromotionWorkflow(railwayPolicy(), { cli })).get('promote')!;
+  assert.match(promote, /if: needs\.candidate\.outputs\.id != ''/);
+  assert.doesNotMatch(promote, /:-latest/, 'a workflow_run promotion never falls back to the newest candidate');
+
+  // Railway names with spaces stay one argument, and the listed command quotes them.
+  const commands: { program: string; args: string[] }[] = [];
+  const directory = await temporaryDirectory('railway-link');
+  const ctx: DeploymentContext = {
+    repository: 'owner/orders', installId: 'x', baseBranch: 'main', policy: railwayPolicy({ project: 'orders app' }), railwayDir: directory,
+    workspace: 'My Team', created: [], createEnvironments: true,
+    transport: { description: 'fake', exec: async (program, args) => { commands.push({ program, args }); return { stdout: '', stderr: '', code: 0 }; }, putFile: async () => {} },
+  };
+  const plan = railwayDeploymentAdapter.plan(ctx);
+  assert.equal(plan[0].command, "railway link --project 'orders app'");
+  assert.ok(!('steps' in plan[0]), 'the plan carries display commands only');
+  await railwayDeploymentAdapter.provision(ctx, { createPaid: true });
+  assert.deepEqual(commands[0], { program: 'railway', args: ['link', '--project', 'orders app'] });
+  // Each service is created tracking its release branch, never the default branch.
+  for (const environment of ['uat', 'production'])
+    assert.ok(commands.some(({ args }) => args.join(' ') === `add --service orders-${environment} --repo owner/orders --branch release/${environment}`), `the ${environment} service tracks release/${environment}`);
+  assert.ok(plan.slice(1).every(action => !!action.command?.includes('--branch release/') && !/source branch/.test(action.human ?? '')), 'the source branch is no longer an operator step');
+  assert.deepEqual(railwayDeploymentAdapter.plan({ ...ctx, policy: railwayPolicy({ project: null }) })[0].command, "railway init --name orders-app --workspace 'My Team'");
+
+  // The GitHub environments action lists every command apply runs.
+  const environments = wiringActions(ctx, null).find(action => action.id === 'release.github-environments')!;
+  assert.equal(environments.command, 'gh api --method PUT repos/owner/orders/environments/uat && gh api --method PUT repos/owner/orders/environments/production');
+
+  // A fast-named check whose script chains other commands is kept but flagged on the confirmation screen.
+  const chained = classifyChecks({ files: ['package.json'], contents: { 'package.json': JSON.stringify({ scripts: { test: 'npm run unit && npm run integration-all', lint: 'eslint .' } }) } });
+  assert.match(chained.preMerge.find(entry => entry.check === 'test')!.reason, /chains several commands \(npm run unit && npm run integration-all\).*move it to perCandidate/);
+  assert.doesNotMatch(chained.preMerge.find(entry => entry.check === 'lint')!.reason, /chains/);
 });
