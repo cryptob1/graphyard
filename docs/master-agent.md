@@ -27,7 +27,7 @@ The loop launches, wakes and rotates its [master session](master-agent-sessions.
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, `attest` answering a refusal or stopped producer request, and `decide merge` of unauthorized merges or with no operator agent.
 
-Unproduced `manual:` proofs are the loop's: an `attest` per proof, head, base and policy revision, an approver launched, withdrawn on head change (`loopDecisions.attestations`, not needs-human). One attest per item, so each proof takes an approver round. Refused ones and inherited obligations stay the operator's.
+The loop requests one `attest` per unproduced `manual:` proof, bound to head, base and policy (withdrawn on head change), with an approver (`loopDecisions.attestations`), one per item at a time. Refusals and inherited obligations are the operator's.
 
 ### Session liveness is reconciled, not trusted
 
@@ -42,9 +42,11 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. `sessions.unseen` lists stale handles. Profile concurrency and name use count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. `sessions.unseen` lists stale handles. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**Instead of closing sessions by hand:** nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot.
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
+another session's handle finished to free a slot.
 
 `blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
 
@@ -66,11 +68,11 @@ Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then 
 
 A candidate passing the build gate gets, in `autoDispatch`, one producer request per proof group (`unit`, `integration`, `manual` for `producerProofs`), then a review request once those pass (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). A reviewer launch awaits bot reviews (`run.awaitReviewers`) for `awaitReviewersMinutes` (default 8, 0 disables), skipping one that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
-**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each with a name unique to its request above one. `run.reviewerProfile`'s profile defaults to 4 sessions; pending sessions count before Herdr shows them. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
+**Concurrency is per role.** A profile's `concurrency` (1–20, default 1) caps simultaneous sessions, each uniquely named above one. `run.reviewerProfile`'s profile defaults to 4 sessions; pending sessions count before Herdr shows them. It applies without a restart; lowering it drains sessions first (`longestWaitMs`); a role starved ten minutes counts in `counts.concurrencyStarved`.
 
 **Launches bind heads**; stale refusals wake observation, then retry. 15m+ `dispatch.waiting` reviews raise attention.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's open pane is closed next dispatch tick, freeing its name; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then a quoting rework.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's pane closes next tick, freeing its name; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then rework.
 
 **Every role fails over on spent quota** or waits as a `capacity` line, uncounted, relaunching oldest-first.
 
@@ -84,7 +86,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When all remaining unit or integration proofs are such findings, the next action is `request-rework`, naming proof, criterion and surviving mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When only such unit or integration findings remain, the next action is `request-rework`, naming proof, criterion and mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
@@ -92,7 +94,7 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-First exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15m, checks passed, with an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
+First exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15m, checks passed, with an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until merged normally.
 
 The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: a confirmed required-suite failure on main traced to the culprit lands a revert on the base tip — refused if later merges touched the files — head-bound through the bypass, recorded `optimistic.revert.*`, the item reopened as rework.
 

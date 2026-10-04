@@ -6,6 +6,7 @@ import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
 import { recordSettledDecision } from '../model/project-memory.js';
+import { otherProofAttest } from '../model/unproduced-attestation.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
@@ -18,16 +19,6 @@ import { wakeObservationJob } from './cycle-delivery.js';
 
 /** The launcher key of the approver launch for a decision (GY-616). */
 const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
-/**
- * GY-1051. Why an attest decision standing for another proof on the item's current head, base and
- * policy revision holds `decision` back, or null. That one is judged first: the control plane holds
- * one attest decision per item, so an item with several unproduced proofs takes one approver round each.
- */
-function otherProofAttest(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any }): string | null {
-  const input = standing.input ?? {}, candidate = work.candidate;
-  const head = !!candidate && input.sha === candidate.sha && input.baseSha === candidate.baseSha && input.policyRevision === work.policyRevision;
-  return head && input.proof !== decision.input?.proof ? `attest decision ${standing.id} is ${standing.state} for ${String(input.proof)} on ${String(input.sha).slice(0, 12)}` : null;
-}
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
 export const handWatchPrefix = 'hand:';
 /** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
@@ -319,28 +310,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key} already holds an applied merge decision for candidate ${decision.binding.slice(0, 12)}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      // A request whose response was lost is already standing on the item, and the server refuses a
-      // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
+      // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it
+      // is what keeps a retry from leaving a decision nobody will judge. One attest for another proof on this head waits (GY-1051).
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
-      // The control plane holds one attest decision per item (src/server/decisions.ts). One standing
-      // for another proof on this very head — made by hand, or before a lost cursor — is judged
-      // first: this proof waits, quietly, rather than recording a failed step every cycle (GY-1051).
-      const heldBy = standing && decision.action === 'attest' ? otherProofAttest(item, decision, standing) : null;
-      if (heldBy) {
-        const detail = `${item.key}'s attest decision for ${String(decision.input?.proof)} waits: ${heldBy}; the control plane holds one attest decision at a time, so it is requested once that one settles`;
-        const changed = detailChanged(previous, detail);
-        const waiting = await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
-        if (changed) performed.push(waiting);
-        return;
-      }
+      const held = standing && decision.action === 'attest' ? otherProofAttest(item, decision.input?.proof, standing) : null; if (held) { const waiting = await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: held, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist); if (detailChanged(previous, held)) performed.push(waiting); return; }
       // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
       const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
       if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
-      // Nor does the server keep more than one resolve standing, whatever its trigger. One for
-      // another escalation (a security-concern a master asked about) is not this decision: adopting
-      // it would settle this watch while the lease-loss still stands, and the binding would never
-      // ask again. It is left to its own requester, and this one is asked once it settles.
+      // Nor does the server keep more than one resolve standing, whatever its trigger. One for another escalation (a
+      // security-concern a master asked about) is not this decision: adopting it would settle this watch while the lease-loss
+      // still stands, and the binding would never ask again. It is left to its own requester, and this one is asked once it settles.
       if (standing && decision.action === 'resolve' && decision.escalation && !resolveCovers(standing, decision.escalation)) {
         throw new Error(`resolve decision ${standing.id} is ${standing.state} for ${String(standing.input?.trigger)}, not the ${decision.escalation.trigger} raised at ${decision.escalation.at}; the control plane holds one resolve at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
@@ -624,6 +604,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
       // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
+      // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
       await wakeObservationJob(cycle, item, 'rework');
       return;
     }
@@ -636,18 +617,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A done entry with no watch adopts the standing decision and launches an approver.
     await requestNeeded(item, decision, key);
   });
-  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its
-  //      head, one at a time. The control plane holds one attest decision per item, so the next proof
-  //      is requested only once no watch is judging: an item with N such proofs takes N approver
-  //      rounds in sequence. `attestDecisions` returns at once for any item not held at acceptance
-  //      alone, so the pass over every snapshot item costs a gate scan for the rest (GY-1051).
+  // 4c+. Attestations (GY-521): one attest per `manual:` proof no producer may run, bound to its head; one per item, so N proofs take N rounds, the next requested in the cycle that settles one (GY-1051).
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
     const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);
-      // A decision this supervision settles (applied or refused) frees the item's one attest, so the
-      // next proof is requested within this cycle rather than an approver round later.
       if (watch && !watch.settledAt) { await supervise(item, decision, key, watch); if (!state.approvals[key]?.settledAt) judging = true; }
       else if (watch?.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
     }
