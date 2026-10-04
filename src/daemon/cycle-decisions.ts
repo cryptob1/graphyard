@@ -9,7 +9,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, approverLaunchKey, attestDecisions, approverPrefixes, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, prioritizeCapacityWaiters, recordWatchEnded, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, approverLaunchKey, attestDecisions, approverPrefixes, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, recordWatchEnded, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
@@ -543,10 +543,21 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // runs its sweep here and consults `holds` where a conflict rework decision would be requested.
   const docsSync = docsSyncRoute({ config, state, effects, snapshot, sessions, note, inventorySpent: () => { inventory = null; }, stamp, clock });
   await docsSync.sweep();
-  // GY-849: when capacity frees, the capacity-refused decisions are relaunched oldest first.
-  const workToProcess = prioritizeCapacityWaiters(snapshot.work, state.approvals, approversSpent);
-  // A producer request whose attempts are used up calls for a rework once its escalation has stood
-  // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
+  // GY-849: when capacity frees, the capacity-refused decisions are relaunched oldest first. The
+  // items a waiting decision belongs to move to the front of the step in age order, and their
+  // relaunches enter the launcher one at a time (`capacityRelaunchInFlight`), so the oldest waiting
+  // decision is the one that meets the freed slot, not the first the snapshot happened to list.
+  const capacityRank = new Map<string, number>();
+  if (!approversSpent) for (const watch of Object.values(state.approvals)) {
+    if (!watch.capacity || watch.settledAt) continue;
+    const age = Date.parse(watch.requestedAt);
+    if (!Number.isFinite(age)) continue;
+    const held = capacityRank.get(watch.work);
+    if (held === undefined || age < held) capacityRank.set(watch.work, age);
+  }
+  const rank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
+  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => rank(a) - rank(b)) : snapshot.work;
+  // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   // A needed decision with no watch is requested once ready to retry, or escalated.
   const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {

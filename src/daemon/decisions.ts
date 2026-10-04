@@ -781,23 +781,4 @@ export function recordWatchEnded(watch: ApprovalWatch, detail: string) {
   if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
 }
 
-/** GY-849: when capacity frees, the capacity-refused decisions are relaunched oldest first. */
-export function prioritizeCapacityWaiters(work: Work[], approvals: Record<string, ApprovalWatch>, approversSpent: boolean): Work[] {
-  if (approversSpent) return work;
-  const capacityRank = new Map<string, number>();
-  for (const watch of Object.values(approvals)) {
-    if (!watch.capacity || watch.settledAt) continue;
-    const age = Date.parse(watch.requestedAt);
-    if (!Number.isFinite(age)) continue;
-    const held = capacityRank.get(watch.work);
-    if (held === undefined || age < held) capacityRank.set(watch.work, age);
-  }
-  if (!capacityRank.size) return work;
-  const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
-  return [...work].sort((a, b) => {
-    const aRank = waitingRank(a), bRank = waitingRank(b);
-    return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
-  });
-}
-
 
