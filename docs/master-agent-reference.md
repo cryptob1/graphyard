@@ -77,4 +77,4 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 
 Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Rows' `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-The loop's decisions step stays within 10 s a cycle at about 90 open items. One coordinator read of the `decision.*` ledger per cycle names the items whose decisions moved; only those histories are read again, once a cycle and eight at a time. A history whose ledger has not moved is kept, not read.
+The loop's decisions step stays within 10 s a cycle at about 90 open items: one read of the `decision.*` ledger names the items whose decisions moved, and only those histories are reread, eight at a time. A history whose ledger has not moved is kept, not read.
