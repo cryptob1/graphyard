@@ -73,7 +73,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 With `run.research`, features (or `"research": true`) get one read-only Pi briefing per revision; build follows it, failure never blocks; product questions need humans.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; recurrences re-file. Branch restores or base conflicts under 30m and restart-resumed merges are not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approvals release its fix or close-as-duplicate; recurrences re-file. Branch restores or base conflicts under 30m, restart-resumed merges are not `merge` faults.
 
 ## Fault classes
 
