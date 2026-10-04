@@ -1,4 +1,5 @@
 import type { ProducerGroup } from './dispatch.js';
+import { endedRuntimeStates } from './sessions.js';
 
 /**
  * The action vocabulary: the kinds themselves, the typed inputs each carries, and where the
@@ -138,6 +139,9 @@ export const observationWaitBoundMs = 30 * 60_000;
  */
 export const workerSlotWaitBoundMs = 30 * 60_000;
 
+/** Agent states that end a session, so a profile reporting one is not busy (GY-1141). */
+const terminatedAgentStates = new Set([...endedRuntimeStates, 'terminated', 'exited-error']);
+
 /**
  * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
  *
@@ -157,7 +161,8 @@ export function workerSlotWait(reason: string): boolean {
   let busyLaunchProfiles = 0;
   for (const [, , r] of entries) {
     if (r === 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process') continue;
-    if (/^(\S+ )?agent \S+ is \S+$/.test(r)) {
+    const statusMatch = r.match(/^(\S+ )?agent \S+ is (\S+)$/);
+    if (statusMatch && !terminatedAgentStates.has(statusMatch[2])) {
       busyLaunchProfiles++;
       continue;
     }

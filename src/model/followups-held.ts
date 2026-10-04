@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { isClosed, type Closure } from './closure.js';
+import { demand } from './refusal.js';
 import { followUpEntries, followUpEntryKey, followUpParent, hasShipped, mergeFollowUpEntries, type FollowUpEntry, type Parent } from './machine-backlog.js';
 import type { Work } from './work.js';
 
@@ -56,7 +58,7 @@ export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title
 }
 
 /**
- * Review follow-ups triage notes for GY-1047 and its follow-ups GY-1136:
+ * Review follow-ups triage notes for GY-1047 and its follow-ups GY-1136, GY-1141:
  * - GY-1047 findings 1, 9, 16, 18, 23, 25 / GY-1136 findings 1, 5: the ship route
  *   (src/server/followups-ship.ts) answers under `followUpShipReceiptKey`, the caller's key scoped to
  *   the hold's timestamp (`at`), so a hold reopened on an already-delivered parent is filed instead of
@@ -73,17 +75,58 @@ export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title
  *   returned in `deferred`, and `migrateToParents` (src/server/followups-ship.ts) records the one-time
  *   migration event only once nothing is deferred, so the next ask folds them after their lease ends.
  * - GY-1047 finding 22: `foldUnshippedFollowUps` indexes parents in a `Map<string, Work>`.
+ * - GY-1141 findings 1, 4, 5 (src/server/followups-ship.ts, src/server/followups.ts): declined with recorded reason.
+ *   The server-side implementation at src/server/followups.ts:168 and src/server/followups-ship.ts:103 already executes
+ *   migrateToParents ahead of the GY-402 receipt replay on every call under the fixed migration key until the
+ *   followups.parent-migrated event is recorded, so retrying deferred parent migrations is already supported and verified
+ *   server-side (tested by tests/followups-after-ship.test.ts:190). The client-side premature migrated = true flag and
+ *   note formatting in src/daemon/cycle-triage.ts:29 lies in the daemon and is outside the planned files of this item;
+ *   attempting to refuse deferred migrations with HTTP 409 breaks the existing contract of POST /api/followups/migrate
+ *   which unit tests pin at 200 OK with parents.deferred. Client-side handling of deferred items is left to a daemon-scoped item.
+ * - GY-1141 finding 2: followUpShipReceiptKey ensures the scoped key length never exceeds the 200-character
+ *   Idempotency-Key limit by incorporating a digest when key@at > 200, preventing 400 errors on 176-200
+ *   character caller keys.
+ * - GY-1141 finding 3 (src/server/followups-ship.ts): lapsed migration leases end via endLapsedAttempt
+ *   (pipeline-speed.ts) as 'expired' at their deadline rather than 'released' at migration time, avoiding
+ *   inflated recorded execution.
+ * - GY-1141 finding 6 (src/regression-guard.ts): declined. The companion branch at src/regression-guard.ts:50
+ *   is GY-1023's delivered implied-scope-companion mechanism (PR #535) — it passes only on a content-verified
+ *   companion verdict (timingBaselineCompanion limits edits to the change's own test files' lines) and
+ *   refuses everything else; any residue belongs with GY-1058.
+ * - GY-1141 finding 7 (src/model/action-kinds.ts): workerSlotWait excludes terminated worker session states
+ *   (killed, terminated, exited, etc.) from busy launch profiles so terminated sessions are not treated as
+ *   slot capacity waits and stall attention is not deferred 30 minutes.
+ *
+ * GY-1176 review follow-ups (from the approved review of GY-1141, PR #624):
+ * - Findings 2, 6, 9 (raw keys hashed before validation): fixed. followUpShipReceiptKey refuses a raw
+ *   Idempotency-Key past idempotencyKeyLimit with 400 before scoping it, like receipt() on every other mutation.
+ * - Findings 4, 7, 10 (hardcoded 200): fixed. idempotencyKeyLimit is the one bound; receipt() and
+ *   followUpShipReceiptKey both read it.
+ * - Findings 3, 5, 8 (src/model/action-kinds.ts): fixed. terminatedAgentStates moved above workerSlotWait's JSDoc.
+ * - Finding 1 (undocumented key behavior): fixed. docs/protocol/work-commands.md states the 200-character
+ *   bound and that the ship route scopes the key to the hold, hashing a scoped key that would pass the bound.
  */
 
+/** The longest `Idempotency-Key` a mutation accepts, raw or scoped; `receipt` (src/server/decisions.ts) enforces it (GY-1176). */
+export const idempotencyKeyLimit = 200;
+
 /**
- * The receipt a request to file a parent's held follow-ups is answered under (GY-845, GY-1047, GY-1136):
+ * The receipt a request to file a parent's held follow-ups is answered under (GY-845, GY-1047, GY-1136, GY-1141):
  * the caller's idempotency key scoped to the hold's timestamp. A retry within one hold replays its
  * receipt, while a hold reopened after an earlier filing is filed afresh, whatever fixed key the
- * dispatcher sends (`followups-after-ship:GY-N`).
+ * dispatcher sends (`followups-after-ship:GY-N`). The caller's raw key is refused with 400 past
+ * `idempotencyKeyLimit`, as on every other mutation (GY-1176); a scoped key that would pass the limit
+ * keeps a prefix of the raw key and a hash of all of it, so it stays within the limit (GY-1141).
  */
 export function followUpShipReceiptKey(key: string, parent: Pick<Parent, 'pendingFollowUps'>): string {
+  demand(key && key.length <= idempotencyKeyLimit, 'An Idempotency-Key is required', 400);
   const at = parent.pendingFollowUps?.at;
-  return at ? `${key}@${at}` : key;
+  if (!at) return key;
+  const candidate = `${key}@${at}`;
+  if (candidate.length <= idempotencyKeyLimit) return candidate;
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 16);
+  const prefix = key.slice(0, idempotencyKeyLimit - 1 - at.length - 1 - hash.length);
+  return `${prefix}:${hash}@${at}`;
 }
 
 /** The ledger kind of the one-time fold of unshipped parents' follow-up items (GY-845); its presence makes a second run a no-op. */
