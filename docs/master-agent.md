@@ -13,11 +13,13 @@ When `daemon.liveness` is `stalled` or `absent`, run `systemctl --user restart g
 
 Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` when unauthorized or without an operator agent.
 
+Unproduced `manual:` proofs are the loop's: one `attest` decision per proof, head, base and policy revision, an independent approver launched, withdrawn on head change (`loopDecisions.attestations`, not needs-human).
+
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `dispatch.sessionReconcile` reports closures (`sessions.unseen`):
+that host's loop. `dispatch.sessionReconcile` reports closures:
 
 - **Vanished**: missed twice.
 - **Ended**: agentless pane or terminal state; `idle`, `done` and
@@ -50,6 +52,8 @@ Past the build gate, `autoDispatch` requests a producer per proof group (`unit`,
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart, and lowering it drains first (`longestWaitMs`); ten starved minutes count in `counts.concurrencyStarved`. `run.reviewerProfile` defaults to 4 sessions, pending ones counted.
 - **Requests always settle.** A `pane_not_found` pane is closed; a settled reviewer's open pane closes next tick (attention after 3 refused closes). No request outlives its own token: expired and unreported by Herdr it settles `expired`, else counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (an unposted reviewer is reminded first), 12 per request (`dispatch.abandoned`). Killed producer runs spend no attempt; exhausted ones raise `escalation:proof-exhausted`, then rework.
+
+**Launches bind heads**; stale refusals wake observation, then retry. 15m+ `dispatch.waiting` reviews raise attention.
 
 The master never launches reviews or producers by hand (`master review GY-N [PROFILE]` only after the loop stops relaunching).
 

@@ -45,7 +45,7 @@ A failing required check [reruns once](github.md#merge-queue) per sha, keeping p
 | --- | --- |
 | `merge` | passing, within two of the head or a parallel tip: 20 s |
 | `active` | awaiting check, review or rework: 1 min |
-| `steady` | unchanged: 5 min or longer |
+| `steady` | unchanged: 5 min or longer; review requests ≤ 10 min |
 | `idle` | awaiting dispatch or escalation: 5 min |
 
 Unchanged non-merge candidates: **at most 40%** (`steadyStateShare`).
@@ -113,9 +113,9 @@ Only an `admin` grants or revokes, to `producer` principals: exact name, `kind:*
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4) pace each token's budget to the reset. `observationThroughput`: pace, head lag (`github` past two minutes). `leaseHealth`: lease pool (heartbeat, claim, `complete`, `blocked`) p50/p95, raised past 5 s.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250) sizes reconcile batches. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace each token's budget to the reset; review requests 15+ min stale are claimed. `observationThroughput`: pace, head lag, `bands` lag (`github` past merge 2, review 30 min). `leaseHealth`: lease pool (heartbeat, claim, `complete`, `blocked`) p50/p95, raised past 5 s.
 
-Reconcile reads each live item once per pass; contended batches back off, then defer a tick; ticks over 5 s warn.
+Reconcile reads each live item once per pass, locking only its batch rows; contended batches back off, then defer a tick; ticks over 5 s warn.
 
 ### Concurrent reconciliation
 

@@ -415,6 +415,24 @@ test('unit:recurring-class-item — a typed wait is one fault, not also a generi
   assert.deepEqual(recurringClasses(record.instances, [], policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['human-decision']);
 });
 
+test('unit:recurring-class-item — containment grace window is no fault; lapsed quarantine is a containment fault', () => {
+  const fenced = item('GY-14', {
+    containmentQuarantine: {
+      at: iso(-60_000), epoch: 1, owner: 'worker-1',
+      leaseExpiresAt: iso(30_000), launchExpiresAt: iso(-60_000), settlementHash: 'a'.repeat(64),
+      scope: { pid: 1234, unit: 'u.scope' },
+    },
+    lease: null,
+  } as Partial<Work>);
+  assert.deepEqual(workFaults(fenced, clock).map(fault => fault.kind), [], 'grace window is no fault');
+  assert.deepEqual(cycleFaults(emptyDaemonState(config()), [fenced], clock, { config: config() }).filter(fault => fault.faultClass === 'containment'), [], 'cycleFaults produces no containment fault during grace');
+
+  // After grace window has elapsed (120s past leaseExpiresAt)
+  const lapsedClock = clock + 180_000;
+  assert.deepEqual(workFaults(fenced, lapsedClock).map(fault => fault.kind), ['containment'], 'lapsed quarantine is a containment fault');
+  assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 1);
+});
+
 test('unit:recurring-class-item — a recurring human-decision class keeps the decision with the human', () => {
   const recent = [instance('human-decision', 'GY-1', -3 * hour), instance('human-decision', 'GY-2', -2 * hour), instance('human-decision', 'GY-3', -hour)];
   const filed = faultClassItem({ faultClass: 'human-decision', recent }, policy, clock);
