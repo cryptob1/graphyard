@@ -283,6 +283,17 @@ export function deadProofRescope(work: Work, decisions: ProducerGroupDecision[])
   if (!groups.length) return null;
   return `the loop requests the criterion re-scope: ${dead.filter(entry => groups.some(decision => decision.unproven.includes(entry.proof))).map(entry => deadProofDetail(entry, work.candidate!.sha)).join('; ')}`;
 }
+/**
+ * GY-1177. The planner's step for a head whose unit or integration groups have nothing left but
+ * proofs recorded as not exercising their criterion: the rework, or the re-scope wait when every
+ * such proof is a dead one whose criterion its other proofs already prove. Null when neither applies.
+ */
+export function unexercisedStep(work: Work, decisions: ProducerGroupDecision[]): { step: 'failed'; detail: string; mechanical: true } | { step: 'wait'; detail: string } | null {
+  const rework = unexercisedRework(work, decisions);
+  if (rework) return { step: 'failed', detail: rework, mechanical: true };
+  const rescope = deadProofRescope(work, decisions);
+  return rescope ? { step: 'wait', detail: rescope } : null;
+}
 
 /** The live producer request bound to the current head for one group, or null. */
 export function openProducerRequest(work: Work, group: ProducerGroup): DispatchRequest | null {
