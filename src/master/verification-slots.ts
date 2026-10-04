@@ -91,7 +91,15 @@ function tryTake(directory: string, slots: number, owner: SlotOwner, alive: (pid
       try {
         renameSync(taking, path);
         let released = false;
-        return { slot, path, release: () => { if (!released) { released = true; rmSync(path, { recursive: true, force: true }); } } };
+        // Renamed away before it is removed: removing in place empties the slot first, and a waiter's
+        // rename onto that empty directory would take it while the remove then fails or deletes its owner.
+        return { slot, path, release: () => {
+          if (released) return;
+          released = true;
+          const freed = `${path}.freed-${owner.pid}-${Date.now()}`;
+          try { renameSync(path, freed); } catch { return; }
+          rmSync(freed, { recursive: true, force: true });
+        } };
       } catch (error) {
         rmSync(taking, { recursive: true, force: true });
         if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
