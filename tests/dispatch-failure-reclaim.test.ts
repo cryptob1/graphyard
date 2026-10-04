@@ -11,7 +11,7 @@ import { defaultChildRun } from '../src/child-runner.js';
 import { masterConfigSchema, prepareWorkerLaunch, saveWorkerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { dispatchFailureBlockAfter, dispatchFailureCause, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
-import { branchHolders, reclaimBranchHolders } from '../src/worktree-holders.js';
+import { branchHolders, reclaimBranchHolders, worktreeRecord } from '../src/worktree-holders.js';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -317,8 +317,21 @@ test('the record of a deleted session worktree is removed on a first attempt, an
     const deleted = await sessionHolder(root, 1, branch);
     await rm(deleted, { recursive: true, force: true });
     assert.deepEqual(branchHolders(root, branch, target).map(entry => [entry.via, entry.missing]), [['checkout', true]]);
+    // GY-1193: only this holder's record goes; another deleted worktree's stale record stays.
+    const other = join(root, '.graphyard', 'worktrees', 'GY-8-1');
+    git(root, 'worktree', 'add', '-q', '-b', 'graphyard/gy-8-1', other);
+    await rm(other, { recursive: true, force: true });
+    const record = worktreeRecord(root, deleted), otherRecord = worktreeRecord(root, other);
+    assert.ok(record && otherRecord && record !== otherRecord, 'each deleted worktree is found by its own record');
+    git(root, 'worktree', 'lock', deleted);
+    assert.throws(() => reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: false }), /is locked, so it is left alone/);
+    assert.equal(worktreeRecord(root, deleted), record, 'a locked record is never removed');
+    git(root, 'worktree', 'unlock', deleted);
     const [pruned] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: false });
     assert.equal(pruned.action, 'removed the record of the deleted worktree');
+    assert.equal(worktreeRecord(root, deleted), null, 'the holder\'s record is removed');
+    assert.equal(worktreeRecord(root, other), otherRecord, 'another stale record is left alone');
+    assert.match(git(root, 'worktree', 'list', '--porcelain'), new RegExp(`worktree ${other}`));
     git(root, 'worktree', 'add', '-q', target, branch);
     git(root, 'worktree', 'remove', target);
 
@@ -397,7 +410,33 @@ test('dispatchblock is refused off a dispatchable stage, over a standing blocker
       work = await engine.execute(worker, 'release', work.id, { epoch: work.epoch }, randomUUID());
     }
     work = await engine.execute(loop, 'dispatchblock', work.id, { reason: 'Dispatch failed 3 consecutive times: fatal: held' }, randomUUID());
-    assert.equal(work.blocker, 'Dispatch failed 3 consecutive times: fatal: held [attempts 1, 2, 3 each ended without a submission]');
+    assert.equal(work.blocker, 'Dispatch failed 3 consecutive times: fatal: held [attempts 1, 2, 3 each ended without a submission within 240s of its claim]');
     await refused(work, /already carries a blocker/);
+
+    // GY-1193: a lease that lapsed without a release is closed here, not refused; an attempt that
+    // ran longer than a launch that never got going breaks the run.
+    const brief = new Engine(store, [15368], 1, 'owner/project', 0); brief.principals = [human, worker, loop];
+    const pause = (ms: number) => new Promise(done => setTimeout(done, ms));
+    const block = (work: Work) => brief.execute(loop, 'dispatchblock', work.id, { reason: 'fatal: held' }, randomUUID());
+    let lapsed = await brief.execute(human, 'create', null, { title: 'lapsed', plannedFiles: ['src/held.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+    lapsed = await brief.execute(human, 'ready', lapsed.id, {}, randomUUID());
+    for (let n = 0; n < dispatchFailureBlockAfter - 1; n++) {
+      lapsed = await brief.execute(worker, 'claim', lapsed.id, {}, randomUUID());
+      lapsed = await brief.execute(worker, 'release', lapsed.id, { epoch: lapsed.epoch }, randomUUID());
+    }
+    lapsed = await brief.execute(worker, 'claim', lapsed.id, {}, randomUUID());
+    await pause(1200);
+    lapsed = await block(lapsed);
+    assert.match(lapsed.blocker!, /\[attempts 1, 2, 3 each ended without a submission within 1s of its claim\]$/, 'the lapsed attempt is closed inline and counted');
+    assert.equal(lapsed.pipeline!.attempts.at(-1)!.end, 'expired');
+
+    let long = await brief.execute(human, 'create', null, { title: 'long', plannedFiles: ['src/held.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+    long = await brief.execute(human, 'ready', long.id, {}, randomUUID());
+    for (let n = 0; n < dispatchFailureBlockAfter; n++) {
+      long = await brief.execute(worker, 'claim', long.id, {}, randomUUID());
+      if (n === 1) for (let beat = 0; beat < 3; beat++) { await pause(500); long = await brief.execute(worker, 'heartbeat', long.id, { epoch: long.epoch }, randomUUID()); }
+      long = await brief.execute(worker, 'release', long.id, { epoch: long.epoch }, randomUUID());
+    }
+    await assert.rejects(block(long), /attempt 2 ran longer than 1s before ending/);
   } finally { await store.close(); await database.stop(); }
 });

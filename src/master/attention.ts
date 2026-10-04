@@ -46,7 +46,9 @@ export function installationOwner(source: typeof installationSources[number], te
     : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
   if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
-  return agentOwner('master', 'Fix or trigger the deployment of the base branch with the configured provider, then graphyard master verify-deployment GY-N for each pending delivery');
+  // Production may track a release branch only `graphyard release promote` moves: the fix is the
+  // deployment of what production tracks, never a deploy of main past the release gates (GY-1207).
+  return agentOwner('master', 'Fix the failing deployment of the branch production tracks (release/production when the release pipeline owns production, else the base branch) with the configured provider, never deploying main past graphyard release; then graphyard master verify-deployment GY-N for each pending delivery');
 }
 /** Why a work item raises attention; each cause is also its fault kind. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
@@ -188,9 +190,12 @@ export function fleetStatus(fleet: FleetView | null | undefined) {
 export function productionSummary(report: Partial<ProductionReport>) {
   const incidents = (report.incidents ?? []).map(incident => ({ key: incident.key, mergeSha: incident.mergeSha, status: incident.status, reason: incident.reason, deploymentId: incident.deploymentId ?? null, since: incident.since }));
   const ahead = report.ahead ?? null;
-  const summary = ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production` : report.aheadError ?? 'production lag is unknown';
-  return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], summary,
+  const release = report.release ?? null;
+  const awaiting = release && typeof release.unreleased === 'number' ? `; main is ${release.unreleased} commit${release.unreleased === 1 ? '' : 's'} ahead of it, awaiting the next release` : '';
+  const summary = release ? (ahead?.by === 0 ? `production serves ${release.branch}${awaiting}` : ahead ? `${release.branch} is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production${awaiting}` : `${report.aheadError ?? 'production lag is unknown'}${awaiting}`)
+    : ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production` : report.aheadError ?? 'production lag is unknown';
+  return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], release, summary,
     latestDeployment: report.latest ? { id: report.latest.id, status: report.latest.providerStatus, commit: report.latest.commit, createdAt: report.latest.createdAt, url: report.latest.url ?? null } : null,
     deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
-    attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null }) };
+    attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null, release }) };
 }
