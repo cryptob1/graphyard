@@ -1209,6 +1209,17 @@ export function followUpRecordRequest(item: FollowUpItem) {
   if (!parent) throw new Error('the follow-up filing names no approved item to record its findings on');
   return { parent, path: `work/${encodeURIComponent(parent)}/followups`, body: { findings: item.origin?.reviewFollowUps?.findings ?? [], reason: item.reason } };
 }
+/** The control plane's refusal of a key sent again with a different body (`idempotencyMismatch`, src/engine.ts). */
+const keyReuseRefusal = 'Idempotency key reused with different input';
+/**
+ * Whether a refused follow-up request was refused for its key, reused with a different body: read
+ * once, where the client holds the response's status and `error` field (GY-1168), and carried on the
+ * thrown error as `keyReuse`, so the filing resolves it without matching the composed message.
+ */
+export const keyReuseRefused = (status: number, body: unknown) =>
+  status === 409 && (body as { error?: unknown } | null)?.error === keyReuseRefusal;
+/** A refusal the client marked `keyReuse` (see keyReuseRefused). */
+const refusedAsKeyReuse = (error: unknown) => (error as { keyReuse?: unknown } | null)?.keyReuse === true;
 /**
  * The loop's filing of an approval's follow-ups, as the master's operator-agent identity, idempotent
  * on `key` (GY-896): the findings are recorded against the approved item's own record
@@ -1222,7 +1233,7 @@ function operatorAgentCreate(root: string, config: MasterConfig): CreateFollowUp
     const { parent, path, body } = followUpRecordRequest(item);
     const response = await fetch(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const result: any = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(`Graphyard refused the follow-ups for ${parent} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
+    if (!response.ok) throw Object.assign(new Error(`Graphyard refused the follow-ups for ${parent} (${response.status}): ${result?.error ?? JSON.stringify(result)}`), { keyReuse: keyReuseRefused(response.status, result) });
     if (typeof result?.key !== 'string') throw new Error(`Graphyard did not return the key of ${parent}, which records the follow-ups`);
     return { key: result.key };
   };
@@ -1231,14 +1242,15 @@ function operatorAgentCreate(root: string, config: MasterConfig): CreateFollowUp
 /**
  * The loop's append of a later approval's findings to the parent's open follow-up item (GY-402), as
  * the master's operator-agent identity, idempotent on `key`. A refusal because the item is no longer
- * open is marked `notOpen`, so the filing files the parent's new follow-up item instead.
+ * open is marked `notOpen`, so the filing files the parent's new follow-up item instead; one of its
+ * key as reused with another body is marked `keyReuse`, as the create's is.
  */
 function operatorAgentAppend(root: string, config: MasterConfig): AppendFollowUpFindings {
   return async (item, findings, reason, key, parent) => {
     const token = await agentToken(root, config, 'operatorAgent');
     const response = await fetch(`${config.url}/api/work/${encodeURIComponent(item)}/followups`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ findings, reason, ...(parent ? { parent: true } : {}) }), signal: AbortSignal.timeout(30_000) });
     const result: any = await response.json().catch(() => null);
-    if (!response.ok) throw Object.assign(new Error(`Graphyard refused the follow-ups for ${item} (${response.status}): ${result?.error ?? JSON.stringify(result)}`), { notOpen: response.status === 409 && /not an open follow-up item/.test(String(result?.error)) });
+    if (!response.ok) throw Object.assign(new Error(`Graphyard refused the follow-ups for ${item} (${response.status}): ${result?.error ?? JSON.stringify(result)}`), { notOpen: response.status === 409 && /not an open follow-up item/.test(String(result?.error)), keyReuse: keyReuseRefused(response.status, result) });
     if (typeof result?.key !== 'string') throw new Error(`Graphyard did not return the follow-up item key for ${item}`);
     return { key: result.key, added: Number(result.added) || 0 };
   };
@@ -1410,8 +1422,6 @@ async function fileApprovedFollowUps(root: string, records: ReviewRecord[], revi
   return { events, changed };
 }
 
-/** The control plane's refusal of a key sent again with a different body (`idempotencyMismatch`, src/engine.ts). */
-const keyReuseRefusal = 'Idempotency key reused with different input';
 /**
  * The key a follow-up create is sent under once its approval's key was refused as reused with a
  * different body: the approval's key and the hash of the body sent, so a retry of this very body
@@ -1437,7 +1447,7 @@ export function existingFollowUpItem(work: readonly Pick<Work, 'key' | 'title' |
 async function createResolvingKeyReuse(payload: FollowUpItem, key: string, create: CreateFollowUpItem, existing: () => string | undefined, resolved: (how: 'linked' | 'rekeyed') => void) {
   try { return await create(payload, key); }
   catch (error) {
-    if (!(error instanceof Error ? error.message : String(error)).includes(keyReuseRefusal)) throw error;
+    if (!refusedAsKeyReuse(error)) throw error;
     const linked = existing();
     if (linked) { resolved('linked'); return { key: linked }; }
     try { const made = await create(payload, followUpBodyKey(key, payload)); resolved('rekeyed'); return made; }
@@ -1455,7 +1465,7 @@ async function createResolvingKeyReuse(payload: FollowUpItem, key: string, creat
 async function appendResolvingKeyReuse(append: AppendFollowUpFindings, target: string, findings: Parameters<AppendFollowUpFindings>[1], reason: string, key: string, parentTarget: boolean | undefined, resolved: () => void) {
   try { return await append(target, findings, reason, key, parentTarget); }
   catch (error) {
-    if (!(error instanceof Error ? error.message : String(error)).includes(keyReuseRefusal)) throw error;
+    if (!refusedAsKeyReuse(error)) throw error;
     try {
       const made = await append(target, findings, reason, followUpBodyKey(key, { target, findings, reason }), parentTarget);
       resolved(); return made;
