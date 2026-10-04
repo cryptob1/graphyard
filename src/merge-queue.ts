@@ -1572,6 +1572,10 @@ function blockedMergeStall(item: Work, state: GitHubMergeQueueState, now: number
  * How long auto-merge may wait on an authorized head GitHub reports BLOCKED before the control plane
  * asks GitHub to merge that head at once: GitHub never says why auto-merge does not fire, but a
  * head-bound merge either lands or is refused with the rule that blocks it, recorded as the reason.
+ * The probe is not spaced after a recorded refusal of the same head (GY-1181, declined): GY-1112's
+ * approved proof requires it to reach GitHub on consecutive observations, a refusal may be a
+ * transient rule (a check still reporting), and the cost is bounded — one mutation per observation
+ * of one authorized BLOCKED head, ledgered once per head, raised as merge-blocked past thirty minutes.
  */
 export const blockedAutoMergeProbeMs = 10 * 60_000;
 export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, request: MergeEnqueueRequest | null, now = Date.now()): MergeQueueAction {
