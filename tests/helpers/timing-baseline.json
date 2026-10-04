@@ -519,6 +519,7 @@
     "tests/successor-scope.test.ts": 1658,
     "tests/supervisor-renewal.test.ts": 83958,
     "tests/sync-restore.test.ts": 1800,
+    "tests/sync-workflow-push.test.ts": 900,
     "tests/system-invariants.test.ts": 1175,
     "tests/system.test.ts": 29095,
     "tests/test-isolation.test.ts": 5273,
