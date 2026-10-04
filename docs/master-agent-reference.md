@@ -25,6 +25,8 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`): `restored` once GitHub shows it, else `unpublished` (`failure`); a second, candidate unchanged, escalates (`escalated`, `master status`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are neither rework nor ejection. Git decides landing (`landing.landed`); landed peers deliver immediately.
 
+**A base-branch breakage is refreshed, not reworked** (GY-793): if every CI-named failing test (`graphyard-failed-tests:`) fails on the candidate's base and passes on the tip, the loop merges the tip in (`baseBreak`); status names tests and both bases.
+
 #### A contaminated branch
 
 Listed under `branches.contaminated`; run `master repair GY-42`.
