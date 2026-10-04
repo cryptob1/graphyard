@@ -1,12 +1,15 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
-import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
+import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
+import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import type { DaemonEffects } from './effects.js';
@@ -221,6 +224,33 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
+ * GY-1008. A planned-file-scope blocker — a worker's blocker naming the files its change needs and
+ * the commit it needs them for — as the same additive `requirements` decision a routed scope request
+ * becomes, requested by the master's operator-agent identity and judged by the independent
+ * approver, with no master session involved. The recorded blocker already ended its attempt, so
+ * nothing about a worker is attested; the approver judges the widening alone. Null when the
+ * blocker is anything else, when plannedFiles already cover every file it names (the blocker step
+ * then clears it), or when no fold represents the widening under the plannedFiles cap.
+ */
+export function blockerScopeDecision(work: Work): RoutineDecision | null {
+  if (work.stage === 'done' || !work.blocker || work.scopeRequest || work.blocker.startsWith(scopeRefusalBlocker)) return null;
+  const classification = itemBlockerClass(work);
+  if (classification?.class !== 'planned-file-scope' || (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears) return null;
+  const paths = uncoveredBlockerPaths(work, classification);
+  if (!paths.length) return null;
+  const widened = widenedPlannedFiles(work, paths);
+  if (!widened.representable) return null;
+  let broad: string | null = null;
+  try { guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, work.blocker, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
+  catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
+  const asked = `${work.key}: its worker recorded a planned-file-scope blocker naming ${paths.join(', ')} for commit ${classification.commit}, which ended its attempt: "${work.blocker.slice(0, 500)}". `
+    + 'Approve the additive plannedFiles widening if the item\'s criteria justify those files, refuse with the reason otherwise; the loop clears the blocker once plannedFiles cover them. '
+    + (broad ? `${broad.slice(0, 300)} It needs the broad-scope flag: grant it only with a stated reason why narrower paths will not do. ` : '');
+  const named = `Criteria: ${work.criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
+  return { action: 'requirements', binding: `blocker-scope:${classification.commit}:${paths.join(',')}`.slice(0, decisionBindingMax), input: { plannedFiles: widened.plannedFiles },
+    reason: (asked + named).slice(0, 2000) };
+}
+/**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
@@ -327,6 +357,41 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   if (lost) return lost;
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/**
+ * The attestation decisions one item needs right now, one per `manual:` proof no producer session
+ * may run (`unproducedManualProofs`, GY-521), or none. Each binds the proof, the exact head, its base
+ * and the policy revision — the attest input names all four, so an approval can never apply to a
+ * later head — and asks the approver to verify the criterion on that head before approving. Like a
+ * merge decision it attests nothing about a worker, so it is requested whatever the lease says.
+ */
+export function attestDecisions(work: Work, all: Work[], now: number): RoutineDecision[] {
+  const candidate = work.candidate;
+  if (!candidate || work.stage === 'done') return [];
+  return unproducedManualProofs(work, all, new Date(now)).map(proof => {
+    const criteria = work.criteria.filter(criterion => criterion.proofs.includes(proof));
+    const named = criteria.length ? criteria.map(criterion => `${criterion.id} ("${boundDetail(criterion.text, 600)}")`).join('; ') : 'an inherited bootstrap obligation';
+    return { action: 'attest', binding: `${proof}:${candidate.sha}:${candidate.baseSha}`, input: { proof },
+      reason: `${work.key}: every gate before acceptance passes for candidate ${candidate.sha.slice(0, 12)} (base ${candidate.baseSha.slice(0, 12)}, policy revision ${work.policyRevision}), and ${proof}, required by ${named}, is a manual proof no producer session may run, so only this two-party attestation satisfies it. Approve only after verifying on that exact head that the criterion holds; refuse naming what is missing otherwise.` };
+  });
+}
+/**
+ * The withdrawal reason for a merge or attest decision standing on `work` that can never apply to
+ * the one now needed, or null when it is this decision (or another action). Only a merge decision
+ * and an attest decision (GY-521) name what they bind: one for an earlier head is taken back if it
+ * is still requested; one for another proof on this head is judged first, one attest at a time.
+ */
+export function overtakenDecision(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any }, canWithdraw: boolean): string | null {
+  if (decision.action !== 'merge' && decision.action !== 'attest') return null;
+  const head = standing.input?.sha === work.candidate?.sha && standing.input?.baseSha === work.candidate?.baseSha && standing.input?.policyRevision === work.policyRevision;
+  if (head && (decision.action === 'merge' || standing.input?.proof === decision.input?.proof)) return null;
+  const merge = decision.action === 'merge', sha = merge ? decision.binding : work.candidate?.sha ?? '';
+  const other = merge
+    ? `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${sha.slice(0, 12)}`
+    : `attest decision ${standing.id} is ${standing.state} for ${String(standing.input?.proof)} on ${String(standing.input?.sha).slice(0, 12)}, not ${String(decision.input?.proof)} on ${sha.slice(0, 12)}`;
+  if (head) throw new Error(`${other}; the control plane holds one attest decision at a time, so this one is requested once it settles: graphyard master decisions ${work.key}`);
+  if (standing.state !== 'requested' || !canWithdraw) throw new Error(`${other}, and ${canWithdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${work.key}`);
+  return `The candidate moved to ${sha.slice(0, 12)}; ${other}, so it can never apply and is withdrawn for a request that names the current ${merge ? 'candidate' : 'head'}`;
 }
 /**
  * The rework a required CI check that failed on exactly the current head calls for, or null. The
