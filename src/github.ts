@@ -23,7 +23,7 @@ import { blockedFeatures, controlPlanePermissions, describeShortfall, permission
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
 import type { IntegrationJob } from './coordination.js';
-import { docsSyncAdoption, outsideDocs, overlappingPaths, type DocsSync } from './model/docs-sync.js';
+import { docsSyncAdoption, isDocsPage, overlappingPaths, type DocsSync } from './model/docs-sync.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
@@ -2250,12 +2250,17 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
       return [...new Set(files.flatMap((file: any) => [file?.filename, file?.previous_filename]).filter((path: unknown): path is string => typeof path === 'string'))];
     } catch { return null; }
   }
-  /** The patch-id of `head`'s own change outside docs/ (GY-566); null when GitHub could not list the change completely. */
+  /**
+   * The patch-id of `head`'s own change to every path that is not a docs page (GY-566): only
+   * Markdown under docs/ (`isDocsPage`) is the docs-sync's to resolve, so any other file under
+   * docs/ (generated JSON, an image) counts as code here. Null when GitHub could not list the
+   * change completely.
+   */
   async nonDocsPatchId(base: string, head: string): Promise<string | null> {
     try {
       const files = base === head ? [] : (await this.request(`/compare/${base}...${head}`))?.files;
       if (!Array.isArray(files) || files.length >= compareFileCap) return null;
-      return patchId(files.filter((file: any) => outsideDocs(String(file?.filename ?? '')) || (typeof file?.previous_filename === 'string' && outsideDocs(file.previous_filename))));
+      return patchId(files.filter((file: any) => !isDocsPage(String(file?.filename ?? '')) || (typeof file?.previous_filename === 'string' && !isDocsPage(file.previous_filename))));
     } catch { return null; }
   }
   /**
