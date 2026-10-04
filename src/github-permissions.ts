@@ -5,15 +5,15 @@
  * else. Anything not declared here is not requested and is never silently relied upon.
  */
 export type PermissionLevel = 'read' | 'write' | 'admin';
-export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue' | 'check-rerun';
+export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue' | 'check-rerun' | 'workflow-sync';
 export interface PermissionRequirement { permission: string; level: PermissionLevel; feature: PermissionFeature; reason: string }
 export interface PermissionShortfall { permission: string; required: PermissionLevel; granted: PermissionLevel | null; features: PermissionFeature[]; reasons: string[] }
 
 const levels: PermissionLevel[] = ['read', 'write', 'admin'];
-export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration' };
+export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration', workflows: 'Workflows' };
 export const featureLabels: Record<PermissionFeature, string> = {
   repository: 'repository access', observation: 'pull request observation', check: 'the required checks',
-  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue',
+  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue', 'workflow-sync': 'workflow sync',
 };
 
 /** The control-plane App: it observes, publishes the gate check, dispatches reviews, and lands the queue. */
@@ -28,12 +28,15 @@ export const controlPlanePermissions: readonly PermissionRequirement[] = [
   { permission: 'checks', level: 'read', feature: 'observation', reason: 'read CI check runs' },
   { permission: 'checks', level: 'write', feature: 'check', reason: 'publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit' },
   { permission: 'administration', level: 'read', feature: 'observation', reason: 'inspect branch protection' },
+  { permission: 'workflows', level: 'write', feature: 'workflow-sync', reason: 'push base syncs carrying the base\'s workflow changes' },
 ];
 /**
  * A reviewer App reads code and writes pull request comments. It deliberately never gains
  * `contents: write`, `checks`, or `administration`: a reviewer can neither publish Graphyard's
  * own gate check, change protection, nor write source code. Worker identities are not Apps
- * at all; they push their own branches with their own credentials.
+ * at all; they push their own branches with a credential narrowed to `workerPushPermissions`
+ * (worker-credential.ts). When an installation still refuses a worker push of the base branch's
+ * workflow changes, the control plane pushes that base sync instead (sync.ts, GY-1098).
  */
 export const reviewerPermissions: readonly PermissionRequirement[] = [
   { permission: 'metadata', level: 'read', feature: 'repository', reason: 'read the managed repository' },
@@ -72,7 +75,12 @@ export function blockedFeatures(shortfalls: readonly PermissionShortfall[]): Per
   return [...new Set(shortfalls.flatMap(shortfall => shortfall.features))];
 }
 export const permissionLabel = (permission: string) => permissionLabels[permission] ?? permission;
-export const describePermission = (permission: string, level: PermissionLevel) => `${permissionLabel(permission)}: ${level}`;
+/**
+ * `workflows` keeps its API key in shortfall sentences: the worker-credential attention has named
+ * the missing grant `workflows: write` since GY-1100 (before it had a label), matching GitHub's own
+ * push refusal ("without `workflows` permission"); the permission tables still show `Workflows`.
+ */
+export const describePermission = (permission: string, level: PermissionLevel) => `${permission === 'workflows' ? 'workflows' : permissionLabel(permission)}: ${level}`;
 /**
  * One operator-facing sentence per shortfall. It names the missing permission, why it is
  * needed, and the installation page where a pending permission request is accepted.

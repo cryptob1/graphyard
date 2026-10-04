@@ -7,6 +7,7 @@ import { type CapacityRole, capacitySignature, standingCapacity, describeCapacit
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { type DaemonAction, message } from './state.js';
@@ -39,6 +40,19 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const offered = dispatchSort(open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }), hotFiles, clock);
+
+  // GY-1082: a failure run counts this loop's own consecutive failed launches, so it is retired
+  // whenever the snapshot shows the item somewhere a run cannot follow: gone or delivered, carrying
+  // a blocker (the one the run recorded, even when the loop stopped before forgetting it, or anyone
+  // else's), held under a lease no launch of this loop is running, or past an epoch this loop's
+  // last failure did not spend — another dispatcher claimed it in between, so the failures were
+  // not consecutive. A later failure then starts a new run.
+  for (const [id, run] of Object.entries(state.dispatchFailures)) {
+    if (cycle.launcher.keys().some(key => key.startsWith(`dispatch:${id}:`))) continue;
+    const item = snapshot.work.find(entry => entry.id === id);
+    const claimed = !!item?.lease && Date.parse(item.lease.expiresAt) > clock;
+    if (!item || item.stage === 'done' || item.blocker || claimed || item.epoch > run.epoch + 1) delete state.dispatchFailures[id];
+  }
 
   // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
   // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this
@@ -178,6 +192,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
+    // GY-860: a workspace failure hands the epoch back, so the next dispatch reuses this key; it
+    // waits out the usual doubling backoff instead of retrying the same host git state every cycle.
+    const failed = state.actions[key];
+    if (failed && workspaceDispatchFailure(failed.detail) && state.cycle - failed.cycle < Math.min(2 ** failed.attempts, 30)) return;
     // GY-1078: an item whose dispatches keep failing for one cause is not dispatched again; the
     // cause is recorded as its blocker, and a block the control plane refused is asked for again.
     const failing = state.dispatchFailures[item.id];
@@ -276,9 +294,14 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           await effects.persist(state);
           return;
         }
-        recordProfileFailure(state, current.profile, message(error), now());
+        // GY-860 AC-2: a failure about the item's own workspace is the host's git state, not the
+        // profile's — it puts no profile into its failure cool-off. The worktree command has
+        // already released the claim with its git message, which hands the epoch back, and the
+        // item's record here keeps that message.
+        const workspace = workspaceDispatchFailure(message(error));
+        if (!workspace) recordProfileFailure(state, current.profile, message(error), now());
         const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)} (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''} (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         if (run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }
