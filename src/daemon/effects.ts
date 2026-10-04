@@ -31,7 +31,8 @@ import { type ContainmentRetention, type DaemonAction, type DaemonState, type Lo
 import { writeProjectMemory } from '../project-memory.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
-import { decisionEventKinds, neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
+import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
+import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { withReviewerDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
