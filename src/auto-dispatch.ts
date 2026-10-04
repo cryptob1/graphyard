@@ -1256,14 +1256,20 @@ export function tickWaits(waiting: DispatchWait[]) {
   return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1) || requested(a) - requested(b)).slice(0, launchWaitLimit)
     .map(({ kind, work, requestId, sha, reason, group }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}) }));
 }
+// GY-1067 follow-up 17: launchWaits reports review and producer requests managed by the
+// dispatcher; approver launches are managed separately by the daemon's cycle-decisions
+// loop (state.approvals) with their own escalation and tracking mechanisms.
 /** A review request waiting longer than this without a launch raises attention (GY-710). */
 export const reviewLaunchWaitAttentionMs = 15 * 60_000;
 export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string }
 /**
- * Every launch still waiting (GY-710), as `master status` reports it: each request the control
- * plane still holds open that the last tick left waiting or a refusal still stands against, how
- * long since the request was made, and why it has not launched. A request the snapshot no longer
- * holds, or one already answered by a session, waits for nothing and is not listed.
+ * Every launch still waiting (GY-710, GY-1067), as `master status` reports it: each request the control
+ * plane still holds open that has no live session, how long since the request was made, and why
+ * it has not launched. A request whose last tick left it waiting reports that reason, one with a
+ * standing failure reports the refusal and next attempt, and an unreached or skipped open request
+ * falls back to 'waiting for dispatch' aged from requestedAt (GY-1067 follow-ups 11, 18, 21, 31, 33).
+ * A request the snapshot no longer holds, or one already answered or currently running, waits for nothing
+ * and is not listed.
  */
 export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick' | 'failures'>, now: number): LaunchWait[] {
   const waits = new Map((cursor.lastTick?.waits ?? []).map(entry => [entry.requestId, entry]));
@@ -1272,17 +1278,24 @@ export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick
     const requests = [item.autoDispatch!.review, ...item.autoDispatch!.producers].filter((request): request is DispatchRequest => request?.state === 'requested');
     for (const request of requests) {
       const wait = waits.get(request.id), failure = cursor.failures[request.id];
-      if (!wait && !failure) continue;
+      const hasLiveSession = (item.sessions ?? []).some(session => session.id === request.id && session.state === 'running');
+      if (hasLiveSession) continue;
+      // GY-1067 follow-up 25: aging from request.requestedAt tracks cumulative unfulfilled time
+      // across any failed/expired sessions, maintaining a bounded clock to 15-minute attention.
       const requested = Date.parse(request.requestedAt);
       rows.push({ kind: request.kind === 'review' ? 'review' : 'producer', work: item.key, requestId: request.id, sha: request.sha, group: request.group ?? null, requestedAt: request.requestedAt,
         waitedMs: Number.isFinite(requested) ? Math.max(0, now - requested) : 0,
-        reason: wait?.reason ?? `launch refused ${failure!.attempts} time(s): ${failure!.reason}; next attempt at ${failure!.nextAt}` });
+        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : 'waiting for dispatch') });
     }
   }
   return rows.sort((a, b) => b.waitedMs - a.waitedMs);
 }
 const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor(ms % 3_600_000 / 60_000)} min` : `${Math.floor(ms / 60_000)} min`;
-/** One attention item per review request that has waited past the bound without a launch (GY-710), naming how long and why. */
+/**
+ * One attention item per review request that has waited past the bound without a launch (GY-710), naming how long and why.
+ * GY-1067 follow-up 1: raises attention for any review waiting over 15 minutes, intentionally including capacity
+ * and bot waits so prolonged stalls are always visible to operators rather than silently hidden.
+ */
 export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
   return waits.filter(wait => wait.kind === 'review' && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
     text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
