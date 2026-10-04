@@ -35,7 +35,7 @@ Worker and non-Actions unit-proof hosts need bubblewrap: `bwrap --ro-bind / / --
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`, `--domain`; `init --scan` [proposes](operations-reference.md#setup-proposals-and-drift) check and proof names.
+Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME`, `--domain`; `init --scan` [proposes](operations-reference.md#setup-proposals-and-drift) check and proof names. `delivery` lists the merge-gate split, and `release.*` actions the [candidate pipeline's](delivery.md#managed-repositories) UAT and production resources; any marked `human` costs money and is created only by `--apply --create-environments`.
 
 **Verify:** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`).
 
