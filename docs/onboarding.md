@@ -76,7 +76,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--plan NAME` names the provider plan an account draws on (`none` clears); otherwise one host and home share a plan, as do `pi-X` and `opencode-X`. A plan's accounts share one failover budget: one exhausted bars the rest.
+`--plan NAME` names an account's provider plan (`none` clears); otherwise one host and home share a plan, as do Z.AI-keyed `pi-X` and `opencode-X` (`auth.json`-only logins need `--plan`). A plan's accounts share one failover budget: one exhausted bars the rest.
 
 `--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Registry writes refuse any field that looks like a pasted key; model ids are exempt.
 
