@@ -7,8 +7,9 @@ import type { HerdrAgent } from '../../src/master.js';
 import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
-import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
+import { heldBase, mergeableNow, queueRef, requestedBaseRefresh, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
+import type { BaseCheck } from '../../src/model/base-failure.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
@@ -123,6 +124,13 @@ export class SimulatedGitHub {
   blockedMerge = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
+  /**
+   * A required-check failure on the base branch (GY-528): a commit landed outside Graphyard that
+   * fails one `test` test in every tree containing it, until a later commit repairs it. A head is
+   * failing while it contains the breaking commit and not the repair, so a rerun of its job fails
+   * again and only the repaired base merged in clears it.
+   */
+  baseFailure = { test: 'soak:time-bomb — a fixed date held against the clock', broken: null as string | null, repaired: null as string | null };
   /** Heads that break the required suite on the base branch once merged (GY-500): every base commit holding one fails until it is reverted. */
   breaking = new Set<string>();
   /** The revert pull requests the main guard opened, and the base commit each landed as. */
@@ -135,9 +143,11 @@ export class SimulatedGitHub {
    */
   flaky = new Map<string, 'rerun-passes' | 'rerun-fails'>();
   /** The CI runs reported per commit, created once CI finishes on it; a rerun appends a later attempt. */
-  runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number }[]>();
+  runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number; tests: string[] }[]>();
   /** Every rerun the control plane asked for: the item, the tip and the failed check run. */
   reruns: { key: string; sha: string; checkRunId: number; at: number }[] = [];
+  /** The failed base-failure jobs rerun (GY-528), each with who asked: the loop's remedy step, or the engine's own first check-rerun (GY-516). */
+  baseReruns: { jobId: number; by: 'loop' | 'engine' }[] = [];
   /** The `graphyard/landable` runs the control plane published per head (GY-887), with how often each was written. */
   landable = new Map<string, { id: number; body: LandableCheckRun; writes: number }[]>();
   /** Every GitHub request publishing the landability verdict cost: the head's run listing, the pull request read before a success, and each write. */
@@ -257,6 +267,24 @@ export class SimulatedGitHub {
     pr.pushed.set(head, clock.now());
     return pr;
   }
+  /** Whether `commit`'s tree carries the base failure: it contains the breaking commit and not the repair. */
+  failing(commit: string) {
+    const { broken, repaired } = this.baseFailure;
+    return !!broken && this.contains(commit, broken) && !(repaired && this.contains(commit, repaired));
+  }
+  /** The failing test names the log of check run `id` reports: the base failure's test for a run the base failure failed (GY-528); none for a flake or a passed run, whose log names no failing test. */
+  failedTests(id: number) {
+    const found = [...this.runs.values()].flat().find(entry => entry.id === id);
+    if (!found) throw new Error(`No check run ${id}`);
+    return found.result === 'failure' ? [...found.tests] : [];
+  }
+  /** The base branch head's latest run of `check`: pending until `ciMs` after the tip landed; failed while the tip carries the base failure (GY-528). */
+  baseCheck(check: string): BaseCheck {
+    const tip = this.tip, commit = this.commits.get(tip)!, jobId = Number.parseInt(tip.slice(0, 7), 16);
+    if (clock.now() - commit.at < this.options.ciMs) return { check, baseSha: tip, state: 'pending', jobId: null, url: null, tests: null };
+    const failed = check === 'test' && this.failing(tip);
+    return { check, baseSha: tip, state: failed ? 'failed' : 'passed', jobId, url: null, tests: failed ? [this.baseFailure.test] : [] };
+  }
   pr(work: Pick<Work, 'submission' | 'candidate'>) { const number = work.candidate?.pr ?? work.submission?.pr; const pr = number ? this.prs.get(number) : undefined; if (!pr) throw new Error(`No pull request #${number}`); return pr; }
 
   // The reads the production landing check makes of GitHub, answered from this repository's commit
@@ -334,7 +362,7 @@ export class SimulatedGitHub {
     };
   }
 
-  /** The CI runs that have reported on `pr`'s head by `now`: every attempt, as GitHub keeps them. */
+  /** The CI runs that have reported on `pr`'s head by `now`: every attempt, as GitHub keeps them. A `test` run fails when the head hits the item's flake (GY-516) or carries the base branch's failing test (GY-528); the flake decides the log's failing tests, so a flake goes down the rerun path, not the base-failure one. */
   checks(pr: PullRequest, now: number) {
     const head = pr.head;
     if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
@@ -342,7 +370,8 @@ export class SimulatedGitHub {
       const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
       // `secrets` is required by the base branch's protection alone (GY-1060), bound to no app, as
       // PR #221's scan was: every gate, verdict and window view of the day reads it beside the policy's.
-      const runs = ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now }));
+      const failed = (name: string) => name === 'test' && (flake || this.failing(head));
+      const runs = ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: failed(name) ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now, tests: failed(name) && !flake ? [this.baseFailure.test] : [] as string[] }));
       // The project's own documentation budget check (GY-574): the budget is the project's own
       // rule, counted over the pages its configuration names (here docs/ and README.md, as the
       // committed graphyard.json does), and this project's CI fails the check when that total is
@@ -352,7 +381,7 @@ export class SimulatedGitHub {
         const commit = this.commits.get(head)!;
         const total = [...commit.contents].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path))
           .reduce((sum, [, text]) => sum + text.split(/\s+/).filter(Boolean).length, 0);
-        runs.push({ name: 'unit:docs-word-budget', result: total > this.options.docs.budget.total ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now });
+        runs.push({ name: 'unit:docs-word-budget', result: total > this.options.docs.budget.total ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now, tests: [] });
       }
       this.runs.set(head, runs);
     }
@@ -369,19 +398,22 @@ export class SimulatedGitHub {
     }
     return deliveries;
   }
-  /** GitHub's "rerun failed jobs": the failed run's job runs again on the same commit, reporting `ciMs` later. A documentation-budget breach is not a flake: the rerun judges the commit's pages again (GY-574). */
-  rerun(checkRunId: number) {
+  /** GitHub's "rerun failed jobs": the failed run's job runs again on the same commit, reporting `ciMs` later. A rerun of a base-failure job fails again (GY-528): the merge commit it reuses still carries the breaking change, and only the repaired base merged in clears it. A documentation-budget breach is not a flake either: the rerun judges the commit's pages again (GY-574). */
+  rerun(checkRunId: number, by: 'loop' | 'engine' = 'engine') {
     const [head, runs] = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId)) ?? [];
     const failed = runs?.find(entry => entry.id === checkRunId);
     if (!head || !runs || !failed || failed.result !== 'failure') throw new Error(`GitHub POST /actions/jobs/${checkRunId}/rerun refused: not a failed job`);
     const pr = [...this.prs.values()].find(entry => entry.head === head)!;
     const now = clock.now();
-    this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
+    const base = failed.tests.length > 0;
+    if (base) this.baseReruns.push({ jobId: checkRunId, by });
+    else this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
     const breached = failed.name === 'unit:docs-word-budget' && this.options.docs
       ? [...(this.commits.get(head)?.contents ?? [])].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path))
           .reduce((sum, [, text]) => sum + text.split(/\s+/).filter(Boolean).length, 0) > this.options.docs.budget.total
       : undefined;
-    runs.push({ name: failed.name, result: breached !== undefined ? (breached ? 'failure' : 'success') : this.flaky.get(pr.key) === 'rerun-fails' ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
+    const again = breached ?? (base || this.flaky.get(pr.key) === 'rerun-fails');
+    runs.push({ name: failed.name, result: again ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs, tests: again && base ? [this.baseFailure.test] : [] });
     return { runId: 900_000 + checkRunId };
   }
   /** One minute of GitHub: CI finishes, reviewers post verdicts, reviewer Apps answer, and auto-merge lands what it may. */
@@ -576,8 +608,19 @@ export class SimulatedGitHub {
           merge: { from, parents: [from, predicted], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } };
       },
       async refreshCandidateBase(work: Work): Promise<BaseRefresh> {
-        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         const pr = world.pr(work), at = new Date(clock.now()).toISOString();
+        // The coordinator asked for the repaired base to be merged in (GY-528): this App merges the tip into the branch.
+        const requested = requestedBaseRefresh(work);
+        if (requested) {
+          const from = pr.head, bound = pr.base, tip = world.tip, merged = sha('refresh', from, tip), onto = world.commits.get(tip)!;
+          const changed = onto.files.filter(file => !world.commits.get(bound)!.files.includes(file));
+          world.record({ sha: merged, tree: sha('tree', merged), parents: [from, tip], files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(), message: `Graphyard base refresh for ${work.key}` }, world.mergedContents(from, tip, work.plannedFiles ?? []));
+          pr.head = merged; pr.base = tip; pr.pushed.set(merged, clock.now());
+          return { from: { sha: from, baseSha: bound }, base: tip, baseTree: onto.tree, policyRevision: work.policyRevision, at, head: merged, conflict: null, carry: null, trigger: 'base failure repaired',
+            requested: { by: requested.by, at: requested.at, reason: requested.reason },
+            merge: { from, parents: [from, tip], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } } as BaseRefresh;
+        }
+        // No candidate in this world conflicts: a GitHub reading that says so is stale, as GY-375 found.
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
       },

@@ -145,11 +145,11 @@ test('integration:delta-readers — events history, store.events, attestations, 
   await run(operator, 'ready', {}); await run(worker, 'claim', {});
   await run(worker, 'workspace', { epoch: 1, host: 'test', path: `/tmp/readers-${n}`, branch: `graphyard/readers-${n}` });
   for (let beat = 0; beat < 3; beat++) await run(worker, 'heartbeat', { epoch: 1 });
+  // A blocker ends the attempt (GY-1008): nothing heartbeats after it.
   await run(worker, 'blocked', { epoch: 1, reason: 'Waiting on a credential' });
-  await run(worker, 'heartbeat', { epoch: 1 });
   const rows = await raw(w.id);
   const deltaKinds = new Set(rows.filter(row => row.payload.delta).map(row => row.kind));
-  assert.ok(deltaKinds.has('blocked') && deltaKinds.has('heartbeat') && deltaKinds.has('workspace'), `non-routine kinds are deltas too: ${[...deltaKinds].join(', ')}`);
+  assert.ok(deltaKinds.has('heartbeat') && deltaKinds.has('workspace'), `non-routine kinds are deltas too: ${[...deltaKinds].join(', ')}`);
   const byRevision = new Map(records.map(record => [record.revision, record]));
   // store.events and the events API: every row carries its whole document.
   for (const event of await store.events(w.id)) assert.deepEqual(event.payload.work, byRevision.get(event.payload.work.revision), `${event.kind} reads whole through store.events`);
@@ -162,8 +162,8 @@ test('integration:delta-readers — events history, store.events, attestations, 
   // The intervention ledger reads the stage and blocker from the delta row.
   const ledger = (await readInterventionLedger(store.pool, { workId: w.id })).rows;
   const blocked = ledger.find(row => row.kind === 'blocked')!;
-  assert.equal(blocked.work?.blocker, 'Waiting on a credential'); assert.equal(blocked.work?.stage, records.at(-1)!.stage); assert.equal(blocked.stageBefore, records.at(-1)!.stage);
-  assert.equal(blocked.at, byRevision.get(Number(rows.find(row => row.kind === 'blocked')!.payload.delta.revision))!.updatedAt);
+  assert.equal(blocked.work?.blocker, 'Waiting on a credential'); assert.equal(blocked.work?.stage, records.at(-1)!.stage); assert.equal(blocked.stageBefore, records.at(-2)!.stage, 'the stage the blocker ended the attempt from');
+  assert.equal(blocked.at, byRevision.get(Number((rows.find(row => row.kind === 'blocked')!.payload.delta ?? rows.find(row => row.kind === 'blocked')!.payload.work).revision))!.updatedAt);
   // The projected replay and a replay of whole documents agree.
   const projected = (await store.pool.query(`SELECT ${ledgerReplayColumns} FROM events WHERE work_id=$1 ORDER BY seq`, [w.id])).rows.map(ledgerEntry);
   const whole = (await store.pool.query(`SELECT seq, kind, created_at, ${resolvedPayloadSql()} AS payload FROM events WHERE work_id=$1 ORDER BY seq`, [w.id])).rows;

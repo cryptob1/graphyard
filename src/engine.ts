@@ -15,7 +15,7 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, requestedBaseRefresh, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { liftedEjection, queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -35,6 +35,8 @@ import { claimAction, openActions, reconcileActions, renewClaim, settleAction, s
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
+import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
+import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
@@ -93,12 +95,16 @@ const commands = {
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
-  release: z.object({ epoch }).strict(),
+  // `cause` is why the attempt ended, for a release its watch supervisor makes after the session is
+  // gone (GY-1008): it is kept on the release event and never stands as a blocker on the item.
+  release: z.object({ epoch, cause: z.string().trim().min(1).max(2000).optional() }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
   submit: z.object({ epoch, pr: z.number().int().positive(), documentation: z.string().trim().min(1).max(1000).optional() }).strict(),
-  blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
+  // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
+  // blocker ended it (GY-1008): the same record an interrupted attempt carries.
+  blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional() }).strict(),
   // An empty request clears this attempt's open one; otherwise it must ask for something the
   // planned scope does not already carry. `paths` widens, and the two fields the loop never
   // decides are stated as plainly as the widening is: `remove` drops planned containment and
@@ -141,6 +147,10 @@ const commands = {
   // unlanded commits (GY-127). It carries no head: the restore is decided from the record and the
   // observation, run by the reconciliation job, and recorded on `baseRefresh.restore`.
   repair: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
+  // The coordinator — the master loop's operator-agent identity — asking the control plane to merge
+  // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
+  // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
+  refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
   // The coordinator reporting that the guarded merge refused this exact candidate (GY-831): a
   // carried approval it could not re-post, or one reason repeated since `since`. The control plane
   // decides what follows from the record: a carried approval is cleared so the review gate asks
@@ -175,7 +185,7 @@ export const mergeExecutionOwner = (actor: Pick<Principal, 'id'>, executor?: str
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -875,6 +885,21 @@ export class Engine {
           restore: { contaminated: candidate.sha, foreign: contamination!.foreign, own: contamination!.own, cause: 'repair', requested: { by: actor.id, at: now.toISOString(), reason: data.reason },
             reason: `head ${candidate.sha.slice(0, 12)} carries the unlanded commits of ${contamination!.foreign.join(', ')} (${contamination!.source.join(' and ')})`, performedAt: null, outcome: null } };
       }
+      if (command === 'refresh') {
+        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.submission && !work.observation?.merged && work.stage !== 'done' && !work.reworkRequested, 'Open submitted work is required');
+        const candidate = work.candidate, observation = work.observation;
+        demand(candidate && observation?.candidate.sha === candidate.sha && observation.prState === 'open' && observation.draft === false, 'An open pull request observed at the current head is required');
+        demand(!work.queue, `${work.key} is a live merge-queue entry; its tip is rebuilt on the base branch when the queue changes`);
+        demand(observation!.baseTip === data.base, `The base branch tip last observed for ${work.key} is ${observation!.baseTip?.slice(0, 12) ?? 'unknown'}, not ${data.base.slice(0, 12)}; retry once it is observed`, 409);
+        demand(observation!.baseTipContained === false, `${work.key} head ${candidate!.sha.slice(0, 12)} already contains base branch tip ${data.base.slice(0, 12)}; there is nothing to merge in`);
+        const refresh = work.baseRefresh;
+        demand(!(refresh && refresh.from.sha === candidate!.sha && refresh.base === data.base && refresh.policyRevision === work.policyRevision),
+          `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} onto ${data.base.slice(0, 12)} is already recorded`);
+        demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
+        // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
+        work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
+      }
       if (command === 'mergerefused') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         const candidate = work.candidate;
@@ -1143,7 +1168,28 @@ export class Engine {
       }
       if (command === 'release') { endAttempt(work, data.epoch, 'released', now); work.lease = null; }
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
-      if (command === 'blocked') { work.blocker = data.reason; if (data.reason) recordIntervention(work, 'blocked'); }
+      if (command === 'blocked') {
+        work.blocker = data.reason;
+        if (data.reason) {
+          recordIntervention(work, 'blocked');
+          // GY-1008: recording a blocker ends the attempt in this same transaction, so a blocked
+          // item holds no worker slot while the loop re-checks its cause. The work it had is kept
+          // (committed on its branch, and what it had not committed as the CLI's WIP commit), and
+          // the next attempt's request names that commit, as for any interrupted attempt.
+          const partialWork = data.partialWork ?? { state: 'not-applicable' as const, detail: 'the blocked attempt reported no partial work; its commits stay on its branch' };
+          const record: ExhaustionRecord = { role: 'worker', cause: 'interrupted', epoch: data.epoch, profile: actor.id.slice(0, 80), account: null, runtime: actor.runtime?.slice(0, 40) ?? null,
+            // A GitHub credential failure's end carries GY-999's marker, so it counts on the retry
+            // ladder: a failure no freshly minted credential cures is relaunched after a backoff
+            // and held at the cap for an approver, never ended and relaunched for ever.
+            reason: (credentialFailure(data.reason) ? credentialBlockedReason(work, data.epoch, data.reason) : `${blockedAttemptMarker}${data.epoch}: ${data.reason}`).slice(0, 500),
+            resetsAt: null, partialWork, at: now.toISOString(), owner: actor.id, recordedBy: actor.id };
+          const capacity = work.capacity ?? { exhaustions: [], escalations: [] };
+          work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
+          endAttempt(work, data.epoch, 'released', now);
+          work.lease = null;
+          work.scopeRequest = null;
+        }
+      }
       if (command === 'scope') {
         const asks = data.paths.length || data.remove?.length || data.criteria?.length;
         if (!asks) {
@@ -1293,6 +1339,8 @@ export class Engine {
       }
       if (command === 'submit') {
         demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');
+        // A submission ends the run of blockers the loop cleared in a row (GY-1008).
+        if (work.blockerProbe) work.blockerProbe = { ...work.blockerProbe, clears: 0 };
         demand(!all.some(w => w.id !== work!.id && w.submission?.pr === data.pr), 'Pull request is already linked to another task');
         demand(!work.submission || work.submission.pr === data.pr, 'A submitted task cannot switch pull requests');
         if (observation) {
@@ -1890,6 +1938,8 @@ export class Engine {
       }
       const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
       work.baseRefresh = { ...refresh, carry };
+      // A requested refresh (GY-528) is answered by the refresh of the head it named, merged or conflicting.
+      if (work.baseRefreshRequest?.head === refresh.from.sha) work.baseRefreshRequest = null;
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);

@@ -60,6 +60,8 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     master: masterSummary(state.master, now),
     // Fault instances by class in the recurrence window, and the item each recurring class filed (GY-173).
     faults: faultRecurrenceReport(state, faultPolicy, now),
+    // Required checks failing on the base head as well as on the candidates they hold (GY-528).
+    baseFailures: Object.values(state.baseFailures),
     // Each diagnosis the diagnostician returned, and the fix item or covering item answering it (GY-439).
     diagnoses: diagnosisReport(state),
     // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
