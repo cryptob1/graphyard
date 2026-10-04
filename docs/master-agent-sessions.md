@@ -19,7 +19,7 @@ Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode byp
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; session bus: keyring-only proxy), only the session's own checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout) is refused. The master session is exempt. Every other session starts in its own checkout, never this one; the loop and executors never start, self-upgrade or restart on a dirty or moved checkout (checked each cycle; `escalation:dirty-checkout` names paths, leases, HEAD, panes; [reference](master-agent-reference.md#resources-and-disk), GY-866).
+Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; session bus: keyring-only proxy), only the session's own checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout) is refused. The master session is exempt; every other session starts in its own checkout. The loop and executors never start, self-upgrade or restart on a dirty or moved checkout (checked each cycle; `escalation:dirty-checkout` names paths, leases, HEAD, panes; [reference](master-agent-reference.md#resources-and-disk), GY-866).
 
 ## Accounts and failover
 
@@ -65,7 +65,7 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt.
+When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed on.
 
 Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
 
