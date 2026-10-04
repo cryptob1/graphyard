@@ -45,6 +45,10 @@ The full suite is CI's gate, not the worker's (GY-853). Every worker request say
 
 `docs/README.md` and `docs/protocol.md` are generated in full ([development](development.md)) and `init` renders the managed `AGENTS.md` blocks; `sync` regenerates them after merging. The regression guard classifies `GRAPHYARD_GENERATED_FILES` paths (here `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md`) as `generated`, refusing only a deletion.
 
+## Landing refresh
+
+A landing that moves the base tip checks each queue entry behind the parallel-tip window once. One whose reviewed files it missed is skipped (`queue.landing-skipped`); else a test merge onto it publishes one `landing-refresh` tip, keeping approval, proofs and place, or on an own tip only verifies, `[skip ci]` (`queue.landing-verified`). A conflict (`queue.landing-conflict`) requeues it last and requests rework at once.
+
 ## Ship in under thirty minutes
 
 The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never weaker gates.
