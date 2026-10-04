@@ -18,7 +18,7 @@ import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
 import { currentOptimisticMerge, describeGuard, mainGuard, postMergeVerdict, retestAfterRevert, revertRefusal, verdictCommit, type GuardState, type OptimisticMerge, type OptimisticRevert } from './optimistic-merge.js';
 export { CHECK_NAME, LANDABLE_CHECK };
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -26,6 +26,7 @@ import type { IntegrationJob } from './coordination.js';
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
+import { firstObservationOwed, observationBandLag, observationClaim, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -341,7 +342,10 @@ export function observationCadence(work: Work, all: Work[], now: Date, previous?
   const state = observationBand(work, all, now, next);
   if (state.band !== 'merge' && !state.fresh && previous && observationFingerprint(previous) === observationFingerprint(work.observation)) {
     const band = state.band === 'active' ? 'steady' : state.band;
-    return { band, ms: Math.max(observationCadenceMs[band], steadyMs),
+    // A review request is launched only from a reading under thirty minutes (GY-1114): at ~100 open
+    // items the fleet bound reaches an hour, so the request is polled at a third of its bound at most.
+    const stretched = Math.max(observationCadenceMs[band], steadyMs);
+    return { band, ms: next?.kind === 'request-review' ? Math.min(stretched, reviewCadenceCapMs) : stretched,
       reason: `${work.key} came back with its head, base tip, check state and review state unchanged; polling settles to the steady-state interval and the webhook wakes it the moment any of that moves` };
   }
   return { band: state.band, ms: observationCadenceMs[state.band], reason: state.reason };
@@ -1597,8 +1601,9 @@ export class GitHub {
   async tipDocs(work: Work, head: string, base: string, checks: { id?: number; name: string; status: string; conclusion: string | null }[]): Promise<TipDocs | undefined> {
     const required = new Set(work.policy.checks ?? []);
     const latest = new Map<string, string>();
-    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed') latest.set(check.name, check.conclusion ?? '');
-    const failed = [...latest.values()].filter(result => failedCheckConclusions.has(result)).length;
+    // A cancelled run never supersedes one that was not cancelled, nor counts as failing (GY-1109).
+    for (const check of [...checks].sort((a, b) => (a.id ?? 0) - (b.id ?? 0))) if (required.has(check.name) && check.status === 'completed' && (check.conclusion !== 'cancelled' || !latest.has(check.name) || latest.get(check.name) === 'cancelled')) latest.set(check.name, check.conclusion ?? '');
+    const failed = [...latest.values()].filter(result => result !== 'cancelled' && failedCheckConclusions.has(result)).length;
     if (!failed) return undefined;
     // The counts only sharpen an ejection: a tip they cannot be read for is bisected as before, never left unobserved.
     try {
@@ -1671,6 +1676,7 @@ export class GitHub {
       pull: pr => this.request(`/pulls/${pr}`),
       blobAt: (path, ref) => this.blobAt(path, ref),
       blobContent: sha => this.blobContent(sha),
+      hasBlobContent: sha => this.hasBlobContent(sha),
       contains: (base, tip) => this.contains(base, tip),
       historySince: (base, tip) => this.historySince(base, tip),
     }, work, head, files, bound, speculative, branch, peers, budget);
@@ -1759,6 +1765,10 @@ export class GitHub {
     const content = entry.encoding === 'base64' ? Buffer.from(entry.content, 'base64') : Buffer.from(entry.content, 'utf8');
     this.blobContents.set(sha, content);
     return content;
+  }
+  /** True when the blob bytes are already held in memory. */
+  hasBlobContent(sha: string): boolean {
+    return this.blobContents.has(sha);
   }
   /** Two fresh observations that must agree: the final check before a merge shares no cycle read (GY-806). */
   async verify(work: Work, peers?: Work[]): Promise<Observation> {
@@ -2528,6 +2538,8 @@ export interface LandingGitHub {
    * cannot produce them keeps the conservative blob-identity comparison.
    */
   blobContent?(sha: string): Promise<Buffer | null>;
+  /** Whether the bytes of a blob by sha are already cached in memory. */
+  hasBlobContent?(sha: string): boolean;
   /** Whether `head` contains `base` by ancestry. */
   contains(base: string, head: string): Promise<boolean>;
   /** The commits `head` holds that `base` does not, or null when GitHub's list is truncated. */
@@ -2675,7 +2687,10 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
     const merged = threeWayMerge(baseContent, landingContent, headContent);
     if (merged.clean && merged.content !== null && merged.content.equals(landingContent)) file.mergeSha = file.baseSha;
     // The baseline lands as the merge result: judged by the lines it adds to what the commit holds (GY-1023).
-    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(files));
+    else if (merged.clean && merged.content !== null && file.path === timingBaselinePath) {
+      const inScopeTests = files.filter(f => inPlannedScope(plannedFiles, f.path) || f.status === 'added' || f.baseSha === null);
+      file.companion = timingBaselineCompanion(landingContent.toString('utf8'), merged.content.toString('utf8'), changedTestFiles(inScopeTests));
+    }
   }
 }
 /**
@@ -2685,7 +2700,7 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
  * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
  * refuses rather than passes.
  */
-async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
+async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobContent' | 'hasBlobContent'>, plannedFiles: string[], files: any[], base: string, budget = { remaining: scopeLookupBudget }): Promise<ScopeFile[]> {
   // Lookups are granted from the budget in file order, exactly as when they ran one at a time,
   // then asked a few at a time: in turn they held a final merge verification past its window.
   const wanted: { entry: ScopeFile; field: 'baseSha' | 'previousBaseSha'; path: string }[] = [];
@@ -2703,9 +2718,17 @@ async function compareScopeOf(github: Pick<LandingGitHub, 'blobAt' | 'blobConten
   const found = await boundedMap(wanted, peerContainmentConcurrency, want => github.blobAt(want.path, base));
   wanted.forEach((want, index) => { want.entry[want.field] = found[index]; });
   // The timing baseline is judged by its lines, not its blob (GY-1023): two content reads from the same budget.
-  if (github.blobContent && budget.remaining >= 2) {
+  if (github.blobContent) {
     const read = github.blobContent.bind(github);
-    await judgeTimingCompanion(compared, async sha => { budget.remaining -= 1; const content = await read(sha).catch(() => null); return content && content.length <= mergeContentCap ? content.toString('utf8') : null; }, path => inPlannedScope(plannedFiles, path));
+    await judgeTimingCompanion(compared, async sha => {
+      const cached = github.hasBlobContent?.(sha);
+      if (!cached) {
+        if (budget.remaining < 1) return null;
+        budget.remaining -= 1;
+      }
+      const content = await read(sha).catch(() => null);
+      return content && content.length <= mergeContentCap ? content.toString('utf8') : null;
+    }, path => inPlannedScope(plannedFiles, path));
   }
   return compared;
 }
@@ -2954,74 +2977,17 @@ export const idleObservationSeconds = 300;
  * guard demands of the record it publishes, and the lag past which `master status` names the
  * queue head as unobserved (GY-492).
  */
-export const observationFreshnessMs = 120_000;
+export { observationFreshnessMs } from './observation-priority.js';
 /** Consecutive permission refusals a job may retry at the normal cadence before it is held. */
 export const permissionRefusalLimit = 3;
 /** How often the job loop re-reads the merge-queue settings the master published (GY-330, GY-516). */
 export const mergeBatchSizeRefreshMs = 30_000;
 const batchSizeRead = new WeakMap<Engine, number>();
 const guardRead = new WeakMap<Engine, number>(), guardFailure = new WeakMap<Engine, string>();
-/**
- * How far the claim priority reaches into the merge queue (GY-492): the head and the next
- * `max(2, batch size) - 1` entries. The head needs a fresh observation to merge at all; the
- * entries its batch is validated with move only when it does.
- */
-export const headClaimBand = (batchSize: number) => Math.max(2, Math.max(1, Math.floor(batchSize)));
-/**
- * Whether this item's next action waits on an observation (GY-492): the loop requests a rework
- * round and dispatches a review only from a fresh reading of the pull request, so a job for such
- * an item is claimed ahead of the idle backlog that would otherwise hold it minutes.
- */
-export function waitsOnObservation(work: Work, all: Work[], now = new Date()): boolean {
-  const kind = nextAction(work, all, now)?.kind;
-  // A resync is the wait for a fresher reading itself (a first reading has its own tier): unnamed, it was
-  // claimed only after every named starved job, and under a paced budget never (2026-09-26: GY-393, GY-430 for 3 h).
-  return kind === 'request-rework' || kind === 'request-review' || (kind === 'resync' && !firstObservationOwed(work));
-}
-/** Whether a session is running on the item now: a worker, reviewer or producer whose result an observation reads. */
-export const runningSession = (work: Work) => (work.sessions ?? []).some(session => session.state === 'running' && !session.endedAt);
-/** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
-export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
+// The claim order, its bands and their freshness bounds live in observation-priority.ts (GY-1114).
+export { firstObservationOwed, headClaimBand, observationClaimOrder, observationHeadCount, runningSession, waitsOnObservation } from './observation-priority.js';
 /** When the item's current submission was made: the documentation record's time for that PR, else when its stage was entered. */
 const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.submission?.pr && work.documentation?.submission?.at ? work.documentation.submission.at : work.stageEnteredAt;
-/**
- * How many of the claim order's leading ids are the merge path — the queue-head band and any merge
- * in flight (GY-567) — which no starved job overtakes.
- */
-export function observationHeadCount(all: Work[], batchSize: number, now = Date.now()): number {
-  const band = headClaimBand(batchSize);
-  const head = new Set(predictQueue(all, now).filter(placement => placement.position < band).map(placement => placement.id));
-  for (const work of all) if (mergeAuthorized(work)) head.add(work.id);
-  return head.size;
-}
-/**
- * The order observation jobs are claimed in (GY-492): merge-queue entries within the head band
- * first, in queue position, and any merge in flight (an authorized head GitHub may merge now);
- * then submissions never observed; then items whose next action waits on an observation, then
- * items with a running session, then the rest by available_at — the order `Store.takeJob` falls
- * back to for a job this list does not name. Under a `tight` budget (GY-567) running sessions come
- * straight after the first reads, which stay behind only the merge path whatever the budget.
- * `available_at` still gates every claim: priority reorders due jobs, never makes one due.
- */
-export function observationClaimOrder(all: Work[], batchSize: number, now = Date.now(), tight = false): string[] {
-  const band = headClaimBand(batchSize);
-  const ranked: string[] = [];
-  for (const placement of predictQueue(all, now)) {
-    if (placement.position < band) ranked.push(placement.id);
-  }
-  for (const work of all) if (mergeAuthorized(work) && !ranked.includes(work.id)) ranked.push(work.id);
-  const open = all.filter(work => work.stage !== 'done' && !ranked.includes(work.id));
-  // A submission never observed has no candidate, so no gate, review or proof can start until it
-  // is read once. Behind the review-waiting items, which come due again every cycle, one worker
-  // never reached it (2026-09-26: eight submitted PRs unread for hours).
-  const firstReads = open.filter(firstObservationOwed).map(work => work.id);
-  const waiting = open.filter(work => waitsOnObservation(work, all, new Date(now))).map(work => work.id);
-  const running = open.filter(runningSession).map(work => work.id);
-  return [...new Set([...ranked, ...firstReads, ...(tight ? [running, waiting] : [waiting, running]).flat()])];
-}
-
-/** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
-const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round(ms % 60_000 / 1000)}s` : `${Math.round(ms / 1000)}s`;
 
 /**
  * Observation throughput and the queue head's observation lag (GY-492), read from what master
@@ -3057,14 +3023,17 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
   const unobserved = snapshot.work.filter(firstObservationOwed).map(work => ({ key: work.key, pr: work.submission!.pr, submittedAt: submittedAt(work) }))
     .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
   const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
+  const headStale = !!head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs);
+  // Lag per band against its bound (GY-1114); a stale head is the item below, not counted twice.
+  const lag = observationBandLag(snapshot.work, now, headStale ? head!.key : null);
   const report = { budget, jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
-    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs, oldestUnobservedSubmission };
-  const attention: AttentionItem[] = head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs)
+    p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs, oldestUnobservedSubmission, bands: lag.bands };
+  const attention: AttentionItem[] = headStale && head
     ? [{ subject: 'github',
         text: `The merge-queue head ${head.key} has ${headObservationAgeMs === null ? 'no observation at all' : `gone ${observationLag(headObservationAgeMs)} without an observation`} while the merge gate refuses anything older than two minutes${oldestDueJobMs !== null ? `; the oldest due job has waited ${observationLag(oldestDueJobMs)}` : ''}${report.jobsPerMinute !== null ? `, and the server has been observing ${report.jobsPerMinute} job(s)/min (median ${report.medianDurationMs ?? '?'} ms, p90 ${report.p90DurationMs ?? '?'} ms)`: ''}: the queue stalls until its head is observed`,
         ...agentOwner('control plane', 'Nothing to run: the observation workers claim the head ahead of the backlog on their own; if the lag keeps growing, graphyard status (githubBudget.throughput) shows what the workers achieve and the budget allows') }]
     : [];
-  return { ...report, attention };
+  return { ...report, attention: [...attention, ...lag.attention] };
 }
 /**
  * Claim and run one due observation job. `spent`, when given, is told what the job charged the
@@ -3104,7 +3073,9 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
   // A job an observation webhook made due is claimed ahead of all of it by `takeJob` itself (GY-806).
   const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
-  const job = await engine.store.takeJob(observationClaimOrder(all, band, Date.now(), budgetTight(github.budget?.())), observationHeadCount(all, band));
+  // Review-requested items past half their bound join the protected prefix (GY-1114).
+  const plan = observationClaim(all, band, Date.now(), budgetTight(github.budget?.()));
+  const job = await engine.store.takeJob(plan.order, plan.headCount);
   if (!job) return false;
   const viaWebhook = job.webhook === true;
   // A poll of an item a webhook-driven observation refreshed within its poll interval is skipped
@@ -3216,6 +3187,41 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           continue;
         }
         const probe = classifyRerunRun(due, found);
+        if (probe.kind === 'cancelled') {
+          // A rerun attempt GitHub cancelled did not conclude the rerun (GY-1109): it keeps the hold
+          // and is rerun again on the cancelled allowance (at most cancelledRerunLimit times),
+          // without spending the single re-request meant for vanished runs.
+          const cancelledCount = Number(due.detail?.match(/cancelled:(\d+)/)?.[1] ?? 0);
+          if (cancelledCount < cancelledRerunLimit) {
+            try {
+              const again = await github.rerunFailedJobs(due.failedRunId);
+              const detail = `cancelled:${cancelledCount + 1}:${new Date().toISOString()}`;
+              const itemToUpdate: Work = work!;
+              work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
+                const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
+                if (!jobRow) return itemToUpdate;
+                const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+                const cur = all.find(w => w.id === itemToUpdate.id);
+                if (!cur) return itemToUpdate;
+                const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
+                if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
+                const current = cur.checkReruns![index];
+                const at = now.toISOString();
+                const next: CheckRerun = { ...current, runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail, probedAt: at, waiting: undefined };
+                cur.checkReruns = cur.checkReruns!.map((entry, pos) => pos === index ? next : entry);
+                await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [cur.id, JSON.stringify(cur)]);
+                await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [cur.id, 'github', 'check.rerun.requested', JSON.stringify({ details: next, at })]);
+                return cur;
+              });
+            } catch (error) {
+              const detail = `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}`;
+              work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'refused', detail });
+            }
+          } else {
+            work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'waiting', status: 'cancelled' });
+          }
+          continue;
+        }
         if (probe.kind !== 'missing') { work = await engine.recordCheckRerunProbe(work.id, job.token, due, probe); continue; }
         if (due.rerequestedAt) {
           work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'expired', detail: `GitHub accepted the rerun twice but no ${due.check} run was found within ${checkRerunVisibilityMs / 60_000} minutes of either request` });

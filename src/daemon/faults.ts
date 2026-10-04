@@ -19,6 +19,7 @@ import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { currentRestore } from '../merge-queue.js';
+import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -53,9 +54,9 @@ export interface FaultSources {
  * cause (a full ledger, a resource at its bound) is tracked as that cause alone. A derived line that
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
- * instance. Nor is the one-hour dwell line (`gate`) counted, which is the ordinary pace of work — a
- * gate nothing moves is `stalled-item`. Failed actions are not read here: the action history
- * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
+ * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
+ * which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
+ * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
   const routes = sources.scopeRoutes ?? true;
@@ -72,7 +73,9 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
     const byKey = new Map(work.map(item => [item.key, item]));
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind)) && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now)))
+      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+        && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now)))
         derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
@@ -105,6 +108,23 @@ export function restoreInMotion(work: Work | undefined, now: number): boolean {
   const ejected = work.queueEjection?.sha === work.candidate.sha ? work.queueEjection : null;
   const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
+}
+/** How long an approval dismissed for a merge-base change may stay in motion before it counts as a review-convergence fault (GY-1140). */
+export const mergeBaseDismissalWaitBoundMs = 30 * 60_000;
+/**
+ * GY-1140. Whether a merge-base dismissal is still in motion: GitHub dismissed the approval of the
+ * current candidate because the merge base changed, and that dismissal is inside `mergeBaseDismissalWaitBoundMs`.
+ * The control plane handles this on its own (the merge queue republishes the speculative tip onto the
+ * base branch tip, or the merge broker restores the approval on the unchanged head), so the dismissal
+ * is a step in motion, not a review-convergence fault (GY-1136, counted 2.4 minutes after dismissal).
+ * A dismissal that stands past the bound counts.
+ */
+export function mergeBaseDismissalInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.candidate) return false;
+  const dismissal = mergeBaseDismissal(work);
+  if (!dismissal?.at) return false;
+  const since = Date.parse(dismissal.at);
+  return Number.isFinite(since) && now - since <= mergeBaseDismissalWaitBoundMs;
 }
 /**
  * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
