@@ -5,16 +5,9 @@ import type { Work } from '../model.js';
 import { mergeStalls } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
-import { slowCycleAttention } from '../daemon/liveness.js';
-import { loopMemoryAttention, type HostMemoryState } from '../master-resources.js';
 
 // The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
-
-/** The running loop's own attention past its liveness: slow cycles, approver launches that cannot settle, and host memory below its floor (GY-612). */
-export function loopHealthAttention(cycling: Parameters<typeof slowCycleAttention>[0] & Parameters<typeof approverLaunchAttention>[0] & { running: boolean; memory?: HostMemoryState | null }): AttentionItem[] {
-  return [...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...loopMemoryAttention(cycling)];
-}
 
 /**
  * One attention item per requested decision whose approver could not be launched (GY-101, GY-849).
