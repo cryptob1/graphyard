@@ -69,6 +69,12 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
+## Research and diagnosis
+
+With `run.research` set, features (or `"research": true`) get one read-only Pi briefing per revision. Build follows recommendations, differing answers rework, failure never blocks; product questions need humans.
+
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. Branch restores under 30m and restart-resumed merges are self-handled, not `merge` faults.
+
 ## Fault classes
 
 Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.

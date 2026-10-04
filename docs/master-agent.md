@@ -42,9 +42,10 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. Concurrency and names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**Instead of closing sessions by hand:** nothing for finished or dead sessions (`graphyard master run --once` sweeps); attach to an overlong one via its handle's command. Never mark
+**So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
+that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
 `blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
@@ -56,12 +57,6 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 ### The pipeline doctor
 
 Every `run.doctor.intervalMinutes` (default 10) the loop runs the [doctor](onboarding.md#the-pipeline-doctor-on-by-default) on stuck work, sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merge, dispatch, evidence or leases. Off: `run.doctor.enabled=false`.
-
-## Research and diagnosis
-
-With `run.research` set, features (or `"research": true`) get one read-only Pi briefing per revision. Build follows recommendations, differing answers rework, failure never blocks; product questions need humans.
-
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approved decisions release its fix or close-as-duplicate; later recurrences re-file. Branch restores under 30m and restart-resumed merges are self-handled, not `merge` faults.
 
 ## Machine-filed backlog
 
