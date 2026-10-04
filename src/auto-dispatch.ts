@@ -18,7 +18,7 @@ import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
-import { classified, launchWaitKind } from './model/fault-classes.js';
+import { classified, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
@@ -914,7 +914,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       // and a request no profile has room for waits on the limit it names.
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
       const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, review.id);
-      const busy = () => wait('review', item, review, `every reviewer profile is busy: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
+      const busy = () => wait('review', item, review, `${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
       if (!profile) wait('review', item, review, reason!);
       else if (!withRoom().length) busy();
       else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
@@ -935,7 +935,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // A request a settled session already answered waits on the control plane reading that
           // verdict (GY-1083): no launch was refused, so no failure counts against the request.
           const answered = answeredByPendingReview(error, review);
-          if (answered?.answered) wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); the control plane settles the request once it reads that verdict`);
+          if (answered?.answered) wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`);
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
         }
         await persist();
