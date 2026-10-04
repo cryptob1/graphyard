@@ -6,6 +6,7 @@ import { pathScopesOverlap } from './model/scope.js';
 import { evaluateLandability, landabilityEjection, type LandabilityAudit, type LandabilityVerdict } from './model/landability.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
 import type { BaseBreak } from './master/base-break-refresh.js';
+import type { DocsSync } from './model/docs-sync.js';
 import { ciCheckName } from './model/ci-refusal.js';
 import { attributeDocsOverflow, docsBudgetProof, docsOverflowReason, ownDocsOverflow, type DocsWordBudget, type DocsWordCount } from './model/documentation.js';
 
@@ -559,6 +560,14 @@ export interface BaseRefresh {
   head: string | null;
   /** Why the base could not be merged into the candidate, named for the worker; null on success. */
   conflict: string | null;
+  /**
+   * With a confirmed conflict (GY-566): the paths both the head and the base changed since their
+   * merge base, which hold every conflicted path; null when GitHub could not list either side.
+   * The loop routes a conflict confined to docs pages to a docs-sync session (model/docs-sync.ts).
+   */
+  conflictPaths?: string[] | null;
+  /** Set when the head is a docs-sync of `from` onto `base` (GY-566): what the carry was decided from. */
+  docsSync?: DocsSync | null;
   /** How Graphyard produced the head, as GitHub reports the commit; null when nothing was merged. */
   merge?: TipMerge | null;
   /** Which bindings of the replaced head carried onto it, decided once when the refresh was bound. */
@@ -591,7 +600,7 @@ export interface BaseRefresh {
  * `base breakage` (GY-793), why a candidate whose required check failed only on tests the base
  * branch broke and has since fixed was brought onto the fixed tip.
  */
-export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'base breakage';
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync' | 'base breakage';
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head

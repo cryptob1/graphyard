@@ -68,7 +68,7 @@ const gapProofs = (work: Work) => [...new Set(work.criteria.flatMap(ac => ac.pro
 async function refreshProofGaps(db: pg.PoolClient, principals: readonly Principal[], actor: string, now: Date) {
   const registry = await authorityRegistry(db, principals);
   const gapsOf = (work: Work) => gapsAgainst(registry, gapProofs(work), work.producerProofs);
-  const open: Work[] = (await db.query("SELECT document FROM work_items WHERE document->>'stage' <> 'done' ORDER BY number")).rows.map(row => row.document);
+  const open: Work[] = (await db.query("SELECT w.document FROM work_items w WHERE w.id IN (SELECT id FROM work_index WHERE stage <> 'done') ORDER BY w.number")).rows.map(row => row.document);
   const changed: string[] = [];
   for (const work of open) if (JSON.stringify(gapsOf(work)) !== JSON.stringify(work.proofGaps ?? [])) changed.push(work.id);
   if (!changed.length) return;

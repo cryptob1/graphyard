@@ -3,7 +3,7 @@ import { workerLaunchStatus } from '../master/dispatch.js';
 import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { dataDirectory } from '../install/worktree-root.js';
 import { mergeQueueStatus } from '../master/profiles.js';
-import { landingAttention, optimisticStatus } from '../master/optimistic-attention.js';
+import { optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
@@ -27,7 +27,6 @@ import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
 import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
-import { observationThroughputStatus } from '../github.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
@@ -41,6 +40,8 @@ import { releaseLagStatus } from '../master/release-lag.js';
 import { throughputStatus } from '../throughput.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
+import { hotspots } from './hotspots.js';
+import { stallAttention } from './stall-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
@@ -48,8 +49,9 @@ export { actionReport, agentRequestAttention, agentRequestReport, sessionReport 
 export { cycleBudget } from '../daemon/metrics.js';
 export { approveScopeRequest } from './master-scope.js';
 
-// Observation throughput lives beside the schedule it reads.
-export { observationThroughputStatus };
+// The queue-head observation lag, lease health and stall composition live in `stall-attention.ts`;
+// the report and the tests read them from here, as they always have.
+export { observationThroughputStatus } from './stall-attention.js';
 // The attention builders live in `status-attention.ts`; the report reads them from here.
 export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
@@ -104,6 +106,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention];
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
+  const hs = hotspots(daemonState);
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
@@ -144,10 +147,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a red main post-merge (GY-500),
-  // queue-head lag (GY-492), slow renewals (GY-558).
-  const observation = observationThroughputStatus(coordinator, snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...landingAttention(snapshot.work), ...health.attention];
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
+  const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
   const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
     declaration: executors.supervision.declaration, served: executors.presence.served });
@@ -187,7 +189,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // Commits no reviewer session ever got a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
-    merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, ...optimisticStatus(master, snapshot.work), mergeQueue, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    conflictHotspots: hs.report, merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, ...optimisticStatus(master, snapshot.work), mergeQueue, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     conflictProbe: probe,
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation, leaseHealth: health.report,

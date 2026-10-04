@@ -18,7 +18,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
-import { currentRestore } from '../merge-queue.js';
+import { baseRefreshConflict, currentRestore } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
@@ -75,6 +75,7 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
       if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
         && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now)))
         derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
@@ -125,6 +126,20 @@ export function mergeBaseDismissalInMotion(work: Work | undefined, now: number):
   if (!dismissal?.at) return false;
   const since = Date.parse(dismissal.at);
   return Number.isFinite(since) && now - since <= mergeBaseDismissalWaitBoundMs;
+}
+/**
+ * GY-1129. Whether a base refresh conflict is still in motion or in rework: the candidate has a confirmed
+ * conflict with the base branch, and the conflict was reported within `restoreWaitBoundMs` (the time the
+ * loop takes to return the item and decide its rework). The control plane requests and approves rework on
+ * its own, so a base conflict actively being handled is self-handled, not a merge fault
+ * (GY-501, GY-1073, GY-417 on 3 October 2026: each counted while in rework or within minutes of the conflict).
+ * A conflict left unhandled past the bound counts as a merge fault even if rework was requested.
+ */
+export function baseConflictInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.candidate) return false;
+  if (!baseRefreshConflict(work)) return false;
+  const since = work.baseRefresh?.at;
+  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
 /**
  * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
@@ -336,7 +351,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   endFailingRuns(state, policy, clock);
   // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
   // judged on each observation over the same snapshot; each violation is one fault of its class below.
-  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
+  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs,
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
     refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
