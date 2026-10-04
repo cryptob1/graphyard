@@ -12,7 +12,7 @@
 - **Item not moving**: fix the refusal's cause. Never weaken requirements.
   - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; an explained `lease-loss` is settleable by `admin --attestation` alone.
   - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
-  - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
+  - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation the loop requests ([system-driven items](master-agent.md#system-driven-items)).
 - **Merge refused**: wait or repair the cause; never bypass.
 - **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
 - **Wrong accepted evidence**: [revoke it](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).

@@ -18,6 +18,16 @@ import { wakeObservationJob } from './cycle-delivery.js';
 
 /** The launcher key of the approver launch for a decision (GY-616). */
 const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
+/**
+ * GY-1051. Why an attest decision standing for another proof on the item's current head, base and
+ * policy revision holds `decision` back, or null. That one is judged first: the control plane holds
+ * one attest decision per item, so an item with several unproduced proofs takes one approver round each.
+ */
+function otherProofAttest(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any }): string | null {
+  const input = standing.input ?? {}, candidate = work.candidate;
+  const head = !!candidate && input.sha === candidate.sha && input.baseSha === candidate.baseSha && input.policyRevision === work.policyRevision;
+  return head && input.proof !== decision.input?.proof ? `attest decision ${standing.id} is ${standing.state} for ${String(input.proof)} on ${String(input.sha).slice(0, 12)}` : null;
+}
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
 export const handWatchPrefix = 'hand:';
 /** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
@@ -299,7 +309,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
-    const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+    const previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     try {
       const history = effects.decisions ? (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions : [];
@@ -312,6 +322,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A request whose response was lost is already standing on the item, and the server refuses a
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
+      // The control plane holds one attest decision per item (src/server/decisions.ts). One standing
+      // for another proof on this very head — made by hand, or before a lost cursor — is judged
+      // first: this proof waits, quietly, rather than recording a failed step every cycle (GY-1051).
+      const heldBy = standing && decision.action === 'attest' ? otherProofAttest(item, decision, standing) : null;
+      if (heldBy) {
+        const detail = `${item.key}'s attest decision for ${String(decision.input?.proof)} waits: ${heldBy}; the control plane holds one attest decision at a time, so it is requested once that one settles`;
+        const changed = detailChanged(previous, detail);
+        const waiting = await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
+        if (changed) performed.push(waiting);
+        return;
+      }
       // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
       const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
@@ -615,13 +636,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A done entry with no watch adopts the standing decision and launches an approver.
     await requestNeeded(item, decision, key);
   });
-  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
+  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its
+  //      head, one at a time. The control plane holds one attest decision per item, so the next proof
+  //      is requested only once no watch is judging: an item with N such proofs takes N approver
+  //      rounds in sequence. `attestDecisions` returns at once for any item not held at acceptance
+  //      alone, so the pass over every snapshot item costs a gate scan for the rest (GY-1051).
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
     const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);
-      if (watch && !watch.settledAt) { judging = true; await supervise(item, decision, key, watch); }
+      // A decision this supervision settles (applied or refused) frees the item's one attest, so the
+      // next proof is requested within this cycle rather than an approver round later.
+      if (watch && !watch.settledAt) { await supervise(item, decision, key, watch); if (!state.approvals[key]?.settledAt) judging = true; }
       else if (watch?.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
     }
     const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
