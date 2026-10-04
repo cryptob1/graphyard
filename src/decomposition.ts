@@ -8,6 +8,7 @@ import { pathScopeContains } from './model/scope.js';
 import { settleDelivered } from './model/actions.js';
 import { decompositionPayloadSchema, decompositionSettingsSchema, type DecompositionPayload, type DecompositionSettings } from './runner/payloads.js';
 import { save } from './store.js';
+import { lockedWork, workIdByRef } from './store/locked-read.js';
 import type { Services } from './server/routes.js';
 
 // ---------------------------------------------------------------------------
@@ -253,8 +254,21 @@ export function splitParentDelivery(child: Work, all: readonly Work[], now: Date
  * (`decomposition.parent-delivered`). The delivery paths call it beside the child's own save.
  */
 export async function deliverSplitParent(db: pg.PoolClient, child: Work, all: Work[], now: Date) {
-  const parent = splitParentDelivery(child, all, now);
+  if (!child.parent) return null;
+  // The caller's board holds stand-ins for items it does not act on (GY-1027): the parent and the
+  // child's siblings are read whole here, bounded by the split's own size, and the parent replaces
+  // its stand-in in the board so the save writes the document.
+  const parentRow = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')} FOR UPDATE`, [child.parent])).rows[0];
+  if (!parentRow) return null;
+  const parentDocument = parentRow.document as Work;
+  const siblings = (parentDocument.children ?? []).filter(key => key !== child.key);
+  const siblingDocuments: Work[] = siblings.length
+    ? (await db.query('SELECT document FROM work_items WHERE id IN (SELECT id FROM work_index WHERE key = ANY($1::text[])) ORDER BY number', [siblings])).rows.map(row => row.document)
+    : [];
+  const parent = splitParentDelivery(child, [parentDocument, child, ...siblingDocuments], now);
   if (!parent) return null;
+  const index = all.findIndex(entry => entry.id === parent.id);
+  if (index >= 0) all[index] = parent;
   await db.query('DELETE FROM jobs WHERE work_id=$1', [parent.id]);
   settleDelivered(parent, all, now);
   await save(db, parent, 'graphyard', 'decomposition.parent-delivered', now, { children: parent.delivery!.children, lastChild: child.key });
@@ -281,7 +295,8 @@ export async function recordDecomposition(services: Services, actor: Principal, 
     const fingerprint = digest({ id, decomposition: event });
     const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as Work; }
-    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    // The item itself, its dependencies and the open items overlapping it, whole; the rest as stand-ins (GY-1027).
+    const all: Work[] = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id);
     demand(work, 'Work item not found', 404);
     demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
