@@ -365,6 +365,10 @@ export default function FlowAnalytics({ request, token, canAudit, initial, folde
             <button className="text-button" onClick={() => setDrill({ metric: 'review', key: null, title: 'Reviews' })}>Review records ↗</button></div>
           <div><h3>Leases and capacity</h3><p>{report.operations.leases.claims} claim(s), {report.operations.leases.reassignments} reassignment(s), {report.operations.leases.losses} loss(es) of which {report.operations.leases.expirations} expired. Utilization {report.operations.leases.utilizationRatio === null ? '—' : `${Math.round(report.operations.leases.utilizationRatio * 100)}%`}, idle capacity {duration(report.operations.leases.idleCapacityMs)}.</p></div>
           <div><h3>Queues</h3><ul>{report.operations.queues.map((queue: any) => <li key={queue.queue}>{queue.queue}: average depth {count(queue.averageDepth)}, maximum {count(queue.maxDepth)} — {queue.definition}</li>)}</ul></div>
+          {report.conflictHotspots && <div><h3>Conflict hotspots <small>last {report.conflictHotspots.windowHours} hours</small></h3>{report.conflictHotspots.hotspots.length
+            ? <><p>{report.conflictHotspots.conflicts} conflict(s): {report.conflictHotspots.docsSynced} docs-synced, {report.conflictHotspots.sentBack} sent back to a worker.</p>
+              <ul>{report.conflictHotspots.hotspots.map((hotspot: any) => <li key={hotspot.path}>{hotspot.conflicts >= report.conflictHotspots.threshold ? <strong>{hotspot.path}</strong> : hotspot.path} ×{hotspot.conflicts}{hotspot.sentBack.length ? ` — sent back ${hotspot.sentBack.join(', ')}` : ''}</li>)}</ul></>
+            : <p>No merge conflict was confirmed in the last {report.conflictHotspots.windowHours} hours.</p>}</div>}
         </div>
         <h3>Deployment</h3>
         {report.operations.deployments.observations === 0
