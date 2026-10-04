@@ -1,11 +1,13 @@
 // Concern: containment quarantines — their phase against the lease, and verifying a supervisor is gone.
 import type { Work } from '../model.js';
-import { type ContainmentVerification, containmentGraceMs, containmentAttestation, containmentVerificationSchema, containmentSettlementRefusals, boundContainmentVerification } from '../quarantine.js';
+import { type ContainmentVerification, containmentAttestation, containmentVerificationSchema, containmentSettlementRefusals, boundContainmentVerification } from '../quarantine.js';
 import { type SupervisorProbe, probeSupervisorAbsence } from '../containment-probe.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { watchAssignment } from '../supervisor.js';
 import { watchSupervisorRunning } from './dispatch-reservation.js';
+import { type ContainmentPhase, containmentPhase, containmentGraceMs } from '../model/containment.js';
+export { type ContainmentPhase, containmentPhase, containmentGraceMs };
 
 export interface ContainmentAssessment {
   key: string; id: string; epoch: number; owner: string; at: string;
@@ -16,28 +18,6 @@ export interface ContainmentAssessment {
   verification: ContainmentVerification | null;
 }
 
-export type ContainmentPhase =
-  | { state: 'live'; owner: string; epoch: number; expiresAt: string }
-  | { state: 'grace'; lapsedAt: string; remainingMs: number }
-  | { state: 'lapsed'; lapsedAt: string | null };
-/**
- * Where a containment quarantine stands against its worker's lease. Every supervised launch
- * records one, so while its owner still holds the quarantined epoch's lease it is a session at
- * work, not something to act on. Once the lease lapses, the grace window runs from the later of
- * the lease and launch deadlines, and only then can supervisor absence be verified.
- */
-export function containmentPhase(work: Work, now: number, graceMs = containmentGraceMs): ContainmentPhase | null {
-  const quarantine = work.containmentQuarantine;
-  if (!quarantine) return null;
-  const lease = work.lease;
-  if (lease && lease.owner === quarantine.owner && lease.epoch === quarantine.epoch && Date.parse(lease.expiresAt) > now)
-    return { state: 'live', owner: lease.owner, epoch: lease.epoch, expiresAt: lease.expiresAt };
-  const deadlines = [lease?.epoch === quarantine.epoch ? lease.expiresAt : undefined, quarantine.leaseExpiresAt, quarantine.launchExpiresAt]
-    .map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
-  if (!deadlines.length) return { state: 'lapsed', lapsedAt: null };
-  const lapsed = Math.max(...deadlines), lapsedAt = new Date(lapsed).toISOString();
-  return lapsed + graceMs > now ? { state: 'grace', lapsedAt, remainingMs: lapsed + graceMs - now } : { state: 'lapsed', lapsedAt };
-}
 /** Why a quarantined item cannot be dispatched: in progress by its live owner, or unverified containment. */
 export function containmentHold(work: Work, now: number): string | null {
   const phase = containmentPhase(work, now);
@@ -66,14 +46,19 @@ export async function snapshotWithClock<T extends { now: string }>(read: () => P
 export interface ControlPlaneClock { clockOffset: { min: number; max: number }; roundTripMs: number; source: 'timed read' | 'snapshot read' }
 /** The control-plane time and clock bounds a containment assessment is judged with, and the read that measured them. */
 export interface ContainmentObservation { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: ControlPlaneClock['source'] }
-/** How long the timed clock read may take before the loop falls back to the snapshot's bounds. */
+/**
+ * How long the timed clock read may take before the loop falls back to the snapshot's bounds.
+ * Kept at 10 s (GY-795, GY-1043) so slow measured reads up to ~7 s can report their round trip
+ * rather than aborting, while capping cycle delay.
+ */
 export const controlPlaneClockTimeoutMs = 10_000;
 /**
  * Bound the local clock against the control plane with a light timed read (GY-811): a `HEAD /`
  * is answered by the plane's static route from a file, touching neither the database nor the
  * store, and stamped with the plane's `Date` header. Its round trip, plus the second the header is
  * truncated to, is the width of the bound, which stays short on a plane whose work snapshot takes
- * seconds to build.
+ * seconds to build. Using the static route rather than a PostgreSQL transaction clock avoids
+ * database connection contention on loaded planes; minor clock skew is absorbed by the 5 s tolerance.
  */
 export async function readControlPlaneClock(url: string, deps: { fetcher?: typeof fetch; clock?: () => number; timeoutMs?: number } = {}): Promise<ControlPlaneClock> {
   const fetcher = deps.fetcher ?? fetch, clock = deps.clock ?? Date.now;
@@ -98,7 +83,10 @@ export async function containmentClock(snapshotOffset: { min: number; max: numbe
   if (!read) return fallback;
   try { return await read(); } catch { return fallback; }
 }
-/** A containment refusal with its measured round trip masked: two cycles' refusals for the same cause compare equal. */
+/**
+ * A containment refusal with its measured round trip masked: two cycles' refusals for the same cause compare equal.
+ * Specifically masks only `/control-plane clock took \d+ms round trip/g` to avoid masking other numbers in the detail.
+ */
 export function unmeasured(detail: string) {
   return detail.replace(/control-plane clock took \d+ms round trip/g, 'control-plane clock took …ms round trip');
 }

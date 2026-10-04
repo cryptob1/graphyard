@@ -1,14 +1,22 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
-import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
+import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
+import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
+import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
+import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { sessionName } from '../session-name.js';
+
+/** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
+export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
 
 // ---- Routine decisions ---------------------------------------------------------------------
 /*
@@ -55,6 +63,35 @@ export function standingVerdict(work: Work): StandingVerdict | null {
 }
 
 /**
+ * GY-1118. What a change request standing against the current head calls for once the item is past
+ * its review-round cap, or null. One that names no `BLOCKING:` finding and was posted by the
+ * configured reviewer App is a `follow-up`: its findings become the item's follow-up batch and the
+ * request is withdrawn, so the head is reviewed again with no rework. One naming a blocking finding
+ * is an `escalate`: the loop requests no further rework and puts the finding to an independent
+ * approver. So is any other — an agent provider's verdict, or a person's review — since Graphyard
+ * cannot withdraw it as the reviewer App.
+ */
+export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string }
+export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
+  const cap = reviewRoundCapOf(config);
+  if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
+  const verdict = standingVerdict(work);
+  if (!verdict) return null;
+  const candidate = work.candidate!, observation = work.observation!;
+  const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
+  const body = review ? review.body : observation.agentReview?.reason;
+  const reviewId = review ? review.id ?? null : observation.agentReview?.verdictId ?? null;
+  const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
+  const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
+  const findings = followUpFindingsOf(body);
+  const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };
+  const past = `${work.key} is in review round ${round}, past its cap of ${cap}`;
+  if (blocking.length) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} names ${blocking.length === 1 ? 'a blocking finding' : `${blocking.length} blocking findings`} on ${candidate.sha.slice(0, 12)}: ${blocking.join('; ')}` };
+  if (!own || reviewId === null) return { kind: 'escalate', ...base, reason: `${past}, and ${verdict.reviewer} requested changes on ${candidate.sha.slice(0, 12)} naming no BLOCKING: finding, but Graphyard cannot withdraw a verdict it did not obtain through its reviewer App` };
+  return { kind: 'follow-up', ...base, reason: `${past}, and ${verdict.reviewer}'s change request ${reviewId} on ${candidate.sha.slice(0, 12)} names no BLOCKING: finding` };
+}
+
+/**
  * GY-144. Rework throws away a current review and its proofs, so it is asked for only on a GitHub
  * observation that still describes the item: one taken within the two minutes the merge gate
  * trusts, while GitHub answers. During a rate-limit pause the control plane cannot observe, and
@@ -94,6 +131,54 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   const age = now - Date.parse(observation.at);
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
+}
+
+/**
+ * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once
+ * and waits for that observation to land, rather than for whatever the job's cadence brings round.
+ * One wake stands until an observation newer than it lands; a wake that brought none within this
+ * bound (the job failed, or the server lost it) is sent again. During a GitHub pause the job can
+ * observe nothing, so no wake is sent.
+ */
+export const observationWakeRetryMs = 5 * 60_000;
+export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number, pause: GitHubPause | null): boolean {
+  if (pause || !work.submission) return false;
+  const woken = wokenAt ? Date.parse(wokenAt) : Number.NaN;
+  if (!Number.isFinite(woken)) return true;
+  const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN;
+  // The woken observation landed and is already stale again: this refusal is a new one.
+  if (Number.isFinite(observed) && observed > woken) return true;
+  return now - woken >= observationWakeRetryMs;
+}
+
+/** The merge gate's refusal of an item whose last observation is missing or older than two minutes (model/gates.ts). */
+export const staleObservationMergeReason = 'GitHub observation missing or older than two minutes';
+/** The guarded merge's refusal (engine.ts) when the authorization it checks — the observation's two-minute bound among it — no longer holds. */
+export const staleMergeRefusal = /Merge authorization is no longer current/;
+/**
+ * GY-710. Why the guarded merge waits for a fresh observation, or null when it may be asked. The
+ * merge keeps its two-minute bound: a candidate the merge gate refuses for a stale observation is
+ * not asked at all — the refusal would only restate it — and waits for the woken observation.
+ */
+export function mergeObservationWait(work: Work): string | null {
+  const gate = work.gates.find(entry => entry.name === 'merge');
+  if (!gate || gate.passed || !gate.reasons.includes(staleObservationMergeReason)) return null;
+  const seen = work.observation ? `the last GitHub observation (taken at ${work.observation.at} of head ${work.observation.candidate.sha.slice(0, 12)})` : 'no GitHub observation of the item';
+  return `${work.key}: the guarded merge waits for a fresh GitHub observation — the merge gate refuses ${seen}, which is missing or older than two minutes`;
+}
+/** GY-710. Whether the last guarded merge was refused for a stale observation and the wake that refusal sent stands. */
+export function awaitingObservation(previous: { state: string; detail: string } | undefined, wake: { state: string } | undefined): boolean {
+  return previous?.state === 'failed' && staleMergeRefusal.test(previous.detail) && wake?.state === 'done';
+}
+/**
+ * GY-710. Whether the observation a stale merge refusal woke has landed — an observation newer than
+ * the wake — with every gate passing: the merge is asked again at once, the attempt following the
+ * observation rather than the retry backoff (`mergeRetryDue`).
+ */
+export function mergeObservationLanded(wake: { state: string; at: string } | undefined, work: Work): boolean {
+  if (wake?.state !== 'done' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
+  const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN, woken = Date.parse(wake.at);
+  return Number.isFinite(observed) && Number.isFinite(woken) && observed > woken;
 }
 
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
@@ -139,12 +224,39 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
+ * GY-1008. A planned-file-scope blocker — a worker's blocker naming the files its change needs and
+ * the commit it needs them for — as the same additive `requirements` decision a routed scope request
+ * becomes, requested by the master's operator-agent identity and judged by the independent
+ * approver, with no master session involved. The recorded blocker already ended its attempt, so
+ * nothing about a worker is attested; the approver judges the widening alone. Null when the
+ * blocker is anything else, when plannedFiles already cover every file it names (the blocker step
+ * then clears it), or when no fold represents the widening under the plannedFiles cap.
+ */
+export function blockerScopeDecision(work: Work): RoutineDecision | null {
+  if (work.stage === 'done' || !work.blocker || work.scopeRequest || work.blocker.startsWith(scopeRefusalBlocker)) return null;
+  const classification = itemBlockerClass(work);
+  if (classification?.class !== 'planned-file-scope' || (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears) return null;
+  const paths = uncoveredBlockerPaths(work, classification);
+  if (!paths.length) return null;
+  const widened = widenedPlannedFiles(work, paths);
+  if (!widened.representable) return null;
+  let broad: string | null = null;
+  try { guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, work.blocker, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
+  catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
+  const asked = `${work.key}: its worker recorded a planned-file-scope blocker naming ${paths.join(', ')} for commit ${classification.commit}, which ended its attempt: "${work.blocker.slice(0, 500)}". `
+    + 'Approve the additive plannedFiles widening if the item\'s criteria justify those files, refuse with the reason otherwise; the loop clears the blocker once plannedFiles cover them. '
+    + (broad ? `${broad.slice(0, 300)} It needs the broad-scope flag: grant it only with a stated reason why narrower paths will not do. ` : '');
+  const named = `Criteria: ${work.criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
+  return { action: 'requirements', binding: `blocker-scope:${classification.commit}:${paths.join(',')}`.slice(0, decisionBindingMax), input: { plannedFiles: widened.plannedFiles },
+    reason: (asked + named).slice(0, 2000) };
+}
+/**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   const needed = neededDecision(work, config, exhausted);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
@@ -170,7 +282,7 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
  */
-export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -199,7 +311,11 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // so the loop asks for that round at once, naming the base tip it conflicts with.
   const sync = work.reworkRequested ? null : syncConflict(work);
   if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
-  const verdict = standingVerdict(work);
+  // Past the review-round cap (GY-1118) no review finding sends the item back: a change request is
+  // filed as follow-ups or escalated by the review-cap step (cappedReview), and threads are only
+  // the reviewer's inputs. Proofs, CI, conflicts and refused merges still return the head below.
+  const capped = pastReviewCap(work, reviewRoundCapOf(config));
+  const verdict = capped ? null : standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
   // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
@@ -230,7 +346,7 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   // overridden and the loop resolves them, so a rework requested before it settles would invalidate
   // the review that clears them. After `botThreadReworkRounds` rework rounds a bot's thread is
   // advisory: bot findings alone had kept items cycling round after round on the same head family.
-  const threads = !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
+  const threads = !capped && !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
   if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
     binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   // A lease-loss the control plane raised is operational: once the lost attempt can no longer act,
@@ -241,6 +357,41 @@ export function neededDecision(work: Work, config: Pick<MasterConfig, 'autoMerge
   if (lost) return lost;
   if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/**
+ * The attestation decisions one item needs right now, one per `manual:` proof no producer session
+ * may run (`unproducedManualProofs`, GY-521), or none. Each binds the proof, the exact head, its base
+ * and the policy revision — the attest input names all four, so an approval can never apply to a
+ * later head — and asks the approver to verify the criterion on that head before approving. Like a
+ * merge decision it attests nothing about a worker, so it is requested whatever the lease says.
+ */
+export function attestDecisions(work: Work, all: Work[], now: number): RoutineDecision[] {
+  const candidate = work.candidate;
+  if (!candidate || work.stage === 'done') return [];
+  return unproducedManualProofs(work, all, new Date(now)).map(proof => {
+    const criteria = work.criteria.filter(criterion => criterion.proofs.includes(proof));
+    const named = criteria.length ? criteria.map(criterion => `${criterion.id} ("${boundDetail(criterion.text, 600)}")`).join('; ') : 'an inherited bootstrap obligation';
+    return { action: 'attest', binding: `${proof}:${candidate.sha}:${candidate.baseSha}`, input: { proof },
+      reason: `${work.key}: every gate before acceptance passes for candidate ${candidate.sha.slice(0, 12)} (base ${candidate.baseSha.slice(0, 12)}, policy revision ${work.policyRevision}), and ${proof}, required by ${named}, is a manual proof no producer session may run, so only this two-party attestation satisfies it. Approve only after verifying on that exact head that the criterion holds; refuse naming what is missing otherwise.` };
+  });
+}
+/**
+ * The withdrawal reason for a merge or attest decision standing on `work` that can never apply to
+ * the one now needed, or null when it is this decision (or another action). Only a merge decision
+ * and an attest decision (GY-521) name what they bind: one for an earlier head is taken back if it
+ * is still requested; one for another proof on this head is judged first, one attest at a time.
+ */
+export function overtakenDecision(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any }, canWithdraw: boolean): string | null {
+  if (decision.action !== 'merge' && decision.action !== 'attest') return null;
+  const head = standing.input?.sha === work.candidate?.sha && standing.input?.baseSha === work.candidate?.baseSha && standing.input?.policyRevision === work.policyRevision;
+  if (head && (decision.action === 'merge' || standing.input?.proof === decision.input?.proof)) return null;
+  const merge = decision.action === 'merge', sha = merge ? decision.binding : work.candidate?.sha ?? '';
+  const other = merge
+    ? `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${sha.slice(0, 12)}`
+    : `attest decision ${standing.id} is ${standing.state} for ${String(standing.input?.proof)} on ${String(standing.input?.sha).slice(0, 12)}, not ${String(decision.input?.proof)} on ${sha.slice(0, 12)}`;
+  if (head) throw new Error(`${other}; the control plane holds one attest decision at a time, so this one is requested once it settles: graphyard master decisions ${work.key}`);
+  if (standing.state !== 'requested' || !canWithdraw) throw new Error(`${other}, and ${canWithdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${work.key}`);
+  return `The candidate moved to ${sha.slice(0, 12)}; ${other}, so it can never apply and is withdrawn for a request that names the current ${merge ? 'candidate' : 'head'}`;
 }
 /**
  * The rework a required CI check that failed on exactly the current head calls for, or null. The
@@ -262,7 +413,8 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
     const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
-    return !!latest && ['failure', 'timed_out', 'action_required', 'cancelled', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
+    // A run GitHub cancelled is no failure of the head (GY-1109): the check is rerun, never reworked.
+    return !!latest && ['failure', 'timed_out', 'action_required', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
   }).map(required => required.name).sort();
   if (!failed.length) return null;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
@@ -368,7 +520,10 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const tip = observation.baseTip ?? candidate.baseSha;
-  if (observation.conflicting && !work.queue)
+  // While the control plane's own test merge of the head onto that tip is pending, it decides: a
+  // confirmed conflict is `baseRefreshConflict`'s, routed to a docs-sync session when it is confined
+  // to docs pages (GY-566), and a clean one costs no round at all.
+  if (observation.conflicting && !work.queue && !pendingBaseRefresh(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
   if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
@@ -548,7 +703,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
   return { stopped: false, grounds: '', unverified: assessment?.refusals.length ? assessment.refusals.join('; ') : `no host verification of the epoch ${quarantine.epoch} supervisor was possible from this loop` };
 }
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
-export function withheldDecision(work: Work, config: Pick<MasterConfig, 'autoMerge'>, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
+export function withheldDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
   if (!needed || needed.action === 'merge' || needed.action === 'attest' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
   const unverified = workerStopped(work, now, assessment).unverified;
@@ -612,4 +767,18 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   const refusal = work.mergeRefusal, candidate = work.candidate;
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
+
+/** The launcher key of the approver launch for a decision (GY-616). */
+export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
+/** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
+export const handWatchPrefix = 'hand:';
+/** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
+export const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+
+/** Record how a watch's session ended (GY-551). */
+export function recordWatchEnded(watch: ApprovalWatch, detail: string) {
+  const entry = `${watch.agentName ? `session ${watch.launches}: ` : ''}${detail}`.slice(0, 300);
+  if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
+}
+
 

@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
-import { stableJson } from './model/stable-json.js';
+import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
-import { reconcileCandidatesSql, reconcileItemLockSql, reconcileRereadSql, reconcileSettledSql, reconcileVersionsSql } from './store/coordination-sql.js';
+import { reconcileItemLockSql, reconcileRereadSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
@@ -16,11 +16,12 @@ import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { branchContamination, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { docsSyncCarry } from './model/docs-sync.js';
 import { liftedEjection, queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { retroCheckRefusals } from './model/retro-synthesis.js';
-import { readRetroArtefacts } from './retro-synthesis.js';
+import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
 import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
@@ -35,12 +36,15 @@ import { claimAction, openActions, reconcileActions, renewClaim, settleAction, s
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
+import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
+import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
+import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -93,12 +97,16 @@ const commands = {
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
-  release: z.object({ epoch }).strict(),
+  // `cause` is why the attempt ended, for a release its watch supervisor makes after the session is
+  // gone (GY-1008): it is kept on the release event and never stands as a blocker on the item.
+  release: z.object({ epoch, cause: z.string().trim().min(1).max(2000).optional() }).strict(),
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(200).refine(validBranch, 'Invalid Graphyard branch name') }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
   submit: z.object({ epoch, pr: z.number().int().positive(), documentation: z.string().trim().min(1).max(1000).optional() }).strict(),
-  blocked: z.object({ epoch, reason: z.string().max(2000).nullable() }).strict(),
+  // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
+  // blocker ended it (GY-1008): the same record an interrupted attempt carries.
+  blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional() }).strict(),
   // An empty request clears this attempt's open one; otherwise it must ask for something the
   // planned scope does not already carry. `paths` widens, and the two fields the loop never
   // decides are stated as plainly as the widening is: `remove` drops planned containment and
@@ -110,6 +118,10 @@ const commands = {
   // verdict: the decision is recomputed here from the item's own criteria and the repository's
   // documentation rule, exactly as `autosettle` recomputes containment death.
   autoscope: z.object({ epoch }).strict(),
+  // The master loop recording that dispatching the item keeps failing for one unchanged cause
+  // (GY-1078): the cause becomes the item's blocker, so nothing dispatches it again until an
+  // operator clears it. It needs no lease — no attempt is running — and is refused while one is.
+  dispatchblock: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
   // scope syntax; the merge queue carries a proof across its own authored tip only inside it.
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
@@ -238,7 +250,7 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
 const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
-function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
+export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
     waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
@@ -246,15 +258,19 @@ function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest'
   // An applied request is answered and cleared, exactly as an operator widening clears it;
   // a refused one stays open, carrying its refusal, because someone still has to decide it.
   work.scopeRequest = verdict.state === 'approved' ? null : { ...request, decision };
+  // The timing baseline granted as a companion stays outside plannedFiles: only its own test files' lines pass (GY-1023).
+  const widening = verdict.paths.filter(path => !verdict.companions?.includes(path));
   if (verdict.state === 'approved') {
     // Non-weakening intent the item already carried: applied to the live attempt, which
     // keeps its lease and its containment fence exactly as an operator widening would. A wide
     // ask is folded into directory entries, as a routed one is, rather than overrun the cap;
     // an ask no fold represents was refused by the rule above, never applied past the cap.
-    work.plannedFiles = widenedPlannedFiles(work, verdict.paths).plannedFiles;
-    work.policyRevision++;
-    work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
-    work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    if (widening.length) {
+      work.plannedFiles = widenedPlannedFiles(work, widening).plannedFiles;
+      work.policyRevision++;
+      work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
+      work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
+    }
     if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
   } else {
     // Refused and escalated: the reason is the item's blocker, so the ready gate holds it
@@ -534,7 +550,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
@@ -561,7 +577,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === rerun.sha && entry.check === rerun.check && entry.failedRunId === rerun.failedRunId);
@@ -602,7 +618,7 @@ export class Engine {
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const all: Work[] = (await this.store.leasePool.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all = await lockedWork(this.store.leasePool, [id]);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
@@ -717,7 +733,7 @@ export class Engine {
     const write = async () => (await this.store.pool.query(`WITH live AS (
         SELECT id, CASE WHEN document->'lease' ? 'renewalFault' THEN (document->'lease'->>'expiresAt')::timestamptz
           ELSE GREATEST((document->'lease'->>'expiresAt')::timestamptz, $7::timestamptz) END AS grace_until
-        FROM work_items WHERE (id::text=$1 OR document->>'key'=$1) AND document->'lease'->>'owner'=$2
+        FROM work_items WHERE id = ${workIdByRef('$1')} AND document->'lease'->>'owner'=$2
           AND (document->'lease'->>'epoch')::int=$5 AND (document->'lease'->>'expiresAt')::timestamptz>=$6::timestamptz LIMIT 1),
       recorded AS (INSERT INTO events(work_id,actor,kind,payload) SELECT id, $2, $3, $4::jsonb FROM live RETURNING work_id)
       SELECT live.grace_until, clock_timestamp() AS now FROM live JOIN recorded ON recorded.work_id=live.id`,
@@ -772,7 +788,7 @@ export class Engine {
         if (actor.role === 'operator-agent') authorizeOperatorCommand(actor, command, data, receipt.result as Work, this.repository);
         return receipt.result as Work;
       }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       let work = all.find(w => w.id === id || w.key === id);
       const before = work ? structuredClone(work) : null;
       // Set by the requirements command: the revision was a purely additive planned-files
@@ -1135,7 +1151,28 @@ export class Engine {
       }
       if (command === 'release') { endAttempt(work, data.epoch, 'released', now); work.lease = null; }
       // A blocked report is a hand-off to the master or operator; the item's timeline counts it.
-      if (command === 'blocked') { work.blocker = data.reason; if (data.reason) recordIntervention(work, 'blocked'); }
+      if (command === 'blocked') {
+        work.blocker = data.reason;
+        if (data.reason) {
+          recordIntervention(work, 'blocked');
+          // GY-1008: recording a blocker ends the attempt in this same transaction, so a blocked
+          // item holds no worker slot while the loop re-checks its cause. The work it had is kept
+          // (committed on its branch, and what it had not committed as the CLI's WIP commit), and
+          // the next attempt's request names that commit, as for any interrupted attempt.
+          const partialWork = data.partialWork ?? { state: 'not-applicable' as const, detail: 'the blocked attempt reported no partial work; its commits stay on its branch' };
+          const record: ExhaustionRecord = { role: 'worker', cause: 'interrupted', epoch: data.epoch, profile: actor.id.slice(0, 80), account: null, runtime: actor.runtime?.slice(0, 40) ?? null,
+            // A GitHub credential failure's end carries GY-999's marker, so it counts on the retry
+            // ladder: a failure no freshly minted credential cures is relaunched after a backoff
+            // and held at the cap for an approver, never ended and relaunched for ever.
+            reason: (credentialFailure(data.reason) ? credentialBlockedReason(work, data.epoch, data.reason) : `${blockedAttemptMarker}${data.epoch}: ${data.reason}`).slice(0, 500),
+            resetsAt: null, partialWork, at: now.toISOString(), owner: actor.id, recordedBy: actor.id };
+          const capacity = work.capacity ?? { exhaustions: [], escalations: [] };
+          work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
+          endAttempt(work, data.epoch, 'released', now);
+          work.lease = null;
+          work.scopeRequest = null;
+        }
+      }
       if (command === 'scope') {
         const asks = data.paths.length || data.remove?.length || data.criteria?.length;
         if (!asks) {
@@ -1153,6 +1190,11 @@ export class Engine {
           work.scopeRequest = mergedScopeRequest(work.scopeRequest, { epoch: data.epoch, paths: data.paths, reason: data.reason, requestedBy: actor.id, at: now.toISOString(),
             ...(data.remove?.length ? { remove: data.remove } : {}), ...(data.criteria?.length ? { criteria: data.criteria } : {}) }, work.plannedFiles);
         }
+      }
+      if (command === 'dispatchblock') {
+        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; a dispatch failure is recorded only while no attempt holds the item`, 409);
+        work.blocker = data.reason; recordIntervention(work, 'blocked');
       }
       if (command === 'autoscope') {
         // The loop asks, the control plane decides. The verdict is recomputed here from the item's
@@ -1280,6 +1322,8 @@ export class Engine {
       }
       if (command === 'submit') {
         demand(work.workspaces.some(w => w.epoch === data.epoch), 'Register the assignment workspace first');
+        // A submission ends the run of blockers the loop cleared in a row (GY-1008).
+        if (work.blockerProbe) work.blockerProbe = { ...work.blockerProbe, clears: 0 };
         demand(!all.some(w => w.id !== work!.id && w.submission?.pr === data.pr), 'Pull request is already linked to another task');
         demand(!work.submission || work.submission.pr === data.pr, 'A submitted task cannot switch pull requests');
         if (observation) {
@@ -1288,7 +1332,7 @@ export class Engine {
           const regressions = regressionRefusals(work, observation, all);
           demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
           // Checks registered by approved retro artefacts (GY-970) run against the observed candidate.
-          const retroChecks = retroCheckRefusals(work, observation, await readRetroArtefacts(db));
+          const retroChecks = retroCheckRefusals(work, observation, await readAppliedRetroChecks(db));
           demand(!retroChecks.length, `Submission refused for ${work.key}: ${retroChecks.join('; ')}`);
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
@@ -1415,7 +1459,7 @@ export class Engine {
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
   private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string): Promise<Work | undefined> {
-    return (await db.query(`SELECT document FROM work_items WHERE document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
+    return (await db.query(`SELECT document FROM work_items w WHERE w.id IN (SELECT id FROM work_index WHERE NOT settled) AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
   }
   /**
    * Claim the next action for a stateless executor.
@@ -1474,7 +1518,7 @@ export class Engine {
       const transition = settleAction(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, data.result, data.reason, now);
       // A row settled on a delivered item was the last claim holding it open: it is retired with
       // the rest of what the delivery no longer needs, rather than offered again (GY-185).
-      if (work!.stage === 'done') settleDelivered(work!, (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document.id === work!.id ? work! : r.document as Work), now);
+      if (work!.stage === 'done') settleDelivered(work!, (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item), now);
       await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
       if (work!.submission) await wakeJob(db, work!.id);
       const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
@@ -1610,7 +1654,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(item => item.id === id || item.key === id);
       demand(work, 'Work item not found', 404);
       demand(data.expectedRevision <= work.revision, 'Task changed before the merge was requested; retry');
@@ -1661,7 +1705,7 @@ export class Engine {
       const delivered = work.stage === 'done';
       if (!applyRevert(work, mergeSha, revert, now)) return work;
       if (delivered && work.stage !== 'done') {
-        const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+        const all = await lockedWork(db, [work.id]);
         this.evaluate(work, all.map(item => item.id === work.id ? work : item), now);
         await this.recordDispatch(db, work, now);
       }
@@ -1707,7 +1751,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
       const provider = reviewProviderOf(work.policy);
@@ -1735,7 +1779,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
       requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
@@ -1856,7 +1900,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
       requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
@@ -1875,13 +1919,18 @@ export class Engine {
         await wakeJob(db, work.id);
         return work;
       }
-      const carry = refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
+      // A docs-sync head (GY-566) resolved a conflict, which the refresh rule never carries across;
+      // its own rule keeps the approval when the diff outside docs/ is unchanged.
+      const carry = refresh.docsSync && refresh.head ? docsSyncCarry({ from: refresh.from, base: refresh.base, at: now.toISOString(), policyRevision: work.policyRevision, merge: refresh.merge ?? null, docsSync: refresh.docsSync,
+        reviewedFiles: work.observation?.candidate.sha === refresh.from.sha ? work.observation.files : [], approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })) })
+        : refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
       work.baseRefresh = { ...refresh, carry };
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head, trigger: refresh.trigger ?? null,
-        ...(refresh.conflict ? { conflict: refresh.conflict } : {}),
+        ...(refresh.conflict ? { conflict: refresh.conflict, conflictPaths: refresh.conflictPaths ?? null } : {}),
+        ...(refresh.docsSync ? { docsSync: { paths: refresh.docsSync.paths, reviewed: refresh.docsSync.reviewed, synced: refresh.docsSync.synced } } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
       // Publication makes the next prediction buildable before this tip's CI finishes.
@@ -1914,7 +1963,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the branch was restored');
       const restore = refresh.restore;
@@ -1997,7 +2046,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done', 'Task changed before the queue ejection');
       requireCurrent(work.queue, 'Queue entry already left the merge queue');
@@ -2023,7 +2072,7 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review failover');
       const request = work.reviewRequest;
@@ -2129,10 +2178,15 @@ export class Engine {
   /**
    * Reconcile every item that can still change, in batches. A pass reads its candidates once
    * (GY-727): the opening transaction — a short coordination transaction, like every mutation's —
-   * reads each non-settled item's document one time, with a settled delivery's summary served
-   * from the work index (GY-203) instead of its document, and sweeps direct merges. After that a
-   * document is read again only for an item that moved since: where the old pass re-read every
-   * document in every batch, O(batches x items), this one is O(items) however many batches it takes.
+   * reads the board through `lockedRows` (GY-1027), every item as its compact stand-in from the
+   * in-process cache (an open item's coordination projection, a settled delivery's work-index
+   * summary), so the lock hold grows with neither the history nor the open items' histories (on
+   * 2026-10-01 re-reading ~1000 whole documents under the lock cost each batch 15-19 s), and sweeps
+   * direct merges. A batch reads each of its own items whole as it reaches it, outside the
+   * coordination lock, and what its commit saved stands in for that row in the next pass's opening
+   * read. After that a document is read again only for an item that moved since: where the old pass
+   * re-read every document in every batch, O(batches x items), this one is O(items) however many
+   * batches it takes.
    *
    * Each batch is its own short transaction on the background lane (a bounded share of the pool)
    * that holds no coordination lock while it evaluates: it compares every row's version (`xmin`,
@@ -2167,21 +2221,22 @@ export class Engine {
       for (const row of (await db.query(reconcileRereadSql, [ids])).rows) fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version });
       view();
     };
-    let opened = false, written = new Set<string>();
+    let opened = false, written = new Set<string>(), saved: SavedVersion[] = [];
     for (;;) {
       const opening = !opened, batch = next;
-      written = new Set();
+      written = new Set(); saved = [];
       let finished: boolean;
       try {
         finished = await this.store.transaction(async (db, now) => {
           if (opening) {
-            const live = (await db.query(reconcileCandidatesSql)).rows as { id: string; number: string; document: Work }[];
-            for (const row of (await db.query(reconcileSettledSql)).rows as { id: string; number: string; summary: Work }[]) fleet.set(row.id, { number: Number(row.number), work: row.summary, version: '' });
-            for (const row of live) fleet.set(row.id, { number: Number(row.number), work: row.document, version: '' });
-            candidates = live.map(row => row.id); view();
+            // Versions first: a row that moves after them reads as moved, so the first batch reads it again —
+            // the items the sweep below delivers included.
+            const versions = await versionsOf(db);
+            const rows = await lockedRows(db, []);
+            for (const { number, document } of rows) fleet.set(document.id, { number, work: document, version: isSettledSummary(document) ? '' : versions.get(document.id) ?? '' });
+            candidates = rows.filter(row => !isSettledSummary(row.document)).map(row => row.document.id); view();
             // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
             await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
-            for (const [id, version] of await versionsOf(db)) { const entry = fleet.get(id); if (entry) entry.version = version; }
             opened = true;
             return false;
           }
@@ -2200,7 +2255,7 @@ export class Engine {
             if (locked.version !== fleet.get(id)?.version) {
               if (written.size) throw new ReconcileContended();
               await reread(db, [id]);
-            }
+            } else if (isStandIn(fleet.get(id)!.work)) await reread(db, [id]);
             if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) written.add(id);
           }
           if (!written.size) return done;
@@ -2208,8 +2263,11 @@ export class Engine {
           const versions = await versionsOf(db);
           if (!locked || moved(versions, written).length) throw new ReconcileContended();
           for (const id of written) fleet.get(id)!.version = versions.get(id)!;
+          saved = await savedVersions(db, [...written].map(id => fleet.get(id)!.work));
           return done;
         }, { lane: 'background', coordinationLock: opening });
+        // Committed: what this batch saved stands in for its rows in the next pass's opening read.
+        rememberSaved(saved);
       } catch (error) {
         if (!(error instanceof ReconcileContended)) throw error;
         // Rolled back: the batch's writes never happened, so its items are read again and it runs again.
@@ -2250,7 +2308,7 @@ export class Engine {
       await save(db, work, 'graphyard', 'delivery.settled', now);
       return true;
     }
-    const before = stableJson(work);
+    const before = JSON.stringify(work);
     // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
@@ -2307,7 +2365,7 @@ export class Engine {
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-    if (stableJson(work) !== before) {
+    if (jsonChanged(before, work)) {
       for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
@@ -2332,7 +2390,7 @@ export class Engine {
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
         requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
       }
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+      const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');

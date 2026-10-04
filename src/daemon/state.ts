@@ -9,9 +9,11 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
+import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
+import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
@@ -368,6 +370,8 @@ export function masterSummary(master: MasterSessionState, now: number) {
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
 }
 
+export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict();
+export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
@@ -396,6 +400,10 @@ export const daemonStateSchema = z.object({
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
   /** Per decision action key, the request this loop put to an approver and what became of it. */
   approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** Per item, head and base tip, the docs-sync session the loop launched for a docs-only conflict (GY-566). */
+  docsSyncs: z.record(z.string(), docsSyncWatchSchema).default({}),
+  /** Every confirmed conflict the loop routed, newest last: master status reads its hotspots from here (GY-566). */
+  conflicts: z.array(routedConflictSchema).default([]),
   /** Per work item, a live lease whose session Herdr no longer reports while no fence stands (see step 1d). */
   absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
@@ -422,11 +430,21 @@ export const daemonStateSchema = z.object({
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
+  /**
+   * Per work item id, the run of consecutive dispatch failures with one unchanged cause (GY-1078),
+   * across epochs: each failed launch spends an epoch, so no per-epoch record could see the run.
+   * Cleared by a launch that lands and once the blocker naming the cause is recorded.
+   */
+  dispatchFailures: z.record(z.string(), dispatchFailureRunSchema).default(() => ({})),
+  /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */
+  projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500;
+/** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
+export const retainedDispatchFailureRuns = 500;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
 export const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
@@ -466,7 +484,11 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  const resolved = entries.filter(([, action]) => action.state === 'done' || action.state === 'failed');
+  // A row holding a standing failing run is that fault's only record (GY-1086): a refusal written
+  // once while it stands (upgrade:refused, a dirty checkout) went oldest, was retired by this bound
+  // within the hour, and its next refusal opened a new instance — six in a day for one cause. It is
+  // kept while its run stands; endFailingRuns ends a run the window no longer sees attempted.
+  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
@@ -486,6 +508,8 @@ export function pruneDaemonState(state: DaemonState) {
   const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
   const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
   if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
+  const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));
+  if (runs.length > retainedDispatchFailureRuns) for (const [id] of runs.slice(0, runs.length - retainedDispatchFailureRuns)) delete state.dispatchFailures[id];
   return state;
 }
 
@@ -516,6 +540,15 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
   if (fault) noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
   state.actions[key] = entry;
   return entry;
+}
+/**
+ * A refusal that still stands, observed again with the same detail (GY-1086): its row is not
+ * rewritten — the run it opened is the one fault — but its time moves, so neither the cursor
+ * bound nor the recurrence window takes it for a run that has ended and opens it again.
+ */
+export function touchStanding(state: DaemonState, key: string, at: string) {
+  const row = state.actions[key];
+  if (row && row.state === 'failed') row.at = at;
 }
 /** The action key a recurring class's filing is recorded under. */
 export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
@@ -556,6 +589,11 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   const failures = state.failures;
   if (failures.last) Object.assign(failures.last, { call: cut(failures.last.call, 100), reason: cut(failures.last.reason, 1000) });
   if (failures.lastUnhandled) failures.lastUnhandled.reason = cut(failures.lastUnhandled.reason, 1000);
+  if (state.projectMemory) {
+    state.projectMemory.decisions = (state.projectMemory.decisions ?? []).slice(0, 50);
+    state.projectMemory.pitfalls = (state.projectMemory.pitfalls ?? []).slice(0, 50);
+    state.projectMemory.changes = (state.projectMemory.changes ?? []).slice(0, 50);
+  }
   return state;
 }
 /** A deployment observation within its schema: 200 deliveries a side (the newest kept) and a 500-character reason. */

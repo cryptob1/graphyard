@@ -3,6 +3,7 @@ import type { Store } from './store.js';
 import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
+import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 import { eventHistoryLimits } from './events-history.js';
 
 // Delivery-flow analytics.
@@ -321,6 +322,16 @@ export interface FlowQuery {
   days: FlowWindow; type?: string | null; stage?: string | null; slice?: string | null; asOf?: string | null; limit?: number; productionEnvironment?: string;
   /** The production watch's report (`ProductionWatch.status()`), read by the caller on this request; absent, no hold. */
   production?: unknown;
+  /**
+   * The only fact kinds the in-window scan reads (`reportKinds`, `drilldownKinds`); absent, every
+   * kind. A reader that derives from a few kinds never has its bound spent on the others.
+   */
+  kinds?: readonly FlowKind[] | null;
+  /**
+   * Where the read starts, when later than the window's start: the dataset's `from`, and the
+   * instant its carried state is read at. The steps drill-down reads from its key's instant.
+   */
+  since?: string | null;
 }
 export interface FlowDataset {
   observedAt: string; from: string; to: string; days: FlowWindow;
@@ -352,6 +363,8 @@ export interface FlowDataset {
    */
   stepEntries?: Record<string, string>;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
+  /** Confirmed conflicts in the day before `to`, from the ledger (GY-566); absent reads as none. */
+  conflicts?: ConflictOccurrence[];
 }
 /**
  * How much of the requested window a bounded scan covered. The in-window scan reads facts in
@@ -442,6 +455,35 @@ export function readByScan(dataset: Pick<FlowDataset, 'scanEnd'>): (fact: FlowFa
   const at = time(end.observedAt)!;
   return fact => { const t = time(fact.observedAt)!; return t < at || (t === at && (fact.id ?? 0) <= end.id); };
 }
+/**
+ * The kinds the flow report counts in its window. Creation, release, dependency, blocker-cleared
+ * and submission facts are read only as an item's latest state (`latest`), never from the window.
+ */
+export const reportKinds: FlowKind[] = flowKinds.filter(kind => !['work.created', 'work.released', 'dependencies.changed', 'blocker.cleared', 'pr.submitted'].includes(kind));
+/**
+ * The kinds each drill-down reads from the window, for those that read a subset: the steps
+ * drill-down derives from gate facts and the merge (`stepMoves`); bottleneck and work in progress
+ * read only latest state. A metric not named here (phase) reads the flow report's own dataset.
+ * When the shared scan bound is exhausted, narrowed drill-downs spend their bound only on their
+ * own kinds, so their reach can extend beyond the report's shared scan cutoff. Metrics whose
+ * kinds are carried in `separateKinds` (`throughput`, `lead-time`, `merge-ready`) align with report
+ * figures, while narrow reads for other metrics (`stage-dwell`, `evidence`, `review`, `blockers`)
+ * can reach further than the truncated report aggregate, stating their own reach in `coverage`.
+ */
+export const drilldownKinds: Partial<Record<string, readonly FlowKind[]>> = {
+  steps: ['gates.changed', 'merged'], 'merge-ready': ['gates.changed'], 'stage-dwell': ['stage.changed'],
+  'lead-time': ['delivered'], throughput: ['delivered'], evidence: ['evidence.recorded'], review: ['review.submitted'],
+  blockers: ['blocker.set'], bottleneck: [], wip: [], deployments: [],
+};
+/**
+ * How far a read covered `kinds` of its window: to its end, or — when a bound stopped it short —
+ * to the earliest instant up to which every one of them was read, with the read's own statement.
+ */
+export function kindsCoverage(dataset: Pick<FlowDataset, 'to' | 'covered' | 'kindCovered'>, kinds: readonly FlowKind[]) {
+  const reached = kinds.map(kind => coveredUntil(dataset, kind) ?? dataset.to).sort((a, b) => time(a)! - time(b)!)[0] ?? dataset.to;
+  const truncated = time(reached)! < time(dataset.to)!;
+  return { truncated, toCovered: truncated ? reached : dataset.to, statement: truncated ? dataset.covered?.statement ?? `The read stopped at ${reached}.` : null };
+}
 /** Up to when the facts of `kind` in the window were all read: its own read, else the shared scan's reach. */
 export function coveredUntil(dataset: { to?: string; covered?: CoveredWindow; kindCovered?: Partial<Record<FlowKind, string>> }, kind: FlowKind): string | undefined {
   return dataset.kindCovered?.[kind] ?? (dataset.covered?.truncated ? dataset.covered.toCovered : dataset.to);
@@ -476,7 +518,13 @@ function rowToFact(row: any): FlowFact {
 export async function readFlow(store: Store, query: FlowQuery): Promise<FlowDataset> {
   const clock = iso((await store.reportPool.query('SELECT clock_timestamp() AS now')).rows[0].now);
   const observedAt = query.asOf && time(query.asOf) !== null && time(query.asOf)! <= time(clock)! ? new Date(time(query.asOf)!).toISOString() : clock;
-  const to = observedAt, from = new Date(time(observedAt)! - query.days * day).toISOString();
+  const to = observedAt, windowStart = time(observedAt)! - query.days * day;
+  const since = query.since ? time(query.since) : null;
+  const from = new Date(since !== null && since > windowStart && since <= time(to)! ? since : windowStart).toISOString();
+  // A kind-filtered read scans only those kinds, and carries past the shared scan only the separate kinds among them.
+  const kinds = query.kinds ? [...new Set(query.kinds)] : null;
+  const ownKinds = kinds ? separateKinds.filter(kind => kinds.includes(kind)) : separateKinds;
+  const kindFilter = kinds ? ' AND kind=ANY($5)' : '';
   // The watch's report is what production serves now; a report as of an earlier instant has none.
   const production = query.asOf ? noProductionHold : productionHold(query.production ?? null);
   // One extra work item and one extra deployment probe their own scan bounds, so an
@@ -496,9 +544,9 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const pending = (await store.reportPool.query('SELECT count(*)::int AS pending FROM (SELECT 1 FROM events WHERE seq>$1 AND work_id IS NOT NULL LIMIT 1001) probe', [lastEvent])).rows[0].pending as number;
   const projection = { lastEvent, updatedAt: projectionRow ? iso(projectionRow.updated_at) : null, pendingEvents: Math.min(pending, 1000), pendingCapped: pending > 1000 };
   const scanLimit = Math.min(Math.max(1, query.limit ?? flowLimits.scan), flowLimits.scan);
-  const scan = ids.length ? await store.reportPool.query(
-    `SELECT * FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3 ORDER BY observed_at,id LIMIT $4`,
-    [ids, from, to, scanLimit + 1]) : { rows: [], rowCount: 0 };
+  const scan = ids.length && kinds?.length !== 0 ? await store.reportPool.query(
+    `SELECT * FROM flow_facts WHERE work_id=ANY($1) AND observed_at>=$2 AND observed_at<$3${kindFilter} ORDER BY observed_at,id LIMIT $4`,
+    [ids, from, to, scanLimit + 1, ...(kinds ? [kinds] : [])]) : { rows: [], rowCount: 0 };
   const truncated = scan.rowCount! > scanLimit;
   const facts = scan.rows.slice(0, scanLimit).map(rowToFact);
   const scanned = facts.length;
@@ -510,16 +558,16 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const lastFact = facts.at(-1);
   const remainingProbe = truncated && lastFact ? await store.reportPool.query(
     `SELECT count(*)::int AS remaining FROM (SELECT 1 FROM flow_facts WHERE work_id=ANY($1) AND observed_at<$2
-       AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$3), $3::bigint) LIMIT $4) probe`,
-    [ids, to, lastFact.id, flowLimits.remainingProbe + 1]) : null;
+       AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$3), $3::bigint)${kindFilter} LIMIT $4) probe`,
+    [ids, to, lastFact.id, flowLimits.remainingProbe + 1, ...(kinds ? [kinds] : [])]) : null;
   const covered = truncated ? coveredWindow(from, to, lastFact?.observedAt ?? from, (remainingProbe?.rows[0].remaining ?? 0) as number, scanLimit) : fullyCovered(from, to);
   // Past where the shared scan stopped, each kind the flow figures count is read on its own bound,
   // in the same order, so check-run and observation facts can never crowd a landing or a step
   // move out of the report. A kind whose own bound is exhausted is covered to its last fact read.
-  const kindCovered: Partial<Record<FlowKind, string>> = Object.fromEntries(separateKinds.map(kind => [kind, to]));
+  const kindCovered: Partial<Record<FlowKind, string>> = Object.fromEntries(ownKinds.map(kind => [kind, to]));
   if (truncated && lastFact) {
     const separate: FlowFact[] = [];
-    for (const kind of separateKinds) {
+    for (const kind of ownKinds) {
       const rows = (await store.reportPool.query(
         `SELECT * FROM flow_facts WHERE kind=$1 AND work_id=ANY($2) AND observed_at<$3
            AND (observed_at,id) > ((SELECT observed_at FROM flow_facts WHERE id=$4), $4::bigint) ORDER BY observed_at,id LIMIT $5`,
@@ -530,7 +578,7 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
     }
     facts.push(...separate.sort((a, b) => time(a.observedAt)! - time(b.observedAt)! || a.id! - b.id!));
   }
-  if (covered.truncated) covered.statement += ` Deliveries, merges and gate changes are read past that cutoff on bounds of their own, so the daily landings and step moves cover ${separateKinds.map(kind => `${kind} to ${kindCovered[kind]}`).join(', ')}.`;
+  if (covered.truncated && ownKinds.length) covered.statement += ` ${ownKinds.length < separateKinds.length ? `${ownKinds.join(', ')} facts are read past that cutoff on bounds of their own, so they cover` : 'Deliveries, merges and gate changes are read past that cutoff on bounds of their own, so the daily landings and step moves cover'} ${ownKinds.map(kind => `${kind} to ${kindCovered[kind]}`).join(', ')}.`;
   // Current state is read as of the observation instant, inclusively: a fact recorded in
   // the same millisecond as the read clock is the state at that instant, never stale.
   // The in-window scan above stays half-open on `to` as documented.
@@ -565,7 +613,12 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
   const scanEnd = truncated && lastFact ? { observedAt: lastFact.observedAt, id: lastFact.id! } : undefined;
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
+  // The conflict hotspots (GY-566) read the last day of confirmed conflicts and docs-sync refreshes,
+  // through the report pool like every other report read (GY-491).
+  const conflictRows = (await store.reportPool.query(`SELECT w.document->>'key' AS key, e.kind, e.created_at, e.payload->'details' AS details FROM events e JOIN work_items w ON w.id=e.work_id
+    WHERE e.kind IN ('base.conflict','base.refreshed') AND e.created_at>=$1 AND e.created_at<$2 ORDER BY e.seq LIMIT $3`, [new Date(time(to)! - conflictHotspotWindowMs).toISOString(), to, flowLimits.scan])).rows;
+  const conflicts = ledgerConflicts(conflictRows.map(row => ({ key: row.key, kind: row.kind, at: iso(row.created_at), details: row.details })));
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection, conflicts };
 }
 
 /**
@@ -582,7 +635,7 @@ export const flowReportCoalesceMs = 10_000;
 /** How many window-and-filter reports one store keeps; each holds its own bounded dataset. */
 export const flowReportPoolLimit = 8;
 export interface PooledFlowReport { dataset: FlowDataset; report: ReturnType<typeof computeFlow> }
-interface PoolEntry { read: Promise<PooledFlowReport>; at: number; lastFact: number; pending: boolean }
+interface PoolEntry<T = PooledFlowReport> { read: Promise<T>; at: number; lastFact: number; pending: boolean }
 const reportPools = new WeakMap<Store, Map<string, PoolEntry>>();
 /**
  * What a pooled report stands for: every query field `readFlow` and `computeFlow` read, and the
@@ -594,7 +647,7 @@ export function flowReportKey(query: FlowQuery): string {
     query.productionEnvironment ?? null, hold.observedAt, [...hold.unserved].sort(), [...hold.failed].sort()]);
 }
 /** Drop every pooled report of `store`, so the next read recomputes: a flow input the fact projection does not record has changed. */
-export function invalidateFlowReports(store: Store) { reportPools.get(store)?.clear(); }
+export function invalidateFlowReports(store: Store) { reportPools.get(store)?.clear(); drilldownPools.get(store)?.clear(); }
 /**
  * The flow report for `query` from the cache, computed on a miss. The bounded projection
  * catch-up runs first on every read — on the report pool (GY-491), like the read itself — so a
@@ -603,14 +656,36 @@ export function invalidateFlowReports(store: Store) { reportPools.get(store)?.cl
  * Concurrent misses share one computation, and a failed one is never cached.
  */
 export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<PooledFlowReport> {
+  return pooled(reportPools, store, flowReportKey(query), () => readFlow(store, { ...query, kinds: reportKinds, since: null }).then(dataset => ({ dataset, report: computeFlow(dataset, query) })));
+}
+/**
+ * One drill-down, answered from the narrowest read that holds its rows: a metric that reads a
+ * subset of kinds (`drilldownKinds`) reads only those, the steps drill-down from its key's instant
+ * on, so facts of other kinds or from earlier in the window never spend the bound its rows need;
+ * any other metric answers from the pooled flow report's dataset. Under a truncated shared scan,
+ * drill-down metrics whose kinds are in `separateKinds` (`throughput`, `lead-time`, `merge-ready`)
+ * count the same delivered/merged/gate facts as the report, while metrics that read other subsets
+ * (`stage-dwell`, `evidence`, `review`, `blockers`) can read facts past the report's shared scan
+ * cutoff and state that reach in their own `coverage`. These reads are pooled apart from the
+ * reports, on the same freshness rules, keyed by their kinds and start.
+ */
+export async function pooledFlowDrilldown(store: Store, query: FlowQuery, request: DrilldownRequest) {
+  const kinds = drilldownKinds[request.metric];
+  if (!kinds) { const { dataset, report } = await pooledFlowReport(store, query); return flowDrilldown(dataset, report, request); }
+  const since = request.metric === 'steps' ? stepsKey(request.key ?? null).instant : null;
+  const narrow = { ...query, kinds, since };
+  const { dataset } = await pooled(drilldownPools, store, JSON.stringify([flowReportKey(query), kinds, since]), () => readFlow(store, narrow).then(dataset => ({ dataset, report: null })));
+  return flowDrilldown(dataset, { filters: { type: query.type ?? null, stage: query.stage ?? null, slice: query.slice ?? null }, productionEnvironment: query.productionEnvironment ?? defaultProductionEnvironment }, request);
+}
+const drilldownPools = new WeakMap<Store, Map<string, PoolEntry<{ dataset: FlowDataset; report: null }>>>();
+async function pooled<T>(pools: WeakMap<Store, Map<string, PoolEntry<T>>>, store: Store, key: string, read: () => Promise<T>): Promise<T> {
   await projectFlow(store, { batches: 3, pool: store.reportPool });
   const lastFact = Number((await store.reportPool.query('SELECT COALESCE(max(id),0) AS id FROM flow_facts')).rows[0].id);
-  const pool = reportPools.get(store) ?? reportPools.set(store, new Map()).get(store)!;
-  const key = flowReportKey(query);
+  const pool = pools.get(store) ?? pools.set(store, new Map()).get(store)!;
   const hit = pool.get(key);
   if (hit && (hit.pending || (Date.now() - hit.at < flowReportFreshMs &&
     (hit.lastFact === lastFact || Date.now() - hit.at < flowReportCoalesceMs)))) return hit.read;
-  const entry: PoolEntry = { at: Date.now(), lastFact, pending: true, read: readFlow(store, query).then(dataset => ({ dataset, report: computeFlow(dataset, query) })) };
+  const entry: PoolEntry<T> = { at: Date.now(), lastFact, pending: true, read: read() };
   pool.delete(key); pool.set(key, entry);
   while (pool.size > flowReportPoolLimit) pool.delete(pool.keys().next().value!);
   entry.read.then(() => { entry.pending = false; }, () => {
@@ -1226,6 +1301,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     },
     coverage, exclusions, unavailable,
     stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, mergeQueue, phases, ci, evidence, operations, bottleneck,
+    // The paths most often conflicting in the last day and the items they sent back (GY-566).
+    conflictHotspots: conflictHotspots(dataset.conflicts ?? [], to),
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;
@@ -1401,8 +1478,10 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { fr
 export const drilldownCatalog = drilldownMetrics;
 
 // Bounded drill-down to the exact underlying records behind an aggregate.
-export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request: DrilldownRequest) {
+export function flowDrilldown(dataset: FlowDataset, report: Pick<FlowReport, 'filters' | 'productionEnvironment'>, request: DrilldownRequest) {
   const metric = request.metric, key = request.key ?? null, authorized = request.authorized === true;
+  // How far the read behind these rows reached: a bound that stopped it short is said, never an empty answer.
+  const coverage = kindsCoverage(dataset, drilldownKinds[metric] ?? reportKinds);
   const columns = ['workKey', 'metric', 'bucket', 'observedAt', 'valueMs', 'pullRequest', 'commit', 'detail'];
   const rows: Record<string, string | number | null>[] = [];
   const keyOf = new Map(dataset.work.map(item => [item.id, item.key]));
@@ -1530,7 +1609,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     for (const fact of dataset.facts.filter(fact => fact.kind === 'blocker.set' && scopedIds.has(fact.workId) && (!key || blockerReasonKey(fact) === key)))
       row(fact.workKey, blockerReasonKey(fact) ?? 'blocker', fact.observedAt, null, null, null, String(fact.details.reason ?? ''));
   } else {
-    return { metric, key, supported: drilldownMetrics, error: `Unknown drill-down metric; choose one of ${drilldownMetrics.join(', ')}`, columns, rows: [], total: 0, truncated: false, next: null };
+    return { metric, key, supported: drilldownMetrics, error: `Unknown drill-down metric; choose one of ${drilldownMetrics.join(', ')}`, columns, rows: [], total: 0, truncated: false, next: null, coverage };
   }
   const order = (value: Record<string, any>) => `${workKeyOrder(String(value.workKey))}|${value.bucket ?? ''}|${value.observedAt ?? ''}|${value.commit ?? ''}|${value.detail}`;
   rows.sort((left, right) => order(left).localeCompare(order(right)));
@@ -1553,7 +1632,7 @@ export function flowDrilldown(dataset: FlowDataset, report: FlowReport, request:
     const read = (cursor?.within?.key === cut ? skipped : 0) + page.length;
     next = `${cursor!.instant ?? ''} ${alone ? `within:${cut}:${read}` : `after:${page.at(-1)!.workKey}`}`.trim();
   }
-  return { metric, key, supported: drilldownMetrics, columns, total: rows.length - skipped, truncated, next, rows: page, authorized };
+  return { metric, key, supported: drilldownMetrics, columns, total: rows.length - skipped, truncated, next, rows: page, authorized, coverage };
 }
 
 /** A work key in the drill-down's row order: its number padded, so GY-9 sorts before GY-10. */

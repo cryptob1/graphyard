@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isClosed, type Closure } from './closure.js';
 import { followUpEntries, followUpEntryKey, followUpParent, hasShipped, mergeFollowUpEntries, type FollowUpEntry, type Parent } from './machine-backlog.js';
 import type { Work } from './work.js';
@@ -8,6 +9,7 @@ import type { Work } from './work.js';
 // parents' follow-up items back onto them.
 
 const open = (work: Pick<Work, 'stage'>) => work.stage !== 'done';
+const liveLease = (work: Pick<Work, 'lease'>, now: Date) => !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
 /** The findings a parent holds that still wait to be filed or dropped. */
 export const heldFollowUps = (parent: Pick<Parent, 'pendingFollowUps'>) => {
   const held = parent.pendingFollowUps;
@@ -55,34 +57,60 @@ export function pendingFollowUpsReport(all: readonly (Parent & Pick<Work, 'title
 }
 
 /**
- * Review follow-ups triage notes for GY-1047 (approved review follow-ups of GY-845 / PR #528):
- * - Finding 1, 9, 16, 18, 23, 25: `followUpShipKey` incorporates the hold's timestamp (`at`) into
- *   the idempotency key so that reopening a hold on an already-delivered parent generates a fresh key
- *   and avoids replaying the cached receipt. Modifications to `src/reviewer.ts` and `src/server/followups-ship.ts`
- *   are declined here as outside planned scope (`plannedFiles: ['src/model/followups-held.ts', 'tests/followups-after-ship.test.ts']`);
- *   `followUpShipKey` is exported for use by `src/reviewer.ts` and the server route in a follow-up item.
- * - Finding 2: `deliver` in unit tests updates Postgres directly to avoid end-to-end merge queue and
- *   CI overhead while isolating follow-up transitions; real delivery through the engine observation path
- *   is verified by `tests/soak.test.ts`.
- * - Finding 4, 13: `foldUnshippedFollowUps` skips items with an active lease (`item.lease`) to avoid
- *   ending a worker's in-progress attempt without notice, and returns them in `deferred` so callers
- *   can defer writing the final migration ledger event until leased items conclude.
- * - Finding 22: `foldUnshippedFollowUps` indexes parents in a `Map<string, Work>`, eliminating the
- *   quadratic O(n²) `all.find` scan during the migration transaction.
- * - Findings 3, 5-8, 10-12, 14-15, 17, 19-21, 24: Declined with recorded reasons (see PR description);
- *   all lie in modules outside planned scope (`src/server/followups.ts`, `src/server/followups-ship.ts`,
- *   `src/reviewer.ts`, `src/model/machine-backlog.ts`, `src/review-threads.ts`, `src/model/invariants.ts`,
- *   `tests/soak.test.ts`).
+ * Review follow-ups triage notes for GY-1047 and its follow-ups GY-1136, GY-1141:
+ * - GY-1047 findings 1, 9, 16, 18, 23, 25 / GY-1136 findings 1, 5: the ship route
+ *   (src/server/followups-ship.ts) answers under `followUpShipReceiptKey`, the caller's key scoped to
+ *   the hold's timestamp (`at`), so a hold reopened on an already-delivered parent is filed instead of
+ *   replaying the earlier filing's receipt under the dispatcher's fixed key. The unused client-side
+ *   `followUpShipKey` is removed: the server owns the scoping, so src/reviewer.ts needs no change.
+ * - GY-1047 finding 2 / GY-1136 finding 8: declined. The unit tests' `deliver` writes the delivered
+ *   document straight to Postgres, and `tests/soak.test.ts` also calls `shipHeldFollowUps` with a stub
+ *   ship, so neither drives delivery through `engine.observe`. The follow-up path reads delivery only
+ *   through `hasShipped` (machine-backlog.ts), which these tests exercise on the same fields the
+ *   observation path writes (`stage: 'done'`, no closure, `delivery.mergeSha`); the observation path
+ *   writing those fields is covered by the merge-observation tests, not here.
+ * - GY-1047 findings 4, 13 / GY-1136 findings 2, 3, 4, 6, 7: `foldUnshippedFollowUps` skips an open
+ *   item only under a live lease (`expiresAt` after `now`), so a lapsed one folds; skipped items are
+ *   returned in `deferred`, and `migrateToParents` (src/server/followups-ship.ts) records the one-time
+ *   migration event only once nothing is deferred, so the next ask folds them after their lease ends.
+ * - GY-1047 finding 22: `foldUnshippedFollowUps` indexes parents in a `Map<string, Work>`.
+ * - GY-1141 findings 1, 4, 5 (src/server/followups-ship.ts, src/server/followups.ts): declined with recorded reason.
+ *   The server-side implementation at src/server/followups.ts:168 and src/server/followups-ship.ts:103 already executes
+ *   migrateToParents ahead of the GY-402 receipt replay on every call under the fixed migration key until the
+ *   followups.parent-migrated event is recorded, so retrying deferred parent migrations is already supported and verified
+ *   server-side (tested by tests/followups-after-ship.test.ts:190). The client-side premature migrated = true flag and
+ *   note formatting in src/daemon/cycle-triage.ts:29 lies in the daemon and is outside the planned files of this item;
+ *   attempting to refuse deferred migrations with HTTP 409 breaks the existing contract of POST /api/followups/migrate
+ *   which unit tests pin at 200 OK with parents.deferred. Client-side handling of deferred items is left to a daemon-scoped item.
+ * - GY-1141 finding 2: followUpShipReceiptKey ensures the scoped key length never exceeds the 200-character
+ *   Idempotency-Key limit by incorporating a digest when key@at > 200, preventing 400 errors on 176-200
+ *   character caller keys.
+ * - GY-1141 finding 3 (src/server/followups-ship.ts): lapsed migration leases end via endLapsedAttempt
+ *   (pipeline-speed.ts) as 'expired' at their deadline rather than 'released' at migration time, avoiding
+ *   inflated recorded execution.
+ * - GY-1141 finding 6 (src/regression-guard.ts): declined. The companion branch at src/regression-guard.ts:50
+ *   is GY-1023's delivered implied-scope-companion mechanism (PR #535) — it passes only on a content-verified
+ *   companion verdict (timingBaselineCompanion limits edits to the change's own test files' lines) and
+ *   refuses everything else; any residue belongs with GY-1058.
+ * - GY-1141 finding 7 (src/model/action-kinds.ts): workerSlotWait excludes terminated worker session states
+ *   (killed, terminated, exited, etc.) from busy launch profiles so terminated sessions are not treated as
+ *   slot capacity waits and stall attention is not deferred 30 minutes.
  */
 
 /**
- * Idempotency key for filing held follow-ups after ship (GY-845, GY-1047; findings 1, 9, 16, 18, 23, 25).
- * Incorporates the hold's timestamp so a re-hold after an earlier filing generates a distinct key
- * and avoids replaying the cached receipt of the previous filing.
+ * The receipt a request to file a parent's held follow-ups is answered under (GY-845, GY-1047, GY-1136, GY-1141):
+ * the caller's idempotency key scoped to the hold's timestamp. A retry within one hold replays its
+ * receipt, while a hold reopened after an earlier filing is filed afresh, whatever fixed key the
+ * dispatcher sends (`followups-after-ship:GY-N`). The scoped key's length is bounded at 200 chars (GY-1141).
  */
-export function followUpShipKey(parent: Pick<Parent, 'key' | 'pendingFollowUps'>): string {
-  const at = parent.pendingFollowUps?.at ?? '';
-  return `followups-after-ship:${parent.key}${at ? `:${at}` : ''}`;
+export function followUpShipReceiptKey(key: string, parent: Pick<Parent, 'pendingFollowUps'>): string {
+  const at = parent.pendingFollowUps?.at;
+  if (!at) return key;
+  const candidate = `${key}@${at}`;
+  if (candidate.length <= 200) return candidate;
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 16);
+  const prefix = key.slice(0, 200 - 1 - at.length - 1 - hash.length);
+  return `${prefix}:${hash}@${at}`;
 }
 
 /** The ledger kind of the one-time fold of unshipped parents' follow-up items (GY-845); its presence makes a second run a no-op. */
@@ -92,23 +120,18 @@ export const followUpParentMigrationEvent = 'followups.parent-migrated';
  * findings back onto the parent and is closed as superseded by it, naming it. Nothing is deleted. A
  * parent already closed without shipping drops what it then holds. Items are changed in place.
  *
- * Finding 4 & 13: items in build under a live lease (`item.lease`) are skipped so in-progress attempts
- * are not aborted without notice; they are returned in `deferred` so callers can defer finalizing
- * the migration.
- * Finding 22: parents are indexed by key in a Map so parent lookup is O(1) instead of O(n²).
+ * An open item under a live lease (one whose `expiresAt` is after `now`) is skipped so an attempt in
+ * progress is not ended without notice; it is returned in `deferred`, and the caller leaves the
+ * migration unfinished until none are. A lapsed lease folds like no lease. Parents are indexed by key.
  */
 export function foldUnshippedFollowUps(all: Work[], actor: string, now: Date) {
   const folded: { work: Work; parent: Work; added: number }[] = [], parents = new Set<Work>(), deferred: Work[] = [];
   const parentsByKey = new Map<string, Work>();
   for (const item of all) parentsByKey.set(item.key, item);
   for (const item of all) {
-    if (item.lease) {
-      const key = open(item) ? followUpParent(item) : null, parent = key ? parentsByKey.get(key) : undefined;
-      if (parent && !hasShipped(parent)) deferred.push(item);
-      continue;
-    }
     const key = open(item) ? followUpParent(item) : null, parent = key ? parentsByKey.get(key) : undefined;
     if (!parent || hasShipped(parent)) continue;
+    if (liveLease(item, now)) { deferred.push(item); continue; }
     const { added } = holdFollowUps(parent, followUpEntries(item), now);
     const closure: Closure = { kind: 'superseded', ref: parent.key, by: actor, at: now.toISOString(), from: item.stage,
       reason: `Folded back onto ${parent.key}, which has not shipped: its follow-ups wait there and become one follow-up item when it is delivered (GY-845 follow-up migration)` };

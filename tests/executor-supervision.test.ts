@@ -363,7 +363,10 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
   const row = item.actionQueue!.actions.find(entry => entry.kind === 'dispatch')!;
   assert.ok(row, 'a released item with nobody on it needs a dispatch, and the control plane keeps the row for it');
 
-  // Nobody polls. The queue alone cannot tell this from every executor being busy; presence can.
+  // Nobody polls. The queue alone cannot tell this from every executor being busy; presence can,
+  // once the control plane has listened for a whole liveness window (GY-1086) — before that an
+  // empty registry is a fleet not yet heard from. This one has been listening that long.
+  Object.assign(executorRegistry(engine), { since: new Date(Date.now() - executorLiveMs - 1) });
   const before = await ok(coordinator, 'GET', 'actions');
   assert.deepEqual(before.executors.live, []);
   assert.deepEqual(before.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']]);
@@ -563,10 +566,10 @@ test('integration:killed-worker-work-preserved: a worker killed outright keeps i
     assert.match(prompt, new RegExp(`The previous attempt \\(epoch 1\\) ended without submitting: its agent session agent-builder is gone from Herdr \\(first seen gone at [^)]+\\) and its supervisor has exited without releasing the lease; its work is kept as commit ${kept} on local branch graphyard/${work.key.toLowerCase()}-1 \\(worktree ${worktree}\\)\\. Read it with git log and git show`));
     assert.doesNotMatch(prompt, /ran out of quota/);
 
-    // The second attempt ends the ordinary way — a blocker for the operator, its lease released,
-    // its session gone — so the profile is free for the next item and the first is not re-offered.
+    // The second attempt ends the ordinary way — a blocker for the operator, which ends the attempt
+    // and releases its lease (GY-1008), its session gone — so the profile is free for the next item
+    // and the first is not re-offered.
     await ok(workerA, 'POST', `work/${work.id}/blocked`, { epoch: 2, reason: 'fixture: parked for the operator' });
-    await ok(workerA, 'POST', `work/${work.id}/release`, { epoch: 2 });
     process.kill(agents[1].pid, 'SIGKILL'); await until(() => !processAlive(agents[1].pid), 'the second worker process to die');
 
     // --- B. The agent dies but its supervisor keeps renewing the lease: the orphan step keeps the

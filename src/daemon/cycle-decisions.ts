@@ -5,21 +5,20 @@ import { detectRuntimeExhaustion } from '../master/environments.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
+import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, approverLaunchKey, attestDecisions, approverPrefixes, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, recordWatchEnded, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
-import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
+import { baseRefreshConflict } from '../merge-queue.js';
+import { docsSyncRoute } from './docs-sync-route.js';
+import { wakeObservationJob } from './cycle-delivery.js';
 
-/** The launcher key of the approver launch for a decision (GY-616). */
-const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
-/** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
-export const handWatchPrefix = 'hand:';
-/** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
-const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+/** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
+export { handWatchPrefix };
 
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
@@ -40,8 +39,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
   let inventory: { agents: HerdrAgent[]; available: boolean } | null = null;
   const sessions = async () => inventory ??= await effects.herdr?.() ?? { agents: await effects.agents(), available: true };
-  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) =>
-    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
+    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   /**
    * End the agent registry session a watch's launch holds (GY-182). At a role concurrency of 1 a
    * live one refuses the next decision's approver, so it goes wherever the approver is closed or
@@ -71,15 +70,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true;
     }
     catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
-  };
-  /**
-   * Keep how a watch's session ended, named by its launch so two sessions that ended alike under
-   * the same name stay two reasons (GY-551). The same step taken again on the same session — a
-   * close or re-request retried next cycle — records nothing new.
-   */
-  const recordEnded = (watch: ApprovalWatch, detail: string) => {
-    const entry = `${watch.agentName ? `session ${watch.launches}: ` : ''}${detail}`.slice(0, 300);
-    if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
   };
   const approverCapacity = capacities.find(capacity => capacity.role === 'approver');
   const capacityWait = () => `every approver account is spent, so no approver is launched before ${approverCapacity?.retryAt ?? 'an account reports quota again'}`;
@@ -249,7 +239,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const ended = `approver session ${watch.agentName} exhausted ${spentOn} mid-session (${signal.reason}; ${resets})`;
       // The registry slot goes first (closeApprover ends it): at a role concurrency of 1 the replacement is refused while it is held.
       if (!await closeApprover(item, watch, ended)) throw new Error(`the session could not be closed, so its name or registry slot still refuses a replacement`);
-      recordEnded(watch, ended);
+      recordWatchEnded(watch, ended);
       Object.assign(watch, { launches: Math.max(0, watch.launches - 1), agentName: null, pane: null });
       const next = await launch(item, watch, false);
       performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `${ended} judging ${watch.action} decision ${watch.decision}; ${next}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -287,7 +277,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
       return 'done';
     }
-    recordEnded(watch, step.detail);
+    recordWatchEnded(watch, step.detail);
     if (step.step === 'rerequest') return 'rerequest';
     if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return 'done'; }
     try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
@@ -310,14 +300,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A request whose response was lost is already standing on the item, and the server refuses a
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
-      // Only a merge decision names what it binds. One standing for an earlier candidate can never
+      // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
-      if (standing && decision.action === 'merge' && !(standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision)) {
-        const stale = `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${decision.binding.slice(0, 12)}`;
-        if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
-        await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
-        standing = undefined;
-      }
+      const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
+      if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
       // it would settle this watch while the lease-loss still stands, and the binding would never
@@ -508,6 +494,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
+      // The shared memory takes the approver's judgement as it settled, never a refusal (GY-1125).
+      recordSettledDecision(state.projectMemory, watch, judged, stamp);
       await note(`${base}:settled`, item, 'decision', 'done', step.detail);
       if (judged) await noteScopeOutcome(item, watch, judged);
       return;
@@ -550,6 +538,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
     return judged?.state === 'done' && !/^Widened /.test(judged.detail);
   };
+  // GY-566: a docs-only conflict routes to a docs-sync session instead of a rework decision. The
+  // route — classification, session watch, hotspot log — lives in docs-sync-route.ts; the step
+  // runs its sweep here and consults `holds` where a conflict rework decision would be requested.
+  const docsSync = docsSyncRoute({ config, state, effects, snapshot, sessions, note, inventorySpent: () => { inventory = null; }, stamp, clock });
+  await docsSync.sweep();
   // GY-849: when capacity frees, the capacity-refused decisions are relaunched oldest first. The
   // items a waiting decision belongs to move to the front of the step in age order, and their
   // relaunches enter the launcher one at a time (`capacityRelaunchInFlight`), so the oldest waiting
@@ -562,19 +555,24 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const held = capacityRank.get(watch.work);
     if (held === undefined || age < held) capacityRank.set(watch.work, age);
   }
-  const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
-  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => {
-    const aRank = waitingRank(a), bRank = waitingRank(b);
-    return aRank === bRank ? 0 : aRank < bRank ? -1 : 1;
-  }) : snapshot.work;
-  // A producer request whose attempts are used up calls for a rework once its escalation has stood
-  // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
+  const rank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
+  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => rank(a) - rank(b)) : snapshot.work;
+  // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
+  // A needed decision with no watch is requested once ready to retry, or escalated.
+  const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
+    const previous = state.actions[key];
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
+    if (effects.decide && effects.approver) return request(item, decision, key, null);
+    const escalationKey = `escalation:decision:${item.id}:${decision.binding}`, input = decision.action === 'attest' ? ` '${JSON.stringify(decision.input)}'` : '';
+    const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
+    if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  };
   for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment, exhausted);
+    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, exhausted);
@@ -588,6 +586,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       return;
     }
     const key = decisionKey(item, decision);
+    // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566).
+    if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
     needed.add(key);
     const watch = state.approvals[key];
     // Rework waits for an observation that still describes the item (GY-144). A request already
@@ -597,30 +597,33 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
+      // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
+      // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
+      await wakeObservationJob(cycle, item, 'rework');
       return;
     }
-    // A settled watch is supervised no more, but a registry session its close could not end still
-    // holds the role's slot: ending it is tried again each cycle until the registry is told.
+    // A settled watch is supervised no more; an unclosed registry session is retried.
     if (watch) {
       if (!watch.settledAt) await supervise(item, decision, key, watch);
       else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
       return;
     }
-    const previous = state.actions[key];
-    // A `done` entry with no watch is a cursor written before requests were supervised; the
-    // request path adopts the decision it left standing and launches an approver for it.
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
-    if (!effects.decide || !effects.approver) {
-      const escalationKey = `escalation:decision:${item.id}:${decision.binding}`;
-      const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
-      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    await request(item, decision, key, null);
+    // A done entry with no watch adopts the standing decision and launches an approver.
+    await requestNeeded(item, decision, key);
   });
-  // A watch whose item no longer needs its decision — applied and moved on, or overtaken by a new
-  // head — has nothing left to judge. Its session is closed rather than left holding a provider
-  // seat, and the watch goes with it; one Herdr cannot be read for stays until it can.
+  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
+  for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
+    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
+    for (const decision of attestations) {
+      const key = decisionKey(item, decision), watch = state.approvals[key];
+      needed.add(key);
+      if (watch && !watch.settledAt) { judging = true; await supervise(item, decision, key, watch); }
+      else if (watch?.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
+    }
+    const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
+    if (next) await requestNeeded(item, next, decisionKey(item, next));
+  });
+  // A watch whose item no longer needs its decision is closed rather than left holding a provider seat.
   for (const [key, watch] of Object.entries(state.approvals)) await isolate('decision', snapshot.work.find(candidate => candidate.key === watch.work) ?? null, watch.work, async () => {
     // A watch the loop made for a session it did not launch has no request of the loop's to take back (below).
     if (needed.has(key) || key.startsWith(handWatchPrefix)) return;

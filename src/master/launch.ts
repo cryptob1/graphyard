@@ -304,13 +304,23 @@ export function outputAfterCommand(screen: string | null, command: string) {
   if (prompted && echoed > 0 && lines[echoed - 1] && after.at(-1) === lines[echoed - 1]) after.pop();
   return after.length ? after.slice(-exitedLineLimit).map(line => line.length > paneLineLimit ? `${line.slice(0, paneLineLimit)}…` : line) : null;
 }
-/** Whether the pane's own shell holds its terminal's foreground, as `herdr pane process-info` reports it: nothing the launch typed is still running. False when Herdr cannot say. */
-export async function shellInForeground(pane: string, run?: ChildRun) {
+/**
+ * Who holds the pane's terminal foreground, as `herdr pane process-info` reports it: `shell` when
+ * the pane's own shell does (nothing the launch typed is still running), `command` when another
+ * process group does (the typed launch command — its supervisor, then the runtime — is executing),
+ * null when Herdr cannot say.
+ */
+export async function paneForeground(pane: string, run?: ChildRun): Promise<'shell' | 'command' | null> {
   try {
     const raw = await herdrJson(['pane', 'process-info', '--pane', pane], run);
     const info = raw?.process_info ?? raw;
-    return Number.isSafeInteger(info?.shell_pid) && info.shell_pid > 0 && info.foreground_process_group_id === info.shell_pid;
-  } catch { return false; }
+    if (!Number.isSafeInteger(info?.shell_pid) || info.shell_pid <= 0 || !Number.isSafeInteger(info?.foreground_process_group_id) || info.foreground_process_group_id <= 0) return null;
+    return info.foreground_process_group_id === info.shell_pid ? 'shell' : 'command';
+  } catch { return null; }
+}
+/** Whether the pane's own shell holds its terminal's foreground (paneForeground). False when Herdr cannot say. */
+export async function shellInForeground(pane: string, run?: ChildRun) {
+  return await paneForeground(pane, run) === 'shell';
 }
 export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates): Promise<StartObservation> {
   let agent: HerdrAgent | null = null;
@@ -320,11 +330,13 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // started one is, and has not read its request (GY-130).
   if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
+  let foreground: 'shell' | 'command' | null | undefined;
+  const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run)));
   // A runtime that printed below its command and handed the terminal back to the shell has exited
   // before it was ready — Cursor's IDE launcher saying "No Cursor IDE installation found", a
   // command not found — and nothing will start in that pane however long the bound (GY-976).
   const printed = outputAfterCommand(screen, command);
-  if (printed && await shellInForeground(pane, run)) return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
+  if (printed && await readForeground() === 'shell') return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
   const prompt = detectConsentPrompt(screen);
   if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
   // A runtime stopped on its own settings warning has not started either, whatever Herdr reports,
@@ -343,7 +355,17 @@ export async function observeStart(pane: string, kind: string, command: string, 
   if (agent?.agent === kind && showing && readyStates.includes('working')) return { state: 'ready', agent, detail: `the ${kind} runtime is on screen while Herdr reports it ${agent.agent_status ?? 'unknown'}`, line };
   if (agent?.agent === kind) return { state: 'starting', agent, detail: `the ${kind} runtime process exists under the pane, Herdr reports it ${agent.agent_status ?? 'unknown'}${showing ? ', its screen showing' : ''}`, line };
   if (showing) return { state: 'starting', agent: null, detail: `the ${kind} banner is on screen`, line };
-  return { state: 'absent', agent: null, line, detail: commandEchoing(last, command) ? 'command still echoing' : agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : 'no runtime under the pane' };
+  // The launch command is on screen and still holds the pane's foreground: its supervisor is
+  // setting up — containment calls to a control plane that may be slow under load — before it
+  // spawns the runtime. That launch is starting, given until the ceiling, never refused as absent
+  // at the bound (GY-1033). Its detail quotes what the supervisor last printed, if anything. Only
+  // a pane whose shell is back in the foreground with nothing printed, or one Herdr cannot
+  // describe, is absent. A pane where Herdr reports a different agent is absent (GY-1053).
+  if (!agent?.agent && (printed || commandEchoing(last, command)) && await readForeground() === 'command') {
+    const said = printed?.at(-1);
+    return { state: 'starting', agent: null, line, detail: said ? `the launch command is running, its supervisor setting up: "${said}"` : 'the launch command is running, its supervisor still setting up' };
+  }
+  return { state: 'absent', agent: null, line, detail: agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : commandEchoing(last, command) ? 'command still echoing' : 'no runtime under the pane' };
 }
 export async function awaitRuntimeStart(pane: string, kind: string, command: string, run?: ChildRun, bounds: StartBounds = {}) {
   const timeoutMs = bounds.timeoutMs ?? agentStartTimeoutMs, ceilingMs = Math.max(timeoutMs, bounds.ceilingMs ?? agentStartCeilingMs), pollMs = bounds.pollMs ?? startPollMs;
@@ -372,6 +394,9 @@ export async function awaitRuntimeStart(pane: string, kind: string, command: str
         await wait(pollMs);
         continue;
       }
+      // A workspace-trust prompt means the recipe's trust step did not take (GY-1152): the launch
+      // fails naming it, and is never held as a session keeping its lease while it waits.
+      if (prompt.kind === 'folder') throw new SessionStartError('awaiting consent', pane, prompt.text, waitedMs, `the ${kind} runtime stopped at a workspace-trust prompt in pane ${pane} although its launch records the folder trusted, so the launch failed rather than holding the lease for a human: "${prompt.text}"`);
       const why = rule ? `the launcher answered it ${consentAnswerAttempts} times and it is still showing` : `it is outside the launcher's consent allow-list`;
       // A session held for a human is reported, not refused: it has not taken its request, and it
       // is never counted as started. Everything else refuses the launch with the prompt's own text.

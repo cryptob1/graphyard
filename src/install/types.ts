@@ -54,6 +54,13 @@ export interface InstallPlan {
   host?: import('./host.js').HostPlan;
   /** The provider's monthly price for the server this install would create (Hetzner, GY-717 AC-5). */
   price?: import('./pricing.js').PriceQuote | null;
+  /**
+   * The repository's delivery model (GY-1102): its mode, the checks protection requires on pull
+   * requests, the per-candidate checks, and the adapter deploying UAT and production.
+   * `committed` is false while graphyard.json holds no reviewed policy yet: protection then keeps
+   * the discovered checks until `graphyard init --scan --apply` records the split.
+   */
+  delivery: { mode: 'release-candidate' | 'per-pr'; committed: boolean; preMerge: string[]; perCandidate: string[]; adapter: 'railway' | 'command' };
 }
 
 export interface InstallInputs {
@@ -99,6 +106,8 @@ export interface InstallInputs {
    * saved registration or the checkout's `.graphyard/github-app.json` before asking for a browser click.
    */
   githubAppFile?: string;
+  /** Create the cost-bearing UAT and production resources the plan marks as human decisions (GY-1102). */
+  createEnvironments?: boolean;
 }
 
 export function installIdFor(repository: string) {

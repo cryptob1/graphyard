@@ -221,7 +221,8 @@ test('the App-bound merge check is required only once Graphyard has published it
   const published = await harness({ provider: 'compose', protection: { required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: null }] }, enforce_admins: { enabled: false }, required_pull_request_reviews: { required_approving_review_count: 0 } } });
   try {
     const { summary } = await apply(published, 'compose');
-    const put = published.transport.commands.filter(command => command.args.includes('--method') && command.args.includes('PUT')).at(-1)!;
+    // The last protection write; the release pipeline's GitHub environments are PUTs of their own.
+    const put = published.transport.commands.filter(command => command.args.includes('--method') && command.args.includes('PUT') && command.args.some(arg => arg.endsWith('/protection'))).at(-1)!;
     const payload = JSON.parse(put.input!);
     const merge = payload.required_status_checks.checks.find((check: any) => check.context === CHECK_NAME);
     assert.equal(merge.app_id, GRAPHYARD_APP_ID, 'the merge check must be bound to the Graphyard App');

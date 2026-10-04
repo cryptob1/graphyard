@@ -1,9 +1,10 @@
 import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
-import { followUpEntries, followUpShipSchema, mergeFollowUpEntries, openFollowUpItem, appendedDescription, type FollowUpEntry } from '../model/machine-backlog.js';
-import { followUpParentMigrationEvent, foldUnshippedFollowUps, shippedFollowUpsOwed } from '../model/followups-held.js';
+import { followUpEntries, followUpParent, followUpShipSchema, mergeFollowUpEntries, openFollowUpItem, appendedDescription, type FollowUpEntry } from '../model/machine-backlog.js';
+import { followUpParentMigrationEvent, followUpShipReceiptKey, foldUnshippedFollowUps, shippedFollowUpsOwed } from '../model/followups-held.js';
 import { shippedFollowUpItem } from '../review-threads.js';
-import { endAttempt } from '../pipeline-speed.js';
+import { endLapsedAttempt } from '../pipeline-speed.js';
+import { isStandIn, lockedWork } from '../store/locked-read.js';
 import { save } from '../store.js';
 import { settleOpenRequests } from './close.js';
 import { authenticated, digest, receipt } from './decisions.js';
@@ -13,7 +14,8 @@ import type { Services } from './routes.js';
 // delivered parent's held findings filed as its one follow-up item, the one-time fold of unshipped
 // parents' follow-up items back onto them, and the helpers the follow-up routes share.
 export type Db = pg.PoolClient;
-export const readAll = async (db: Db): Promise<Work[]> => (await db.query('SELECT document FROM work_items ORDER BY number FOR UPDATE')).rows.map(row => row.document);
+// The named items, what overlaps them and their dependencies whole and locked; the rest as compact stand-ins (GY-1027).
+export const readAll = (db: Db, focus: string[] = []): Promise<Work[]> => lockedWork(db, focus, { forUpdate: true });
 export const recordDispatch = (services: Services, db: Db, work: Work, now: Date) =>
   (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
 /** The master's identities: its coordinator, its operator agent (holding `intent:create`), or an admin. */
@@ -48,35 +50,38 @@ export async function shipFollowUps(services: Services, caller: Principal, id: s
   const fingerprint = digest({ id, ship: true });
   const frozen = await services.engine.store.transaction(async (db, now) => {
     const actor = await authenticated(services, db, now, caller);
-    const replay = await receipt(db, actor, key, fingerprint); if (replay) return { replay };
-    const all = await readAll(db);
+    const all = await readAll(db, [id]);
     const parent = all.find(item => item.id === id || item.key === id); demand(parent, 'Work item not found', 404);
     masterOnly(actor, parent, services, 'file held review follow-ups');
+    // Answered per hold: a hold reopened after an earlier filing never replays that filing's receipt.
+    const scoped = followUpShipReceiptKey(key, parent!);
+    const replay = await receipt(db, actor, scoped, fingerprint); if (replay) return { replay };
     const held = parent!.pendingFollowUps;
     demand(held && !held.dropped && (held.filing && !held.filed || shippedFollowUpsOwed(parent!)), `${parent!.key} is not a delivered item holding follow-ups to file`, 409);
     // One open follow-up item per parent, in any stage: one already open takes the held findings.
     const open = held!.filing ? undefined : openFollowUpItem(all, parent!.key);
     if (open) {
+      const openItem = isStandIn(open) ? (await readAll(db, [parent!.id, open.id])).find(item => item.id === open.id)! : open;
       const count = held!.findings.length;
-      await appendToItem(services, db, actor, open, parent!.key, held!.findings, `Held on ${parent!.key} until it shipped:`, all, now, { reason: data.reason });
-      parent!.pendingFollowUps = { ...held!, filed: { item: open.key, at: now.toISOString() } };
-      await save(db, parent!, actor.id, 'followups.filed', now, { item: open.key, findings: count, later: 0, appended: true });
-      const result = { key: open.key, findings: count };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
+      await appendToItem(services, db, actor, openItem, parent!.key, held!.findings, `Held on ${parent!.key} until it shipped:`, all, now, { reason: data.reason });
+      parent!.pendingFollowUps = { ...held!, filed: { item: openItem.key, at: now.toISOString() } };
+      await save(db, parent!, actor.id, 'followups.filed', now, { item: openItem.key, findings: count, later: 0, appended: true });
+      const result = { key: openItem.key, findings: count };
+      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, scoped, fingerprint, JSON.stringify(result)]);
       return { replay: result };
     }
     if (!held!.filing) {
       held!.filing = { key: `followups-after-ship:${parent!.key}:${digest(held!.findings).slice(0, 16)}`, count: held!.findings.length, at: now.toISOString() };
       await save(db, parent!, actor.id, 'followups.filing', now, { ...held!.filing, reason: data.reason });
     }
-    return { actor, parent: parent!, filing: held!.filing, findings: held!.findings.slice(0, held!.filing.count) };
+    return { actor, parent: parent!, scoped, filing: held!.filing, findings: held!.findings.slice(0, held!.filing.count) };
   });
   if ('replay' in frozen) return frozen.replay;
-  const { actor, parent, filing, findings } = frozen;
+  const { actor, parent, scoped, filing, findings } = frozen;
   const item = shippedFollowUpItem({ key: parent.key, pr: parent.candidate?.pr ?? null, mergeSha: parent.delivery?.mergeSha ?? null }, findings);
   const created = await services.engine.execute(caller, 'create', null, item, filing.key);
   return services.engine.store.transaction(async (db, now) => {
-    const all = await readAll(db);
+    const all = await readAll(db, [parent.id, created.id]);
     const current = all.find(entry => entry.id === parent.id)!, filed = all.find(entry => entry.id === created.id)!;
     const held = current.pendingFollowUps!;
     const result = { key: created.key, findings: filing.count };
@@ -86,7 +91,7 @@ export async function shipFollowUps(services: Services, caller: Principal, id: s
       await save(db, current, actor.id, 'followups.filed', now, { item: created.key, findings: filing.count, later: later.length });
       if (later.length && filed.stage !== 'done') await appendToItem(services, db, actor, filed, current.key, later, `Held on ${current.key} after this item was filed:`, all, now, { reason: 'held after filing' });
     }
-    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [actor.id, key, fingerprint, JSON.stringify(result)]);
+    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [actor.id, scoped, fingerprint, JSON.stringify(result)]);
     return result;
   });
 }
@@ -94,16 +99,21 @@ export async function shipFollowUps(services: Services, caller: Principal, id: s
  * The one-time fold of GY-845: each open follow-up item whose parent has not shipped is closed as
  * superseded by the parent, its findings held there (`followUpParentMigrationEvent`); a parent
  * closed without shipping drops what it then holds, saying why. Nothing is deleted; a second run
- * returns the first run's record.
+ * returns the first run's record. Items deferred under a live lease leave the migration unfinished:
+ * no record is written, so the next ask folds them once their lease has ended.
  */
 export async function migrateToParents(services: Services, db: Db, actor: Principal, now: Date) {
   const previous = (await db.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq LIMIT 1', [followUpParentMigrationEvent])).rows[0]?.payload;
   if (previous) return { ...previous, already: true };
-  const all = await readAll(db);
-  const { folded, parents, dropped } = foldUnshippedFollowUps(all, actor.id, now);
+  const compact = await readAll(db);
+  const unshipped = compact.filter(item => item.stage !== 'done' && followUpParent(item));
+  const parentKeys = new Set(unshipped.map(item => followUpParent(item)!));
+  const focus = [...unshipped.map(item => item.id), ...compact.filter(item => parentKeys.has(item.key)).map(item => item.id)];
+  const all = await readAll(db, focus);
+  const { folded, parents, dropped, deferred } = foldUnshippedFollowUps(all, actor.id, now);
   for (const { work, parent } of folded) {
     const settled = settleOpenRequests(work, work.closure!, now);
-    if (work.lease) { endAttempt(work, work.lease.epoch, 'released', now); work.lease = null; }
+    if (work.lease) { endLapsedAttempt(work, work.lease, now); work.lease = null; }
     services.engine.evaluate(work, all, now);
     Object.assign(work, { queue: null, mergeAuthorization: null });
     await recordDispatch(services, db, work, now);
@@ -113,6 +123,7 @@ export async function migrateToParents(services: Services, db: Db, actor: Princi
     folded: folded.filter(entry => entry.parent === parent).map(entry => entry.work.key), dropped: parent.pendingFollowUps?.dropped?.reason ?? null });
   const payload = { folded: folded.length, at: now.toISOString(), by: actor.id, parents: parents.map(parent => ({ key: parent.key, folded: folded.filter(entry => entry.parent === parent).map(entry => entry.work.key), held: parent.pendingFollowUps?.findings.length ?? 0 })),
     dropped: dropped.map(entry => ({ key: entry.parent.key, findings: entry.dropped, reason: entry.parent.pendingFollowUps!.dropped!.reason })) };
+  if (deferred.length) return { ...payload, deferred: deferred.map(item => item.key) };
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, followUpParentMigrationEvent, JSON.stringify(payload)]);
   return payload;
 }

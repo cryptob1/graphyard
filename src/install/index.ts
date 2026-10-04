@@ -4,7 +4,10 @@ import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { discover } from '../onboarding.js';
+import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
+import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
+import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
+import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { existingMachineAdapter, generateHostSecrets, hostLayout, hostPlan, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
@@ -77,6 +80,23 @@ export interface InstallSession {
   generatedFiles: { assignment: GeneratedFilesAssignment | null; error: string | null };
   /** The App registration this install reuses instead of the browser step, or why the named one cannot be. */
   savedApp: { app: SavedApp | null; error: string | null };
+  /**
+   * The repository's delivery model (GY-1102): the reviewed policy graphyard.json commits, or the
+   * one a scan would propose when none is committed yet (`committed` false), with the adapter that
+   * deploys its UAT and production environments.
+   */
+  delivery: { policy: DeliveryPolicy; committed: boolean; adapter: DeploymentAdapter; context: DeploymentContext };
+}
+
+/** The committed delivery policy, or the one `init --scan` would propose for this checkout. */
+export async function repositoryDelivery(root: string): Promise<{ policy: DeliveryPolicy; committed: boolean }> {
+  const { readFile } = await import('node:fs/promises');
+  let text: string | null = null;
+  try { text = await readFile(resolve(root, repositoryConfigFile), 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  const committed = text === null ? undefined : parseRepositoryConfig(text).delivery;
+  if (committed) return { policy: committed, committed: true };
+  const input = await collectScanInput(root), stack = detectStack(input);
+  return { policy: proposeDelivery(input, detectDeploy(input, stack), stack), committed: false };
 }
 
 const APP_HUMAN_STEP = 'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository.';
@@ -146,6 +166,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
   try { generatedFiles = { assignment: generatedFilesAssignment(root), error: null }; }
   catch (error: any) { generatedFiles = { assignment: null, error: error.message }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
+  const delivery = await repositoryDelivery(root);
   const inputs = { ...rawInputs, provider, baseBranch: rawInputs.baseBranch ?? 'main' };
   const transport = dependencies.transport ?? localTransport();
   const ssh = dependencies.ssh ?? ((host: string, user = inputs.sshUser ?? 'root') => sshTransport(host, user, transport));
@@ -193,10 +214,20 @@ export async function prepareInstall(cwd: string, rawInputs: InstallInputs, depe
   const savedApp = await findSavedApp(root, directory, inputs);
   if (savedApp.app) { vault.add(savedApp.app.facts.privateKey); if (savedApp.app.facts.webhookSecret) vault.add(savedApp.app.facts.webhookSecret); }
   const adapter = dependencies.adapter ?? (selfContained ? selfContainedAdapter(provider === 'host' ? existingMachineAdapter : adapterFor(provider)) : adapterFor(provider));
+  const deployment: DeploymentContext = {
+    repository: inputs.repository, installId, baseBranch: inputs.baseBranch, policy: delivery.policy,
+    railwayDir: `${directory}/release-railway`, workspace: inputs.workspace ?? null, transport,
+    created: record?.release?.created ?? [], createEnvironments: !!inputs.createEnvironments,
+  };
+  // Only a reviewed, committed split reaches branch protection; until `init --scan --apply` records
+  // one, protection keeps the checks discovery proposes. An explicit --required-check always wins.
+  const requiredChecks = inputs.requiredChecks?.length ? inputs.requiredChecks
+    : delivery.committed ? requiredPullRequestChecks(delivery.policy) : detected.proposedChecks;
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
     reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, savedApp,
-    reviewPolicy, requiredChecks: inputs.requiredChecks?.length ? inputs.requiredChecks : detected.proposedChecks,
+    delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment },
+    reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
   };
@@ -331,6 +362,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   if (session.inputs.githubAppFile) preflight.push(session.savedApp.error
     ? { name: 'GitHub App registration', ok: false, detail: session.savedApp.error, fix: 'Name the JSON the manifest flow saved for this repository with --github-app FILE, or omit --github-app to register the App in the browser' }
     : { name: 'GitHub App registration', ok: true, detail: `reusing app ${session.savedApp.app!.facts.appId} from ${session.savedApp.app!.file}` });
+  const candidateModel = session.delivery.policy.mode === 'release-candidate';
+  if (candidateModel) preflight.push(...await session.delivery.adapter.preflight(session.delivery.context));
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
   const core = coreEnv(session);
@@ -386,6 +419,13 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
   if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off for the merge queue; at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
   actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, which the merge queue needs, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
+  // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
+  // production resource the deployment adapter would create, cost-bearing ones marked human.
+  if (candidateModel) {
+    const ghReady = preflight.some(item => item.name === 'GitHub CLI' && item.ok);
+    actions.push(...wiringActions(session.delivery.context, ghReady ? await observeReleaseWiring(gh, session.inputs.repository) : null));
+    actions.push(...session.delivery.adapter.plan(session.delivery.context));
+  }
   if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}" and add its identity to GRAPHYARD_REVIEWER_APPS`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
 
   // A local Compose install serves loopback only, so GitHub can never deliver to it. Saying
@@ -423,13 +463,21 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     domain: context.domain, url: observation.url ?? record?.url ?? null, existing, secretsRedacted: true,
     preflight, principals: session.principals, actions, drift,
     humanSteps: [CORE_HUMAN_STEPS[0], ...(saved && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
-      ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : [])],
+      ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : []),
+      ...(candidateModel ? ['Approve any UAT or production resource the plan marks as costing money before rerunning with --apply --create-environments; without that flag none is created.'] : [])],
     ...(host ? { host: hostPlan(context) } : {}),
     ...(context.provider === 'hetzner' ? { price: quotedPrice(context) } : {}),
+    delivery: deliverySummary(session),
   };
   const serialized = JSON.stringify(plan);
   session.vault.assertClean(serialized, 'the installation plan');
   return session.vault.scrub(plan);
+}
+
+function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
+  const { policy, committed } = session.delivery;
+  return { mode: policy.mode, committed, preMerge: requiredPullRequestChecks(policy),
+    perCandidate: policy.mode === 'per-pr' ? [] : policy.mergeGate.perCandidate.map(entry => entry.check), adapter: policy.deploy.adapter };
 }
 
 function describeProtection(protection: any) {
@@ -452,6 +500,7 @@ export interface InstallSummary {
   host?: HostFleetResult;
   /** The single-use dashboard sign-in for the admin; printed once, stored on the host only as a hash. */
   signIn?: string;
+  release: { mode: 'release-candidate' | 'per-pr'; adapter: 'railway' | 'command'; created: string[]; pending: { id: string; command?: string; human?: string }[] };
 }
 
 /**
@@ -548,6 +597,18 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off for the merge queue); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
     : `already matches the ${session.reviewPolicy} review policy`;
 
+  // The release pipeline's free wiring, then the adapter's environments: paid ones only with
+  // --create-environments, every other one left pending with its exact command.
+  const release: InstallSummary['release'] = { mode: session.delivery.policy.mode, adapter: session.delivery.policy.deploy.adapter, created: [], pending: [] };
+  if (release.mode === 'release-candidate') {
+    release.created.push(...await applyWiring(gh, session.delivery.context));
+    const provisioned = await session.delivery.adapter.provision(session.delivery.context, { createPaid: !!session.inputs.createEnvironments });
+    release.created.push(...provisioned.created);
+    release.pending = provisioned.pending.map(action => ({ id: action.id, ...(action.command ? { command: action.command } : {}), ...(action.human ? { human: action.human } : {}) }));
+  }
+  const releaseCreated = [...new Set([...(record.release?.created ?? []), ...release.created.filter(id => !id.startsWith('release.branches') && !id.startsWith('release.github'))])];
+  record = { ...record, release: { adapter: release.adapter, created: releaseCreated } };
+
   const status = await authenticatedStatus(session, url);
   const installation = installationClient(facts, deps.fetch);
   const since = deps.now();
@@ -586,7 +647,8 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(session.tokens.get(principal.id)!), tokenFile: context.host ? hostTokenFile(context.host.layout, principal.id) : tokenFile(session.directory, principal.id) })),
     github: { appId: facts.appId, installationId: facts.installationId, slug: facts.slug, ciAppIds: ciApps.map(entry => entry.appId) },
     protection: protectionDetail, health, status, webhook, profiles, drift: plan.drift,
-    nextSteps: nextSteps(session, url, mergeCheckExists, webhook, profiles),
+    nextSteps: [...nextSteps(session, url, mergeCheckExists, webhook, profiles), ...release.pending.map(action => `${action.human ?? 'Pending'} Command: ${action.command}`)],
+    release,
     ...(fleet ? { host: fleet } : {}),
     ...(context.host?.claim ? { signIn: `${url}/#claim=${context.host.claim}` } : {}),
   };

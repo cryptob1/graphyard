@@ -127,6 +127,13 @@ export const producerLedgerBound = sessionLedgerBound;
 
 const settledAt = (record: { closedAt?: string; idleSince?: string; requestedAt: string }) => Date.parse(record.closedAt ?? record.idleSince ?? record.requestedAt);
 const finished = ['idle', 'done', 'blocked'];
+/**
+ * Whether the reclaim pass may close an unowned holder: any status but running. The namespace
+ * reading counts every non-working unowned holder as stale (and overdue past its bound), so the
+ * pass gives back exactly what the reading charges: a pane Herdr reports `unknown` once its
+ * runtime stopped reporting is no less finished than an idle one (GY-1165).
+ */
+const reclaimableStatus = (agent: HerdrAgent) => agent.agent_status !== 'working';
 type Role = 'worker' | 'reviewer' | 'producer';
 const roleProfiles = (input: Pick<ResourceInputs, 'profiles'>): { role: Role; name: string; agentName: string; concurrency?: number; principal?: string }[] => [
   ...input.profiles.workers.filter(profile => profile.mode === 'launch' && profile.agentName).map(profile => ({ role: 'worker' as const, name: profile.name, agentName: profile.agentName, principal: profile.principal })),
@@ -206,7 +213,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'agent-names', title: 'Herdr agent-name namespace', unit: 'names',
     bound: "each launch profile's concurrency: its fixed agent name at concurrency 1, or that many derived <agentName>-<8hex> names above it",
     usage: 'Herdr agent list: every agent whose name is one of the profile\'s session names', owner: 'Herdr, through the worker, reviewer and producer launchers in src/master.ts',
-    reclaim: `the reclaim pass closes a finished pane on one of the names once its record has been settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned (a worker pane is closed by the loop's first step once its lease ends)`,
+    reclaim: `the reclaim pass closes a finished pane on one of the names once its session has settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned`,
     remedy: 'close the finished panes holding the names (graphyard master run --once, or herdr pane close PANE after confirming the session posted its result)',
     // A name held by a live session is the slot pool working; only names nothing live owns, and no
     // reclaim gave back within its bound, warn (GY-1089). A running session is never reclaimable: it
@@ -332,7 +339,7 @@ function stuckSession(record: { state: string; agentName: string; idleSince?: st
   if (record.state !== 'pending' || !agents) return false;
   const agent = agents.find(candidate => candidate.name === record.agentName);
   if (!agent) return now - Date.parse(record.requestedAt) >= stuckSessionMs;
-  return agent.agent_status === 'blocked' && now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
+  return (agent.agent_status === 'blocked' || finished.includes(agent.agent_status ?? '')) && now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
 }
 
 const disk = new Set<ResourceId>(['worktree-disk', 'database-capacity']);
@@ -559,8 +566,8 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * written from a fresh read once the panes are closed, so a launch recorded meanwhile survives.
  *
  * It runs every cycle of the loop and from `master run --once`. It removes nothing a live request
- * or a running session needs, and it never touches a worker's pane: the loop's first step closes
- * those once their lease ends.
+ * or a running session needs, and it closes finished worker panes once their lease has ended and
+ * their session has settled.
  */
 /**
  * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
@@ -589,7 +596,7 @@ export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => recl
 /** Wait for the /tmp pass in flight, if any: for a caller that must see it finish. */
 export const settleTmpReclaim = async () => { await tmpPass; };
 
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'>, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport> } = {}): Promise<ResourceReclaimReport> {
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport> } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
   const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [] };
@@ -614,7 +621,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
         const first = file.seen[key] ?? report.at;
         if (now - Date.parse(first) < stuckSessionMs) { seen[key] = first; continue; }
       }
-      const reason = agent ? `blocked on a prompt in Herdr for over ${stuckSessionMs / 60_000} minutes without a result` : `absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes`;
+      const reason = agent
+        ? (agent.agent_status === 'blocked' ? `blocked on a prompt in Herdr for over ${stuckSessionMs / 60_000} minutes without a result` : `finished (${agent.agent_status}) in Herdr for over ${stuckSessionMs / 60_000} minutes without a result`)
+        : `absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes`;
       // A session never acknowledged and gone from Herdr never started: the launcher's retry policy for that case applies.
       const resolution = !agent && !record.acknowledgedAt
         ? `${neverStartedReason}: the session left Herdr without acting on its request (reclaimed; its slot is released and the request may be launched again)`
@@ -628,11 +637,13 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (records.some(record => record.state === 'pending' && record.agentName === agent.name && !failed.has(identity(record)))) continue;
       const settled = records.filter(record => record.agentName === agent.name).at(-1);
       // A session this pass just released is closed at once; any other waits out the grace, finished.
+      // A holder with no record (reaped at retention, or never written) has no settle time of its
+      // own: the two passes the grace apart are its clock, so its name is never pinned (GY-1165).
       const released = report.released.some(entry => entry.name === agent.name);
-      if (!settled || (!released && (now - settledAt(settled) < finishedSessionGraceMs || !finished.includes(agent.agent_status ?? '')))) continue;
+      if (!released && (!reclaimableStatus(agent) || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
       const first = file.seen[agent.pane_id] ?? report.at;
       if (!released && now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id] = first; continue; }
-      const state = failed.has(identity(settled)) ? 'failed' : settled.state, resolution = failed.get(identity(settled))?.resolution ?? settled.resolution;
+      const state = !settled ? 'left no record' : failed.has(identity(settled)) ? 'failed' : settled.state, resolution = settled ? failed.get(identity(settled))?.resolution ?? settled.resolution : undefined;
       try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}` }); }
       catch (error) { report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`); }
     }
@@ -668,6 +679,25 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
     }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
+  // 4. Worker panes on a profile's names whose session settled and no live lease holds the profile's principal.
+  for (const worker of config.workers ?? []) {
+    const held = (observed.agents ?? []).filter(agent => agent.pane_id && agent.name && isProfileSession(worker, agent.name));
+    for (const agent of held) {
+      const profile = { role: 'worker' as const, name: worker.name, agentName: worker.agentName, principal: worker.principal };
+      if (liveOwner(profile, agent.name!, { reviews: [], producers: [], work: observed.work, now })) continue;
+      if (!reclaimableStatus(agent)) continue;
+      const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work });
+      if (settled !== null && now - settled < finishedSessionGraceMs) continue;
+      const first = file.seen[agent.pane_id!] ?? report.at;
+      if (now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id!] = first; continue; }
+      try {
+        await close(agent.pane_id!);
+        report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: 'its worker session finished and holds no active assignment' });
+      } catch (error) {
+        report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
   // The host's own temporary directories (GY-421): a bounded pass removes what earlier runs left —
   // a live owner keeps its directory, a dead owner's goes whatever its age, and an ownerless one
   // goes once it is older than `tmpReclaimMinAgeMs` and no live process holds it open. Both bounds

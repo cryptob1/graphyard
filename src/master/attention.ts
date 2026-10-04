@@ -1,5 +1,6 @@
 // Concern: who owns each attention item, control-plane attention, fleet and production summaries.
 import { environmentBlocked, blockedPath } from '../worker-sandbox.js';
+import { blockerView } from '../model/blocker-class.js';
 import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { type Work, standingEscalations } from '../model.js';
@@ -7,6 +8,7 @@ import { currentRestore, refusedReconciliation } from '../merge-queue.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
+import { roleAtCapacity } from '../fleet.js';
 import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
 
@@ -110,6 +112,11 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
   const escalation = standingEscalations(work)[0];
   if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  // A blocker of a routine class is the loop's to clear (GY-1008): it probes the cause every cycle.
+  const blocker = blockerView(work);
+  // A sandbox refusal the probe keeps failing on is the launcher's grant to fix (GY-134); the loop clears it once the grant lands.
+  const grant = environmentBlocked(work.blocker) ? `; while it fails, grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox")` : '; nothing to run by hand';
+  if (blocker && !blocker.needsSomeone) return agentOwner('control plane', `The loop re-checks the ${blocker.class} blocker every cycle and clears it once the probe passes${blocker.lastProbe ? ` (last probe ${blocker.lastProbe.at}: ${blocker.lastProbe.result})` : ''}${grant}`);
   // A required command the worker's sandbox refused is the launcher's to fix, never the item's (GY-134).
   if (environmentBlocked(work.blocker)) return agentOwner('master', `Grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox"), then graphyard master unblock ${key} REASON and dispatch it again`);
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
@@ -156,6 +163,7 @@ export function starvedJobText(job: NonNullable<ControlPlaneStatus['starvedJobs'
  * on. Everything that stops a role from launching is attention the master resolves itself, in
  * the registry: no file on this host decides it.
  */
+const masterRoleUnnamed = (text: string) => /^role master is not configured\b/.test(text);
 export function fleetStatus(fleet: FleetView | null | undefined) {
   if (!fleet) return { fleet: null, attentionItems: [] as AttentionItem[] };
   const accounts = fleet.accounts.map(account => ({ account: account.name, runtime: account.runtime, model: account.model, modelId: account.modelId, cost: account.cost, capability: account.capability?.tier ?? null, host: account.host,
@@ -163,7 +171,9 @@ export function fleetStatus(fleet: FleetView | null | undefined) {
     loggedIn: account.loggedIn, quota: account.quota, usage: account.usage, resetsAt: account.resetsAt, observedAt: account.observedAt, eligible: account.eligible, ineligible: account.ineligible,
     smoke: account.smoke ? { result: account.smoke.result, at: account.smoke.at, reason: account.smoke.reason } : null, heldFrom: account.held ?? [] }));
   // A role at its limit is raised only for its sessions that carry no work (GY-950): a capacity fault, not configuration.
-  const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.map(text => /^role \S+ is at its concurrency limit\b/.test(text) ? { subject: 'fleet', text,
+  // A role at its limit with all sessions on work is no fault (GY-1086), nor is the opt-in master role when unconfigured.
+  const fullRoleOnWork = (text: string) => /^role \S+ is at its concurrency limit\b/.test(text) && !/carrying no work/.test(text);
+  const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.filter(text => !fullRoleOnWork(text) && !masterRoleUnnamed(text)).map(text => /^role \S+ is at its concurrency limit\b/.test(text) ? { subject: 'fleet', text,
     ...agentOwner('master', 'graphyard master registry session end ID --reason REASON for each session it names, once its runtime has nothing to do'), ...classified('fleet-capacity') } : { subject: 'fleet', text,
     ...agentOwner('master', /is not configured/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON' : /serves no role/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --reason REASON, or graphyard master registry account remove NAME --reason REASON'
       : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)'), ...classified('fleet') }) : [];
