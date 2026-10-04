@@ -27,7 +27,7 @@ import { docsSyncAdoption, outsideDocs, overlappingPaths, type DocsSync } from '
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
-import { firstObservationOwed, observationBandLag, observationClaim, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
+import { firstObservationOwed, observationBandLag, observationClaim, observationClaimBatch, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
@@ -3031,7 +3031,7 @@ const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.
  * missing or older than that is raised as attention naming the head, its lag, and what the
  * workers have actually been achieving.
  */
-export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null } | null | undefined,
+export function observationThroughputStatus(coordinator: { githubBudget?: ({ throughput?: { jobsPerMinute?: number; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } & Partial<Pick<GitHubBudget, 'remaining' | 'limit' | 'resetAt' | 'perMinute' | 'projectedExhaustionAt' | 'exhaustsBeforeReset' | 'reserve' | 'tokens' | 'billable'>> & { pace?: Partial<GitHubBudget['pace']> | null }) | null; mergeQueue?: { batchSize?: number; parallelTips?: number } | null } | null | undefined,
   snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
   const throughput = coordinator?.githubBudget?.throughput ?? null;
   const reading = coordinator?.githubBudget ?? null;
@@ -3058,8 +3058,9 @@ export function observationThroughputStatus(coordinator: { githubBudget?: ({ thr
     .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
   const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
   const headStale = !!head && (headObservationAgeMs === null || headObservationAgeMs > observationFreshnessMs);
-  // Lag per band against its bound (GY-1114); a stale head is the item below, not counted twice.
-  const lag = observationBandLag(snapshot.work, now, headStale ? head!.key : null);
+  // Lag per band against its bound (GY-1114); a stale head is the item below, not counted twice. The
+  // merge band spans the queue positions the workers claim with the merge path (GY-1178).
+  const lag = observationBandLag(snapshot.work, now, headStale ? head!.key : null, observationClaimBatch(coordinator?.mergeQueue?.batchSize, coordinator?.mergeQueue?.parallelTips));
   const report = { budget, jobsPerMinute: throughput?.jobsPerMinute ?? null, medianDurationMs: throughput?.medianDurationMs ?? null,
     p90DurationMs: throughput?.p90DurationMs ?? null, oldestDueJobMs, head: head?.key ?? null, headObservationAgeMs, oldestUnobservedSubmission, bands: lag.bands };
   const attention: AttentionItem[] = headStale && head
@@ -3106,7 +3107,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   const all = await engine.store.list();
   // The band spans the parallel-tip window too (GY-498): every entry validated at once is claimed first.
   // A job an observation webhook made due is claimed ahead of all of it by `takeJob` itself (GY-806).
-  const band = Math.max(engine.mergeBatchSize, engine.parallelTips);
+  const band = observationClaimBatch(engine.mergeBatchSize, engine.parallelTips);
   // Review-requested items past half their bound join the protected prefix (GY-1114).
   const plan = observationClaim(all, band, Date.now(), budgetTight(github.budget?.()));
   const job = await engine.store.takeJob(plan.order, plan.headCount);
@@ -3239,8 +3240,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
               work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
                 const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
                 if (!jobRow) return itemToUpdate;
-                const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-                const cur = all.find(w => w.id === itemToUpdate.id);
+                // Only this item is read under the coordination lock (GY-1027).
+                const cur: Work | undefined = (await db.query('SELECT document FROM work_items WHERE id=$1', [itemToUpdate.id])).rows[0]?.document;
                 if (!cur) return itemToUpdate;
                 const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
                 if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
