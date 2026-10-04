@@ -318,7 +318,12 @@ test('unit:deployment-source-is-a-release — the observation takes the newest s
     ];
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (args[1].includes('/deployments?')) { assert.doesNotMatch(args[1], /ref=/, 'the listing is not filtered by ref'); return listing(listed); }
+      if (args[1].includes('/deployments?')) {
+        assert.doesNotMatch(args[1], /ref=/, 'the listing is not filtered by ref');
+        // GitHub honours the environment filter, so a namesake is seen only on the unfiltered page.
+        const environment = /environment=([^&]*)/.exec(args[1]);
+        return listing(environment ? listed.filter(record => record.environment === decodeURIComponent(environment[1])) : listed);
+      }
       const asked = statusRead(args);
       if (asked) return statusAnswer(asked, () => 'success');
       throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
@@ -513,12 +518,13 @@ test('unit:deployment-observation-environment-filter — 600 CI reporting deploy
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
 
-test('unit:deployment-observation-inactive-release — the newest production deployment that reached success and was later marked inactive is the served release; one superseded by a newer success, or behind a failed, unreadable or other-branch attempt, stays fail-closed', async () => {
+test('unit:deployment-observation-inactive-release — the newest production deployment that reached success and was later marked inactive is the served release, also while a newer one is still in flight; one superseded by a newer success, or behind a failed, unreadable or other-branch attempt, stays fail-closed', async () => {
   const fixture = await deliveredHistory(3);
   try {
     await writeFile(fixture.token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const [old, mid, release] = fixture.shas;
-    type Status = { latest: string; history: string[] } | null;
+    // `recent` is the history's other end, when it is longer than the read's first window.
+    type Status = { latest: string; history: string[]; recent?: string[] } | null;
     let records: { id: number; sha: string; ref: string; environment: string }[] = [];
     let status: Record<number, Status> = {};
     const run = (command: string, args: string[]) => {
@@ -527,9 +533,10 @@ test('unit:deployment-observation-inactive-release — the newest production dep
       if (listed !== null) return listed;
       const asked = statusRead(args);
       if (asked) {
-        assert.match(args[3], /statuses\(first: \d+\) \{ nodes \{ state \} \}/, 'the read asks for each deployment\'s status history');
+        assert.match(args[3], /statuses\(first: 100\) \{ nodes \{ state \} \} recent: statuses\(last: 100\) \{ nodes \{ state \} \}/, 'the read asks for both ends of each deployment\'s status history');
         // GitHub lists a deployment's statuses newest first.
-        return JSON.stringify({ data: { nodes: asked.map(id => { const value = status[id]; return value ? { databaseId: id, latestStatus: { state: value.latest.toUpperCase() }, statuses: { nodes: value.history.map(state => ({ state: state.toUpperCase() })) } } : null; }) } });
+        const states = (history: string[]) => ({ nodes: history.map(state => ({ state: state.toUpperCase() })) });
+        return JSON.stringify({ data: { nodes: asked.map(id => { const value = status[id]; return value ? { databaseId: id, latestStatus: { state: value.latest.toUpperCase() }, statuses: states(value.history), recent: states(value.recent ?? value.history) } : null; }) } });
       }
       throw new Error(`unexpected GitHub request: ${args.join(' ')}`);
     };
@@ -581,6 +588,24 @@ test('unit:deployment-observation-inactive-release — the newest production dep
     records = [production(5, 'c'.repeat(40), 'graphyard/gy-7-1'), production(3, release)];
     status = { 3: deactivated };
     assert.equal((await observe()).source, 'unavailable');
+
+    // A newer release still pending, queued or in progress does not serve yet: production still
+    // serves the deactivated release behind it, through the whole deploy window.
+    for (const flight of ['pending', 'queued', 'in_progress', 'waiting']) {
+      records = [production(4, mid), production(3, release)];
+      status = { 4: { latest: flight, history: [flight] }, 3: deactivated };
+      const window = await observe();
+      assert.equal(window.sha, release, `a newer ${flight} deployment does not supersede the release production serves`);
+      assert.deepEqual(window.pending, []);
+    }
+    // Once it concludes, it does: a success is the release, a failure leaves the older one unasserted.
+    status[4] = { latest: 'failure', history: ['failure', 'in_progress'] };
+    assert.equal((await observe()).source, 'unavailable');
+
+    // A success outside the first window of a long history is still seen at the history's other end.
+    records = [production(3, release)];
+    status = { 3: { latest: 'inactive', history: Array.from({ length: 100 }, () => 'inactive'), recent: ['in_progress', 'success', 'inactive'] } };
+    assert.equal((await observe()).sha, release, 'the success past the first 100 statuses');
 
     // A newer attempt still underway has served nothing: the deactivated release behind it is served (GY-1106).
     records = [production(6, mid), production(3, release)];

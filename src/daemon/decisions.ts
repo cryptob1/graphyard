@@ -13,6 +13,7 @@ import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { sessionName } from '../session-name.js';
 
 /** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
 export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
@@ -519,7 +520,10 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const tip = observation.baseTip ?? candidate.baseSha;
-  if (observation.conflicting && !work.queue)
+  // While the control plane's own test merge of the head onto that tip is pending, it decides: a
+  // confirmed conflict is `baseRefreshConflict`'s, routed to a docs-sync session when it is confined
+  // to docs pages (GY-566), and a clean one costs no round at all.
+  if (observation.conflicting && !work.queue && !pendingBaseRefresh(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
   if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
@@ -763,4 +767,18 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   const refusal = work.mergeRefusal, candidate = work.candidate;
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
+
+/** The launcher key of the approver launch for a decision (GY-616). */
+export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
+/** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
+export const handWatchPrefix = 'hand:';
+/** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
+export const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+
+/** Record how a watch's session ended (GY-551). */
+export function recordWatchEnded(watch: ApprovalWatch, detail: string) {
+  const entry = `${watch.agentName ? `session ${watch.launches}: ` : ''}${detail}`.slice(0, 300);
+  if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
+}
+
 

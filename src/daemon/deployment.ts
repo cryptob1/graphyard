@@ -87,10 +87,16 @@ export const productionEnvironmentRecord = (environment: unknown, production: st
 
 /** GitHub's node ids are opaque base64-like tokens; anything else is not sent inside a query. */
 const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
-/** A deployment's latest states while it is still being deployed: it has served nothing yet. */
-const underwayStates = new Set(['pending', 'queued', 'waiting', 'in_progress']);
-/** How many of a deployment's statuses the batched read asks for, to tell whether it ever reached success. */
-const deploymentStatusHistory = 20;
+/**
+ * How many of a deployment's statuses the batched read asks for at each end of its history, to tell
+ * whether it ever reached success: the earliest and the latest, GitHub's connection maximum each, so
+ * the success is seen whichever order the connection lists them in and however many statuses were
+ * added after it. Only a deployment with more than twice this many statuses, its success in the
+ * middle, is unseen, and that one fails closed.
+ */
+const deploymentStatusHistory = 100;
+/** States of a deployment still on its way: it does not serve yet, so it supersedes nothing. */
+const inFlightStates = new Set(['pending', 'queued', 'in_progress', 'waiting']);
 /**
  * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
  * has only a per-deployment status listing. A deployment whose status could not be read has no
@@ -104,7 +110,7 @@ async function deploymentStates(repository: string, deployments: any[], run: Chi
   if (!readable.length) return { states: [], succeeded: [], failure: 'GitHub listed it without a node id' };
   let nodes: any[];
   try {
-    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } statuses(first: ${deploymentStatusHistory}) { nodes { state } } } } }`;
+    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } statuses(first: ${deploymentStatusHistory}) { nodes { state } } recent: statuses(last: ${deploymentStatusHistory}) { nodes { state } } } } }`;
     const answer = JSON.parse(await run('gh', ['api', 'graphql', '-f', `query=${query}`]));
     nodes = Array.isArray(answer?.data?.nodes) ? answer.data.nodes : [];
   } catch (error) { return { states: [], succeeded: [], failure: message(error) }; }
@@ -117,7 +123,8 @@ async function deploymentStates(repository: string, deployments: any[], run: Chi
   return {
     failure: null,
     states: answers.map(node => node === undefined ? undefined : typeof node.latestStatus?.state === 'string' ? node.latestStatus.state.toLowerCase() : 'pending'),
-    succeeded: answers.map(node => Array.isArray(node?.statuses?.nodes) && node.statuses.nodes.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success')),
+    succeeded: answers.map(node => [node?.statuses?.nodes, node?.recent?.nodes].some(history => Array.isArray(history)
+      && history.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success'))),
   };
 }
 
@@ -153,10 +160,11 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // Whether a production deployment newer than the one being read has been listed: a release
     // Railway marked inactive is served only while nothing newer was deployed to production.
     let newerProduction = false;
-    // Whether a newer release attempt still underway, never yet successful, was passed over.
+    // Whether a newer release attempt still on its way, never yet successful, was passed over.
     let underway = false;
-    // Environments named like production under another identity, reported when no release is found
-    // so an unconfigured Railway installation is told the name to configure rather than left pending.
+    // Environments named like production under another identity, reported when the production
+    // environment records nothing so an unconfigured Railway installation is told the name to
+    // configure rather than left pending. Only the unfiltered page below can list them.
     const namesake = new Set<string>();
     for (let page = 1; page <= deploymentListingPages && !sha && !exhausted; page++) {
       let deployments: any[];
@@ -178,10 +186,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         // The base branch and its commits are deployed to staging and previews as readily as to
         // production, whether the ref names the branch or the commit; only the production
         // environment's record says what production serves.
-        if (!productionEnvironmentRecord(deployment?.environment, production)) {
-          if (typeof deployment?.environment === 'string' && deployment.environment.endsWith(` / ${production}`) && namesake.size < 5) namesake.add(deployment.environment);
-          continue;
-        }
+        if (!productionEnvironmentRecord(deployment?.environment, production)) continue;
         // A release is the base branch or a commit on it; another branch's deployment is not.
         const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
         let candidate = true;
@@ -198,14 +203,15 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       // Newest first: the first success is the release. An attempt whose status cannot be read may
       // be the newest success, so no older release is taken past it: the observation is
       // unavailable, and every delivery stays pending. A deployment that reached success and was
-      // later marked inactive is the release only when every newer production deployment is a
-      // release attempt still underway that has never reached success: Railway deactivates it minutes
-      // after success though production still serves it, and a successor still building has served
-      // nothing yet (GY-1106: on 2026-10-02 every release deactivated before its successor started
-      // was refused for as long as that successor built). GitHub deactivates it when a newer
-      // deployment succeeds. Behind any other newer production record — a successful one, a failed
-      // attempt, one whose status is unread or not a release — an inactive deployment is never
-      // taken, so a superseded or rolled-back release is not served.
+      // later marked inactive is the release only when it is the newest production deployment of
+      // all: Railway deactivates it minutes after success though production still serves it, while
+      // GitHub deactivates it when a newer deployment succeeds. Behind any newer production record
+      // — a successful one, a failed attempt, one whose status is unread or not a release — an
+      // inactive deployment is never taken, so a superseded or rolled-back release is not served.
+      // A newer release still pending, queued or in progress is the exception: production keeps
+      // serving the release until it concludes, so a deploy window leaves no delivery pending
+      // (GY-1106: on 2026-10-02 every release deactivated before its successor started was refused
+      // for as long as that successor built). One that once reached success is not on its way.
       for (const { deployment, candidate } of records) {
         if (candidate) {
           const index = candidates.indexOf(deployment);
@@ -216,7 +222,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
             if (state === 'inactive') inactive = `${production} deployment ${deployment.id} reached success and was later marked inactive${underway ? `; every newer ${production} deployment is still underway` : ` with no newer ${production} deployment`}, so it is the release production serves`;
             break;
           }
-          if (underwayStates.has(state) && !states.succeeded[index]) { underway = true; continue; }
+          if (inFlightStates.has(state) && !states.succeeded[index]) { underway = true; continue; }
         }
         newerProduction = true;
       }
