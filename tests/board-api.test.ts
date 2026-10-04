@@ -221,9 +221,10 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
 });
 
 // Every way a module names another: `import … from`, `export … from`, a side-effect `import`, a
-// dynamic `import(` and a `require(`, in any quote. A relative specifier is resolved against the
-// importing file, dot segments and all, so `../x/../web/y` counts and `src/web/y` does not (GY-469).
-const specifiers = /(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)(['"`])([^'"`]+)\1/g;
+// dynamic `import(` — of a literal or of `new URL(literal, import.meta.url)` (GY-1146) — and a
+// `require(`, in any quote. A relative specifier is resolved against the importing file, dot
+// segments and all, so `../x/../web/y` counts and `src/web/y` does not (GY-469).
+const specifiers = /(?:\bfrom\s*|\bimport\s*\(?\s*(?:new\s+URL\s*\(\s*)?|\brequire\s*\(\s*)(['"`])([^'"`]+)\1/g;
 const reachesWeb = (path: string, source: string) => [...source.matchAll(specifiers)].some(([, , specifier]) =>
   specifier!.startsWith('.') && /^web(?:\/|$)/.test(posix.join(posix.dirname(path), specifier!)));
 
@@ -236,6 +237,17 @@ test('manual:review-followups-triaged GY-469.1 (layering-guard-covers-every-impo
   for (const [path, form] of [
     ['src/a.ts', `import { x } from './web/x.js';`], ['src/model/a.ts', `import x from '../web/x.js';`], ['src/a.ts', `import x from '../webhooks/x.js';`],
     ['src/a.ts', `import '../web/../src/x.js';`], ['src/a.ts', `const web = '../web/';`], ['src/a.ts', `import x from 'web/x';`],
+  ] as const) assert.ok(!reachesWeb(path, form), `the guard ignores ${form} in ${path}`);
+});
+
+test('manual:review-followups-triaged GY-1146.3 (layering-guard-catches-url-dynamic-import): the layering guard catches a dynamic import of `new URL(specifier, import.meta.url)` that resolves into web/, and ignores one that resolves elsewhere', () => {
+  for (const [path, form] of [
+    ['src/server/a.ts', `await import(new URL('../../web/x.js', import.meta.url))`], ['src/a.ts', 'await import( new URL( `../web/${name}.js`, import.meta.url ).href)'],
+    ['src/a.ts', `import(new URL("../placeholder/../web/x.js", import.meta.url));`],
+  ] as const) assert.ok(reachesWeb(path, form), `the guard catches ${form} in ${path}`);
+  for (const [path, form] of [
+    ['src/server/a.ts', `await import(new URL('../web/x.js', import.meta.url))`], ['src/a.ts', `await import(new URL('./web/x.js', import.meta.url))`],
+    ['src/a.ts', `await import(new URL('../webhooks/x.js', import.meta.url))`],
   ] as const) assert.ok(!reachesWeb(path, form), `the guard ignores ${form} in ${path}`);
 });
 

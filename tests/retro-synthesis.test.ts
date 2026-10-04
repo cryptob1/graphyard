@@ -26,6 +26,14 @@ const token = (principal: Principal) => credentials.find(credential => credentia
 const policy: InterventionPolicy = { threshold: 3, windowDays: 7 };
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let serial = 0;
+/** Poll until `condition` holds or the deadline passes, so timing assertions never rest on a fixed sleep. */
+const eventually = async (condition: () => boolean, deadlineMs = 10_000) => {
+  const deadline = Date.now() + deadlineMs;
+  while (!condition()) {
+    if (Date.now() > deadline) assert.fail(`condition not met within ${deadlineMs} ms`);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+};
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_RETRO_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 970);
@@ -277,7 +285,7 @@ test('unit:retro-artefact-governed-application — a closed pattern is never del
   assert.equal(approved.application?.revision, 2);
 });
 
-test('unit:retro-artefact-governed-application — judgement revalidates an operator agent under its own lock, concurrent approvals apply at distinct revisions, and unjudged drafts survive a burst of judged ones', async () => {
+test('unit:retro-artefact-governed-application — judgement revalidates an operator agent under its own lock, concurrent approvals apply at distinct revisions, and unjudged drafts survive a burst of judged ones', async t => {
   // Two review causes, each drafting a requirements update for the same registry.
   for (const n of [1, 2, 3]) await reworked(`Reviewer on GY-${n}: the handler leaks the connection on timeout`);
   for (const n of [1, 2, 3]) await reworked(`Reviewer on GY-${n}: the migration lacks a down step`);
@@ -324,9 +332,13 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
   } finally { await holder.query('SELECT pg_advisory_unlock($1)', [advisoryLocks.retroIndex]); holder.release(); }
   assert.equal(await ensureRetroIndex(store.pool), 'built');
   assert.equal(await ensureRetroIndex(store.pool), 'present');
-  await store.pool.query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'events_retro_id'::regclass");
-  assert.equal(await ensureRetroIndex(store.pool), 'built');
-  assert.equal((await store.pool.query("SELECT indisvalid FROM pg_index WHERE indexrelid = 'events_retro_id'::regclass")).rows[0].indisvalid, true);
+  // Marking the index INVALID writes the catalogue directly, which only a superuser may do; on a
+  // non-superuser test database that case is reported as skipped rather than failing (GY-1189).
+  if ((await store.pool.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0]?.rolsuper) {
+    await store.pool.query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'events_retro_id'::regclass");
+    assert.equal(await ensureRetroIndex(store.pool), 'built');
+    assert.equal((await store.pool.query("SELECT indisvalid FROM pg_index WHERE indexrelid = 'events_retro_id'::regclass")).rows[0].indisvalid, true);
+  } else t.diagnostic('skipped the INVALID-index rebuild: the test role is not a superuser and cannot write pg_index');
 
   // When another replica holds the lock, the watch observes 'building elsewhere' and retries deferred
   // until the lock is released and the index is built/present (follow-up 26).
@@ -340,8 +352,7 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
       intervalMs: 20,
       announce: outcome => { watchOutcomes.push(outcome); },
     });
-    await new Promise(resolve => setTimeout(resolve, 50));
-    assert.ok(watchOutcomes.includes('building elsewhere'));
+    await eventually(() => watchOutcomes.includes('building elsewhere'));
   } finally {
     await otherReplica.query('SELECT pg_advisory_unlock($1)', [advisoryLocks.retroIndex]);
     otherReplica.release();
@@ -352,17 +363,25 @@ test('unit:retro-artefact-governed-application — judgement revalidates an oper
   watch!.stop();
   assert.equal((await store.pool.query("SELECT indisvalid FROM pg_index WHERE indexrelid = 'events_retro_id'::regclass")).rows[0]?.indisvalid, true);
 
-  // A failed attempt reports the error and continues retrying until stopped.
-  const errors: unknown[] = [];
+  // A failed attempt reports the error and keeps retrying, backing off exponentially to the cap, until
+  // stopped; stopping settles `ready` so no awaiter hangs (GY-1189).
+  const failures: number[] = [];
   const failingWatch = startRetroIndexWatch({
     connect: async () => { throw new Error('simulated connection failure'); },
   } as any, {
-    intervalMs: 15,
-    failed: err => errors.push(err),
+    intervalMs: 10,
+    maxIntervalMs: 40,
+    failed: () => failures.push(Date.now()),
   });
-  await new Promise(resolve => setTimeout(resolve, 40));
-  assert.ok(errors.length >= 1);
+  await eventually(() => failures.length >= 5);
   failingWatch.stop();
+  assert.equal(await failingWatch.ready, 'stopped');
+  const gaps = failures.slice(1).map((at, index) => at - failures[index]);
+  // Base 10 ms, then 20, 40 and capped at 40: each gap is at least its scheduled delay.
+  [10, 20, 40, 40].forEach((delay, index) => assert.ok(gaps[index] >= delay - 2, `gap ${index} was ${gaps[index]} ms, scheduled ${delay} ms`));
+  const stoppedAt = failures.length;
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(failures.length, stoppedAt);
 
   // Over thousands of judged retro rows, the applied-check read and the unjudged-draft probe go by
   // payload id through events_retro_id, never a scan of every retro row (follow-ups 18, 19, 22, 23).

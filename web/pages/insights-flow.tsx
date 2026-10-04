@@ -327,6 +327,19 @@ const PlayIcon = () => <svg viewBox="0 0 24 24" width="30" height="30" aria-hidd
 const ReplayIcon = () => <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true" focusable="false"><path d="M12 5a7 7 0 1 1-6.6 4.7" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/><path d="M4.2 4.5v5.6h5.6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 
 /**
+ * What the replay read gave the Flow page: still reading (`frames` null), nothing to replay, or the
+ * replay itself. A read that stopped short names where it stopped, never answers "no item changed
+ * step" for the part it never read (GY-1119).
+ */
+export function ReplayRead({ frames, truncated, coverage, replayError }: { frames: ReplayFrame[] | null; truncated: boolean; coverage: string | null; replayError: string }) {
+  return <>
+    {coverage && <p className="notice" role="status" data-flow="replay-truncated">The recorded step changes were read only in part: {coverage}</p>}
+    {frames === null ? <p className="muted flow-wait">{replayError ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
+      : frames.length === 0 ? <p className="muted flow-wait">{coverage ? 'No item changed step in the part of the last 24 hours that was read.' : 'No item changed step in the last 24 hours.'}</p>
+        : <ReplaySection frames={frames} truncated={truncated}/>}
+  </>;
+}
+/**
  * The replay, played like a video (GY-204): it waits at its first frame under a large play button
  * and runs once, over `replaySeconds`, only when that button is pressed. While it plays the button
  * gives way to a small pause control; at the end it holds the last frame under a replay button.
@@ -427,11 +440,7 @@ export default function InsightsPage({ work, status, api, token, observedAt, set
       <NowLane entries={now7} blocked={new Set(byGroup.blocked.map(item => item.id))} expanded={expanded} onSelect={setSelected}
         onToggle={step => setExpanded(previous => { const next = new Set(previous); if (!next.delete(step)) next.add(step); return next; })}/>
       <div className="flow-subhead"><h3>Last 24 hours, replayed</h3><span>Recorded step changes played back in {replaySeconds} s. Red dots went back to Build for rework.</span></div>
-      {/* A read that stopped short names where it stopped, never answers "no item changed step" for the part it never read (GY-1119). */}
-      {coverage && <p className="notice" role="status" data-flow="replay-truncated">The recorded step changes were read only in part: {coverage}</p>}
-      {frames === null ? <p className="muted flow-wait">{replayError ? 'No recorded history to replay.' : 'Reading the recorded step changes…'}</p>
-        : frames.length === 0 ? <p className="muted flow-wait">{coverage ? 'No item changed step in the part of the last 24 hours that was read.' : 'No item changed step in the last 24 hours.'}</p>
-          : <ReplaySection frames={frames} truncated={truncated}/>}
+      <ReplayRead frames={frames} truncated={truncated} coverage={coverage} replayError={replayError}/>
     </section>
     <div className="insight-charts">
       <LandedPerDay report={report}/>
