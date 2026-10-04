@@ -3,6 +3,7 @@ import type { Store } from './store.js';
 import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
+import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 import { eventHistoryLimits } from './events-history.js';
 
 // Delivery-flow analytics.
@@ -362,6 +363,8 @@ export interface FlowDataset {
    */
   stepEntries?: Record<string, string>;
   projection: { lastEvent: number; updatedAt: string | null; pendingEvents: number; pendingCapped: boolean };
+  /** Confirmed conflicts in the day before `to`, from the ledger (GY-566); absent reads as none. */
+  conflicts?: ConflictOccurrence[];
 }
 /**
  * How much of the requested window a bounded scan covered. The in-window scan reads facts in
@@ -462,10 +465,13 @@ export const reportKinds: FlowKind[] = flowKinds.filter(kind => !['work.created'
  * drill-down derives from gate facts and the merge (`stepMoves`); bottleneck and work in progress
  * read only latest state. A metric not named here (phase) reads the flow report's own dataset.
  * When the shared scan bound is exhausted, narrowed drill-downs spend their bound only on their
- * own kinds, so their reach can extend beyond the report's shared scan cutoff. Metrics whose
- * kinds are carried in `separateKinds` (`throughput`, `lead-time`, `merge-ready`) align with report
- * figures, while narrow reads for other metrics (`stage-dwell`, `evidence`, `review`, `blockers`)
- * can reach further than the truncated report aggregate, stating their own reach in `coverage`.
+ * own kinds, so their reach can extend beyond the report's shared scan cutoff. For metrics whose
+ * kinds are carried in `separateKinds` (`throughput`, `lead-time`, `merge-ready`) the report also
+ * reads those kinds past its cutoff, so the two agree while that kind's own bound is not exhausted;
+ * once it is, the report's facts of that kind read inside the crowded shared scan leave less of its
+ * bound past the cutoff than the drill-down's kind-only read, and the two reach different instants.
+ * Every narrowed drill-down — these and the others (`stage-dwell`, `evidence`, `review`,
+ * `blockers`) — therefore states its own reach in `coverage` rather than claiming the report's.
  */
 export const drilldownKinds: Partial<Record<string, readonly FlowKind[]>> = {
   steps: ['gates.changed', 'merged'], 'merge-ready': ['gates.changed'], 'stage-dwell': ['stage.changed'],
@@ -610,7 +616,12 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
   const scanEnd = truncated && lastFact ? { observedAt: lastFact.observedAt, id: lastFact.id! } : undefined;
-  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection };
+  // The conflict hotspots (GY-566) read the last day of confirmed conflicts and docs-sync refreshes,
+  // through the report pool like every other report read (GY-491).
+  const conflictRows = (await store.reportPool.query(`SELECT w.document->>'key' AS key, e.kind, e.created_at, e.payload->'details' AS details FROM events e JOIN work_items w ON w.id=e.work_id
+    WHERE e.kind IN ('base.conflict','base.refreshed') AND e.created_at>=$1 AND e.created_at<$2 ORDER BY e.seq LIMIT $3`, [new Date(time(to)! - conflictHotspotWindowMs).toISOString(), to, flowLimits.scan])).rows;
+  const conflicts = ledgerConflicts(conflictRows.map(row => ({ key: row.key, kind: row.kind, at: iso(row.created_at), details: row.details })));
+  return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection, conflicts };
 }
 
 /**
@@ -654,11 +665,11 @@ export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<
  * One drill-down, answered from the narrowest read that holds its rows: a metric that reads a
  * subset of kinds (`drilldownKinds`) reads only those, the steps drill-down from its key's instant
  * on, so facts of other kinds or from earlier in the window never spend the bound its rows need;
- * any other metric answers from the pooled flow report's dataset. Under a truncated shared scan,
- * drill-down metrics whose kinds are in `separateKinds` (`throughput`, `lead-time`, `merge-ready`)
- * count the same delivered/merged/gate facts as the report, while metrics that read other subsets
- * (`stage-dwell`, `evidence`, `review`, `blockers`) can read facts past the report's shared scan
- * cutoff and state that reach in their own `coverage`. These reads are pooled apart from the
+ * any other metric answers from the pooled flow report's dataset. Under a truncated shared scan a
+ * narrowed drill-down can read facts past where the report stopped — for `separateKinds` metrics
+ * (`throughput`, `lead-time`, `merge-ready`) once that kind's own bound is exhausted, for the others
+ * (`stage-dwell`, `evidence`, `review`, `blockers`) past the shared scan cutoff — so it states its
+ * own reach in `coverage` and is not guaranteed to count the report's facts. These reads are pooled apart from the
  * reports, on the same freshness rules, keyed by their kinds and start.
  */
 export async function pooledFlowDrilldown(store: Store, query: FlowQuery, request: DrilldownRequest) {
@@ -1293,6 +1304,8 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     },
     coverage, exclusions, unavailable,
     stageDwell, stepDwell, wip, cumulativeFlow, throughput, leadTime, queueVsActive, mergeReadyDwell, mergeQueue, phases, ci, evidence, operations, bottleneck,
+    // The paths most often conflicting in the last day and the items they sent back (GY-566).
+    conflictHotspots: conflictHotspots(dataset.conflicts ?? [], to),
   };
 }
 export type FlowReport = ReturnType<typeof computeFlow>;

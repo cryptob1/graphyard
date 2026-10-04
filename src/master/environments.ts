@@ -214,7 +214,7 @@ async function codexAccount(environment: AgentEnvironment, probe: EnvironmentPro
   return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
 }
 
-async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
+async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe, plan: { id: string | null; now: number }) {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
   const keyFileName = (environment as any).keyFile ?? 'zai.key';
@@ -227,6 +227,10 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
   const loggedIn = !!key || authFileExists || opencodeAuthExists || (!!opencodeAuth && Object.keys(opencodeAuth).length > 0) || (!!auth && Object.keys(auth).length > 0);
   if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
   if (!key) return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+  // Accounts on one shared plan read one quota: a fresh plan reading answers without another call
+  // to the provider's endpoint, so selecting among N such accounts costs one probe, not N (GY-1180).
+  const shared = plan.id ? getCachedPlanUsage(plan.id, plan.now, probe.cacheMs ?? 30_000) : null;
+  if (shared?.reported && shared.windows.length > 0) return { loggedIn: true, usage: shared.windows, note: shared.reason, shared: true };
   try {
     const response = await (probe.fetch ?? fetch)('https://api.z.ai/api/monitor/usage/quota/limit', {
       headers: { Authorization: `Bearer ${key}` },
@@ -262,10 +266,10 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
 
-  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } =
+  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean } =
     environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
     : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
-    : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe))
+    : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe, { id: planId, now }))
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
 
   if (account.loggedIn && planId) {
@@ -275,7 +279,8 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
         account.usage = cachedPlan.windows;
         if (cachedPlan.reason) account.note = cachedPlan.reason;
       }
-    } else {
+    } else if (!account.shared) {
+      // A reading taken from the plan cache is not re-stamped, so the cache still expires.
       setCachedPlanUsage(planId, { reported: true, status: 'reported', windows: account.usage, resetsAt: account.usage.map(u => u.resetsAt).filter(Boolean).sort().at(-1) ?? null, reason: account.note }, now);
     }
   }

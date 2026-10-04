@@ -382,6 +382,7 @@
     "tests/live-scope-widening.test.ts": 3195,
     "tests/live-throughput.test.ts": 7399,
     "tests/liveness-invariant.test.ts": 4845,
+    "tests/locked-read.test.ts": 8600,
     "tests/loop-self-upgrade.test.ts": 2098,
     "tests/loop-silence-owner.test.ts": 1282,
     "tests/machine-backlog-routes.test.ts": 2271,
@@ -575,6 +576,7 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873
+    "tests/unblock-stale-revision.test.ts": 4873,
+    "tests/project-memory-followups.test.ts": 400
   }
 }
