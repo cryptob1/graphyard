@@ -12,7 +12,9 @@ import type { Work } from './model.js';
  * dispatch of the item failed on it. Before the worktree is added, the holders are found by
  * reading each worktree's own admin directory, and an abandoned session's is reclaimed: never one
  * whose epoch holds a live lease, never one with uncommitted changes, and never one outside
- * `.graphyard/worktrees`; each of those is named in the refusal instead.
+ * `.graphyard/worktrees`; each of those is named in the refusal instead. The same rules apply to
+ * an ordinary checkout of the branch and to the record of a session worktree whose directory was
+ * deleted outside git (GY-1082).
  */
 
 /** One worktree holding a branch: where it is, how it holds it, and which attempt it belongs to. */
@@ -21,6 +23,8 @@ export interface BranchHolder {
   /** `checkout` is an ordinary checkout of the branch; the others are an operation in progress on it. */
   via: 'checkout' | 'rebase' | 'am' | 'bisect';
   key: string | null; epoch: number | null;
+  /** The directory is gone but git still records the worktree (`prunable`); only its record holds the branch. */
+  missing?: boolean;
 }
 /** What was done to free the branch: the operation aborted, and the worktree removed or detached. */
 export interface ReclaimedHolder extends BranchHolder { action: string }
@@ -63,12 +67,13 @@ export function branchHolders(root: string, branch: string, except: string, keyO
     // An operation in progress is looked for first, so an attached `am` is not taken for a checkout.
     const attached = fields.includes(`branch refs/heads/${branch}`);
     let via: BranchHolder['via'] | null = null;
-    if (existsSync(path)) {
+    const present = existsSync(path);
+    if (present) {
       const adminDir = git(['rev-parse', '--absolute-git-dir'], path);
       if (adminDir.status === 0) via = operationHolding(adminDir.stdout.trim(), branch, attached);
     }
     via ??= attached ? 'checkout' : null;
-    if (via) holders.push({ path, via, ...keyOf(path) });
+    if (via) holders.push({ path, via, ...keyOf(path), ...(present ? {} : { missing: true }) });
   }
   return holders;
 }
@@ -79,32 +84,40 @@ export function sessionOf(path: string): { key: string | null; epoch: number | n
   return match ? { key: match[1], epoch: Number(match[2]) } : { key: null, epoch: null };
 }
 
+/** Lines of `git status --porcelain` in `path`, with `--ignored` or tracked files only when asked, or git's failure when it cannot read them. */
+function statusLines(path: string, ignored: boolean, trackedOnly = false) {
+  const args = ['status', '--porcelain', ...(ignored ? ['--ignored'] : []), ...(trackedOnly ? ['--untracked-files=no'] : [])];
+  const result = git(args, path);
+  return result.status === 0 ? { lines: result.stdout.split('\n').filter(Boolean) } : { failure: gitFailure(args, result) };
+}
+
 /**
- * Why each of `holders` may not be touched: an operation in progress outside a session worktree
- * of `work`, an epoch holding a live lease on `now`, or — with `dirty` — uncommitted changes.
- * GY-860's release of an earlier attempt's hold records the uncommitted diff on the item's
- * ledger before it ends the operation, so it asks without `dirty`.
+ * Why each of `holders` may not be touched: an operation outside a session worktree, a session
+ * worktree of another item or of an epoch holding a live lease on `now`, or — with `dirty` —
+ * uncommitted changes (only tracked ones for an ordinary checkout). GY-860's release of an earlier
+ * attempt's hold records the uncommitted diff on the item's ledger before it ends the operation,
+ * so it asks without `dirty`.
  */
 export function holderRefusals(root: string, holders: BranchHolder[], work: Pick<Work, 'key' | 'lease'>, now: number, options: { dirty: boolean }): string[] {
   const sessions = resolve(root, '.graphyard/worktrees');
   const refusals: string[] = [];
   const live = (holder: BranchHolder) => !!work.lease && work.lease.epoch === holder.epoch && Date.parse(work.lease.expiresAt) > now;
   for (const holder of holders) {
-    const name = `${holder.path} (${holder.via === 'checkout' ? 'checked out' : `${holder.via} in progress`})`;
-    if (holder.via !== 'checkout' && resolve(dirname(holder.path)) !== sessions) refusals.push(`${name} is not a session worktree under ${sessions}`);
-    else if (holder.via !== 'checkout' && holder.key !== work.key) refusals.push(`${name} belongs to ${holder.key ?? 'no Graphyard item'}, not ${work.key}`);
-    else if (live(holder)) refusals.push(`${name} belongs to ${work.key} epoch ${holder.epoch}, which holds a live lease`);
-    else if (holder.via !== 'checkout' && options.dirty) {
+    const name = `${holder.path} (${holder.missing ? 'deleted, still recorded' : holder.via === 'checkout' ? 'checked out' : `${holder.via} in progress`})`;
+    const checkout = holder.via === 'checkout' && !holder.missing, session = resolve(dirname(holder.path)) === sessions;
+    if (!session && !checkout) refusals.push(`${name} is not a session worktree under ${sessions}`);
+    else if (session && holder.key !== work.key) refusals.push(`${name} belongs to ${holder.key ?? 'no Graphyard item'}, not ${work.key}`);
+    else if (session && live(holder)) refusals.push(`${name} belongs to ${work.key} epoch ${holder.epoch}, which holds a live lease`);
+    else if (!holder.missing && options.dirty) {
       // An unreadable status is not a clean one: the worktree is left alone and named.
-      const status = git(['status', '--porcelain'], holder.path);
-      if (status.status !== 0) refusals.push(`${name} could not be checked for uncommitted changes (${gitFailure(['status', '--porcelain'], status)})`);
-      else if (status.stdout.trim()) refusals.push(`${name} has uncommitted changes`);
+      const status = statusLines(holder.path, false, checkout);
+      if (status.failure) refusals.push(`${name} could not be checked for uncommitted changes (${status.failure})`);
+      else if (status.lines!.length) refusals.push(`${name} has uncommitted changes`);
     }
   }
   return refusals;
 }
 
-/** The refusal `holderRefusals` names, as the error the worktree command reports. */
 export const heldBranchRefusal = (branch: string, refusals: string[]) =>
   `Branch ${branch} is held by another worktree that was not reclaimed: ${refusals.join('; ')}. Finish or abort its operation, or remove that worktree, before retrying.`;
 
@@ -112,27 +125,59 @@ export const heldBranchRefusal = (branch: string, refusals: string[]) =>
  * Frees `branch` for the worktree about to be created at `target`, returning what was reclaimed,
  * or throws naming every holder it may not touch. A holder is reclaimed only when it is a session
  * worktree directly under `<root>/.graphyard/worktrees` belonging to `work`, its epoch holds no
- * live lease on `now`, and it has no uncommitted changes. An operation in progress is aborted and
- * the clean worktree removed (detached if git will not remove it); an ordinary checkout is
- * detached, as the rework path always did, keeping whatever it holds.
+ * live lease on `now`, and it has no uncommitted changes. An ordinary checkout is judged by the
+ * same rules, except that one outside `.graphyard/worktrees` (the worker's earlier checkout of the
+ * branch, which may be the repository's own) is detached as the rework path always did, and only
+ * changes to tracked files count against it: detaching moves no file, and untracked files are its
+ * owner's scratch. A dirty checkout, or another item's session checkout, is named, never changed.
+ * The record of a deleted session worktree is removed. An operation in progress is aborted; on a
+ * rework (`options.checkouts`, which also reclaims ordinary checkouts), whose new workspace resets
+ * the branch to the remote candidate, the tip the abort leaves is first kept under
+ * `refs/graphyard/reclaimed/<worktree>` unless the remote branch already holds it. The
+ * clean worktree is then removed, unless it holds ignored files (which removal would delete) or
+ * git will not remove it, and then detached; an ordinary checkout is detached, keeping what it holds.
  */
 export function reclaimBranchHolders(root: string, branch: string, target: string, work: Pick<Work, 'key' | 'lease'>, now: number, options: { checkouts: boolean }): ReclaimedHolder[] {
-  const holders = branchHolders(root, branch, target).filter(holder => holder.via !== 'checkout' || options.checkouts);
+  // A deleted worktree's record holds the branch on a first attempt as much as on a rework.
+  const holders = branchHolders(root, branch, target).filter(holder => holder.via !== 'checkout' || options.checkouts || holder.missing);
   const refusals = holderRefusals(root, holders, work, now, { dirty: true });
   if (refusals.length) throw new Error(heldBranchRefusal(branch, refusals));
   const reclaimed: ReclaimedHolder[] = [];
   for (const holder of holders) {
+    if (holder.missing) {
+      // Only this record goes; a git that will not remove a missing worktree prunes the stale records instead.
+      if (git(['worktree', 'remove', holder.path], root).status !== 0) gitOrThrow(['worktree', 'prune'], root);
+      reclaimed.push({ ...holder, action: 'removed the record of the deleted worktree' });
+      continue;
+    }
     if (holder.via === 'checkout') {
       gitOrThrow(['-C', holder.path, 'checkout', '--detach', '--quiet']);
       reclaimed.push({ ...holder, action: 'detached its HEAD' });
       continue;
     }
-    const abort = holder.via === 'bisect' ? ['bisect', 'reset', '--quiet'] : [holder.via, '--abort'];
+    // `git bisect reset` takes an optional commit and nothing else: `--quiet` would be read as one.
+    const abort = holder.via === 'bisect' ? ['bisect', 'reset'] : [holder.via, '--abort'];
     gitOrThrow(['-C', holder.path, ...abort]);
-    const removed = git(['worktree', 'remove', holder.path], root);
-    if (removed.status === 0) { reclaimed.push({ ...holder, action: `aborted the ${holder.via} and removed the worktree` }); continue; }
+    const kept = options.checkouts ? keepTip(root, holder, branch) : '';
+    const ignored = statusLines(holder.path, true);
+    const removed = ignored.lines?.some(line => line.startsWith('!! ')) || ignored.failure ? null : git(['worktree', 'remove', holder.path], root);
+    if (removed?.status === 0) { reclaimed.push({ ...holder, action: `aborted the ${holder.via}${kept} and removed the worktree` }); continue; }
     gitOrThrow(['-C', holder.path, 'checkout', '--detach', '--quiet']);
-    reclaimed.push({ ...holder, action: `aborted the ${holder.via} and detached its HEAD (${gitFailure(['worktree', 'remove', holder.path], removed)})` });
+    const why = removed ? gitFailure(['worktree', 'remove', holder.path], removed) : ignored.failure ? `its ignored files could not be listed: ${ignored.failure}` : 'it holds ignored files, which removing it would delete';
+    reclaimed.push({ ...holder, action: `aborted the ${holder.via}${kept} and detached its HEAD (${why})` });
   }
   return reclaimed;
+}
+
+/**
+ * Keeps the commit an aborted operation left `holder` on under `refs/graphyard/reclaimed/<worktree>`,
+ * unless the remote branch already contains it: a rework workspace is reset to the remote candidate
+ * once the holder is gone, and its local commits would otherwise be referenced by nothing.
+ */
+function keepTip(root: string, holder: BranchHolder, branch: string) {
+  const tip = gitOrThrow(['-C', holder.path, 'rev-parse', 'HEAD']).trim();
+  if (git(['merge-base', '--is-ancestor', tip, `refs/remotes/origin/${branch}`], root).status === 0) return '';
+  const ref = `refs/graphyard/reclaimed/${basename(holder.path)}`;
+  gitOrThrow(['update-ref', ref, tip], root);
+  return `, kept its tip ${tip.slice(0, 12)} as ${ref}`;
 }

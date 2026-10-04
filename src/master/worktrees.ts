@@ -670,14 +670,15 @@ export async function submittedBranchRefusal(root: string, branch: string, remot
 /**
  * GY-860: record the reservation with any earlier attempt's preserved hold on the branch, then
  * release that hold. A holder whose epoch holds a live lease, or an operation outside this item's
- * session worktrees, is never touched (GY-1078): it is named and nothing is reserved. A refusal,
+ * session worktrees, is never touched (GY-1078): it is named and nothing is reserved. A deleted
+ * worktree's record is skipped: the release prunes it. A refusal,
  * a refused reservation or a failed release is a workspace failure that costs no attempt.
  */
 export async function reserveReleasingHold(root: string, branch: string, path: string, run: ChildRun, mutate: (name: string, data: unknown) => Promise<unknown>, epoch: number, host: string,
   work: Pick<Work, 'key' | 'lease'>, now: number) {
   const branchExists = await Promise.resolve().then(() => run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: root })).then(() => true, () => false);
   const refusals = branchExists
-    ? holderRefusals(root, branchHolders(root, branch, path), work, now, { dirty: false }) : [];
+    ? holderRefusals(root, branchHolders(root, branch, path).filter(holder => !holder.missing), work, now, { dirty: false }) : [];
   if (refusals.length) {
     const detail = heldBranchRefusal(branch, refusals);
     await releaseUnderFailure(mutate, epoch, detail);
