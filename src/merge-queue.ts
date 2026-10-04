@@ -1511,8 +1511,11 @@ export const mergeStallMs = 5 * 60_000;
 export function mergeStalls(work: Work[], now: number): { key: string; pr: number; head: string; mergeStateStatus: string; requestedAt: string; ageMs: number; text: string; next: string }[] {
   return work.flatMap(item => {
     const state = item.observation?.githubQueue, candidate = item.candidate;
-    if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || state.refused || !state.requestedAt
+    if (!state || !candidate || item.stage === 'done' || item.observation?.merged || state.queue || !state.requestedAt
       || state.head !== candidate.sha) return [];
+    const unanswered = blockedPastProbe(item, state, now);
+    if (unanswered) return [unanswered];
+    if (state.refused) return [];
     const blocked = blockedMergeStall(item, state, now);
     if (blocked) return [blocked];
     if (!mergeableNow(state)) return [];
@@ -1523,6 +1526,25 @@ export function mergeStalls(work: Work[], now: number): { key: string; pr: numbe
       text: `merge-stalled: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been requested for merge for ${Math.floor(ageMs / 60_000)} minutes (since ${state.requestedAt}) while GitHub reports mergeStateStatus ${status}, and no refusal is recorded: GitHub was asked to merge a pull request it reports mergeable and has not`,
       next: `graphyard master create files the control-plane defect for merge state ${status} on ${item.key}; gh pr view ${candidate.pr} shows what GitHub is waiting on` }];
   });
+}
+/** How long an authorized head may stay BLOCKED with every gate passing before master status raises it (GY-1112). */
+export const blockedAuthorizedStallMs = 30 * 60_000;
+/**
+ * GY-1112. A head GitHub reports BLOCKED with every gate passing, its merge requested more than
+ * `blockedAuthorizedStallMs` ago: the blocked-auto-merge probe has asked GitHub to merge it, and
+ * either GitHub refused (its message is the last answer) or it accepted and still has not merged.
+ * On 2026-10-02 GY-794 headed a 17-entry queue so for over 40 minutes with nothing raised.
+ */
+export function blockedPastProbe(item: Work, state: GitHubMergeQueueState, now: number) {
+  const candidate = item.candidate!;
+  if (!state.requestedAt || state.queue || state.head !== candidate.sha || item.observation?.merged || state.mergeStateStatus !== 'BLOCKED' || !mergeAuthorized(item)) return null;
+  const ageMs = now - Date.parse(state.requestedAt!);
+  if (!(ageMs > blockedAuthorizedStallMs)) return null;
+  const answer = state.refused && state.refused.head === state.head ? `GitHub's last answer (${state.refused.at}): ${state.refused.reason}`
+    : 'GitHub\'s last answer: no refusal recorded; it accepted the request and has not merged';
+  return { key: item.key, pr: candidate.pr, head: state.head, mergeStateStatus: 'BLOCKED', requestedAt: state.requestedAt!, ageMs,
+    text: `merge-blocked: ${item.key} pull request #${candidate.pr} at ${state.head.slice(0, 12)} has been BLOCKED with every gate passing for ${Math.floor(ageMs / 60_000)} minutes (merge requested ${state.requestedAt}); ${answer}`,
+    next: `gh pr view ${candidate.pr} shows the rule GitHub enforces; graphyard master create files the defect if no rule explains it` };
 }
 /** How long a merge may stay pending under auto-merge on a head GitHub reports BLOCKED before master status names why (GY-430). */
 export const blockedMergeStallMs = 10 * 60_000;
