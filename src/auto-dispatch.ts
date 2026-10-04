@@ -171,6 +171,25 @@ const requestSessions = (records: DispatchedSession[], requestId: string) => rec
 export const describeAttempts = (records: DispatchedSession[], requestId: string) => requestSessions(records, requestId).slice(-30)
   .map((record, index) => bounded(`attempt ${record.attempt ?? index + 1}${record.profile ? ` on ${record.profile}` : ''}: ${record.state}${record.resolution ? ` — ${record.resolution}` : ''}`, 300));
 /**
+ * GY-1153. The resolutions of producer attempts that ended before the session acted on its request:
+ * it never started (no prompt taken up, a trust prompt it sat on, a pane gone before acting), the
+ * headless run could not start, the launch was refused, or the session exited at launch on its
+ * account's limit notice. Such attempts judged nothing about the candidate. Matched on the start of
+ * the resolution only: a session that acted and later quoted a quota or rate limit in its last words
+ * acted, and still earns the GY-496 rework.
+ */
+const unactedResolution = /^(?:never started\b|the headless run could not start\b|launch refused\b|refused before it started\b|failed before it started\b|the session exited within seconds of its launch\b|exited at launch\b|(?:every (?:independent )?producer )?profile(?: is)? busy\b|reserved by another dispatch\b)/i;
+/** The `attempt N on PROFILE: STATE — ` prefix `describeAttempts` puts before each resolution. */
+const attemptLine = /^attempt \d+(?: on ([^:]+))?: [\w-]+(?: — |$)/;
+/** GY-1153. Whether a producer attempt (a resolution, or a line `describeAttempts` wrote) ended without the session acting. */
+export function isUnactedProducerAttempt(text: string): boolean {
+  return !!text && unactedResolution.test(text.replace(attemptLine, ''));
+}
+/** GY-1153. The producer profiles (each one runtime and its accounts) the described attempts ran on, as the attention names them. */
+export function extractProducerAccountsOrRuntimes(attempts: readonly string[]): string[] {
+  return [...new Set(attempts.map(attempt => attempt.match(attemptLine)?.[1]?.trim()).filter((name): name is string => !!name))];
+}
+/**
  * The profiles a relaunch tries, freshest first: a profile no attempt of this request ran on, then
  * the ones earlier attempts ran on, and the profile of the session that just settled last. A
  * relaunch on the account that just ended without an answer is the one least likely to answer.
@@ -784,6 +803,23 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       ...(kind === 'producer' && request.group ? { group: request.group, proofs: (request.proofs ?? []).slice(0, 50) } : {}) };
     wait(kind, item, request, `${why}; no further automatic attempt, raised as attention for the master`);
   };
+  // GY-1153. A producer request whose every attempt ended without the session acting judged nothing
+  // about the candidate, so spending its attempts is a producer-runtime fault, not the head's: once
+  // the request is spent it relaunches on an independent profile whose credential is available and
+  // which none of its attempts ran on. A profile it already tried is not relaunched on automatically:
+  // a trust prompt or a broken runtime looks healthy to the credential check and would spend a
+  // session every cycle. Null when the request has any attempt that acted.
+  const runtimeProfiles = (item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
+    const sessions = requestSessions(records, request.id);
+    if (!sessions.length || !sessions.every(record => isUnactedProducerAttempt(record.resolution ?? ''))) return null;
+    const tried = new Set(sessions.map(record => record.profile).filter((name): name is string => !!name));
+    return independentProducerProfiles(item, config.producers).filter(profile => credentials[profile.name]?.available !== false && !tried.has(profile.name));
+  };
+  const runtimeRelaunch = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
+    if (kind !== 'producer' || !runtimeProfiles(item, request, records)?.some(profile => room(profile, producers).free > 0)) return false;
+    delete cursor.abandoned[request.id];
+    return true;
+  };
   // Whether the request already has its session, waits to relaunch one that ended, or may launch now.
   const session = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
     const retry = sessionRetry(records, request.id, now());
@@ -802,12 +838,19 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         wait(kind, item, request, `${role} session attempt ${retry.attempts} posted ${last.verdict.state}; the control plane is given until ${new Date(settledAt + verdictIngestGraceMs).toISOString()} to read it before another attempt`);
         return false;
       }
-      if (retry.attempts >= dispatchFailureLimit) { tick.skipped++; abandon(kind, item, request, records, `${settled}, after ${retry.attempts} sessions`); return false; }
+      if (retry.attempts >= dispatchFailureLimit) {
+        if (runtimeRelaunch(kind, item, request, records)) return true;
+        tick.skipped++; abandon(kind, item, request, records, `${settled}, after ${retry.attempts} sessions`); return false;
+      }
       return true;
     }
     if (retry.launch) return true;
     const last = `${role} session attempt ${retry.attempts} ${retry.last!.state}: ${retry.last!.resolution ?? 'no reason recorded'}`;
-    if (retry.exhausted) { abandon(kind, item, request, records, `${last}; ${retry.attempts} sessions failed or expired`); return false; }
+    if (retry.exhausted) {
+      if (runtimeRelaunch(kind, item, request, records)) return true;
+      abandon(kind, item, request, records, `${last}; ${retry.attempts} sessions failed or expired`);
+      return false;
+    }
     // A reviewer that judged the head and was reminded to post, and still posted nothing within the
     // bound, is relaunched now (GY-193 AC-2): the wait was the reminder's, already served.
     const ended = requestSessions(records, request.id).at(-1);
@@ -986,20 +1029,24 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // among the rest up to each one's concurrency.
           const independent = independentProducerProfiles(item, config.producers);
           const available = independent.filter(profile => credentials[profile.name]?.available !== false);
-          const usable = () => preferFreshProfiles(available.filter(profile => room(profile, producers).free > 0), producers, request.id);
+          // A spent request relaunching for a producer-runtime fault (GY-1153) launches only on the
+          // profiles `runtimeProfiles` names; any other request on every available profile, freshest first.
+          const relaunch = sessionRetry(producers, request.id, now()).exhausted ? runtimeProfiles(item, request, producers) : null;
+          const eligible = (profile: ProducerProfile) => (!relaunch || relaunch.some(entry => entry.name === profile.name)) && room(profile, producers).free > 0;
+          const usable = () => preferFreshProfiles(available.filter(eligible), producers, request.id);
           const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
             : !independent.length ? `every producer principal (${config.producers.map(profile => profile.principal).join(', ')}) has held an assignment on ${item.key}; its evidence would not be trusted`
             : `every independent producer profile is busy or unavailable (${independent.map(profile => credentials[profile.name]?.available === false ? `${profile.name}: ${credentials[profile.name].reason}` : atLimit(profile, producers)).join('; ')}); raise concurrency in .graphyard/master.json or add a producer profile`);
-          if (!available.some(profile => room(profile, producers).free > 0)) { busy(); continue; }
+          if (!available.some(eligible)) { busy(); continue; }
           producerLaunches.push(afterEarlier(available.map(profile => profile.agentName), async () => {
             if (!usable().length) { busy(); return; }
             try {
-              const launched = await launchInTurns(request, usable(), profile => room(profile, producers).free > 0, candidate => registeredLaunch(record(item),
+              const launched = await launchInTurns(request, usable(), eligible, candidate => registeredLaunch(record(item),
                 launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal),
                 () => effects.launchProducer(item, request, candidate, inventory(), observedAt), result => coordinates(candidate, request, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
               if (!launched) busy();
               else {
-                delete cursor.failures[request.id]; delete cursor.capacity.producer;
+                delete cursor.failures[request.id]; delete cursor.capacity.producer; delete cursor.abandoned[request.id];
                 tick.launched.push({ kind: 'producer', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, group: request.group, proofs: request.proofs, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
               }
             } catch (error) {
@@ -1321,6 +1368,16 @@ export function dispatchFailureAttention(dispatch: { consecutiveFailures?: numbe
 export function abandonedAttention(entry: AbandonedRequest & { requestId: string }): AttentionItem {
   const role = entry.kind === 'review' ? 'reviewer' : 'producer';
   const group = entry.kind === 'producer' && entry.group ? ` for the ${entry.group} proof group${entry.proofs?.length ? ` (${entry.proofs.join(', ')})` : ''}` : '';
+  const unacted = entry.kind === 'producer' && entry.attempts.length > 0 && entry.attempts.every(isUnactedProducerAttempt);
+  if (unacted) {
+    const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
+    const target = runtimesOrAccounts.length ? runtimesOrAccounts.join(', ') : 'producer runtime or account';
+    return {
+      subject: entry.work,
+      text: bounded(`${entry.work}'s ${role} request ${entry.requestId}${group} on ${entry.sha.slice(0, 12)} stopped on a producer-runtime fault (${target}): every attempt ended without acting on the candidate (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
+      ...agentOwner('master', `The attempts name a producer-runtime fault on ${target}; the loop requests no rework and relaunches the request once an eligible producer account exists (an independent profile with an available credential that none of the attempts ran on); add or repair one`),
+    };
+  }
   return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId}${group} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
     ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}`
       : `The loop requests a rework decision for ${entry.work} on its next cycle, quoting these attempts, and the approver judges it; if the attempts name a launcher fault (a producer profile or its credential), fix that first`) };

@@ -448,6 +448,7 @@
     "tests/reblocked-attempt.test.ts": 1636,
     "tests/receipt-retention.test.ts": 2396,
     "tests/reconcile-batch-setting.test.ts": 1027,
+    "tests/reconcile-contention.test.ts": 22485,
     "tests/reconcile-scale.test.ts": 17577,
     "tests/reconciliation-snapshot.test.ts": 10034,
     "tests/recovery-docs.test.ts": 714,
@@ -578,6 +579,7 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873
+    "tests/unblock-stale-revision.test.ts": 4873,
+    "tests/exhausted-proof-runtime.test.ts": 350
   }
 }

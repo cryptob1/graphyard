@@ -67,6 +67,10 @@ A dead supervisor fences its item; `containment` lists each surviving process's 
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 
+### Producer-runtime faults
+
+A producer request spent with no attempt acting (`never started`, run could not start, launch refused, exited at launch) requests no rework: attention names the attempts and their profiles, and the request relaunches on an independent, credentialed profile none of them ran on.
+
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ## Fault classes
