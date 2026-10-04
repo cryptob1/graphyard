@@ -5,6 +5,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { wakeFromWebhook, wakeJob, wakeJobs } from '../src/store/store.js';
+import { commitLockWaitMs, reconcileCommitBlockingSql } from '../src/store/coordination-sql.js';
+import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -61,9 +63,10 @@ before(async () => {
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
-test('unit:reconcile-tick-bounded-under-contention — a tick over 100 live items under continuous mutation completes within 30 s, evaluating or deferring every candidate, no batch rerun more than twice', { timeout: 180_000 }, async () => {
+// Proven at a 20 ms batch, which makes the most batches contend, and at the 250 ms production default (GY-1212).
+for (const batchMs of [20, 250]) test(`unit:reconcile-tick-bounded-under-contention — a tick over 100 live items under continuous mutation completes within 30 s, evaluating or deferring every candidate, no batch rerun more than twice (reconcileBatchMs ${batchMs})`, { timeout: 180_000 }, async () => {
   await lapse(items.slice(40, 70).map(work => work.id));
-  engine.reconcileBatchMs = 20;
+  engine.reconcileBatchMs = batchMs;
   const errors: unknown[] = [];
   let stop!: () => void; const stopped = new Promise<void>(resolve => { stop = resolve; });
   const load = traffic(stopped, errors);
@@ -145,4 +148,69 @@ test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, cla
   assert.ok(engine.reconcileTicks.at(-1)!.ms > 1000, 'the tick ran for over a second while the requests were made');
   for (const timing of timings) assert.ok(timing.ms < 1000, `a ${timing.what} took ${Math.round(timing.ms)} ms while the tick ran`);
   assert.ok(peakBackground <= 1, `reconciliation held ${peakBackground} background connections at once; ten resyncs must share one tick`);
+});
+
+test('unit:deferred-wake-refuses-later-jobs-statements — inside a transaction, a read or delete of jobs after a deferred wake is refused, and one before it is not (GY-1212)', async () => {
+  const [woken, other] = [items[95].id, items[96].id];
+  await store.pool.query('DELETE FROM jobs WHERE work_id = ANY($1::uuid[])', [[woken, other]]);
+  // Waking then deleting the same job would have its row reinserted at COMMIT: refused, and nothing commits.
+  await assert.rejects(store.transaction(async db => { await wakeJob(db, woken); await db.query('DELETE FROM jobs WHERE work_id=$1', [woken]); }), /after this transaction deferred a job wake/);
+  await assert.rejects(store.transaction(async db => { await wakeJob(db, woken); await db.query({ text: 'SELECT 1 FROM jobs WHERE work_id=$1', values: [other] }); }), /after this transaction deferred a job wake/);
+  assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id = ANY($1::uuid[])', [[woken, other]])).rowCount, 0, 'the refused transactions rolled back their wakes');
+  // Job rows touched before any wake, as every current path does, still commit with the wakes.
+  await store.transaction(async db => { await db.query('SELECT 1 FROM jobs WHERE work_id=$1', [other]); await db.query('DELETE FROM jobs WHERE work_id=$1', [other]); await wakeJob(db, woken); await db.query('SELECT 1 FROM work_items WHERE id=$1', [woken]); });
+  assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1', [woken])).rowCount, 1, 'the wake landed at COMMIT');
+  // The connection went back to the pool with its own query restored.
+  await store.transaction(async db => db.query('SELECT 1 FROM jobs WHERE work_id=$1', [woken]));
+});
+
+test('unit:resync-survives-tick-failure — a failed reconciliation tick does not reject the resyncs waiting on it (GY-1212)', async () => {
+  const internals = engine as unknown as { reconcileTick: () => Promise<void> };
+  const reconcileTick = internals.reconcileTick;
+  internals.reconcileTick = async () => { await new Promise(resolve => setTimeout(resolve, 20)); throw new Error('tick failed for another item'); };
+  try {
+    const resyncs = await Promise.all(items.slice(0, 5).map(work => engine.resyncWork(operator, work.id, {})));
+    assert.deepEqual(resyncs.map(answer => answer.work.id), items.slice(0, 5).map(work => work.id), 'every resync answered with its own item');
+    await assert.rejects(engine.reconcile(), /tick failed for another item/, 'the loop still sees the tick fail');
+  } finally { internals.reconcileTick = reconcileTick; }
+});
+
+test('unit:commit-lock-wait-under-deadlock-timeout — the commit wait stays under half the server deadlock_timeout (GY-1212)', async () => {
+  const row = (await store.pool.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0];
+  assert.equal(row.blocking, false);
+  assert.equal(Number(row.deadlock_ms), 1000, 'the check reads the session deadlock_timeout in milliseconds');
+  assert.equal(commitLockWaitMs(200, 1000), 200, 'the production wait is kept under the default deadlock_timeout');
+  assert.equal(commitLockWaitMs(200, 300), 150, 'a lowered deadlock_timeout cuts the wait to half of it');
+  assert.equal(commitLockWaitMs(200, 1), 1, 'the wait is never below 1 ms');
+  assert.equal(commitLockWaitMs(200, Number.NaN), 200, 'an unreadable setting keeps the configured wait');
+});
+
+test('unit:deferred-batch-keeps-writer-held-turn — a row a writer held in a batch deferred as contended still gets its end-of-pass turn (GY-1212)', { timeout: 60_000 }, async () => {
+  const held = items[80].id;
+  await lapse(items.slice(70, 80).map(work => work.id));
+  const internals = engine as unknown as { coordinationLockWithin: (...args: unknown[]) => Promise<boolean>; reconcileItem: (db: unknown, work: Work, ...rest: unknown[]) => Promise<boolean> };
+  const { coordinationLockWithin, reconcileItem } = internals;
+  const holder = await store.pool.connect();
+  let holding = true;
+  const release = async () => { if (holding) { holding = false; await holder.query('COMMIT'); holder.release(); } };
+  const reached: string[] = [];
+  try {
+    await holder.query('BEGIN');
+    await holder.query('SELECT 1 FROM work_items WHERE id=$1 FOR UPDATE', [held]);
+    // Every batch that wrote is contended, and deferred on its first attempt; the writer lets go once the first batch is refused.
+    internals.coordinationLockWithin = async () => { await release(); return false; };
+    internals.reconcileItem = async (db, work, ...rest) => { reached.push(work.id); return reconcileItem.call(engine, db, work, ...rest); };
+    engine.reconcileBatchMs = 60_000; engine.reconcileMaxAttempts = 1;
+    await engine.reconcile();
+  } finally {
+    await release();
+    internals.coordinationLockWithin = coordinationLockWithin; internals.reconcileItem = reconcileItem;
+    engine.reconcileBatchMs = 250; engine.reconcileMaxAttempts = 3;
+  }
+  const tick = engine.reconcileTicks.at(-1)!;
+  assert.ok(tick.deferred > 0, `the contended batch was deferred (${JSON.stringify(tick)})`);
+  assert.ok(reached.includes(held), 'the row the writer held was evaluated at the end of the pass');
+  assert.equal(tick.evaluated + tick.deferred, tick.candidates, `every candidate was evaluated or deferred exactly once (${JSON.stringify(tick)})`);
+  // Quiet ticks settle the lapsed leases the deferred batch left.
+  for (let n = 0; n < 5 && (await store.list()).some(work => work.lease?.owner === 'gone-worker'); n++) await engine.reconcile();
 });

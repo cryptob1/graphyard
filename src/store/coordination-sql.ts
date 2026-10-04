@@ -126,9 +126,22 @@ export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM w
 export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE SKIP LOCKED';
 /**
  * Whether a session holding the coordination lock (`$1`, a single-key advisory lock) waits on this
- * session (GY-1115): a reconciliation batch queuing for that lock then would deadlock with it.
+ * session (GY-1115): a reconciliation batch queuing for that lock then would deadlock with it. Read
+ * with it, the session's `deadlock_timeout` in milliseconds (GY-1212): a holder that starts waiting
+ * on the batch only after this check is resolved by the batch's own `lock_timeout`, which must
+ * therefore fire before any deadlock check does (`commitLockWaitMs`).
  */
 export const reconcileCommitBlockingSql = `SELECT EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND l.granted
   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
   AND l.classid = ($1::bigint >> 32)::oid AND l.objid = ($1::bigint & 4294967295)::oid AND l.objsubid = 1
-  AND pg_backend_pid() = ANY(pg_blocking_pids(l.pid))) AS blocking`;
+  AND pg_backend_pid() = ANY(pg_blocking_pids(l.pid))) AS blocking,
+  (SELECT setting::int FROM pg_settings WHERE name = 'deadlock_timeout') AS deadlock_ms`;
+/**
+ * The `lock_timeout` a batch's commit waits in line with (GY-1212): `wantedMs`, at most half of
+ * `deadlockMs`, so the batch's wait always gives up well before a deadlock check fires and the
+ * batch, never a mutation holding the coordination lock, is the side that yields.
+ */
+export function commitLockWaitMs(wantedMs: number, deadlockMs: number) {
+  const wanted = Math.max(1, Math.floor(wantedMs));
+  return Number.isFinite(deadlockMs) && deadlockMs > 0 ? Math.max(1, Math.min(wanted, Math.floor(deadlockMs / 2))) : wanted;
+}

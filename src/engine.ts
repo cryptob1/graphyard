@@ -4,7 +4,7 @@ import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, save, wakeJob, documentBefore, eventWorkSql } from './store.js';
-import { reconcileCommitBlockingSql, reconcileItemLockSql, reconcileRereadSql, reconcileVersionsSql } from './store/coordination-sql.js';
+import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileItemLockSql, reconcileRereadSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
@@ -1678,7 +1678,12 @@ export class Engine {
     // without a submission would schedule a read of nothing.
     // `prioritized` claims the job ahead of the polled backlog, as a webhook wake is (GY-1099).
     if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id, data.prioritized === true); });
-    if (wake) await this.reconcile();
+    // A resync waits for the running tick and then the trailing one that serves it (GY-1115), at most two
+    // bounded ticks; reconciling only its own item instead would run a second writer against the tick's
+    // batches, the contention GY-1115 removed (GY-1212). A failed tick is a server fault, not this item's:
+    // every resync waiting on it would share the rejection, so the resync logs it and answers with the
+    // item as it stands, whose `changed`, `observed` and `job` say what the attempt achieved (GY-1212).
+    if (wake) await this.reconcile().catch(error => { console.warn(`reconciliation tick failed during the resync of ${before!.key}: ${error instanceof Error ? error.message : String(error)}`); });
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
     // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
     const since = data.since ?? work.actionQueue?.actions.find(row => row.kind === 'resync' && row.state === 'claimed')?.claim?.claimedAt ?? null;
@@ -2238,7 +2243,11 @@ export class Engine {
    * attempts per batch made a busy fleet's tick take 4-6 minutes.
    */
   reconcileMaxAttempts = 3;
-  /** How long a batch that wrote waits in line for the coordination lock at its commit (GY-1115); well under `deadlock_timeout`. */
+  /**
+   * How long a batch that wrote waits in line for the coordination lock at its commit (GY-1115);
+   * well under `deadlock_timeout`, and never more than half of it on a server where that is lower
+   * (GY-1212): see `coordinationLockWithin`.
+   */
   reconcileCommitLockWaitMs = 200;
   /** The last reconciliation ticks, newest last (GY-1115): what each evaluated, deferred and how many attempts its worst batch took. */
   readonly reconcileTicks: ReconcileTick[] = [];
@@ -2375,8 +2384,11 @@ export class Engine {
         next = batch; contended++;
         tick.maxAttempts = Math.max(tick.maxAttempts, contended);
         if (contended >= this.reconcileMaxAttempts) {
-          console.warn(`reconciliation deferred ${attemptedThrough - batch} item(s) after ${contended} contended attempts; retrying next tick`);
-          tick.deferred += attemptedThrough - batch;
+          // The rows a writer held in the last attempt keep their end-of-pass turn (GY-1212), counted there if still held.
+          const deferred = attemptedThrough - batch - locked.length;
+          skipped.push(...locked);
+          console.warn(`reconciliation deferred ${deferred} item(s) after ${contended} contended attempts; retrying next tick`);
+          tick.deferred += deferred;
           next = attemptedThrough;
           contended = 0; cap = Infinity;
           await new Promise(resolve => setImmediate(resolve));
@@ -2419,13 +2431,16 @@ export class Engine {
    * never committed. A mutation holding the lock may be waiting for one of the batch's rows, so the
    * batch queues only when no lock holder waits on it; one that starts waiting later has its
    * deadlock check (`deadlock_timeout`, 1 s by default) fire long after the batch's own `ms` wait
-   * gives up, so the batch, never the mutation, is the side that yields. A wait past `ms`, a holder
-   * blocked on the batch, or a deadlock reported all the same aborts the batch as contended.
+   * gives up, so the batch, never the mutation, is the side that yields. The check and the wait are
+   * not atomic, so that ordering is what resolves a holder that starts waiting between them; it is
+   * enforced, not assumed (GY-1212): the check reads the session's `deadlock_timeout`, and the wait
+   * never exceeds half of it. A wait past that, a holder blocked
+   * on the batch, or a deadlock reported all the same aborts the batch as contended.
    */
   private async coordinationLockWithin(db: PoolClient, ms: number) {
-    const blocking = (await db.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0].blocking;
+    const { blocking, deadlock_ms: deadlockMs } = (await db.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0];
     if (blocking) return false;
-    await db.query(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(ms))}ms'`);
+    await db.query(`SET LOCAL lock_timeout = '${commitLockWaitMs(ms, Number(deadlockMs))}ms'`);
     try { await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.coordination]); }
     catch (error) { if (['55P03', '40P01'].includes((error as { code?: string }).code ?? '')) return false; throw error; }
     await db.query('SET LOCAL lock_timeout TO DEFAULT');
@@ -2522,6 +2537,11 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       if (jobToken) {
         // The item row before the job row (GY-1115): the order every transaction takes them in, so this never deadlocks a reconciliation batch.
+        // This job row is locked mid-transaction and the queue's wakes at COMMIT lock theirs after it, out of work-id order:
+        // the one exception to the job rows' stable order (GY-1212). Wakes never wait on a row out of order themselves, so a
+        // cycle needs two observations each holding its own job and each waking the other's, which only two deliveries of
+        // queued items observed at the same instant do (each still sees the other queued). Postgres then aborts one as a
+        // deadlock; its observation is refused, nothing is saved, and its job is claimed again once its lease lapses.
         await db.query('SELECT 1 FROM work_items WHERE id=$1 FOR UPDATE', [id]);
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
         requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
