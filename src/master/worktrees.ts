@@ -1,7 +1,6 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
@@ -676,7 +675,8 @@ export async function submittedBranchRefusal(root: string, branch: string, remot
  */
 export async function reserveReleasingHold(root: string, branch: string, path: string, run: ChildRun, mutate: (name: string, data: unknown) => Promise<unknown>, epoch: number, host: string,
   work: Pick<Work, 'key' | 'lease'>, now: number) {
-  const refusals = spawnSync('git', ['-C', root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0
+  const branchExists = await Promise.resolve().then(() => run('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd: root })).then(() => true, () => false);
+  const refusals = branchExists
     ? holderRefusals(root, branchHolders(root, branch, path), work, now, { dirty: false }) : [];
   if (refusals.length) {
     const detail = heldBranchRefusal(branch, refusals);
