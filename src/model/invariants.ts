@@ -87,6 +87,8 @@ export interface InvariantInput {
   metrics?: readonly { at: string; durationMs: number }[];
   /** The decisions the loop put to approvers: which session judged each and when it settled. */
   approvals?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
+  /** The docs-sync sessions the loop launched for docs-only conflicts (GY-566), and when each settled. */
+  docsSyncs?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
   /** The session runtime's listing this cycle; null when it could not be read. */
   agents?: readonly { name?: string; pane_id?: string }[] | null;
   /** The build the control plane reports it runs; null when it could not be read. */
@@ -150,6 +152,10 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
     for (const watch of Object.values(input.approvals ?? {})) {
       const settled = time(watch.settledAt);
       if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) { lingering.push({ subject: watch.work, detail: `approver session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after its decision settled` }); if (watch.agentName) named.add(watch.agentName); }
+    }
+    for (const watch of Object.values(input.docsSyncs ?? {})) {
+      const settled = time(watch.settledAt);
+      if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) lingering.push({ subject: watch.work, detail: `docs-sync session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after it settled` });
     }
     // An approver the loop no longer watches — launched by hand (`master approver`, GY-403), or its watch retired — is
     // known by its name (master/autonomy.ts `approverSessionName`), which carries the item's key.
