@@ -3096,6 +3096,22 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     requireCurrent(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
     if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
   };
+  // The merge gate's success writes — the passing check and the request that GitHub merge the head —
+  // are bound to what they act on, not to the item's revision (GY-1112): the job still holds the
+  // item, which still has the same candidate, policy and all-gates authorization, every gate still
+  // passes, and the observation is fresh. Any other save (an executor claiming one of the item's
+  // action rows, a session update) changed nothing the write depends on, and refusing over it kept
+  // the blocked-auto-merge probe from ever reaching GitHub on consecutive observations.
+  const mergeGuard = (snapshot: Work) => async () => {
+    const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
+      WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
+    const row = result.rows[0], current = row?.document as Work | undefined;
+    const bound = (a: Work, b: Work) => a.candidate!.sha === b.candidate?.sha && a.candidate!.baseSha === b.candidate?.baseSha && a.candidate!.pr === b.candidate?.pr
+      && a.policyRevision === b.policyRevision && a.mergeAuthorization?.sha === b.mergeAuthorization?.sha && a.mergeAuthorization?.baseSha === b.mergeAuthorization?.baseSha
+      && a.mergeAuthorization?.policyRevision === b.mergeAuthorization?.policyRevision;
+    requireCurrent(current && bound(snapshot, current) && mergeAuthorized(current), 'Candidate, policy or merge authorization changed before publication; retry');
+    requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
+  };
   // A feature whose permission the last preflight found missing is not attempted: the job is
   // held with the operator-facing reason instead of retrying into a 403. Adapters without a
   // preflight (test doubles) hold nothing.
@@ -3177,30 +3193,16 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           // without spending the single re-request meant for vanished runs.
           const cancelledCount = Number(due.detail?.match(/cancelled:(\d+)/)?.[1] ?? 0);
           if (cancelledCount < cancelledRerunLimit) {
+            // Recorded through the engine under the item's lock and revision guard (GY-1124), so a
+            // heartbeat committing while GitHub is asked is kept, never written back over.
+            let outcome: Parameters<Engine['recordCheckRerunProbe']>[3];
             try {
               const again = await github.rerunFailedJobs(due.failedRunId);
-              const detail = `cancelled:${cancelledCount + 1}:${new Date().toISOString()}`;
-              const itemToUpdate: Work = work!;
-              work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
-                const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
-                if (!jobRow) return itemToUpdate;
-                const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
-                const cur = all.find(w => w.id === itemToUpdate.id);
-                if (!cur) return itemToUpdate;
-                const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
-                if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
-                const current = cur.checkReruns![index];
-                const at = now.toISOString();
-                const next: CheckRerun = { ...current, runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail, probedAt: at, waiting: undefined };
-                cur.checkReruns = cur.checkReruns!.map((entry, pos) => pos === index ? next : entry);
-                await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [cur.id, JSON.stringify(cur)]);
-                await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [cur.id, 'github', 'check.rerun.requested', JSON.stringify({ details: next, at })]);
-                return cur;
-              });
+              outcome = { kind: 'recancelled', runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail: `cancelled:${cancelledCount + 1}:${new Date().toISOString()}` };
             } catch (error) {
-              const detail = `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}`;
-              work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'refused', detail });
+              outcome = { kind: 'refused', detail: `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}` };
             }
+            work = await engine.recordCheckRerunProbe(work.id, job.token, due, outcome);
           } else {
             work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'waiting', status: 'cancelled' });
           }
@@ -3297,7 +3299,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           if (typeof github.mergeQueueState === 'function') {
             // The check and GitHub's queue move together (GY-258): an authorized, requested head is
             // published as passed and handed to GitHub to merge; anything else is failed and taken out.
-            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), mergeAuthorized(work) ? mergeGuard(work) : guard(work, work.gates.every(g => g.passed) && !work.violations.length));
             if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
           }
           else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));
