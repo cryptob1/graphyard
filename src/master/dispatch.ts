@@ -2,7 +2,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
-import { type ChildRun, defaultChildRun } from '../child-runner.js';
+import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
 import { researchWorkerSection } from '../research.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
@@ -414,7 +414,12 @@ function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
 // large repository is the slowest thing the dispatcher waits on; it is bounded well above the
 // runtime bound, so a slow checkout is never mistaken for a hung one (GY-114).
 export const workerLaunchTimeoutMs = 600_000;
-const workerCommand: WorkerCommand = (command, args, options = {}) => defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
+// A `pipe` stderr is captured so a failed child's is in its error's message, where the dispatch
+// classifier reads the worktree command's git text (GY-860); it is still shown, echoed on failure.
+export const workerCommand: WorkerCommand = async (command, args, options = {}) => {
+  try { return await defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' }); }
+  catch (error) { if (options.stdio?.[2] === 'pipe' && error instanceof ChildProcessError && error.stderr) process.stderr.write(error.stderr); throw error; }
+};
 
 /**
  * The default minter (GY-999): the CLI, as the worker's own principal, asks the control plane for
@@ -444,6 +449,15 @@ export async function releaseWorkerLaunch(root: string, key: string, epoch: numb
   await readWorkerCredential(root, profile.credentialFile);
   await run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
+
+/**
+ * GY-860 AC-2: whether a dispatch failure names the item's own workspace — the host's git state a
+ * repair or a redispatch can clear — rather than the profile. Such a failure cools off no profile:
+ * the worktree command itself releases the claim with its git message, which hands the epoch back,
+ * so the failure costs no attempt, and the item's dispatch record keeps the message.
+ */
+export const workspaceDispatchFailure = (reason: string) =>
+  /Git worktree creation failed|already has a workspace|Branch or host\/path is already reserved|already linked PR branch|Submitted PR branch changed/.test(reason);
 
 /**
  * `claimBy` is a hand dispatch's deadline on this host's clock (GY-175): it is checked again
@@ -479,8 +493,16 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     const reclaimed = Array.isArray(workspace.reclaimed) ? (workspace.reclaimed as { path?: unknown; action?: unknown }[]).map(entry => `${String(entry.path)}: ${String(entry.action)}`) : [];
     return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}), ...(reclaimed.length ? { reclaimed } : {}) };
   } catch (error) {
-    if (claimedEpoch !== null) try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
-    catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`); }
+    if (claimedEpoch !== null) {
+      try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
+      catch (releaseError) {
+        // GY-860: the worktree command releases its own claim as a workspace failure when git
+        // could not build the workspace, which hands the epoch back; a release refused because
+        // that already happened changes nothing, and only one that could not reach the server wraps.
+        if (releaseError instanceof Error && /Lease missing, expired, or superseded/.test(releaseError.message)) throw error;
+        throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`);
+      }
+    }
     throw error;
   }
 }
