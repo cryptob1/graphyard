@@ -3,7 +3,7 @@ import { type Work, type AgentReview, reviewProviderOf, standingEscalations, lea
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
-import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, tipPredecessors, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, tipPredecessors, attributedFailureRework, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -402,11 +402,10 @@ export function overtakenDecision(work: Work, decision: RoutineDecision, standin
  * going or passed asks for nothing; the binding names the head and the failed checks.
  *
  * A head that is a speculative queue tip holds unlanded predecessors, so its failure is attributed
- * first (GY-471, merge-queue.ts `attributeTipFailure`). While the entry is still queued the queue
- * is deciding: it ejects the entry, or bisects its batch. Once ejected, a failure attributed to a
- * predecessor asks nothing of this item — it waits for that predecessor, which is ejected and asked
- * instead (`attributedFailureRework`). Any other failure on a tip is the entry's, and the request
- * names the predecessors the tip held and the evidence, so the approver can check the attribution.
+ * first (GY-471, merge-queue.ts `attributeTipFailure`): while queued, the queue decides; once
+ * ejected, a failure attributed to a predecessor asks nothing of this item — the predecessor is
+ * asked instead (merge-queue.ts `attributedFailureRework`). Any other failure on a tip is the
+ * entry's, and the request names the tip's predecessors and the evidence for the approver.
  */
 export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
@@ -433,21 +432,6 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
     : ` Candidate ${candidate.sha.slice(0, 12)} is a speculative merge-queue tip built ${predecessors.length ? `behind predecessors ${predecessors.join(', ')}` : 'on the base branch with no predecessor'}; attribution: ${attribution ? `${attribution.evidence}${attribution.named.length ? '' : ' (the check output named no file)'}` : 'none was recorded for this tip, so no predecessor was shown to explain the failure'}.`;
   return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}.${tip} No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
-}
-/**
- * GY-471. The rework a predecessor owes for a required check that failed on a later entry's
- * speculative tip and was attributed to it: its current head is the one the attribution judged,
- * and it left the merge queue on that record (model/queue.ts). The reason names the check, the tip,
- * the predecessors the tip held and the evidence; the binding names this head and the tip.
- */
-export function attributedFailureRework(work: Work): { reason: string; binding: string } | null {
-  const candidate = work.candidate, ejection = work.queueEjection, attribution = ejection?.attribution;
-  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.queue || work.observation?.merged) return null;
-  if (!ejection || !attribution || attribution.entry === work.key || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
-  const culprit = attribution.culprits.find(entry => entry.key === work.key && entry.sha === candidate.sha);
-  if (!culprit) return null;
-  return { reason: `${work.key}: required CI check ${attribution.check} failed on speculative tip ${attribution.tip.slice(0, 12)} of ${attribution.entry}, built behind predecessors ${attribution.predecessors.join(', ')}, and is attributed to this item: ${culprit.evidence}. Attribution: ${attribution.evidence}. The item left the merge queue, ${attribution.entry} waits for it without a rework of its own, and it returns to a worker to fix what CI found.`,
-    binding: `${candidate.sha}:ci-attributed:${attribution.entry}:${attribution.tip}` };
 }
 /**
  * GY-496. A producer request the loop stopped attempting: every automatic session it launched for

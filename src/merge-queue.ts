@@ -1417,6 +1417,21 @@ export function ownDiff(work: Pick<Work, 'candidate' | 'observation'>): string[]
   if (!observation.scopeFiles?.length) return observation.files.length ? observation.files : null;
   return observation.scopeFiles.flatMap(file => file.baseSha !== undefined && file.baseSha === file.sha ? [] : [file.path, ...(file.previousPath ? [file.previousPath] : [])]);
 }
+/**
+ * GY-471. The rework a predecessor owes for a required check that failed on a later entry's
+ * speculative tip and was attributed to it: its current head is the one the attribution judged,
+ * and it left the merge queue on that record (model/queue.ts). The reason names the check, the tip,
+ * the predecessors the tip held and the evidence; the binding names this head and the tip.
+ */
+export function attributedFailureRework(work: Work): { reason: string; binding: string } | null {
+  const candidate = work.candidate, ejection = work.queueEjection, attribution = ejection?.attribution;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.queue || work.observation?.merged) return null;
+  if (!ejection || !attribution || attribution.entry === work.key || ejection.sha !== candidate.sha || ejection.policyRevision !== work.policyRevision) return null;
+  const culprit = attribution.culprits.find(entry => entry.key === work.key && entry.sha === candidate.sha);
+  if (!culprit) return null;
+  return { reason: `${work.key}: required CI check ${attribution.check} failed on speculative tip ${attribution.tip.slice(0, 12)} of ${attribution.entry}, built behind predecessors ${attribution.predecessors.join(', ')}, and is attributed to this item: ${culprit.evidence}. Attribution: ${attribution.evidence}. The item left the merge queue, ${attribution.entry} waits for it without a rework of its own, and it returns to a worker to fix what CI found.`,
+    binding: `${candidate.sha}:ci-attributed:${attribution.entry}:${attribution.tip}` };
+}
 /** The entries the current head was published behind as a speculative tip, or null when it is not a tip the record knows. */
 export function tipPredecessors(work: Pick<Work, 'candidate' | 'queue' | 'queueHistory'>): string[] | null {
   const candidate = work.candidate, speculation = work.queue?.speculation;
