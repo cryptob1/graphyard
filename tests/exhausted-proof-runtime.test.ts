@@ -10,7 +10,7 @@ import { atomicPrivateWrite, masterConfigSchema, type MasterConfig } from '../sr
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { exhaustedProofKey, type ExhaustedProof } from '../src/daemon/decisions.js';
 import { sessionRetryLimit } from '../src/producer.js';
-import { dispatchFailureAttention, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchFailureAttention, emptyDispatchCursor, extractProducerAccountsOrRuntimes, isUnactedProducerAttempt, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 
 // GY-1153: Producer attempts that never started (runtime quota, trust prompt, busy profiles)
 // send a correct candidate back to a worker as a rework.
@@ -256,4 +256,39 @@ test('unit:acted-producer-failure-still-reworks — a head whose producer attemp
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('GY-1153 review follow-ups — a sole profile keeps its unstarted retries, mid-run limits still count as acted, and the attention names only profiles', async () => {
+  const root = await temporaryDirectory('exhausted-proof-runtime-followups');
+  try {
+    const token = join(root, 'coordinator.token');
+    await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    await writeFile(join(root, 'agy.token'), 'agy-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const config = masterConfig(token);
+    const item = requested('unit:never-started-producers-request-no-rework');
+    const unit = item.autoDispatch!.producers.find(request => request.group === 'unit')!;
+
+    // One never-started attempt on the only producer profile: the request is not spent, so the next
+    // attempt launches on that same profile rather than waiting on it as busy.
+    const once = [{ requestId: unit.id, state: 'failed', attempt: 1, profile: 'agy', requestedAt: iso(-3_600_000), closedAt: iso(-3_000_000),
+      resolution: 'never started: the session took up neither its request nor the re-prompt' }];
+    const log: string[] = [], cursor = emptyDispatchCursor(config);
+    await runDispatchTick(config, cursor, dispatchEffects(() => [item], log, once), () => clock);
+    assert.deepEqual(log.filter(entry => entry.includes(':unit:')), ['producer:GY-1127:unit:agy'], 'the sole profile retries an unstarted attempt');
+    assert.equal(cursor.abandoned[unit.id], undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+
+  // A session that acted and quoted a quota or rate limit in its last words acted.
+  assert.equal(isUnactedProducerAttempt('the headless run ended (exit: rate limit reached, quota exceeded) without trusted evidence for unit:a (missing)'), false);
+  assert.equal(isUnactedProducerAttempt('attempt 2 on agy: failed — the headless run ended (exit: provider limit notice) without trusted evidence for unit:a (missing)'), false);
+  assert.equal(isUnactedProducerAttempt('attempt 1 on agy: failed — never started: the session left Herdr without acting on its request'), true);
+  assert.equal(isUnactedProducerAttempt('the headless run could not start: spawn agy ENOENT'), true);
+  // The attention names the profiles the attempts ran on, never words lifted from a resolution.
+  assert.deepEqual(extractProducerAccountsOrRuntimes([
+    'attempt 1 on agy: failed — never started: profile is busy in the claude runtime',
+    'attempt 2 on claude-b: failed — never started: account exhausted',
+    'attempt 3 on agy: failed — never started',
+  ]), ['agy', 'claude-b']);
 });
