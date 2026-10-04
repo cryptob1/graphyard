@@ -19,15 +19,15 @@ On the worker, `graphyard master settle-containment GY-N "reason"` verifies noth
 
 ## Submitted implementation needs rework
 
-Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643: 55% own-change, 33% conflicts; raw median 2, 0 excluding them.
+Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rework; `master status`: `speed.reworkRounds.ownChange` (median excluding out-of-item causes). GY-643: 55% own-change, 33% conflicts.
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rework interventions by cause (declared refusal shape `build/out-of-scope-count`; loop refusal trigger; normalised rework reason). A cause at the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed: standards/criteria wording, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent with `decision:approve` (not a human session, the drafter or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording cause, fingerprint, instances closed, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals), counting recurrences. Drafted instances never recount; a recurrence after application is redrafted, naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal and rework interventions by cause (declared refusal shape `build/out-of-scope-count`; loop refusal trigger; normalised rework reason). A cause at the threshold in the window gets drafted artefacts (`retro.drafted`), never applied or filed: standards/criteria wording, a mechanical check, a producer-method fix or a fault-catalogue entry. An AI admin or operator agent with `decision:approve` (not a human session, the drafter or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording cause, fingerprint, instances closed, or refuses it. In force: requirements show as `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue`, `retroCatalogued`), counting recurrences. Drafted instances never recount; a recurrence after application is redrafted, naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 
-A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval and proofs, despite runner waits (`check.rerun.waiting`); one GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, failing rerun or refusal ejects (`check.rerun.*`). A cancelled run never fails: it reruns (≤3) or stays pending. A passing rerun, or any pass after a cancelled ejecting run, lifts it. `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
+A required check failing on a tip or head reruns once per sha (*rerun failed jobs*, Actions:write), holding position, approval and proofs, despite runner waits (`check.rerun.waiting`); one GitHub accepted but never created is requested once more (`check.rerun.rerequested`); a second failure, failing rerun or refusal ejects (`check.rerun.*`). A cancelled run never fails: it reruns (≤3) or stays pending. Any later pass lifts ejection. `mergeQueue.rerunFailedChecks`: default 1, 0 disables.
 
 ## Accepted evidence turns out to be wrong
 
@@ -56,7 +56,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What an observation costs
 
-~10 requests uncached; unchanged, none.
+~10 requests uncached; none unchanged.
 
 Immutable, per-cycle and webhook-driven reads: [not repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
 
@@ -74,13 +74,13 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else readable same-host `data_directory` volume size, else an advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else same-host `data_directory` volume size, else an advisory 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
-- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only what changed, never the whole work document, unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a delta-extended row, an item's newest save, a delivery event or cited revision, an uncompleted merged item's row, or an unread flow-projection row. Each batch appends a `ledger.compacted` event with counts per kind. Only `VACUUM FULL` returns space to the volume.
+- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only deltas unless they move the stage or delivery.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a delta-extended row, an item's newest save, a delivery event or cited revision, an uncompleted merged item's row, or an unread flow-projection row. Each batch logs `ledger.compacted` counts per kind. Only `VACUUM FULL` returns space to the volume.
 
 ### Host memory
 
