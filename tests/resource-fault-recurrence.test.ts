@@ -1,13 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { HerdrAgent } from '../src/master.js';
+import { fileURLToPath } from 'node:url';
+import { loadMasterConfig, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { finishedSessionGraceMs, loadedRevision, nameReclaimBoundMs, readResources, reclaimResources, resourceAttention, stuckSessionMs, type ResourceInputs } from '../src/master-resources.js';
+import { describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, reclaimResources, resourceAttention, stuckSessionMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -281,3 +285,236 @@ test('manual:fault-class-resources — GY-1130: recurring resources faults from 
   assert.deepEqual(candidateFaults, [], 'None of the 5 recurring resources faults recur against the candidate');
 });
 
+
+// ---- GY-1166: holders whose evidence is gone or unrecognized ------------------------------------
+//
+// GY-1165 recorded seven resource:agent-names instances after GY-1130, all of two shapes the
+// reclaim had no path back from: a producer pane whose settled record retention had already reaped
+// (produce-claude-2 idle in w1V:pG8C, no record in producers.json), and worker panes Herdr reported
+// 'unknown' (six workers, among them graphyard-claude-1 in w1V:pG8F). Each profile's namespace bound
+// is 1, so one leaked pane holds the profile at its bound.
+
+const t1166 = Date.parse('2026-10-03T17:31:17.735Z');
+/** The seven GY-1165 subjects: six worker profiles and one producer profile, each at concurrency 1. */
+const gy1165Workers = [
+  { name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch', pane: 'w1V:pG8F' },
+  { name: 'claude-secondary', principal: 'graphyard-claude-2', agentName: 'graphyard-claude-2', mode: 'launch', pane: 'w1V:pG86' },
+  { name: 'claude-tertiary', principal: 'graphyard-claude-3', agentName: 'graphyard-claude-3', mode: 'launch', pane: 'w1V:pG87' },
+  { name: 'claude-quaternary', principal: 'graphyard-claude-4', agentName: 'graphyard-claude-4', mode: 'launch', pane: 'w1V:pG89' },
+  { name: 'claude-quinary', principal: 'graphyard-opencode-3', agentName: 'graphyard-opencode-3', mode: 'launch', pane: 'w1V:pG5Q' },
+  { name: 'cursor-secondary', principal: 'graphyard-cursor-2', agentName: 'graphyard-cursor-2', mode: 'launch', pane: 'w1V:pG7B' },
+];
+const gy1165Producers = [{ name: 'claude-producer-2', agentName: 'produce-claude-2' }, { name: 'claude-producer-4', agentName: 'produce-claude-4' }, { name: 'claude-producer-1', agentName: 'produce-claude-1' }];
+const gy1165Profiles = { workers: gy1165Workers.map(({ pane: _pane, ...profile }) => profile), reviewers: [], producers: gy1165Producers };
+/** An agent as Herdr reports it, status possibly absent. */
+const held = (name: string, pane: string, status?: string, runtime: string | null = 'claude'): HerdrAgent => ({ name, pane_id: pane, ...(status === undefined ? {} : { agent_status: status }), ...(runtime ? { agent: runtime } : {}) } as HerdrAgent);
+/** A producer record as the ledger schema stores it; `closedAt` undefined leaves it unsettled. */
+const ledgerRecord = (agentName: string, state: string, closedAt: number | undefined, pane = 'w1V:pG00'): ProducerRecord => ({
+  id: randomUUID(), key: 'GY-1098', pr: 1, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, group: 'group-1', proofs: ['integration:proof'],
+  profile: agentName, principal: `principal-${agentName}`, agentName, pane, requestId: randomUUID(), attempt: 1, state, outcome: {},
+  requestedAt: iso((closedAt ?? t1166) - 600_000), expiresAt: iso(t1166 + 3_600_000), ...(closedAt === undefined ? {} : { closedAt: iso(closedAt), requestClosedAt: iso(closedAt) }),
+} as unknown as ProducerRecord);
+/** producers.json as observed: produce-claude-4 failed, produce-claude-1 pending, nothing for produce-claude-2. */
+const observedProducers = (): ProducerRecord[] => [
+  ledgerRecord('produce-claude-4', 'failed', t1166 - 5 * 60_000, 'w1V:pG8D'),
+  ledgerRecord('produce-claude-1', 'pending', undefined, 'w1V:pG8A'),
+];
+const gy1165Agents = (): HerdrAgent[] => [
+  held('produce-claude-2', 'w1V:pG8C', 'idle'),
+  held('produce-claude-1', 'w1V:pG8A', 'working'),
+  ...gy1165Workers.map((worker, index) => index % 2 ? held(worker.agentName, worker.pane, 'unknown') : held(worker.agentName, worker.pane, undefined, null)),
+];
+const gy1165Work = () => gy1165Workers.map(worker => workerItem(worker.principal, { startedAt: t1166 - 3_600_000, endedAt: t1166 - 20 * 60_000, state: 'finished' }));
+/** Runs reclaim passes `gapMs` apart, removing each closed pane from Herdr's next report. */
+async function passes(directory: string, count: number, gapMs: number, agents: HerdrAgent[], work: Work[], profiles = gy1165Profiles, start = t1166) {
+  const closed: string[] = [], reports = [];
+  for (let pass = 0; pass < count; pass++) reports.push(await reclaimResources(directory, profiles, { work, agents: agents.filter(entry => !closed.includes(entry.pane_id!)) },
+    { tmpRoot: directory, now: start + pass * gapMs, closePane: pane => { closed.push(pane); } }));
+  return { closed, reports, remaining: agents.filter(entry => !closed.includes(entry.pane_id!)) };
+}
+const ledgerRoot = async (name: string, producers: ProducerRecord[]) => {
+  const directory = await temporaryDirectory(name);
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  await saveProducerLedger(directory, { version: 1, producers });
+  return directory;
+};
+
+test('unit:agent-name-reclaim-closes-pane-after-record-reaped — a producer pane whose record retention reaped is closed after two passes confirm it unowned, and the close is reported', async () => {
+  const producers = observedProducers();
+  const agents = [held('produce-claude-2', 'w1V:pG8C', 'idle'), held('produce-claude-1', 'w1V:pG8A', 'working')];
+  const profiles = { workers: [], reviewers: [], producers: gy1165Producers };
+  const reading = (input: Partial<ResourceInputs>) => inputs({ now: t1166, producers, agents, profiles, ...input });
+
+  // REPRODUCE: the subject as recorded — the producer namespace at its bound, the holder overdue.
+  assert.deepEqual(faults(reading({})), ['resource:agent-names:claude-producer-2']);
+  assert.match(readResources(reading({})).find(entry => entry.id === 'agent-names:claude-producer-2')!.detail!, /produce-claude-2 \(idle, no live session, not reclaimed within 10 minutes of settling, pane w1V:pG8C\)/);
+  // BASE: step 2 closed a pane only from the name's settled record (`if (!settled || …) continue`), and none is left.
+  assert.equal(producers.filter(record => record.agentName === 'produce-claude-2').length, 0, 'retention reaped the only evidence the base close read');
+
+  // CANDIDATE: first sighting, then a pass 60s on (still confirming the launch bound), then closed.
+  const directory = await ledgerRoot('gy-1166-reaped', producers);
+  const run = await passes(directory, 3, finishedSessionGraceMs, agents, [], profiles);
+  assert.deepEqual(run.reports.map(report => report.closed.map(entry => entry.pane)), [[], [], ['w1V:pG8C']], 'closed only once two passes at least 60s apart saw it unowned past the launch bound');
+  assert.match(run.reports[2].closed[0].reason, /no producer record holds the name \(its record was reaped or never written\) and Herdr reports it idle/);
+  assert.deepEqual(run.remaining.map(entry => entry.pane_id), ['w1V:pG8A'], 'the pending launch on produce-claude-1 is untouched');
+  const recorded = await readReclaimReports(directory);
+  assert.deepEqual(recorded.at(-1)!.closed.map(entry => entry.name), ['produce-claude-2'], 'the pass records the close');
+  assert.match(describeReclaim(run.reports[2])!, /closed 1 finished session\(s\) and released their names \(produce-claude-2\)/);
+
+  // NON-RECURRENCE: the namespace is free again.
+  assert.deepEqual(faults(reading({ now: t1166 + 2 * finishedSessionGraceMs, agents: run.remaining })), []);
+});
+
+test('integration:resources-reclaimed-within-bound — GY-1166: retention and the reclaim of a pane with no recognized status both land inside the name bound', async () => {
+  // A producer session settled; Herdr could not be read on the pass that crossed retention, so its record was reaped before any pass saw the pane.
+  const settled = t1166 - ledgerRetentionMs - 60_000;
+  const directory = await ledgerRoot('gy-1166-bound', [ledgerRecord('produce-claude-2', 'completed', settled)]);
+  const profiles = { workers: gy1165Profiles.workers.slice(0, 1), reviewers: [], producers: gy1165Producers.slice(0, 1) };
+  const blind = await reclaimResources(directory, profiles, { work: [], agents: null }, { tmpRoot: directory, now: t1166 - 60_000, closePane: () => {} });
+  assert.equal(blind.reaped.producer, 1);
+  assert.deepEqual((await readProducerLedger(directory)).producers, []);
+  // The pane on the reaped name, and a worker pane Herdr reports 'unknown', are both given back within nameReclaimBoundMs of the first sighting.
+  const agents = [held('produce-claude-2', 'w1V:pG8C', 'idle'), held('graphyard-claude-1', 'w1V:pG8F', 'unknown')];
+  const work = [workerItem('graphyard-claude-1', { startedAt: t1166 - 3_600_000, endedAt: t1166 - 20 * 60_000, state: 'finished' })];
+  const run = await passes(directory, 2, 2 * finishedSessionGraceMs, agents, work, profiles);
+  assert.deepEqual(run.closed.sort(), ['w1V:pG8C', 'w1V:pG8F']);
+  assert.ok(2 * finishedSessionGraceMs < nameReclaimBoundMs, 'the close lands inside the name bound');
+  assert.deepEqual(faults(inputs({ now: t1166 + 2 * finishedSessionGraceMs, agents: run.remaining, work, profiles })), []);
+});
+
+test('unit:agent-name-reclaim-closes-unknown-status-holder — a worker pane Herdr reports unknown or without a status, unowned, is closed by the reclaim pass and by the loop\'s close step', async () => {
+  const work = gy1165Work();
+  const agents = gy1165Workers.flatMap((worker, index) => [index % 2 ? held(worker.agentName, worker.pane, 'unknown') : held(worker.agentName, worker.pane, undefined)]);
+  // BASE: step 4 and closeStep recognized only idle/done/blocked (or the agentless 'unknown' shape), so every one of these was skipped.
+  assert.ok(agents.every(entry => !['idle', 'done', 'blocked'].includes(entry.agent_status ?? '') && !!entry.agent));
+  const directory = await ledgerRoot('gy-1166-unknown', []);
+  const run = await passes(directory, 3, finishedSessionGraceMs, agents, work);
+  assert.deepEqual(run.reports.map(report => report.closed.length), [0, 0, 6], 'closed once confirmed unowned past the launch bound');
+  assert.match(run.reports[2].closed.find(entry => entry.name === 'graphyard-claude-2')!.reason, /holds no active assignment and Herdr reports it unknown/);
+  assert.match(run.reports[2].closed.find(entry => entry.name === 'graphyard-claude-1')!.reason, /Herdr reports it with no status/);
+  assert.equal(run.remaining.length, 0);
+
+  // The loop's close step: a launch profile's pane Herdr reports 'unknown' with its runtime present, or with no status.
+  const config = await loopConfig();
+  const loopAgents: HerdrAgent[] = [held('graphyard-claude-1', 'pane-1', 'unknown'), held('graphyard-cursor-1', 'pane-2', undefined)];
+  const closed: string[] = [], state = emptyDaemonState(config), loop = loopEffects([], loopAgents, closed);
+  await runCycle(config, state, loop, () => t1166);
+  await runCycle(config, state, loop, () => t1166 + 60_000);
+  assert.deepEqual(closed, [], 'inside the launch bound nothing closes');
+  const result = await runCycle(config, state, loop, () => t1166 + 130_000);
+  assert.deepEqual(closed.sort(), ['pane-1', 'pane-2']);
+  assert.ok(result.actions.some(action => action.kind === 'close' && action.state === 'done' && /Closed finished session graphyard-claude-1 \(unknown\)/.test(action.detail)));
+  assert.ok(result.actions.some(action => action.kind === 'close' && action.state === 'done' && /Closed finished session graphyard-cursor-1 \(no status\)/.test(action.detail)));
+  assert.ok(130_000 < nameReclaimBoundMs);
+});
+
+test('unit:ledger-retention-keeps-record-with-live-pane — a terminal record whose name a pane still holds is not reaped until the pass closes that pane', async () => {
+  const settled = t1166 - ledgerRetentionMs;
+  const record = ledgerRecord('produce-claude-2', 'completed', settled, 'w1V:pG8C');
+  const older = ledgerRecord('produce-claude-2', 'failed', settled - 60_000);
+  const directory = await ledgerRoot('gy-1166-retention', [older, record]);
+  const profiles = { workers: [], reviewers: [], producers: gy1165Producers.slice(0, 1) };
+  // A pane still working on the name: never closed, and its newest record is kept past retention while it holds the name.
+  const winding = await reclaimResources(directory, profiles, { work: [], agents: [held('produce-claude-2', 'w1V:pG8C', 'working')] }, { tmpRoot: directory, now: t1166, closePane: () => {} });
+  assert.deepEqual(winding.closed, []);
+  assert.equal(winding.reaped.producer, 1, 'only the older record, which no pane decision reads, is reaped');
+  assert.deepEqual((await readProducerLedger(directory)).producers.map(entry => entry.id), [record.id], 'the newest record on a held name survives retention');
+  // Finished now: first sighting keeps the record; the pass that closes the pane reaps it with it.
+  const agents = [held('produce-claude-2', 'w1V:pG8C', 'idle')];
+  const first = await reclaimResources(directory, profiles, { work: [], agents }, { tmpRoot: directory, now: t1166 + 60_000, closePane: () => {} });
+  assert.deepEqual([first.closed.length, first.reaped.producer], [0, 0], 'seen once: kept, so the close keeps its evidence');
+  const second = await reclaimResources(directory, profiles, { work: [], agents }, { tmpRoot: directory, now: t1166 + 120_000, closePane: () => {} });
+  assert.deepEqual(second.closed.map(entry => entry.pane), ['w1V:pG8C']);
+  assert.match(second.closed[0].reason, /its producer session completed/, 'the close read the record retention would otherwise have reaped');
+  assert.equal(second.reaped.producer, 1, 'reaped in the same pass that applied the close');
+  assert.deepEqual((await readProducerLedger(directory)).producers, []);
+});
+
+test('unit:agent-name-reclaim-spared-pending-launch — a young pane, a name with a pending record and a name under a live lease are never closed by the new paths', async () => {
+  const directory = await ledgerRoot('gy-1166-spared', [ledgerRecord('produce-claude-1', 'pending', undefined)]);
+  const leased = workerItem('graphyard-claude-2', { startedAt: t1166 - 3_600_000, state: 'running' }, { expiresAt: t1166 + 3_600_000 });
+  // graphyard-claude-3 is launching: its pane stands, its runtime has not reported and its lease has not landed.
+  const launching = workerItem('graphyard-claude-3', { startedAt: t1166 - 30_000, state: 'running' });
+  const work = [leased, launching];
+  const agents = [
+    held('produce-claude-1', 'w1V:pP1', undefined, null),
+    held('graphyard-claude-2', 'w1V:pW2', 'unknown'),
+    held('graphyard-claude-3', 'w1V:pW3', undefined, null),
+    held('graphyard-claude-1', 'w1V:pW1', 'unknown'),
+  ];
+  // Inside the launch bound nothing new closes, even the unowned holder.
+  const young = await passes(directory, 2, finishedSessionGraceMs, agents, work);
+  assert.deepEqual(young.closed, [], 'a pane seen for less than the launch bound is never closed');
+  // Past it, only the unowned worker pane closes; a launch still within its own bound since starting stays too.
+  const later = await reclaimResources(directory, gy1165Profiles, { work, agents }, { tmpRoot: directory, now: t1166 + 2 * finishedSessionGraceMs, closePane: () => {} });
+  assert.deepEqual(later.closed.map(entry => entry.pane), ['w1V:pW1']);
+  // The loop's close step spares the live lease and the young pane alike.
+  const config = await loopConfig();
+  const loopWork = [loopItem('GY-2', { owner: 'worker-b', epoch: 11, expiresAt: new Date(t1166 + 3_600_000).toISOString() } as Work['lease'])];
+  const closed: string[] = [], state = emptyDaemonState(config), loop = loopEffects(loopWork, [held('graphyard-cursor-1', 'pane-2', 'unknown'), held('graphyard-claude-1', 'pane-1', 'unknown')], closed);
+  await runCycle(config, state, loop, () => t1166);
+  await runCycle(config, state, loop, () => t1166 + 60_000);
+  assert.deepEqual(closed, [], 'younger than launchAppearanceMs: nothing closes');
+  await runCycle(config, state, loop, () => t1166 + 130_000);
+  assert.deepEqual(closed, ['pane-1'], 'graphyard-cursor-1, whose principal holds a live lease, is never closed');
+  assert.equal(unownedPaneConfirmMs, launchAppearanceMs, 'the reclaim pass and the loop wait the same launch bound');
+});
+
+test('unit:resource-fault-recurrence-agent-names — GY-1165\'s seven agent-names subjects reproduce, and two reclaim passes leave none at its bound', async () => {
+  const reading = (agents: HerdrAgent[], at: number, producers = observedProducers()) => inputs({ now: at, agents, producers, work: gy1165Work(), profiles: gy1165Profiles });
+  const subjects = ['claude-primary', 'claude-producer-2', 'claude-quaternary', 'claude-quinary', 'claude-secondary', 'claude-tertiary', 'cursor-secondary'].map(name => `resource:agent-names:${name}`);
+  assert.deepEqual(faults(reading(gy1165Agents(), t1166)).sort(), subjects, 'all seven instances reproduce');
+  const directory = await ledgerRoot('gy-1166-recurrence', observedProducers());
+  const run = await passes(directory, 2, unownedPaneConfirmMs, gy1165Agents(), gy1165Work());
+  assert.deepEqual(run.reports[0].closed, [], 'the first pass only notes them');
+  assert.equal(run.reports[1].closed.length, 7, 'the second closes every leaked holder');
+  assert.deepEqual(run.remaining.map(entry => entry.name), ['produce-claude-1'], 'the pending producer launch stays');
+  assert.deepEqual(faults(reading(run.remaining, t1166 + unownedPaneConfirmMs, (await readProducerLedger(directory)).producers)), [], 'zero resource-bound recurrences');
+});
+
+test('unit:resource-fault-recurrence-reproduces-subjects — both new holder shapes join the GY-1130 subjects: after two reclaim passes none of the seven GY-1165 subjects recurs', async () => {
+  // Reaped record (producer) and unrecognized status (workers: 'unknown' with a runtime, and no status at all).
+  const shapes = gy1165Agents().filter(entry => entry.agent_status !== 'working');
+  assert.ok(shapes.some(entry => entry.agent_status === 'idle' && entry.name === 'produce-claude-2'));
+  assert.ok(shapes.some(entry => entry.agent_status === 'unknown' && entry.agent));
+  assert.ok(shapes.some(entry => entry.agent_status === undefined));
+  const directory = await ledgerRoot('gy-1166-subjects', observedProducers());
+  // At the loop's observed cadence (7-11 minutes) the two passes still close everything, well inside retention of nothing.
+  const run = await passes(directory, 2, 7 * 60_000, gy1165Agents(), gy1165Work());
+  assert.deepEqual(run.closed.sort(), ['w1V:pG8C', ...gy1165Workers.map(worker => worker.pane)].sort());
+  const after = inputs({ now: t1166 + 7 * 60_000, agents: run.remaining, producers: (await readProducerLedger(directory)).producers, work: gy1165Work(), profiles: gy1165Profiles });
+  assert.deepEqual(faults(after), []);
+  assert.ok(readResources(after).filter(entry => entry.resource === 'agent-names').every(entry => entry.state !== 'exhausted' || entry.id === 'agent-names:claude-producer-1'), 'only the profile with a pending launch reads full');
+});
+
+// ---- Loop harness for closeStep ----------------------------------------------------------------
+
+/** A work item complete enough for a loop cycle (tests/exited-worker-pane.test.ts). */
+function loopItem(key: string, lease: Work['lease'] = null): Work {
+  const at = (offset = 0) => new Date(t1166 + offset).toISOString();
+  return {
+    id: `work-${key}`, key, title: 'Leaked names return', description: '', type: 'bug', priority: 0, dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'Closed', proofs: ['unit:agent-name-reclaim-spared-pending-launch'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    stage: lease ? 'build' : 'review', revision: 4, policyRevision: 1, createdAt: at(-7_200_000), updatedAt: at(), stageEnteredAt: at(-3_600_000), ready: true, epoch: lease?.epoch ?? 4,
+    lease, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    gates: [], violations: [],
+  } as unknown as Work;
+}
+async function loopConfig(): Promise<MasterConfig> {
+  const root = await temporaryDirectory('gy-1166-loop');
+  const credentials = await temporaryDirectory('gy-1166-loop-credentials');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
+    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
+  const profile = (name: string, principal: string, agentName: string) => ({ name, principal, agentName, mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }) as WorkerProfile;
+  return { ...await loadMasterConfig(root), workers: [profile('claude-primary', 'worker-a', 'graphyard-claude-1'), profile('cursor-primary', 'worker-b', 'graphyard-cursor-1')] };
+}
+function loopEffects(work: Work[], agents: HerdrAgent[], closed: string[]): DaemonEffects {
+  return {
+    agents: () => agents.filter(entry => !closed.includes(entry.pane_id!)), credentials: async () => ({}), snapshot: async () => ({ work, now: new Date(t1166).toISOString() }),
+    closeSession: pane => { closed.push(pane); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({ result: 'merged', merged: true }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(t1166).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+  } as DaemonEffects;
+}

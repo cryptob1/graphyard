@@ -115,6 +115,13 @@ export const finishedSessionGraceMs = 60_000;
  * pane once its lease ends — so the name is a fault; before it, the reclaim is under way (GY-1089).
  */
 export const nameReclaimBoundMs = stuckSessionMs;
+/**
+ * How long a pane holding a name must have been seen unowned before the reclaim closes it on
+ * Herdr's report alone — no settled record left on the name, or a status Herdr does not recognise
+ * as finished (GY-1166). It equals the launcher's `launchAppearanceMs` (src/daemon/effects.ts): a
+ * launch whose runtime has not yet appeared reads the same way, and is never taken for a leak.
+ */
+export const unownedPaneConfirmMs = 120_000;
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
 /** The default warning line: a tenth of the bound, and at least one unit. */
@@ -127,6 +134,14 @@ export const producerLedgerBound = sessionLedgerBound;
 
 const settledAt = (record: { closedAt?: string; idleSince?: string; requestedAt: string }) => Date.parse(record.closedAt ?? record.idleSince ?? record.requestedAt);
 const finished = ['idle', 'done', 'blocked'];
+/** A status Herdr reports for a running runtime: the one a reclaim on Herdr's report never closes. */
+const running = (agent: HerdrAgent) => agent.agent_status === 'working';
+/**
+ * A worker launch under way: an implementation session of the principal not yet ended that started
+ * within `unownedPaneConfirmMs` — its pane can stand before the runtime reports or the lease lands.
+ */
+const launchingWorker = (principal: string | undefined, work: Work[], now: number) => work.some(item => (item.sessions ?? []).some(handle =>
+  handle.kind === 'implementation' && handle.principal === principal && !handle.endedAt && now - Date.parse(handle.startedAt) < unownedPaneConfirmMs));
 type Role = 'worker' | 'reviewer' | 'producer';
 const roleProfiles = (input: Pick<ResourceInputs, 'profiles'>): { role: Role; name: string; agentName: string; concurrency?: number; principal?: string }[] => [
   ...input.profiles.workers.filter(profile => profile.mode === 'launch' && profile.agentName).map(profile => ({ role: 'worker' as const, name: profile.name, agentName: profile.agentName, principal: profile.principal })),
@@ -206,7 +221,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'agent-names', title: 'Herdr agent-name namespace', unit: 'names',
     bound: "each launch profile's concurrency: its fixed agent name at concurrency 1, or that many derived <agentName>-<8hex> names above it",
     usage: 'Herdr agent list: every agent whose name is one of the profile\'s session names', owner: 'Herdr, through the worker, reviewer and producer launchers in src/master.ts',
-    reclaim: `the reclaim pass closes a finished pane on one of the names once its session has settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned`,
+    reclaim: `the reclaim pass closes a finished pane on one of the names once its session has settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned; a pane no settled record accounts for, or whose status Herdr does not report as finished, is closed on Herdr's report once two passes ${unownedPaneConfirmMs / 1000}s apart saw it unowned and not working`,
     remedy: 'close the finished panes holding the names (graphyard master run --once, or herdr pane close PANE after confirming the session posted its result)',
     // A name held by a live session is the slot pool working; only names nothing live owns, and no
     // reclaim gave back within its bound, warn (GY-1089). A running session is never reclaimable: it
@@ -624,23 +639,35 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       failed.set(identity(record), { resolution });
       report.released.push({ name: record.agentName, ledger: kind, reason });
     }
-    // 2. Panes on a profile's names whose session settled and nothing pending holds the name.
+    // 2. Panes on a profile's names that nothing pending holds. A pane whose record settled and
+    //    which Herdr reports finished waits out the grace; one whose record is gone (reaped, or never
+    //    written) or whose status Herdr does not recognise is closed on Herdr's own report once two
+    //    passes `unownedPaneConfirmMs` apart saw it unowned (GY-1166): a reaped record or an unknown
+    //    status otherwise pinned the name at its bound for good. A running session is never closed.
+    const closedNames = new Set<string>();
     for (const agent of observed.agents ?? []) {
       if (!agent.pane_id || !agent.name || !profiles.some(profile => isProfileSession(profile, agent.name))) continue;
       if (records.some(record => record.state === 'pending' && record.agentName === agent.name && !failed.has(identity(record)))) continue;
       const settled = records.filter(record => record.agentName === agent.name).at(-1);
-      // A session this pass just released is closed at once; any other waits out the grace, finished.
+      // A session this pass just released is closed at once; any other waits out the grace, not running.
       const released = report.released.some(entry => entry.name === agent.name);
-      if (!settled || (!released && (now - settledAt(settled) < finishedSessionGraceMs || !finished.includes(agent.agent_status ?? '')))) continue;
+      if (!released && (running(agent) || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
+      const confirmMs = settled && finished.includes(agent.agent_status ?? '') ? finishedSessionGraceMs : unownedPaneConfirmMs;
       const first = file.seen[agent.pane_id] ?? report.at;
-      if (!released && now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id] = first; continue; }
-      const state = failed.has(identity(settled)) ? 'failed' : settled.state, resolution = failed.get(identity(settled))?.resolution ?? settled.resolution;
-      try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}` }); }
+      if (!released && now - Date.parse(first) < confirmMs) { seen[agent.pane_id] = first; continue; }
+      const state = settled ? (failed.has(identity(settled)) ? 'failed' : settled.state) : null, resolution = settled ? failed.get(identity(settled))?.resolution ?? settled.resolution : undefined;
+      const reason = state ? `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}${finished.includes(agent.agent_status ?? '') ? '' : ` (Herdr reports ${agent.agent_status ?? 'no status'})`}`
+        : `no ${kind} record holds the name (its record was reaped or never written) and Herdr reports it ${agent.agent_status ?? 'with no status'}`;
+      try { await close(agent.pane_id); closedNames.add(agent.name); report.closed.push({ name: agent.name, pane: agent.pane_id, reason }); }
       catch (error) { report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`); }
     }
     // 3. Terminal records past retention that answer no live request.
     // A pinned record (GY-131) is never reaped: an open request or a pending review still reads it.
-    const reap = new Set(unpinnedTerminal(records).filter(record => !(record.requestId && live.has(record.requestId)) && now - settledAt(record) >= ledgerRetentionMs).map(identity));
+    // Nor is the newest record on a name a pane still holds and this pass did not close (GY-1166):
+    // it is the close decision's evidence, so retention never outruns the reclaim of its pane.
+    const evidence = new Set((observed.agents ?? []).filter(agent => agent.pane_id && agent.name && !closedNames.has(agent.name))
+      .map(agent => records.filter(record => record.agentName === agent.name).at(-1)).filter((record): record is Settleable => !!record).map(identity));
+    const reap = new Set(unpinnedTerminal(records).filter(record => !(record.requestId && live.has(record.requestId)) && !evidence.has(identity(record)) && now - settledAt(record) >= ledgerRetentionMs).map(identity));
     return { failed, reap };
   };
   /**
@@ -676,14 +703,17 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
     for (const agent of held) {
       const profile = { role: 'worker' as const, name: worker.name, agentName: worker.agentName, principal: worker.principal };
       if (liveOwner(profile, agent.name!, { reviews: [], producers: [], work: observed.work, now })) continue;
-      if (!finished.includes(agent.agent_status ?? '')) continue;
+      // A holder Herdr reports 'unknown' or with no status is closed too, once confirmed unowned for
+      // `unownedPaneConfirmMs` and no launch of the principal is under way (GY-1166); only a running one is spared.
+      const recognised = finished.includes(agent.agent_status ?? '');
+      if (running(agent) || (!recognised && launchingWorker(worker.principal, observed.work, now))) continue;
       const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work });
       if (settled !== null && now - settled < finishedSessionGraceMs) continue;
       const first = file.seen[agent.pane_id!] ?? report.at;
-      if (now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id!] = first; continue; }
+      if (now - Date.parse(first) < (recognised ? finishedSessionGraceMs : unownedPaneConfirmMs)) { seen[agent.pane_id!] = first; continue; }
       try {
         await close(agent.pane_id!);
-        report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: 'its worker session finished and holds no active assignment' });
+        report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: recognised ? 'its worker session finished and holds no active assignment' : `its worker session holds no active assignment and Herdr reports it ${agent.agent_status ?? 'with no status'}` });
       } catch (error) {
         report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`);
       }
