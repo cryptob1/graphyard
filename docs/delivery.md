@@ -15,6 +15,17 @@ Graphyard's own deployment runs one moving main, a frozen candidate, UAT, then t
 
 `release status` lists every candidate with its UAT verdict and promotion. `release GY-N EPOCH`, naming a work item, still gives up that item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, a `GRAPHYARD_UAT_TOKEN` for a principal in UAT's `GRAPHYARD_PRINCIPALS`, and a `GRAPHYARD_RELEASE_TOKEN` that may create work. Create `release/production` at production's current SHA before applying the Railway configuration.
 
+## Managed repositories
+
+Installing Graphyard gives a repository the same model. `init --scan` classifies its checks into `delivery.mergeGate` and shows the split; `init --scan --apply` writes it as `delivery` in `graphyard.json` and renders two workflows from it (re-rendered on every apply, so edit `graphyard.json`, not them):
+
+- `.github/workflows/graphyard-release-candidate.yml` runs `release cut` on `candidateSchedule` (`--candidate-cron`, default six hours; `null` is on demand), runs each `perCandidate` check that has a command at the candidate's exact SHA, moves `release/uat` with `release uat`, deploys through `deploy.adapter`, and records `release validate` with one `--suite` per check.
+- `.github/workflows/graphyard-promotion.yml` runs after a successful candidate run (or by dispatch) and calls `release promote`, which refuses any candidate without a passing UAT record on its exact SHA, then deploys that SHA to production and runs `release verify`.
+
+Both run the Graphyard CLI pinned to the installing commit (`GRAPHYARD_BUILD_SHA` when the build stamps one). `deploy.adapter` is `railway` (services tracking `release/uat` and `release/production` in `deploy.project`) or `command` (`deploy.uat` and `deploy.production` run with `GRAPHYARD_CANDIDATE_SHA`; nothing is guessed, so an unset command leaves the workflows ungenerated and is reported). UAT must report the candidate SHA at `/healthz` as `commit` or `revision`.
+
+Branch protection requires only the `preMerge` set, or every check with `"mode": "per-pr"`, which also generates no workflow. `install --plan` lists the release branches, the `uat` and `production` GitHub environments and every resource the adapter creates; each that costs money or opens an account carries `human`, and `--apply` creates those only with `--create-environments`.
+
 ## Who writes what
 
 Policy and approvals are `admin`'s; builds come from a `producer` with a `builder` registration, selection from `admin` or a `promoter`, observations from a `producer` with an `observer` registration and lease (`POST /api/delivery/lease`).
