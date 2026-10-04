@@ -43,9 +43,9 @@ A failing check is [rerun](github.md#merge-queue) once in place (`mergeQueue.rer
 
 | Band | Cadence
 | --- | ---
-| `merge` | passing, within two of head or a parallel tip: 20 s
+| `merge` | near queue head, gates passing: 20 s
 | `active` | awaiting check, review, base refresh, rework: 1 min
-| `steady` | unchanged: 5 min, stretched by fleet bound
+| `steady` | unchanged: 5 min, stretched by fleet bound; review requests ≤ 10 min
 | `idle` | awaiting dispatch/escalation: 5 min, stretched if unchanged
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
@@ -113,7 +113,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 4, ≤half pool) pace per token, claiming webhook jobs, merge path, remainder. `observationThroughput`: budget, pace, head lag, oldest submission (`github` past two minutes). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, claiming webhook jobs, merge path, stale review requests, remainder. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s. Reconcile locks only its batch rows; contended batches back off, then defer.
 
 ### Concurrent reconciliation
 

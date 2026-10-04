@@ -7,11 +7,13 @@ The master (`coordinator`) routes and administers GitHub unasked; never implemen
 
 Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
+`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session). Railway: set `productionEnvironment`.
 
 ### System-driven items
 
 Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` when unauthorized or without an operator agent.
+
+The loop attests unproduced `manual:` proofs through an independent approver, once per head, base and policy revision (`loopDecisions.attestations`).
 
 ### Session liveness is reconciled, not trusted
 
@@ -40,24 +42,23 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Machine-filed backlog
 
-Follow-ups wait on their item (`pendingFollowUps`) until ship, joining its follow-up item; closing unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. Pi (`run.research`) triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; untriaged past 24h raises attention; status counts `machineUntriaged`/`operatorBacklog`.
+Follow-ups wait on their item (`pendingFollowUps`) until ship, joining its follow-up item; closing unshipped drops them ([follow-ups](followups.md)). Pi (`run.research`) triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; status counts `machineUntriaged`/`operatorBacklog`.
 
-`Recurring <class> faults` and `invariant:` faults get a read-only diagnostician (`run.diagnostician`): approved, its fix releases or closes as duplicate. Restores owed under 30m and restart-resumed merges are self-handled, not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`): approved, its fix releases or closes as duplicate. Restart-resumed merges and restores under 30m are not `merge` faults.
 
 ## Automatic dispatch at submit
 
-Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then, once they pass, a review request (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launches await the head's bot reviews (`run.awaitReviewers`) up to `awaitReviewersMinutes`, skipping a bot that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
+Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then, once they pass, a review request (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launches await the head's bot reviews (`run.awaitReviewers`) up to `awaitReviewersMinutes` (default 8, 0 disables), skipping a bot that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart (`run.reviewerProfile` defaults to 4 sessions); lowering it drains first (`longestWaitMs`); starved minutes count in `counts.concurrencyStarved`.
-- **Launches bind heads**: stale refusals wake observation and retry; 15m+ waiting reviews raise attention.
-- Requests always settle: `pane_not_found` panes close, as do settled reviewers' open panes. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; pending ones count in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch (12 per request, then `dispatch.abandoned`); vanished producer runs spend no attempt, exhausted ones raise `escalation:proof-exhausted`, then a quoting rework.
+- Requests always settle: `pane_not_found` panes close, as do settled reviewers' open panes. No request outlives its own token: expired and unreported by Herdr, it settles `expired`; pending ones count in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch (12 per request, then `dispatch.abandoned`); exhausted producer runs raise `escalation:proof-exhausted`, then a quoting rework.
 - **Every role fails over on spent quota** or waits as one uncounted `capacity` line.
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after relaunching stops.
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Once all an automated group's remaining proofs are such findings, the next action is `request-rework` naming proof, criterion and surviving mutation. `decide attest` adds an approver-confirmed `exercise`; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Then the next action is `request-rework` naming proof, criterion and surviving mutation. `decide attest` adds an approver-confirmed `exercise`; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
@@ -66,7 +67,7 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 ### Repair lane
 
 No-admin-bypass exceptions (head-bound, App's ruleset bypass):
-- A `"repair": "merge-path"` item stalled 15m with checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault; audited (`repair.merged`).
-- The main guard's [revert](github.md#optimistic-merges) of a confirmed main required-suite failure's culprit, unless later merges touched its files (`optimistic.revert.*`); reopens as rework.
+- A `"repair": "merge-path"` item (`mergePath` files only) stalled 15m with checks passed, given an approver's `master decide GY-N repair-merge REASON` naming the fault; audited (`repair.merged`), flagged until a normal merge.
+- The main guard's [revert](github.md#optimistic-merges) of a confirmed main required-suite failure's culprit onto the base tip, unless later merges touched its files (`optimistic.revert.*`); reopens as rework.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
