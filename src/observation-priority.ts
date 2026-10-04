@@ -7,7 +7,8 @@ import { agentOwner, type AttentionItem } from './master/attention.js';
  * What the observation scheduler serves first, and how stale each band may grow (GY-492, GY-1114).
  *
  * Two steps read GitHub through an observation with a bound: the merge gate refuses one older than
- * two minutes, and a reviewer launch one older than thirty. On 2026-10-02, with ~95 open items,
+ * two minutes, and a review request is held to readings under thirty — not refused by the reviewer
+ * launch, which binds the head rather than the age (GY-710), but kept there by this scheduler. On 2026-10-02, with ~95 open items,
  * the fleet's steady-state interval had stretched to an hour, so 43 review-requested items aged
  * past thirty minutes behind the starved backlog while 19 reviewer slots idled and nothing merged
  * for 80 minutes. Here every open item is placed in a band — `merge` (the queue head band, merges
@@ -17,7 +18,11 @@ import { agentOwner, type AttentionItem } from './master/attention.js';
 
 /** How old an observation may be and still serve the merge gate (the publication guard's bound too). */
 export const observationFreshnessMs = 120_000;
-/** How old the observation of a requested head may be when a reviewer is launched for it (GY-710). */
+/**
+ * How old the reading of a review-requested head may grow (GY-1114): the scheduler's own bound, which
+ * no launch enforces (`assertReviewCandidate` binds the head, not the age, GY-710), so a requested
+ * head that moved on GitHub is noticed, and the request superseded, within it.
+ */
 export const reviewObservationFreshnessMs = 30 * 60_000;
 export type FreshnessBand = 'merge' | 'review' | 'steady';
 /** Each band's freshness bound; steady items have none and wait behind the others. */
@@ -36,6 +41,13 @@ export const reviewPromotionAgeMs = reviewObservationFreshnessMs / 2;
  * entries its batch is validated with move only when it does.
  */
 export const headClaimBand = (batchSize: number) => Math.max(2, Math.max(1, Math.floor(batchSize)));
+/**
+ * The batch size the observation workers claim the merge path with (GY-498): the parallel-tip window
+ * when it is wider than the batch, since every entry validated at once is claimed first. `processJob`
+ * claims with it and `observationBandLag` reports with it (GY-1178), so the merge band master status
+ * reports is the band the workers protect.
+ */
+export const observationClaimBatch = (mergeBatchSize = 1, parallelTips = 1) => Math.max(1, mergeBatchSize, parallelTips);
 /** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
 export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
 /** Whether a session is running on the item now: a worker, reviewer or producer whose result an observation reads. */
@@ -50,7 +62,7 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date(), ki
   // claimed only after every named starved job, and under a paced budget never (2026-09-26: GY-393, GY-430 for 3 h).
   return kind === 'request-rework' || kind === 'request-review' || (kind === 'resync' && !firstObservationOwed(work));
 }
-/** Whether the item's next action is the review request, which a reviewer launch serves only from a reading under its bound. */
+/** Whether the item's next action is the review request, whose reading the scheduler keeps under the review bound. */
 export const reviewRequested = (work: Work, all: Work[], now = new Date()) => work.stage !== 'done' && nextAction(work, all, now)?.kind === 'request-review';
 
 /** The merge path's ids (GY-567): the queue-head band in queue position, then any merge in flight. */
@@ -83,7 +95,7 @@ export function observationClaimClasses(all: Work[], batchSize: number, now = Da
  * The claim order and its protected prefix (GY-492, GY-1114). The prefix — which no starved job
  * overtakes in `Store.takeJob` — is the merge path, then every review-requested item whose reading
  * has reached `reviewPromotionAgeMs`, oldest first: past half its bound a review request is served
- * ahead of the backlog, so it never reaches the thirty minutes a reviewer launch refuses. Then
+ * ahead of the backlog, so it never reaches the review band's thirty minutes. Then
  * submissions never observed, items whose next action waits on an observation, running sessions
  * (ahead of the waits under a `tight` budget, GY-567), and the rest by `available_at`.
  * `available_at` still gates every claim: priority reorders due jobs, never makes one due.
@@ -117,9 +129,11 @@ export const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 
  * oldest reading in it, its bound, and how many items are past it. A bounded band with any item
  * past its bound raises one attention item naming the band, the oldest item and its lag. The
  * merge band's queue head is `observationThroughputStatus`'s own item, so `skipHead` leaves it out.
+ * `batchSize` is `observationClaimBatch` of the published queue settings: the merge band holds the
+ * same queue positions the workers claim with the merge path (GY-1178).
  */
-export function observationBandLag(all: Work[], now: number, skipHead: string | null = null) {
-  const merging = new Set(mergePath(all, 1, now)), date = new Date(now);
+export function observationBandLag(all: Work[], now: number, skipHead: string | null = null, batchSize = 1) {
+  const merging = new Set(mergePath(all, batchSize, now)), date = new Date(now);
   const bands = (['merge', 'review', 'steady'] as FreshnessBand[]).map(band => ({ band, boundMs: observationFreshnessBounds[band], items: 0, pastBound: 0, oldest: null as string | null, lagMs: null as number | null, stale: null as { key: string; lagMs: number } | null }));
   for (const work of all) {
     const band = freshnessBand(work, all, merging, date);
@@ -132,7 +146,7 @@ export function observationBandLag(all: Work[], now: number, skipHead: string | 
   }
   const report = bands.map(({ stale: _stale, ...entry }) => ({ ...entry, lagMs: entry.lagMs === Infinity ? null : entry.lagMs, unobserved: entry.lagMs === Infinity }));
   const attention: AttentionItem[] = bands.filter(entry => entry.boundMs !== null && entry.stale).map(entry => ({ subject: 'github',
-    text: `The ${entry.band} band has ${entry.pastBound} of ${entry.items} item(s) observed longer ago than its ${observationLag(entry.boundMs!)} bound (oldest ${entry.stale!.key}, ${entry.stale!.lagMs === Infinity ? 'never observed' : observationLag(entry.stale!.lagMs)}): ${entry.band === 'merge' ? 'the merge gate refuses them' : 'reviewer launches refuse them'} until the observation workers reach them`,
+    text: `The ${entry.band} band has ${entry.pastBound} of ${entry.items} item(s) observed longer ago than its ${observationLag(entry.boundMs!)} bound (oldest ${entry.stale!.key}, ${entry.stale!.lagMs === Infinity ? 'never observed' : observationLag(entry.stale!.lagMs)}): ${entry.band === 'merge' ? 'the merge gate refuses them' : 'their review requests may name heads that have since moved'} until the observation workers reach them`,
     ...agentOwner('control plane', 'Nothing to run: the workers claim these bands ahead of the backlog; if the lag persists, raise GRAPHYARD_OBSERVATION_CONCURRENCY with GRAPHYARD_DATABASE_POOL_SIZE (workers at most half the pool) and restart the server') }));
   return { bands: report, attention };
 }
