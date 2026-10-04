@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -222,7 +222,36 @@ test('unit:host-seal-key-recovers-interrupted-write — a sealing key a killed f
   // A whole private key whose public half never landed: the key stays, and the public half is derived from it.
   await rm(join(home, 'seal', 'cut-host.pem.pub'));
   assert.equal(await hostSealKey('cut-host', home), replaced, 'the existing key is kept');
+  // A public half an older version left truncated: the original key comes back and the copy is rewritten (GY-1211).
+  await writeFile(join(home, 'seal', 'cut-host.pem.pub'), replaced.slice(0, 40));
+  assert.equal(await hostSealKey('cut-host', home), replaced, 'a truncated public half is derived again from the kept key');
+  assert.equal((await readFile(join(home, 'seal', 'cut-host.pem.pub'), 'utf8')).trim(), replaced, 'the public half on disk is whole again');
+  // A whole public half of some other key, as a lost concurrent first use could leave: the private key wins.
+  const { publicKey: stranger } = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  await writeFile(join(home, 'seal', 'cut-host.pem.pub'), stranger);
+  assert.equal(await hostSealKey('cut-host', home), replaced, 'a public half of another key is never returned');
+  assert.equal((await readFile(join(home, 'seal', 'cut-host.pem.pub'), 'utf8')).trim(), replaced);
+  assert.equal(await unsealOnHost(sealToHost(await hostSealKey('cut-host', home), secret), 'cut-host', home), secret);
   assert.deepEqual((await readdir(join(home, 'seal'))).sort(), ['cut-host.pem', 'cut-host.pem.pub'], 'no scratch file is left behind');
+});
+
+test('unit:host-seal-key-without-hard-links-keeps-first-key — concurrent first uses on a filesystem without hard links all return the one key that landed, and a stale lock is cleared (GY-1211)', async () => {
+  const home = await temporaryDirectory('seal-no-links');
+  const noLinks = async () => { throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' }); };
+  const keys = await Promise.all(Array.from({ length: 6 }, () => hostSealKey('fuse-host', home, noLinks)));
+  assert.equal(new Set(keys).size, 1, 'every concurrent first use returns the same public half');
+  assert.equal((await readFile(join(home, 'seal', 'fuse-host.pem.pub'), 'utf8')).trim(), keys[0], 'the public half on disk matches what was returned');
+  const secret = `sealed-${randomUUID()}`;
+  assert.equal(await unsealOnHost(sealToHost(keys[0], secret), 'fuse-host', home), secret, 'the private key opens what is sealed to the returned public half');
+  assert.deepEqual((await readdir(join(home, 'seal'))).sort(), ['fuse-host.pem', 'fuse-host.pem.pub'], 'no scratch or lock file is left behind');
+  // A lock a killed first use left behind, long enough ago, does not keep the next first use waiting.
+  const lock = join(home, 'seal', 'stale-host.pem.lock');
+  await writeFile(lock, '1\n');
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lock, old, old);
+  const recovered = await hostSealKey('stale-host', home, noLinks);
+  assert.equal(await unsealOnHost(sealToHost(recovered, secret), 'stale-host', home), secret);
+  assert.deepEqual((await readdir(join(home, 'seal'))).filter(name => name.startsWith('stale-host')).sort(), ['stale-host.pem', 'stale-host.pem.pub']);
 });
 
 test('unit:operator-principal-declared-human — the install plan declares its operator principal a human session and no agent principal; a roster rotation keeps it so', async () => {
