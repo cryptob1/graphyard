@@ -7,6 +7,7 @@ import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
 import { save, wakeJob } from './store/store.js';
+import { lockedWork } from './store/locked-read.js';
 import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { LANDABLE_CHECK, landableCarried, landableCheckCurrent, landableCheckRun, type LandableCheckRun } from './landable-check.js';
@@ -3010,7 +3011,7 @@ async function refreshLanding(engine: Engine, github: GitHub, work: Work, needed
 async function recordLandingRefresh(engine: Engine, work: Work, record: LandingRefresh, token: string): Promise<Work> {
   return engine.store.transaction(async (db, now) => {
     requireCurrent((await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [work.id, token, now])).rows[0], 'Integration job lease expired or superseded');
-    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all = await lockedWork(db, [work.id]);
     const current = all.find(item => item.id === work.id);
     requireCurrent(current && current.revision === work.revision && current.stage !== 'done' && current.queue && !current.observation?.merged
       && current.candidate?.sha === record.head && current.policyRevision === record.policyRevision, 'Queue entry changed while the landing was verified; retry');
