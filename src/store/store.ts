@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
-import { assertSavable } from './locked-read.js';
+import { assertSavable, noteSaved } from './locked-read.js';
 import { advisoryLocks } from './locks.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
@@ -271,6 +271,7 @@ export async function save(db: pg.PoolClient, work: Work, actor: string, kind: s
   work.updatedAt = now.toISOString();
   const text = JSON.stringify(work);
   await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, text]);
+  noteSaved(work, text);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details, text);
 }
