@@ -669,8 +669,8 @@ export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<
  * narrowed drill-down can read facts past where the report stopped — for `separateKinds` metrics
  * (`throughput`, `lead-time`, `merge-ready`) once that kind's own bound is exhausted, for the others
  * (`stage-dwell`, `evidence`, `review`, `blockers`) past the shared scan cutoff — so it states its
- * own reach in `coverage` and is not guaranteed to count the report's facts. These reads are pooled apart from the
- * reports, on the same freshness rules, keyed by their kinds and start.
+ * own reach in `coverage` and is not guaranteed to count the report's facts. These reads are
+ * pooled apart from the reports, on the same freshness rules, keyed by their kinds and start.
  */
 export async function pooledFlowDrilldown(store: Store, query: FlowQuery, request: DrilldownRequest) {
   const kinds = drilldownKinds[request.metric];

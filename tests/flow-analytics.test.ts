@@ -849,6 +849,11 @@ test('unit:steps-drilldown-reads-recent-moves — the steps drill-down reads onl
   const fullPage = renderFlow(full);
   assert.doesNotMatch(fullPage, /data-flow="replay-truncated"/);
   assert.match(fullPage, /<p class="muted flow-wait">No item changed step in the last 24 hours\.<\/p>/);
+  // InsightsPage itself renders that read from its own replay state: before the read answers, the
+  // page shows ReplayRead's waiting text and no truncation notice (GY-1164 review).
+  const page = renderToStaticMarkup(createElement(InsightsFlow, { work: [], status: null, api: async () => null, token: '', observedAt: asOf, setSelected: () => {} } as any));
+  assert.ok(page.includes('<p class="muted flow-wait">Reading the recorded step changes…</p>'), 'InsightsPage renders ReplayRead with its unread replay state');
+  assert.doesNotMatch(page, /data-flow="replay-truncated"/);
 });
 
 test('unit:flow-now-includes-rework — an unowned rework item with an open candidate is shown at Build in the Now view and counted in the flow', async () => {
@@ -1451,7 +1456,7 @@ test('manual:review-followups-triaged GY-1154: each follow-up listed in the desc
   }
 });
 
-test('manual:review-followups-triaged GY-1164: each follow-up from the approved review of GY-1154 is addressed in code, or declined with a recorded reason (AC-1)', () => {
+test('manual:review-followups-triaged GY-1164: each follow-up from the approved review of GY-1154 is addressed in code, or declined with a recorded reason (AC-1)', async () => {
   const triage: { id: number; path: string; description: string; status: 'addressed' | 'declined'; reasonOrResolution: string }[] = [
     {
       id: 1,
@@ -1463,11 +1468,15 @@ test('manual:review-followups-triaged GY-1164: each follow-up from the approved 
     {
       id: 2,
       path: 'tests/flow-analytics.test.ts:844',
-      description: 'renderFlow patches private React internals (__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE) to seed hook state, brittle across React updates',
+      description: 'renderFlow patches private React client internals to seed hook state, brittle across React updates',
       status: 'addressed',
       reasonOrResolution: 'InsightsPage renders its replay read through the exported ReplayRead component; unit:steps-drilldown-reads-recent-moves renders ReplayRead with the truncated and full replays through public props, and no test touches React internals.',
     },
   ];
   assert.equal(triage.length, 2);
   for (const entry of triage) assert.ok(['addressed', 'declined'].includes(entry.status) && entry.reasonOrResolution.length > 0);
+  // The record is checked against the code it describes, so it cannot go stale silently.
+  const [analytics, tests] = await Promise.all([readFile(new URL('../src/flow-analytics.ts', import.meta.url), 'utf8'), readFile(new URL(import.meta.url), 'utf8')]);
+  assert.doesNotMatch(analytics, /align with report\s+(?:\*\s+)?figures|count the same delivered\/merged\/gate facts as the report/, 'finding 1: the alignment claim is gone');
+  assert.ok(!tests.includes('__CLIENT_' + 'INTERNALS'), 'finding 2: no test reaches into React internals');
 });
