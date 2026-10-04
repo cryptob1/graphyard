@@ -4,7 +4,7 @@ import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeR
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
-import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
+import { coveredDeadProofs, deadProofDetail, mechanicalFailure, mechanicalProof, mechanicalVerdicts, nonexercisingRemedy, producerManualFailure, producerManualFailures, rescopedCriteria } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
@@ -260,7 +260,8 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
-  if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest') return needed;
+  // A re-scope (GY-1177) revises the criteria, and the worker's lease, if any, survives it.
+  if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest' || needed.action === 'requirements') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
   if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
@@ -319,6 +320,9 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
   // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
   // which waits for one — must not hold this rework.
+  // A dead proof whose criterion its other proofs already prove is re-scoped, not reworked (GY-1177).
+  const rescope = rescopeDecision(work);
+  if (rescope) return rescope;
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
   const ci = failedCheckRework(work);
@@ -464,17 +468,40 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
   const now = new Date();
   const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
   // An unexercised `manual:` proof is not the worker's to fix: see attestationDecision.
-  const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));
+  // A dead proof whose criterion is proven otherwise is rescopeDecision's (GY-1177), never rework.
+  const dead = new Set(coveredDeadProofs(work, now).map(entry => entry.proof));
+  const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:') && !dead.has(entry.proof));
   if (!failed.length && !unexercised.length) return null;
   const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
   const findings = [
     ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalProof(verdict.proof) ? mechanicalFailure(verdict, candidate.sha) : producerManualFailure(verdict, candidate.sha)).join('; ')}`] : []),
-    ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}"`).join('; ')}`] : []),
+    ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}". ${nonexercisingRemedy(work, entry.proof, entry.criteria)}`).join('; ')}`] : []),
   ];
   const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
   const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
   return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.${open}`,
     binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
+}
+
+/**
+ * GY-1177. The criterion re-scope a dead proof calls for, or null: a unit or integration proof the
+ * producer recorded as not exercising a criterion whose other proofs already prove it on the
+ * candidate with trusted, exercised evidence. No production round revives such a proof (GY-1132,
+ * GY-1131 and GY-1142 reworked it for days), so the loop requests the requirements revision
+ * retiring it from the criterion, judged by the independent approver like any narrowing, and the
+ * engine records the requirement-weakening escalation that revision raises. A failed proof on the
+ * head is the worker's first: the change itself is wrong, so rework stands and this waits.
+ */
+export function rescopeDecision(work: Work): RoutineDecision | null {
+  const candidate = work.candidate;
+  if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  const now = new Date();
+  if (mechanicalVerdicts(work, [work], now).some(verdict => verdict.outcome === 'failed') || producerManualFailures(work, [work], now).length) return null;
+  const dead = coveredDeadProofs(work, now);
+  if (!dead.length) return null;
+  return { action: 'requirements', input: { criteria: rescopedCriteria(work, dead) },
+    binding: `${candidate.sha}:rescope:${dead.map(entry => `${entry.criteria.join('+')}:${entry.proof}`).sort().join(',')}`.slice(0, decisionBindingMax),
+    reason: `${work.key}: ${dead.map(entry => deadProofDetail(entry, candidate.sha)).join('; ')}. The criterion is proven, only the binding is dead, so no production round can revive it: approve retiring the proof from the criterion (a narrowing, recorded as requirement-weakening), or refuse with the reason if the covering proofs do not assert the criterion's statement.`.slice(0, 2000) };
 }
 
 /**
@@ -701,7 +728,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
 export function withheldDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
-  if (!needed || needed.action === 'merge' || needed.action === 'attest' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
+  if (!needed || needed.action === 'merge' || needed.action === 'attest' || needed.action === 'requirements' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
   const unverified = workerStopped(work, now, assessment).unverified;
   return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
 }

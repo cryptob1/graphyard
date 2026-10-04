@@ -1,6 +1,6 @@
 import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
 import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed } from './dispatch.js';
-import { mechanicalProof, unexercisedRework } from './mechanical-proofs.js';
+import { deadProofRescope, mechanicalProof, unexercisedRework } from './mechanical-proofs.js';
 import { attestationWait } from './unproduced-attestation.js';
 import { producerLaunchStop } from './action-progress.js';
 import { standingEscalations } from './escalation.js';
@@ -96,6 +96,9 @@ function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
   const failed = decisions.find(decision => decision.state === 'failed');
   const detail = failed?.reason ?? unexercisedRework(work, decisions);
   if (detail) return { step: 'failed', detail, mechanical: !failed || failed.failed.every(entry => mechanicalProof(entry.proof)) };
+  // GY-1177: a dead proof whose criterion its other proofs already prove waits on its re-scope.
+  const rescope = deadProofRescope(work, decisions);
+  if (rescope) return { step: 'wait', detail: rescope };
   let stopped: string | null = null;
   for (const decision of decisions.filter(entry => entry.state === 'request')) {
     const request = openProducerRequest(work, decision.group);

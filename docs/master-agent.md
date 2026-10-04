@@ -80,13 +80,13 @@ The master never launches reviews or producers by hand, except `master review GY
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"`: the proof rerun with the criterion's behaviour removed.
+A passing producer records `"exercise"`: the proof rerun with the criterion's behaviour removed wherever it lives — the change's lines or, if it predates the change, the base code carrying it.
 
 ```json
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When all remaining unit or integration proofs are such findings, the next action is `request-rework`, naming proof, criterion and surviving mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass beside such a failing stripped run is trusted; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). `request-rework` and acceptance name the criterion and remedy: a test failing without it, or re-binding. If other proofs prove the criterion, a `requirements` decision retires the dead one. Unexercised `manual:` proofs re-attest with `exercise`. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
