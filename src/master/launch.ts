@@ -466,7 +466,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // verdict is not kept, so the next launch on that endpoint reports it instead.
   let launched = false, settle!: (ok: boolean) => void;
   const outcome = new Promise<boolean>(done => { settle = done; });
-  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
+  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
   try {
     let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
     try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
@@ -538,12 +538,16 @@ export async function secretsBusEndpointProblem(run: ChildRun | undefined, path:
  * this socket was already judged. A probe that cannot judge the socket — no user manager answers,
  * or its answer is unreadable — is not remembered, so a later launch, and any launch that was
  * awaiting that probe, asks again and still reports an unmigrated endpoint once the user manager
- * answers. The line is the launch's own: when `started` settles false (the launch failed and its
+ * answers. Given a `backoff` (the launcher passes keyringProbeBackoff), an unjudged probe opens a
+ * window on that socket in which no launch asks again — it logs nothing — so a user manager that
+ * stays unreachable costs one probe per window rather than one per confined launch; each further
+ * unjudged probe doubles the window up to its cap, and a judged one closes it (GY-1206). The line
+ * is the launch's own: when `started` settles false (the launch failed and its
  * pane was closed) nothing is returned under that session's name. A racing launch that succeeds
  * reports the endpoint instead of staying silent, and the verdict is forgotten only when every
  * racing launch has failed without reporting it, so the next launch reports it.
  */
-export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true)): Promise<string | null> {
+export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true), backoff: KeyringProbeBackoff | null = null): Promise<string | null> {
   if (!confinement || !path) return null;
   let endpoint: string, socket: string;
   try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
@@ -556,11 +560,22 @@ export async function keyringEndpointWarning(name: string, confinement: Coordina
     const outcome = await held.claim(name, started);
     if (outcome !== undefined) return outcome;
   }
+  const waiting = backoff?.windows.get(endpoint);
+  if (waiting?.socket === socket && backoff!.now() < waiting.retryAt) return null;
   let waiters = 0;
   let reported = false;
   let problemResult: string | null | undefined;
   const forget = () => { if (verdicts.get(endpoint)?.verdict === verdict) verdicts.delete(endpoint); return undefined; };
-  const verdict: Promise<string | null | undefined> = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? forget() : problem ? `${problem.text}; migrate: ${problem.next}` : null, forget);
+  const unjudged = () => {
+    if (backoff) {
+      const last = backoff.windows.get(endpoint);
+      const delayMs = last?.socket === socket ? Math.min(last.delayMs * 2, keyringProbeBackoffMaxMs) : keyringProbeBackoffMs;
+      backoff.windows.set(endpoint, { socket, delayMs, retryAt: backoff.now() + delayMs });
+    }
+    return forget();
+  };
+  const judged = (line: string | null) => { backoff?.windows.delete(endpoint); return line; };
+  const verdict: Promise<string | null | undefined> = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? unjudged() : judged(problem ? `${problem.text}; migrate: ${problem.next}` : null), unjudged);
   const claim = async (sessionName: string, sessionStarted: Promise<boolean>): Promise<string | null | undefined> => {
     waiters++;
     try {
@@ -593,6 +608,16 @@ export interface KeyringEndpointVerdict {
 }
 /** The latest socket's verdict per keyring endpoint path in this process (keyringEndpointWarning). */
 const keyringEndpointVerdicts = new Map<string, KeyringEndpointVerdict>();
+/** The window an unjudged keyring probe opens before a launch asks the user manager again, and its cap as it doubles (GY-1206). */
+export const keyringProbeBackoffMs = 30_000;
+export const keyringProbeBackoffMaxMs = 300_000;
+/** Per keyring endpoint path, the socket whose last probe went unjudged and when a launch may ask again (keyringEndpointWarning). */
+export interface KeyringProbeBackoff {
+  windows: Map<string, { socket: string; delayMs: number; retryAt: number }>;
+  now: () => number;
+}
+/** The launcher's backoff on unjudged keyring probes in this process. */
+const keyringProbeBackoff: KeyringProbeBackoff = { windows: new Map(), now: () => Date.now() };
 
 /**
  * A launch that failed before its runtime started closes what it created (GY-413): its pane

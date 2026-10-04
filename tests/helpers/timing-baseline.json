@@ -551,6 +551,7 @@
     "tests/attestation-carry.test.ts": 612,
     "tests/automatic-review-concurrency.test.ts": 5000,
     "tests/coordinator-os-confinement.test.ts": 1100,
+    "tests/keyring-probe-backoff.test.ts": 300,
     "tests/delivery-causes.test.ts": 461,
     "tests/diagnostician.test.ts": 2769,
     "tests/dispatch-recovers-from-jam.test.ts": 1181,
