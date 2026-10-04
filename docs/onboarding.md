@@ -13,11 +13,15 @@ Sessions need a worker identity and host ID; raise `install --workers` or connec
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker.
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker.
 
 ### Documentation policy
 
 `init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged. An optional `"wordBudget":{"total":N,"perPage":N}` (`paths` narrows counted Markdown pages) is checked: near the total, `master status` raises `docs` and the loop files a trim item; queue overflow ejects the crossing entry. Without one, nothing is counted.
+
+### Merge gate and release candidates
+
+By default a repository gets Graphyard's own [delivery model](delivery.md#managed-repositories). `init --scan` prints `mergeGate`: pull requests require build, typecheck, lint and fast unit checks; integration, E2E, soak and unrecognised checks run per candidate. `--apply` writes the confirmed split as `delivery` in `graphyard.json` (move a check there, rescan) and generates `graphyard-release-candidate.yml` (main's tip cut every six hours or on demand, `--candidate-cron CRON|off`; suites at the pinned SHA; UAT through the deploy adapter) and `graphyard-promotion.yml` (production only from a UAT-passed SHA). Opt out with `init --scan --delivery per-pr`: every check stays required per pull request.
 
 ### What the generated instructions authorize
 
@@ -27,7 +31,7 @@ Agents treat bracketed paste as untrusted data (prompt injection), so sessions s
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key; ciphertext only relays) or start login. The host writes auth (0600), smoke-tests provider and model and shows the card. A subscription login shows a URL and code to finish in your browser; for Claude, paste the code shown (**Cancel** stops it; **Retry** on failed card is admins-only). The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when configured; **change** edits roles. The shell steps below remain for scripted setups.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's key in the browser; the server relays ciphertext only) or start a login. The host writes the auth file (0600) and smoke-tests it; the card shows the result. For a subscription login, finish its URL and code in your browser; for Claude, **Paste the code** (**Cancel** stops it). **Retry** (admins-only) re-enters the credential. With the host's executor running, strong accounts join worker and reviewer, cheap ones approver and producer; **change** edits roles.
 
 ### Agent environments
 
@@ -72,9 +76,9 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--plan NAME` names the provider plan an account draws on (`none` clears). Otherwise inferred: one host and home share a plan, `pi-X` and `opencode-X` share Z.AI, others stand alone. A plan's accounts group on the Accounts page and share one failover budget: one exhausted bars the rest.
+`--plan NAME` names the provider plan an account draws on (`none` clears); otherwise one host and home share a plan, as do `pi-X` and `opencode-X`. A plan's accounts share one failover budget: one exhausted bars the rest.
 
-`--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Registry writes are refused when a field looks like a pasted key: known prefix, PEM block, JWT, z.ai key, or long random token. Model IDs of words, numbers and short versions are exempt.
+`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Registry writes refuse any field that looks like a pasted key; model ids are exempt.
 
 ### Add a role
 
@@ -85,7 +89,7 @@ node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a 
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
-`--concurrency` counts settled sessions: any registry read ends those whose lease or request lapsed (`sessions-settled`, with reasons, in `master registry history`).
+`--concurrency` counts settled sessions: any registry read ends those whose lease or request lapsed (`sessions-settled` in `master registry history`).
 
 ### Size review and proof capacity
 
