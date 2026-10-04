@@ -470,6 +470,16 @@ test('unit:resource-fault-recurrence-agent-names — GY-1165\'s seven agent-name
   assert.equal(run.reports[1].closed.length, 7, 'the second closes every leaked holder');
   assert.deepEqual(run.remaining.map(entry => entry.name), ['produce-claude-1'], 'the pending producer launch stays');
   assert.deepEqual(faults(reading(run.remaining, t1166 + unownedPaneConfirmMs, (await readProducerLedger(directory)).producers)), [], 'zero resource-bound recurrences');
+
+  // The loop's close step (closeStep) frees the six worker names too — 'unknown' with its runtime
+  // present and no status at all — within the launch bound, and well inside nameReclaimBoundMs. The
+  // base step recognized only idle/done/blocked or the agentless 'unknown' shape, so it skipped all six.
+  const workerHolders = gy1165Agents().filter(entry => gy1165Workers.some(worker => worker.agentName === entry.name));
+  const loop = await loopCloses(workerHolders, [t1166, t1166 + launchAppearanceMs + 1_000]);
+  assert.deepEqual(loop[0], [], 'the first cycle only notes them');
+  assert.deepEqual(loop[1].sort(), gy1165Workers.map(worker => worker.pane).sort(), 'the next cycle past the launch bound closes all six');
+  assert.ok(launchAppearanceMs + 1_000 < nameReclaimBoundMs, 'inside the name bound');
+  assert.deepEqual(faults(reading(gy1165Agents().filter(entry => !loop[1].includes(entry.pane_id!) && entry.name !== 'produce-claude-2'), t1166 + launchAppearanceMs + 1_000, (await readProducerLedger(directory)).producers)), [], 'no worker subject recurs through the loop path either');
 });
 
 test('unit:resource-fault-recurrence-reproduces-subjects — both new holder shapes join the GY-1130 subjects: after two reclaim passes none of the seven GY-1165 subjects recurs', async () => {
@@ -478,6 +488,10 @@ test('unit:resource-fault-recurrence-reproduces-subjects — both new holder sha
   assert.ok(shapes.some(entry => entry.agent_status === 'idle' && entry.name === 'produce-claude-2'));
   assert.ok(shapes.some(entry => entry.agent_status === 'unknown' && entry.agent));
   assert.ok(shapes.some(entry => entry.agent_status === undefined));
+  // Neither shape is closed before two passes `unownedPaneConfirmMs` apart confirmed it unowned: a
+  // pass one grace on still only notes them, since a launch whose runtime has not appeared reads alike.
+  const early = await passes(await ledgerRoot('gy-1166-subjects-early', observedProducers()), 2, finishedSessionGraceMs, gy1165Agents(), gy1165Work());
+  assert.deepEqual(early.closed, [], 'two passes one grace apart close none of the new shapes');
   const directory = await ledgerRoot('gy-1166-subjects', observedProducers());
   // At the loop's observed cadence (7-11 minutes) the two passes still close everything, well inside retention of nothing.
   const run = await passes(directory, 2, 7 * 60_000, gy1165Agents(), gy1165Work());
@@ -485,6 +499,12 @@ test('unit:resource-fault-recurrence-reproduces-subjects — both new holder sha
   const after = inputs({ now: t1166 + 7 * 60_000, agents: run.remaining, producers: (await readProducerLedger(directory)).producers, work: gy1165Work(), profiles: gy1165Profiles });
   assert.deepEqual(faults(after), []);
   assert.ok(readResources(after).filter(entry => entry.resource === 'agent-names').every(entry => entry.state !== 'exhausted' || entry.id === 'agent-names:claude-producer-1'), 'only the profile with a pending launch reads full');
+
+  // The unrecognized-status shape is reclaimed by the loop's close step as well: two cycles the
+  // observed cadence apart leave none of the six worker subjects at its bound.
+  const loop = await loopCloses(shapes.filter(entry => entry.name !== 'produce-claude-2'), [t1166, t1166 + 7 * 60_000]);
+  assert.deepEqual(loop[1].sort(), gy1165Workers.map(worker => worker.pane).sort());
+  assert.deepEqual(faults({ ...after, agents: gy1165Agents().filter(entry => entry.agent_status === 'working') }), []);
 });
 
 // ---- Loop harness for closeStep ----------------------------------------------------------------
@@ -500,7 +520,7 @@ function loopItem(key: string, lease: Work['lease'] = null): Work {
     gates: [], violations: [],
   } as unknown as Work;
 }
-async function loopConfig(): Promise<MasterConfig> {
+async function loopConfig(launch: { name: string; principal: string; agentName: string }[] = [{ name: 'claude-primary', principal: 'worker-a', agentName: 'graphyard-claude-1' }, { name: 'cursor-primary', principal: 'worker-b', agentName: 'graphyard-cursor-1' }]): Promise<MasterConfig> {
   const root = await temporaryDirectory('gy-1166-loop');
   const credentials = await temporaryDirectory('gy-1166-loop-credentials');
   execFileSync('git', ['init', '-q', root]);
@@ -508,7 +528,14 @@ async function loopConfig(): Promise<MasterConfig> {
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), credentialDirectory: credentials },
     (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
   const profile = (name: string, principal: string, agentName: string) => ({ name, principal, agentName, mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }) as WorkerProfile;
-  return { ...await loadMasterConfig(root), workers: [profile('claude-primary', 'worker-a', 'graphyard-claude-1'), profile('cursor-primary', 'worker-b', 'graphyard-cursor-1')] };
+  return { ...await loadMasterConfig(root), workers: launch.map(entry => profile(entry.name, entry.principal, entry.agentName)) };
+}
+/** Runs loop cycles at each of `at`, returning the panes the close step closed after each one. */
+async function loopCloses(agents: HerdrAgent[], at: number[], launch = gy1165Workers) {
+  const config = await loopConfig(launch);
+  const closed: string[] = [], state = emptyDaemonState(config), loop = loopEffects([], agents, closed), after: string[][] = [];
+  for (const clock of at) { await runCycle(config, state, loop, () => clock); after.push([...closed]); }
+  return after;
 }
 function loopEffects(work: Work[], agents: HerdrAgent[], closed: string[]): DaemonEffects {
   return {
