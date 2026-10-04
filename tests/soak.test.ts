@@ -499,9 +499,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
   const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved;
-  // GY-793's base breakage runs on the main day only: the credential day's own blocked pushes
-  // would race the broken window it opens.
-  const baseBreakDay = mainDay && !options.credentialBlocked;
+  // GY-793's base breakage runs only on the day that asserts it (`github806`): on any other day it
+  // would reshape that day's own scenario (a rework or fenced item doubling as the broken one).
+  const baseBreakDay = mainDay && !!options.github806;
   // The documentation day's world (GY-574): the project keeps the 12,000-word budget and its base
   // sits 15 words under it, within the 3% warning — so the loop's headroom step counts it, and the
   // queue tips whose entries grow the pages are what the day judges.
@@ -1234,8 +1234,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     } : {}),
     exhaustedProofs: async () => [...abandoned.values()],
     // A rework decision waiting on a stale observation wakes the item's own job (GY-793): the real
-    // resync, with the observation job run while the step waits, as the control plane runs it.
-    observe: (work, waitMs) => wakeOwnObservation(body => engine.resyncWork(principals.coordinator, work.id, body), async () => { await processJob(engine, adapter); }, { waitMs }),
+    // resync, with the observation job run while the step waits, as the control plane runs it. Its
+    // waking resync is an observation wake like GY-710's, and counts as one; the polls do not.
+    observe: (work, waitMs) => wakeOwnObservation(body => { if (body.wake !== false) wakes.push({ key: work.key, at: clock.now() }); return engine.resyncWork(principals.coordinator, work.id, body); },
+      async () => { await processJob(engine, adapter); }, { waitMs }),
     // The documentation day's loop counts the base branch's real pages through the counting code
     // master status runs (GY-574), over a git that answers from the simulated repository.
     ...(docs ? {
