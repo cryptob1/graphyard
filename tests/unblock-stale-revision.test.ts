@@ -41,12 +41,18 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 const unblocks = async (work: Work) => (await store.pool.query(`SELECT actor FROM events WHERE work_id=$1 AND kind='unblock' ORDER BY seq`, [work.id])).rows.map(row => row.actor);
 
 /** A released, claimed item its worker has reported blocked. */
-async function blocked(title: string, reason = 'Waiting on an external decision') {
+async function blocked(title: string, reason = 'Waiting on an external decision', keepLease = false) {
   let work = await api(master.token, 'work', { title, description: `Why ${title}`, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal' }) as Work;
   work = await engine.execute(operator, 'ready', work.id, { reason: 'Next by priority' }, randomUUID());
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  const lease = work.lease!;
   work = await engine.execute(implementer, 'blocked', work.id, { epoch: work.epoch, reason }, randomUUID());
   assert.equal(work.blocker, reason);
+  if (keepLease) {
+    // An attempt blocked before GY-1008 held its lease, which heartbeated on 2026-10-01.
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease}',$2::jsonb) WHERE id=$1", [work.id, JSON.stringify(lease)]);
+    return reload(work.id);
+  }
   return work;
 }
 
@@ -80,7 +86,7 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); await database?.stop(); await rm(masterRoot, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); });
 
 test('unit:unblock-retries-stale-revision a heartbeat between the read and the write is retried on the reloaded revision and the blocker clears', async () => {
-  const work = await blocked('heartbeat-race');
+  const work = await blocked('heartbeat-race', undefined, true);
   // The worker heartbeats right after the CLI's first read, as the loop's observations and heartbeats did on 2026-10-01.
   const run = racing(async read => { if (read === 1) await engine.execute(implementer, 'heartbeat', work.id, { epoch: work.epoch }, randomUUID()); });
   const result = await runAutonomyCommand(masterRoot, config, 'unblock', [work.key, 'The', 'external', 'decision', 'was', 'made'], run.dependencies) as Work;
@@ -91,7 +97,7 @@ test('unit:unblock-retries-stale-revision a heartbeat between the read and the w
 });
 
 test('unit:unblock-retries-stale-revision the retry is bounded: a revision that moves on every read is reported after the last attempt', async () => {
-  const work = await blocked('always-moving');
+  const work = await blocked('always-moving', undefined, true);
   const run = racing(async () => { await engine.execute(implementer, 'heartbeat', work.id, { epoch: work.epoch }, randomUUID()); });
   await assert.rejects(runAutonomyCommand(masterRoot, config, 'unblock', [work.key, 'Cleared'], run.dependencies), /Task revision changed/);
   assert.equal(run.reads(), unblockAttempts, 'one read per attempt, and no more attempts than the bound');
@@ -112,6 +118,7 @@ test('unit:unblock-retries-stale-revision a reload that finds a different blocke
   const run = racing(async read => {
     if (read !== 1) return;
     let item = await engine.execute(operator, 'unblock', work.id, { reason: 'Cleared', expectedRevision: (await reload(work.id)).revision }, randomUUID());
+    item = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
     item = await engine.execute(implementer, 'blocked', work.id, { epoch: item.epoch, reason: 'Waiting on a new credential' }, randomUUID());
     assert.equal(item.blocker, 'Waiting on a new credential');
   });
