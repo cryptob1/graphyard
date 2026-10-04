@@ -13,19 +13,21 @@ import type { NextActionKind } from './next-action.js';
  * The items come back in claim order (`claimOrder`, GY-1132), each placed by its first claimable
  * row: the item's priority, then a row that unblocks a merge (`resync` or `merge` at the merge
  * stage), then the oldest request, then the row id — so the item whose row `claimAction` takes is
- * the first one listed here.
+ * the first one listed here. A missing or malformed `requestedAt` counts as oldest rather than
+ * failing the whole query, and ids compare bytewise (`COLLATE "C"`), as `claimOrder` does.
  */
 export const claimCandidatesSql = `SELECT w.id FROM work_index i JOIN work_items w ON w.id = i.id
   CROSS JOIN LATERAL (SELECT
       CASE WHEN w.document->>'stage' = 'merge' AND entry->>'kind' IN ('resync', 'merge') THEN 0 ELSE 1 END AS unblocks,
-      (entry->>'requestedAt')::timestamptz AS requested, (entry->>'id') COLLATE "C" AS row_id
+      CASE WHEN pg_input_is_valid(entry->>'requestedAt', 'timestamptz') THEN (entry->>'requestedAt')::timestamptz END AS requested,
+      (entry->>'id') COLLATE "C" AS row_id
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(w.document->'actionQueue'->'actions') = 'array' THEN w.document->'actionQueue'->'actions' ELSE '[]'::jsonb END) AS a(entry)
       WHERE (w.document->>'stage' IS DISTINCT FROM 'done' OR entry->>'kind' = 'verify-deployment')
         AND ($2::text[] IS NULL OR entry->>'kind' = ANY($2::text[]))
         AND (entry->>'retryAt' IS NULL OR (entry->>'retryAt')::timestamptz <= clock_timestamp())
         AND NOT (entry->>'state' = 'done' AND entry->>'resolvedAt' IS NOT NULL AND (entry->>'resolvedAt')::timestamptz > clock_timestamp() - make_interval(secs => $3::double precision / 1000))
         AND (entry->>'state' = 'pending' OR jsonb_typeof(entry->'claim') IS DISTINCT FROM 'object' OR (entry->'claim'->>'expiresAt')::timestamptz <= clock_timestamp())
-    ORDER BY unblocks, requested, row_id LIMIT 1) first
+    ORDER BY unblocks, requested NULLS FIRST, row_id LIMIT 1) first
   WHERE i.due_at <= clock_timestamp() AND ($1::text IS NULL OR i.id::text = $1 OR i.key = $1)
-  ORDER BY COALESCE(i.priority, 2), first.unblocks, first.requested, first.row_id, i.number`;
+  ORDER BY COALESCE(i.priority, 2), first.unblocks, first.requested NULLS FIRST, first.row_id, i.number`;
 export const claimCandidatesParams = (work: string | undefined, kinds: readonly NextActionKind[] | undefined) => [work ?? null, kinds ? [...kinds] : null, actionSettleMs];

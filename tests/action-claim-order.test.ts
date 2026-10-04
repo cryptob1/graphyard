@@ -82,6 +82,13 @@ test('unit:claim-order-priority-before-age — a later P0 resync at the merge st
   assert.equal(listed[0], resync.id, 'the claim SQL lists the P0 resync item first');
   assert.deepEqual(listed, servedItems(all, now, kinds), 'the SQL and openActions agree on the order of all 41 items');
   assert.deepEqual(await candidates(mixed), expected, 'the SQL orders priority, kind and age as openActions does');
+
+  // A row whose requestedAt is malformed counts as oldest in both orders and fails neither.
+  const malformed = item({ priority: 2, stage: 'ready', kind: 'dispatch', requestedAt: now });
+  rowOf(malformed).requestedAt = 'not a timestamp';
+  const withMalformed = [...dispatches.slice(0, 3), malformed];
+  assert.deepEqual(servedItems(withMalformed, now)[0], malformed.id, 'openActions places a malformed requestedAt first among its peers');
+  assert.deepEqual(await candidates(withMalformed), servedItems(withMalformed, now), 'the SQL lists it in the same place instead of failing');
 });
 
 test('unit:failing-dispatch-row-yields-to-others — a dispatch row that failed for want of a worker waits out its retryAt while the other rows are claimed', async () => {

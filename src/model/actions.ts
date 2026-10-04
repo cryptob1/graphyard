@@ -219,8 +219,12 @@ export const unblocksMerge = (work: Work, row: ActionRow) => work.stage === 'mer
 export const claimOrder = (a: { work: Work; row: ActionRow }, b: { work: Work; row: ActionRow }): number =>
   (a.work.priority ?? 2) - (b.work.priority ?? 2)
   || Number(!unblocksMerge(a.work, a.row)) - Number(!unblocksMerge(b.work, b.row))
-  || Date.parse(a.row.requestedAt) - Date.parse(b.row.requestedAt)
-  || a.row.id.localeCompare(b.row.id);
+  || compare(requestedTime(a.row), requestedTime(b.row))
+  || compare(a.row.id, b.row.id);
+/** A missing or malformed `requestedAt` counts as oldest, as the SQL's `NULLS FIRST` does, so the sort stays total. */
+const requestedTime = (row: ActionRow) => { const time = Date.parse(row.requestedAt); return Number.isNaN(time) ? -Infinity : time; };
+/** Code-unit order, which is the SQL's `COLLATE "C"` for these ASCII ids; `localeCompare` could disagree with it. */
+const compare = <T extends number | string>(a: T, b: T) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * Every row an executor may take now, in claim order (`claimOrder`): priority, rows that unblock a
