@@ -38,7 +38,8 @@ import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentReques
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
-import { beginAttempt, endAttempt, endLapsedAttempt, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
+import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
@@ -1198,7 +1199,18 @@ export class Engine {
       if (command === 'dispatchblock') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; a dispatch failure is recorded only while no attempt holds the item`, 409);
-        work.blocker = data.reason; recordIntervention(work, 'blocked');
+        // GY-1082: only an item awaiting a dispatch can fail one, and a standing blocker is never
+        // overwritten. The failures are not taken on the caller's word: the item's own attempt
+        // record must show its last `dispatchFailureBlockAfter` attempts each claimed and ended
+        // without a submission. The loop supplies only the cause in git's words, which no other
+        // record holds; the blocker names the attempts the control plane verified.
+        demand(work.ready && (!work.submission || work.reworkRequested), `${work.key} is not awaiting a dispatch; a dispatch failure is recorded only on ready work with no submission or with rework requested`, 409);
+        demand(!work.blocker, `${work.key} already carries a blocker; clear it before recording a dispatch failure`, 409);
+        const failed = pipelineTimeline(work).attempts.slice(-dispatchFailureBlockAfter);
+        demand(failed.length === dispatchFailureBlockAfter && failed.every(attempt => attempt.endedAt && (attempt.end === 'released' || attempt.end === 'expired')),
+          `${work.key}'s last ${dispatchFailureBlockAfter} attempts did not each end without a submission; a dispatch failure is recorded only after that many failed attempts in a row`, 409);
+        const verified = ` [attempts ${failed.map(attempt => attempt.epoch).join(', ')} each ended without a submission]`;
+        work.blocker = `${data.reason.slice(0, 2000 - verified.length)}${verified}`; recordIntervention(work, 'blocked');
       }
       if (command === 'autoscope') {
         // The loop asks, the control plane decides. The verdict is recomputed here from the item's
