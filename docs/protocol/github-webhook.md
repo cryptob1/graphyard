@@ -13,7 +13,7 @@
 
 ## Prioritized wakes
 
-A guarded merge refused for ten minutes is reworked or re-reviewed (GY-831), except a refusal standing only on a missing or stale observation, every other gate passing. That candidate keeps its queue position: the loop sends `POST /api/work/:id/resync` with `prioritized: true`, recorded as a `refresh` action and repeated at most once per two-minute window while the refusal stands. A prioritized wake, and the wake of a merge request's enqueue, is claimed like a webhook's, oldest first.
+A guarded merge refused for ten minutes is reworked or re-reviewed (GY-831), except when every other gate passes and the merge gate refuses only for its wait behind predecessors in the merge queue (with or without a stale observation), which a new head cannot shorten: that candidate is left to wait (GY-1084). A refusal standing only on a missing or stale observation is not reworked either. That candidate keeps its queue position: the loop sends `POST /api/work/:id/resync` with `prioritized: true`, recorded as a `refresh` action and repeated at most once per two-minute window while the refusal stands. A prioritized wake, and the wake of a merge request's enqueue, is claimed like a webhook's, oldest first.
 
 ## Automatic dispatch records
 

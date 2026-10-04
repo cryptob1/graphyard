@@ -425,7 +425,8 @@ export function scopeRegressionRework(work: Work): { reason: string; binding: st
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done' || (work.scopeRequest && work.scopeRequest.decision?.state !== 'refused') || observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const refused = (work.gates.find(gate => gate.name === 'build')?.reasons ?? []).filter(reason => /^Candidate changes \d+ files? outside its planned files/.test(reason));
-  return refused.length ? { reason: `${work.key}: ${refused.join('; ')}. Only the worker can restore them, so the item returns to a worker; a file the change does need is asked for with scope-request in that round.`.slice(0, 1800), binding: `${candidate.sha}:outside-scope` } : null;
+  const named = refused.join('; '), listed /* trimmed before the instructions, which stay whole */ = named.length > 1600 ? `${named.slice(0, named.lastIndexOf(' ', 1600))}…` : named;
+  return refused.length ? { reason: `${work.key}: ${listed}. Only the worker can restore them, so the item returns to a worker; a file the change does need is asked for with scope-request in that round.`, binding: `${candidate.sha}:outside-scope` } : null;
 }
 /**
  * GY-496. A producer request the loop stopped attempting: every automatic session it launched for

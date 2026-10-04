@@ -721,7 +721,7 @@ test('manual:fault-class-decision — a decision whose approver the loop is rela
   }
 });
 
-test('manual:fault-class-decision — a guarded-merge refusal for want of an authorization is not marked for rework (GY-1005)', async () => {
+test('manual:fault-class-decision — a guarded-merge refusal standing only on the merge-queue wait is not marked for rework (GY-1005)', async () => {
   const [instance] = decisionFaults.filter(entry => entry.cause === 'merge-authorization');
   assert.equal(instance.subject, 'GY-1005');
   const work = instance.work!, refusal = work.mergeRefusal!;
@@ -731,8 +731,9 @@ test('manual:fault-class-decision — a guarded-merge refusal for want of an aut
   const cycle = { state: emptyDaemonState(config()), performed: [], now: () => at, effects: { persist: async () => {}, refuseMerge: async (item: Work) => { marked.push(item.key); } } } as unknown as Cycle;
   await actOnRepeatedRefusal(cycle, work, `merge:${work.id}`, refusal.reason, refusal.since);
   assert.deepEqual(marked, [], 'no rework is marked, so none is put to an approver to refuse');
-  // A refusal the candidate does cause is still acted on past the bound.
-  await actOnRepeatedRefusal(cycle, work, `merge:${work.id}`, 'Head 7685faf28852 changed on GitHub before merge', refusal.since);
+  // A merge gate that names anything beyond the queue wait still takes the GY-831 rework path past the bound.
+  const conflicted = { ...work, gates: work.gates.map(gate => gate.name === 'merge' ? { ...gate, reasons: [...gate.reasons, 'Pull request is not mergeable against the current base'] } : gate) } as Work;
+  await actOnRepeatedRefusal(cycle, conflicted, `merge:${work.id}`, refusal.reason, refusal.since);
   assert.deepEqual(marked, ['GY-1005']);
 });
 

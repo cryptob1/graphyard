@@ -27,12 +27,6 @@ export const daemonExecutor = (principal: string): MergeExecutor => ({ principal
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /** True for an item held at the merge stage by an observed merge no execution authorized (GY-92). */
 export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
-/**
- * The guarded merge's refusal of an item whose record does not authorize it now: a stale observation, a
- * gate not passing, a standing escalation. The gates and the escalation each name their own remedy, so
- * the refusal itself is no candidate's defect (GY-1084).
- */
-export const unauthorizedMergeRefusal = 'does not have a current all-gates-passing merge authorization';
 export function assertMergeCandidate(work: Work, observedAt?: string) {
   const age = observedAt && work.observation ? Date.parse(observedAt) - Date.parse(work.observation.at) : 0;
   const fresh = !observedAt || !!work.observation && Number.isFinite(age) && age >= 0 && age < 120_000;
@@ -45,7 +39,7 @@ export function assertMergeCandidate(work: Work, observedAt?: string) {
   // evidence whose producer has since implemented the item each refuse delivery
   // in the broker as well as in the gate, so a stale snapshot can never present
   // such an item as selectable.
-  if (!fresh || standingEscalations(work).length || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} ${unauthorizedMergeRefusal}`);
+  if (!fresh || standingEscalations(work).length || work.leadHold || evidenceIndependenceRefusals(work).length || work.stage !== 'merge' || !work.candidate || !work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha || work.mergeAuthorization.policyRevision !== work.policyRevision || work.gates.some(gate => !gate.passed) || work.violations.length) throw new Error(`${work.key} does not have a current all-gates-passing merge authorization`);
   return { key: work.key, revision: work.revision, pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision };
 }
 // Merge order is recomputed from current dependencies and conflicts on every

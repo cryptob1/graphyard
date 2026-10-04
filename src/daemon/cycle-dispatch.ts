@@ -168,7 +168,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //     queue row nobody was ever coming for. A concern carried beside an action that is running
   //     is named here too: the work is not frozen by it, and it is not lost behind the work. An
   //     item parked on a human-only decision is named by the step above with the exact answer
-  //     command, so it is not named twice. A judgment this loop requests itself (a rework round,
+  //     command, so it is not named twice. A judgment this loop requests itself (a rework round, a
+  //     lease-loss resolve) is skipped: the decision step asks the approver for it, so naming it as
+  //     owed by a human would be a decision fault with nobody owing it (GY-1084).
   const exhausted = await cycle.exhaustedProofs();
   for (const owed of humanNeededActions(open.filter(item => !parkedOnHuman(item)), new Date(clock), (work, judgment) => loopRequestsJudgment(work, judgment, config, exhausted))) {
     const key = `owed:${owed.work}:${owed.kind}:${owed.trigger ?? 'refusal'}:${owed.since}`;
