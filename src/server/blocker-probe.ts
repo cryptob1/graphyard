@@ -5,6 +5,7 @@ import { demand, type Principal, type Work } from '../model.js';
 import { blockerClasses, environmentalBlockerClasses, itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths, type BlockerProbe } from '../model/blocker-class.js';
 import { decisionsByWork } from './decision-ledger.js';
 import { save } from '../store.js';
+import { lockedWork } from '../store/locked-read.js';
 import type { Services } from './routes.js';
 
 /**
@@ -39,7 +40,8 @@ export async function recordBlockerProbe(services: Services, actor: Principal, i
     const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result as Work; }
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    // The item whole, what overlaps it and its dependencies; the rest as compact stand-ins (GY-1027).
+    const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id);
     demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', 'Delivered work is immutable');
