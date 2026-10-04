@@ -41,6 +41,19 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }), hotFiles, clock);
 
+  // GY-1082: a failure run counts this loop's own consecutive failed launches, so it is retired
+  // whenever the snapshot shows the item somewhere a run cannot follow: gone or delivered, carrying
+  // a blocker (the one the run recorded, even when the loop stopped before forgetting it, or anyone
+  // else's), held under a lease no launch of this loop is running, or past an epoch this loop's
+  // last failure did not spend — another dispatcher claimed it in between, so the failures were
+  // not consecutive. A later failure then starts a new run.
+  for (const [id, run] of Object.entries(state.dispatchFailures)) {
+    if (cycle.launcher.keys().some(key => key.startsWith(`dispatch:${id}:`))) continue;
+    const item = snapshot.work.find(entry => entry.id === id);
+    const claimed = !!item?.lease && Date.parse(item.lease.expiresAt) > clock;
+    if (!item || item.stage === 'done' || item.blocker || claimed || item.epoch > run.epoch + 1) delete state.dispatchFailures[id];
+  }
+
   // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
   // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this
   // cursor and reads the same from any host: each retry waits 5, then 15 minutes; an item whose
