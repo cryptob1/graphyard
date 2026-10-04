@@ -912,7 +912,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // approved head now conflicts with the base there, and only there (GY-566).
   let docsRewritten = false;
   const docsTick = () => {
-    const pr = [...github.prs.values()].find(entry => entry.key === items[plan.docsConflict.item - 1].key && entry.open);
+    const host = items[plan.docsConflict.item - 1]; // absent on a day planned with fewer items
+    const pr = host && [...github.prs.values()].find(entry => entry.key === host.key && entry.open);
     if (docsRewritten || !pr?.reviews.some(review => review.sha === pr.head && review.state === 'APPROVED')) return;
     docsRewritten = true;
     github.docsConflicts.set(pr.key, plan.docsConflict.page);
