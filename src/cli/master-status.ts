@@ -1,4 +1,3 @@
-import { leaseHealthStatus } from './lease-health-attention.js';
 import { workerLaunchStatus } from '../master/dispatch.js';
 import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { dataDirectory } from '../install/worktree-root.js';
@@ -17,7 +16,7 @@ import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHead
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, directMergeLine, docsBudgetAttention, mergeStallAttention, nameBaseBreaks, nameOrphanSupervisors } from './status-attention.js';
+import { approverLaunchAttention, directMergeLine, docsBudgetAttention, nameBaseBreaks, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
