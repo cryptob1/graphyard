@@ -12,11 +12,14 @@ import { managedMasterInstructions } from '../master.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
+import { runChild } from '../child-runner.js';
+import { releaseUnderFailure, reserveReleasingHold, submittedBranchRefusal, workspaceFailure } from '../master/worktrees.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import { restoreAndReport } from './sync-restore.js';
+import { pushViaControlPlane } from './sync-push.js';
 import { defineCommands, workMutation } from './registry.js';
 import { keepBlockedWork } from './lease.js';
 
@@ -154,14 +157,13 @@ export const workspaceCommands = defineCommands([
       '  sync GY-N --restore           The same, then restore every such file to the base in one new',
       '                                commit naming them; push it plainly. A force push is never',
       '                                needed or allowed',
+      '  sync GY-N --push-via-control-plane COMMIT  Control plane pushes a refused workflow base sync',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
       // so the item never presents as a ready-gate refusal or an unexplained lapse (GY-134).
-      try { await syncWork(context, work); }
-      catch (error) {
-        const failure = environmentFailure(error);
-        const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
+      try { await (context.args.includes('--push-via-control-plane') ? pushViaControlPlane : syncWork)(context, work); } catch (error) {
+        const failure = environmentFailure(error); const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
         if (!failure || epoch === undefined) throw error;
         const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
         const partialWork = keepBlockedWork(work, epoch); await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) });
@@ -205,7 +207,7 @@ export const workspaceCommands = defineCommands([
   {
     name: 'worktree',
     scope: 'work',
-    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree'],
+    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier attempt\'s hold on the branch is preserved and released'],
     async run(context, work) {
       const { args, api, print } = context;
       const mutate = workMutation(context, work);
@@ -218,27 +220,25 @@ export const workspaceCommands = defineCommands([
       let startPoint = args[1] ?? 'HEAD';
       if (work.submission) {
         const remoteBranch = `refs/remotes/origin/${branch}`;
-        execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { stdio: ['ignore', 'ignore', 'inherit'] });
-        const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
-        if (!work.candidate?.sha || remoteSha !== work.candidate.sha) throw new Error('Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace');
+        // GY-860 AC-2: an unfetchable or moved PR branch is a workspace failure, so no attempt is spent.
+        const refused = await submittedBranchRefusal(root, branch, remoteBranch, work.candidate?.sha, runChild);
+        if (refused) { await releaseUnderFailure(mutate, epoch, refused); throw new Error(`${refused}. The claim was released as a workspace failure, so the attempt costs nothing.`); }
         startPoint = remoteBranch;
       }
-      const hostId = context.individualHostId();
-      await mutate('workspace', { epoch, host: hostId, path, branch });
+      // GY-860: an earlier attempt's hold is recorded with the reservation and released; the branch never moves.
+      const now = Date.parse(status.now ?? '') || Date.now();
+      const released = await reserveReleasingHold(root, branch, path, runChild, mutate, epoch, context.individualHostId(), work, now);
       await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
-      // GY-1078: an abandoned session worktree of this item still holding the branch — checked out
-      // on a rework, or stopped mid-rebase, mid-am or mid-bisect of it, which git lists as detached —
-      // is reclaimed first; one with a live lease or uncommitted changes is named and left alone.
-      // Every failure carries git's own stderr, so the loop's record says why.
+      // GY-1078: a mid-am or mid-bisect session worktree the release leaves is reclaimed; failures carry git's stderr.
       let reclaimed: ReclaimedHolder[] = [];
       try {
-        if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, Date.parse(status.now ?? '') || Date.now(), { checkouts: !!work.submission });
+        if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, now, { checkouts: !!work.submission });
         for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
-        gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
+        if (!released?.reused) gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
         if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
       }
-      catch (error) { throw new Error(`Git worktree creation failed: ${error instanceof Error ? error.message : String(error)}. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.`); }
+      catch (error) { await workspaceFailure(mutate, epoch, error); } // GY-860: the host failed, not the attempt
       // A checkout whose lockfile the reachable install does not match gets its own install now,
       // so the session never starts on the wrong dependency versions. The lease is kept alive
       // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
@@ -251,10 +251,10 @@ export const workspaceCommands = defineCommands([
   {
     name: 'watch',
     help: ['  watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss'],
-    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup.
+    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup, once the epoch is checked (GY-1184).
     async run(context) {
       const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
-      if (!id || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      if (!id || !Number.isSafeInteger(epoch) || epoch <= 0 || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
       console.error(setupLine(id, epoch));
       const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
