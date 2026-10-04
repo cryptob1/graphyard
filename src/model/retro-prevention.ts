@@ -25,8 +25,9 @@ function faultClassOfCause(pattern: Pick<RetroPattern, 'gate' | 'shape' | 'cause
 
 /**
  * The artefacts that would prevent a recurring cause, drafted from what the cause is. Each
- * recurring cause gets the prevention its shape calls for and, always, a catalogue entry so later
- * instances are recognised as this cause rather than read afresh. Nothing here is applied.
+ * recurring cause gets the prevention its shape calls for — at least one, so every recurrence is
+ * recorded and closes its instances — and a catalogue entry unless one already recognises it, so
+ * later instances are recognised as this cause rather than read afresh. Nothing here is applied.
  */
 export function draftPrevention(pattern: RetroPattern): RetroDraft[] {
   const evidence = `${pattern.count} instances of ${pattern.label} in ${pattern.window.days} days (threshold ${pattern.threshold}): ${pattern.instances.slice(0, 5).map(instance => `${instance.work ?? 'no item'} (${instance.id})`).join(', ')}${pattern.instances.length > 5 ? ', …' : ''}.`
@@ -52,6 +53,10 @@ export function draftPrevention(pattern: RetroPattern): RetroDraft[] {
     method('Producers exercise the criterion against the exact candidate head and base, report executed and skipped cases honestly, and name the probe that would fail if the behaviour were absent.');
   } else if (pattern.gate === 'review' || pattern.family === 'rework') {
     standards('coding-standards', `Address this recurring review finding before submitting: “${sample.slice(0, 600)}”.`);
+  } else {
+    // Any other declared cause (a ready or dependency refusal, say) still drafts its prevention, so a
+    // recurrence after its catalogue entry is applied is recorded against it and its instances close.
+    standards('criteria-wording', `Write and prepare items so the ${pattern.label} does not recur, e.g. “${sample.slice(0, 600)}”.`);
   }
   // A cause the catalogue already recognises is counted against its entry; it is not catalogued twice.
   if (pattern.catalogued) return drafts;
