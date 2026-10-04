@@ -86,7 +86,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass beside such a failing stripped run is trusted; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). `request-rework` and acceptance name the criterion and remedy: a test failing without it, or re-binding. If other proofs prove the criterion, a `requirements` decision retires the dead one. Unexercised `manual:` proofs re-attest with `exercise`. Attestations carry only on a kept patch-id.
+A pass beside such a failing stripped run is trusted; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). `request-rework` and acceptance name the criterion and remedy: a test failing without it, or re-binding. Other proofs proving the criterion retire the dead one by `requirements` decision (refused: rework). Unexercised `manual:` proofs re-attest with `exercise`. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 

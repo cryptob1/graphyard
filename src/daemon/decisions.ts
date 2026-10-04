@@ -4,7 +4,7 @@ import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeR
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
-import { coveredDeadProofs, deadProofDetail, mechanicalFailure, mechanicalProof, mechanicalVerdicts, nonexercisingRemedy, producerManualFailure, producerManualFailures, rescopedCriteria } from '../model/mechanical-proofs.js';
+import { coveredDeadProofs, deadProofDetail, mechanicalFailure, mechanicalProof, mechanicalVerdicts, nonexercisingRemedy, producerManualFailure, producerManualFailures, rescopedCriteria, retiresProof } from '../model/mechanical-proofs.js';
 import { unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
@@ -255,15 +255,16 @@ export function blockerScopeDecision(work: Work): RoutineDecision | null {
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, exhausted);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = [], rescope: RescopeOutcomes = noRescopeOutcomes): RoutineDecision | null {
+  const needed = neededDecision(work, config, exhausted, rescope);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
   // A re-scope (GY-1177) revises the criteria, and the worker's lease, if any, survives it.
   if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest' || needed.action === 'requirements') return needed;
   // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
-  if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
+  // The narrowing an approved re-scope raised (GY-1177) rests on that decision, not on any worker.
+  if (needed.action === 'resolve' && (supersededLeaseLoss(work)?.superseded || needed.escalation?.trigger === 'requirement-weakening')) return needed;
   const stopped = workerStopped(work, now, assessment);
   // The grounds travel with the request: the approver cannot verify this host, so it is told
   // exactly what the requester verified and judges the attestation on that. A situated request
@@ -280,9 +281,11 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
 }
 /**
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
- * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
+ * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496);
+ * `rescope` what the decision history says of the item's dead-proof re-scopes (rescopeOutcomes, GY-1177).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = [], rescope: RescopeOutcomes = noRescopeOutcomes): RoutineDecision | null {
+  const refusedRescope = rescope.refused;
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -321,9 +324,11 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
   // which waits for one — must not hold this rework.
   // A dead proof whose criterion its other proofs already prove is re-scoped, not reworked (GY-1177).
-  const rescope = rescopeDecision(work);
-  if (rescope) return rescope;
-  const proofs = proofRework(work);
+  const narrowing = rescopeResolve(work, rescope);
+  if (narrowing) return narrowing;
+  const retire = rescopeDecision(work, refusedRescope);
+  if (retire) return retire;
+  const proofs = proofRework(work, refusedRescope);
   if (proofs) return { action: 'rework', ...proofs };
   const ci = failedCheckRework(work);
   if (ci) return { action: 'rework', ...ci };
@@ -462,20 +467,21 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
  * worker's: both stay out of this rework.
  * The reason quotes each finding and names the open threads, so the worker takes both in one round.
  */
-export function proofRework(work: Work): { reason: string; binding: string } | null {
+export function proofRework(work: Work, refusedRescope: readonly string[] = []): { reason: string; binding: string } | null {
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const now = new Date();
   const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
   // An unexercised `manual:` proof is not the worker's to fix: see attestationDecision.
-  // A dead proof whose criterion is proven otherwise is rescopeDecision's (GY-1177), never rework.
-  const dead = new Set(coveredDeadProofs(work, now).map(entry => entry.proof));
+  // A dead proof whose criterion is proven otherwise is rescopeDecision's (GY-1177), never rework,
+  // until an approver refuses its re-scope: then the finding is the worker's like any other.
+  const dead = new Set(coveredDeadProofs(work, now, refusedRescope).map(entry => entry.proof));
   const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:') && !dead.has(entry.proof));
   if (!failed.length && !unexercised.length) return null;
   const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
   const findings = [
     ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalProof(verdict.proof) ? mechanicalFailure(verdict, candidate.sha) : producerManualFailure(verdict, candidate.sha)).join('; ')}`] : []),
-    ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}". ${nonexercisingRemedy(work, entry.proof, entry.criteria)}`).join('; ')}`] : []),
+    ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}". ${refusedRescope.includes(entry.proof) ? 'An approver refused retiring it from the criterion, so its other proofs do not settle it. ' : ''}${nonexercisingRemedy(work, entry.proof, entry.criteria)}`).join('; ')}`] : []),
   ];
   const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
   const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
@@ -490,18 +496,60 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
  * GY-1131 and GY-1142 reworked it for days), so the loop requests the requirements revision
  * retiring it from the criterion, judged by the independent approver like any narrowing, and the
  * engine records the requirement-weakening escalation that revision raises. A failed proof on the
- * head is the worker's first: the change itself is wrong, so rework stands and this waits.
+ * head is the worker's first: the change itself is wrong, so rework stands and this waits. A dead
+ * proof whose re-scope an approver refused (`refusedRescope`) is not asked about again: proofRework
+ * returns its finding to the worker, so a refusal never leaves the item waiting on itself.
  */
-export function rescopeDecision(work: Work): RoutineDecision | null {
+export function rescopeDecision(work: Work, refusedRescope: readonly string[] = []): RoutineDecision | null {
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const now = new Date();
   if (mechanicalVerdicts(work, [work], now).some(verdict => verdict.outcome === 'failed') || producerManualFailures(work, [work], now).length) return null;
-  const dead = coveredDeadProofs(work, now);
+  const dead = coveredDeadProofs(work, now, refusedRescope);
   if (!dead.length) return null;
   return { action: 'requirements', input: { criteria: rescopedCriteria(work, dead) },
     binding: `${candidate.sha}:rescope:${dead.map(entry => `${entry.criteria.join('+')}:${entry.proof}`).sort().join(',')}`.slice(0, decisionBindingMax),
-    reason: `${work.key}: ${dead.map(entry => deadProofDetail(entry, candidate.sha)).join('; ')}. The criterion is proven, only the binding is dead, so no production round can revive it: approve retiring the proof from the criterion (a narrowing, recorded as requirement-weakening), or refuse with the reason if the covering proofs do not assert the criterion's statement.`.slice(0, 2000) };
+    reason: `${work.key}: ${dead.map(entry => deadProofDetail(entry, candidate.sha)).join('; ')}. The criterion is proven, only the binding is dead, so no production round can revive it: approve retiring the proof from the criterion (a narrowing, recorded as requirement-weakening; the new policy revision has the covering proofs produced once more on this head), or refuse with the reason if the covering proofs do not assert the criterion's statement, and the finding returns to the worker as rework.`.slice(0, 2000) };
+}
+
+/** GY-1177. What the decision history says of an item's dead-proof re-scopes: see rescopeOutcomes. */
+export interface RescopeOutcomes { refused: string[]; applied: { id: string } | null }
+export const noRescopeOutcomes: RescopeOutcomes = { refused: [], applied: null };
+type HistoryEntry = { id?: string; action: string; state: string; input?: any; reason?: string };
+/** The words every re-scope reason carries, so the history tells a re-scope from any other requirements revision. */
+const rescopeMark = 'only the binding is dead';
+const sameCriteria = (a: readonly { id: string; text: string; proofs: readonly string[] }[], b: readonly { id: string; text: string; proofs: readonly string[] }[]) =>
+  a.length === b.length && a.every(criterion => { const other = b.find(entry => entry.id === criterion.id); return !!other && other.text === criterion.text && other.proofs.length === criterion.proofs.length && other.proofs.every(proof => criterion.proofs.includes(proof)); });
+/**
+ * GY-1177. Read from the decision history, not the loop's watch, so a judgement stands across a
+ * lost cursor or a restart. `refused`: the dead proofs on the current head whose re-scope an
+ * approver refused — a refused `requirements` decision at the item's policy revision whose criteria
+ * retire the proof; the control plane binds a requirements decision to its input and revision,
+ * never to a head, so the refusal stands for every head until the criteria or the revision move.
+ * `applied`: the re-scope the item's current criteria came from, when it is the latest applied
+ * requirements revision — the narrowing whose requirement-weakening escalation rescopeResolve settles.
+ */
+export function rescopeOutcomes(work: Work, history: readonly HistoryEntry[]): RescopeOutcomes {
+  const refused = history.filter(entry => entry.action === 'requirements' && entry.state === 'refused' && !entry.input?.answers
+    && entry.input?.expectedPolicyRevision === work.policyRevision && Array.isArray(entry.input?.criteria));
+  const latest = history.filter(entry => entry.action === 'requirements' && entry.state === 'applied').at(-1);
+  const applied = latest?.id && latest.reason?.includes(rescopeMark) && Array.isArray(latest.input?.criteria) && sameCriteria(latest.input.criteria, work.criteria) ? { id: latest.id } : null;
+  return { refused: refused.length ? coveredDeadProofs(work).map(entry => entry.proof).filter(proof => refused.some(entry => retiresProof(work, entry.input.criteria, proof))) : [], applied };
+}
+/** The dead proofs whose re-scope an approver refused: rescopeOutcomes' `refused`. */
+export const refusedRescopes = (work: Work, history: readonly HistoryEntry[]) => rescopeOutcomes(work, history).refused;
+/**
+ * GY-1177. The resolve the requirement-weakening escalation an applied re-scope raised calls for,
+ * or null. The engine records every narrowing as requirement-weakening, and the merge gate holds
+ * until it is resolved; the narrowing was the loop's own request, already judged by the independent
+ * approver, so the loop asks for its resolution too rather than leave the item at merge for a person.
+ * Only the escalation the re-scope raises — it retires no criterion — is asked about.
+ */
+export function rescopeResolve(work: Work, rescope: RescopeOutcomes): RoutineDecision | null {
+  if (!rescope.applied) return null;
+  const escalation = standingEscalations(work).find(entry => entry.trigger === 'requirement-weakening' && /^Requirement revision retires no criterion and narrows proofs for /.test(entry.reason));
+  return escalation ? { action: 'resolve', input: { trigger: 'requirement-weakening' }, escalation: { trigger: 'requirement-weakening', at: escalation.at }, binding: `rescope:${rescope.applied.id}:${escalation.at}`,
+    reason: `${work.key}: the requirement-weakening escalation raised at ${escalation.at} (${escalation.reason}) is the narrowing of re-scope decision ${rescope.applied.id}, which the independent approver applied: it retired only proofs recorded as not exercising criteria their other proofs prove with trusted, exercised evidence. Resolving clears only this concern: it decides no gate and ships nothing.`.slice(0, 2000) } : null;
 }
 
 /**

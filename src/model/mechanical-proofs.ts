@@ -219,9 +219,14 @@ export const unexercisedDetail = (entry: UnexercisedFinding, sha: string, work?:
  * revision the independent approver judges) instead of reworking the change again.
  */
 export interface DeadProof { proof: string; criteria: string[]; covering: string[]; finding: UnexercisedFinding }
-export function coveredDeadProofs(work: Work, now = new Date()): DeadProof[] {
+/**
+ * `refused` names the dead proofs whose re-scope the approver already refused (refusedRescopes in
+ * daemon/decisions.ts): that judgement says the covering proofs do not assert the criterion, so
+ * such a proof is no longer dead but the worker's to fix, and the finding returns as rework.
+ */
+export function coveredDeadProofs(work: Work, now = new Date(), refused: readonly string[] = []): DeadProof[] {
   if (!work.candidate) return [];
-  const findings = unexercisedFindings(work).filter(entry => mechanicalProof(entry.proof));
+  const findings = unexercisedFindings(work).filter(entry => mechanicalProof(entry.proof) && !refused.includes(entry.proof));
   const dead = new Set(findings.map(entry => entry.proof));
   // Exercised: a trusted pass of a unit or integration proof was trusted only beside a failing
   // stripped run for this criterion (GY-135); a manual pass carries the cases it judged.
@@ -242,6 +247,16 @@ export function coveredDeadProofs(work: Work, now = new Date()): DeadProof[] {
     }
     return [{ proof: entry.proof, criteria: criteria.map(criterion => criterion!.id), covering: [...covering], finding: entry }];
   });
+}
+/**
+ * Whether a requirements input retires `proof`: every criterion is the item's own with only proofs
+ * removed, and `proof` is among them. A refused re-scope carries exactly such an input.
+ */
+export function retiresProof(work: Pick<Work, 'criteria'>, criteria: readonly { id: string; text: string; proofs: readonly string[] }[], proof: string): boolean {
+  const revised = (id: string) => criteria.find(entry => entry.id === id);
+  return criteria.length === work.criteria.length
+    && work.criteria.every(criterion => { const entry = revised(criterion.id); return !!entry && entry.text === criterion.text && entry.proofs.every(name => criterion.proofs.includes(name)); })
+    && work.criteria.some(criterion => criterion.proofs.includes(proof) && !revised(criterion.id)!.proofs.includes(proof));
 }
 /** The criteria with every covered dead proof retired: the requirements revision a re-scope asks for. */
 export const rescopedCriteria = (work: Pick<Work, 'criteria'>, dead: readonly DeadProof[]): Work['criteria'] =>

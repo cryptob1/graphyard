@@ -1,15 +1,16 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
-import type { Work } from '../model.js';
+import { standingEscalations, type Work } from '../model.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
 import { recordSettledDecision } from '../model/project-memory.js';
+import { coveredDeadProofs } from '../model/mechanical-proofs.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, noRescopeOutcomes, observedFrom, rescopeOutcomes, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
@@ -520,6 +521,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A refused widening is the worker's answer, not the master's: the control plane recorded it
       // on the item, and the worker reads there that it stays inside plannedFiles.
       if (watch.scope && judged) { await noteScopeOutcome(item, watch, judged); return; }
+      // A refused re-scope (GY-1177) is the loop's to answer: the finding returns to the worker as rework.
+      if (key.includes(':rescope:')) { await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}. The dead proof's finding returns to the worker as rework naming its remedy`); return; }
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
@@ -579,10 +582,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted);
+    // GY-1177: a dead proof's re-scope an approver refused is answered by rework, and the narrowing
+    // one applied is resolved, both read from the history — only for an item either could concern.
+    const rescope = effects.decisions && (coveredDeadProofs(item).length || standingEscalations(item).some(entry => entry.trigger === 'requirement-weakening'))
+      ? rescopeOutcomes(item, (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions) : noRescopeOutcomes;
+    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted, rescope);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
-      const called = neededDecision(item, config, exhausted);
+      const called = neededDecision(item, config, exhausted, rescope);
       if (called) unattestable.add(decisionKey(item, called));
       // The item needs the decision and the loop will not attest what it could not verify. Step 3b
       // has already escalated an open item whose fence this host assessed and could not settle.

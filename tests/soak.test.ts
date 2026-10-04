@@ -108,12 +108,14 @@ const repository = 'owner/project';
 const PROOF = 'unit:soak-behaves';
 /** GY-521: a proof no producer session may run, satisfied only by the attest decision the loop requests. */
 const MANUAL = 'manual:soak-attested';
+/** GY-1177: a second proof bound to a criterion PROOF already proves, which the producer finds does not exercise it. */
+const DEAD = 'unit:soak-dead-binding';
 const principals = {
   operator: { id: 'operator', role: 'admin', sessionKind: 'ai' },
   operatorAgent: { id: 'graphyard-master-operator', role: 'admin', sessionKind: 'ai' },
   approver: { id: 'graphyard-approver', role: 'admin', sessionKind: 'ai' },
   coordinator: { id: 'graphyard-master', role: 'coordinator' },
-  producer: { id: 'proof-runner', role: 'producer', proofs: [PROOF] },
+  producer: { id: 'proof-runner', role: 'producer', proofs: [PROOF, DEAD] },
 } satisfies Record<string, Principal>;
 const workers: WorkerProfile[] = ['one', 'two', 'three'].map(name => ({ name, principal: `worker-${name}`, agentName: `soak-worker-${name}`, mode: 'launch', kind: 'claude', credentialFile: `/outside/${name}.token`, agentArgs: [], approvals: 'auto', environment: {} }) as WorkerProfile);
 // The queue-only day's roster (GY-498): worker capacity enough to fill the parallel-tip window,
@@ -462,6 +464,8 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  */
 let days = 0;
 async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: 'approvers-left-open'; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+  /** GY-1177: items whose AC-1 also binds the dead proof; the approver applies the first's re-scope and refuses the second's. */
+  deadProof?: { approved: number; refused: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -580,7 +584,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       plannedFiles: [...files(n), docs.page(n)],
       policy: { checks: ['test', 'typecheck', 'unit:docs-word-budget'], review: true },
     } : {};
-    const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
+    const dead = options.deadProof && (n === options.deadProof.approved || n === options.deadProof.refused);
+    const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: dead ? [PROOF, DEAD] : [PROOF] },
       ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : [])];
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
@@ -983,6 +988,15 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return { agentName, pane };
     }
     pending.push(async () => {
+      // GY-1177: the dead proof's re-scope on the refused item is judged against: its covering proof does not assert the criterion.
+      const rescopeDue = options.deadProof?.refused === numberOf(work)
+        && (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.some((entry: { id: string; action: string }) => entry.id === decision && entry.action === 'requirements');
+      if (rescopeDue) {
+        await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${PROOF} does not assert ${work.key}'s AC-1 statement, so ${DEAD} is not dead; the worker strengthens it` });
+        rescopeRefusals.push({ key: work.key, decision });
+        herdr.status(pane, 'done');
+        return;
+      }
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
         && (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.some((entry: { id: string; action: string }) => entry.id === decision && entry.action === 'rework');
       if (refuseDue) {
@@ -1024,6 +1038,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       producerRuns.push({ requestId, state: 'pending', requestedAt: at, closedAt: null, resolution: null });
     }
   };
+  const deadHeads = new Map<string, string>(), deadEvidence: { key: string; sha: string; survives: boolean }[] = [];
+  const rescopeRefusals: { key: string; decision: string }[] = [];
   const requestProof: DaemonEffects['requestProof'] = work => {
     pending.push(async () => {
       const current = (await store.list()).find(item => item.id === work.id)!;
@@ -1032,6 +1048,15 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       if (spentOn(current)) return;
       await engine.execute(principals.producer, 'evidence', current.id, { proof: PROOF, sha: current.candidate.sha, baseSha: current.candidate.baseSha, policyRevision: current.policyRevision, result: 'pass', executed: 4, skipped: 0,
         exercise: { criterion: 'AC-1', behaviour: `item ${numberOf(current)}'s change`, result: 'fail', executed: 1 } }, id());
+      // GY-1177: the dead binding survives its mutation — on every head of the approved item while
+      // the criterion still binds it, and on the refused item's first head only: its rework is the
+      // worker strengthening the test, so on the next head the stripped run fails as it should.
+      if (!current.criteria.some(criterion => criterion.proofs.includes(DEAD))) return;
+      const first = (deadHeads.get(current.key) ?? deadHeads.set(current.key, current.candidate.sha).get(current.key)) === current.candidate.sha;
+      const survives = numberOf(current) === options.deadProof?.approved || first;
+      deadEvidence.push({ key: current.key, sha: current.candidate.sha, survives });
+      await engine.execute(principals.producer, 'evidence', current.id, { proof: DEAD, sha: current.candidate.sha, baseSha: current.candidate.baseSha, policyRevision: current.policyRevision, result: 'pass', executed: 2, skipped: 0,
+        exercise: { criterion: 'AC-1', behaviour: `item ${numberOf(current)}'s change`, result: survives ? 'pass' : 'fail', executed: 2 } }, id());
     });
   };
 
@@ -1042,7 +1067,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // would otherwise be dispatched, pushed and refused here for its linked pull request. The
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
   // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well.
-  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.containment || failover ? new Set(items.map(item => item.id)) : null;
+  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.containment || options.deadProof || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   const transport = async (path: string, data: any, key: string = id()) => {
     const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
@@ -1821,7 +1846,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
-    wakes, staleMerges, restartLog };
+    wakes, staleMerges, restartLog, deadEvidence, rescopeRefusals };
 }
 
 /**
@@ -2671,6 +2696,47 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   assert.equal(reclaim?.state, 'done');
   assert.match(reclaim.detail, /its pane .* has been gone from the runtime .* keeping the attempt's branch/);
   assert.equal(final.find(item => item.key === items[n - 1].key)!.stage, 'done', 'the item was delivered by its next attempt');
+});
+
+test('unit:soak-invariants-hold — a dead proof whose criterion its other proof already proves is re-scoped once per head, not reworked: an approved re-scope retires it and the item merges, a refused one returns the finding to the worker as rework and the item still merges, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1177: the re-scope is a routine decision the loop takes per item and per head, so it lives
+  // in this world. Two items bind a second proof to AC-1 that the producer finds does not exercise
+  // it while the first proof does. The approver applies one re-scope and refuses the other; the
+  // refusal must reach the worker as rework (never a wait on the refused decision), and the
+  // strengthened proof then exercises the criterion on the next head.
+  const deadProof = { approved: 2, refused: 4 };
+  const { items, final, violations, failures, lost, decideCalls, deadEvidence, rescopeRefusals, state } = await simulateDay({
+    hours: 6, deadProof,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, infrastructure: new Set([5]), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the re-scopes');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const decisionsOf = async (item: Work) => (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(item.id)}/decisions`)).decisions as { id: string; action: string; state: string; input: any }[];
+  // Approved: one re-scope request for the head, applied; the dead proof is retired and no production round was spent on it.
+  const approved = final.find(item => item.key === items[deadProof.approved - 1].key)!;
+  const approvedHistory = await decisionsOf(approved);
+  assert.deepEqual(approvedHistory.filter(entry => entry.action === 'requirements').map(entry => entry.state), ['applied'], `${approved.key}: one re-scope, applied`);
+  assert.equal(decideCalls.filter(call => call.key === approved.key && call.action === 'requirements').length, 1, `${approved.key}: the re-scope was requested once`);
+  assert.deepEqual(approved.criteria.find(criterion => criterion.id === 'AC-1')!.proofs, [PROOF], `${approved.key}: only the dead proof was retired from AC-1`);
+  assert.ok(!approvedHistory.some(entry => entry.action === 'rework'), `${approved.key}: the dead proof cost no rework`);
+  assert.equal(approved.pipeline?.reworkRounds ?? 0, 0, `${approved.key}: no production round was spent on the dead proof`);
+  // The narrowing the engine records for it was the loop's own re-scope, so the loop had it resolved too.
+  assert.deepEqual(approvedHistory.filter(entry => entry.action === 'resolve').map(entry => [entry.input?.trigger, entry.state]), [['requirement-weakening', 'applied']], `${approved.key}: the re-scope's narrowing was resolved once`);
+  // Refused: one re-scope request, refused; the loop then requested the rework naming the remedy, and the next head's strengthened proof exercises AC-1.
+  const refused = final.find(item => item.key === items[deadProof.refused - 1].key)!;
+  const refusedHistory = await decisionsOf(refused);
+  assert.deepEqual(rescopeRefusals.map(entry => entry.key), [refused.key], 'the scenario refusal was judged');
+  assert.deepEqual(refusedHistory.filter(entry => entry.action === 'requirements').map(entry => entry.state), ['refused'], `${refused.key}: one re-scope, refused and never asked again`);
+  const reworks = decideCalls.filter(call => call.key === refused.key && call.action === 'rework');
+  assert.equal(reworks.length, 1, `${refused.key}: the refusal was answered by one rework request`);
+  assert.match(reworks[0].reason, new RegExp(`An approver refused retiring it from the criterion.*re-bind AC-1 to a proof that asserts it`), `${refused.key}: the rework names the refusal and the remedy`);
+  assert.ok(refusedHistory.some(entry => entry.action === 'rework' && entry.state === 'applied'), `${refused.key}: the rework was applied`);
+  assert.deepEqual(refused.criteria.find(criterion => criterion.id === 'AC-1')!.proofs, [PROOF, DEAD], `${refused.key}: the criterion kept its proof`);
+  assert.ok(refused.evidence.some(entry => entry.proof === DEAD && entry.sha === refused.candidate!.sha && entry.trusted && entry.result === 'pass'), `${refused.key}: delivered on the strengthened proof's trusted pass`);
+  assert.ok(deadEvidence.some(entry => entry.key === refused.key && !entry.survives), `${refused.key}: the strengthened proof ran on the reworked head`);
+  assert.ok(!Object.keys(state.actions).some(key => key.startsWith('escalation:decision-refused:') && rescopeRefusals.some(entry => key.endsWith(entry.decision))), 'the refused re-scope is the loop\'s to answer, not an escalation');
 });
 
 test('unit:soak-invariants-hold — blocked work unblocks itself: every routine blocker is re-checked each cycle and cleared only once its cause is gone, the scope and decision blockers reach their approver, a repeating blocker is left to the master, and no approver session or cursor row outlives its blocker', { timeout: 600_000 }, async () => {

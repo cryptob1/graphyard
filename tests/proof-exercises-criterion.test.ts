@@ -12,7 +12,7 @@ import { producerPrompt, proofOutcome } from '../src/producer.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
-import { neededDecision, routineDecision } from '../src/daemon/decisions.js';
+import { neededDecision, rescopeOutcomes, routineDecision } from '../src/daemon/decisions.js';
 import { describeDispatch } from '../src/master/status.js';
 import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 
@@ -283,4 +283,34 @@ test('unit:covered-criterion-rescopes-dead-proof a criterion its other proofs al
   }
   // A criterion with no other proof has nothing covering it.
   assert.equal(neededDecision(unexercisedItem(), { autoMerge: true })!.action, 'rework');
+  // Refused: the approver judged the covering proofs do not assert the statement, so the finding
+  // returns to the worker as rework naming the remedy — never the same re-scope waited on for ever.
+  const input = { expectedPolicyRevision: work.policyRevision, criteria: (decision.input as { criteria: Work['criteria'] }).criteria, dependencies: [], plannedFiles: work.plannedFiles };
+  const refusedHistory = [{ action: 'requirements', state: 'refused', input }];
+  const refused = rescopeOutcomes(work, refusedHistory);
+  assert.deepEqual(refused, { refused: [UNIT], applied: null }, 'the refused re-scope is read from the decision history');
+  const reworked = neededDecision(work, { autoMerge: true }, [], refused)!;
+  assert.equal(reworked.action, 'rework', `a refused re-scope returns the head as rework: ${reworked.reason}`);
+  assert.match(reworked.reason, /An approver refused retiring it from the criterion/);
+  assert.match(reworked.reason, /re-bind AC-3 to a proof that asserts it/);
+  assert.equal(routineDecision(work, { autoMerge: true }, clock.getTime(), null, [], refused)?.action, 'rework');
+  // A refusal at another policy revision, a pending one, or one retiring another proof does not stand.
+  for (const other of [[{ ...refusedHistory[0], input: { ...input, expectedPolicyRevision: work.policyRevision + 1 } }], [{ ...refusedHistory[0], state: 'requested' }],
+    [{ ...refusedHistory[0], input: { ...input, criteria: [{ ...input.criteria[0], proofs: [UNIT] }] } }]])
+    assert.deepEqual(rescopeOutcomes(work, other).refused, []);
+  // Applied: the engine records the narrowing as requirement-weakening, which holds the merge gate;
+  // it was the loop's own re-scope, already judged, so the loop asks for its resolution as well.
+  const narrowed = structuredClone(work);
+  narrowed.criteria = input.criteria;
+  narrowed.escalations = [{ trigger: 'requirement-weakening', reason: 'Requirement revision retires no criterion and narrows proofs for AC-3', at: ago(1), actor: 'graphyard-master-operator' }] as Work['escalations'];
+  const appliedHistory = [{ id: 'rescope-1', action: 'requirements', state: 'applied', input, reason: decision.reason }];
+  const outcomes = rescopeOutcomes(narrowed, appliedHistory);
+  assert.deepEqual(outcomes, { refused: [], applied: { id: 'rescope-1' } });
+  const resolve = routineDecision(narrowed, { autoMerge: true }, clock.getTime(), null, [], outcomes)!;
+  assert.equal(resolve.action, 'resolve', 'the narrowing the approved re-scope raised is resolved, never left for a person');
+  assert.deepEqual(resolve.input, { trigger: 'requirement-weakening' });
+  assert.match(resolve.reason, /re-scope decision rescope-1/);
+  // A narrowing no re-scope made — another revision applied since, or one that is no re-scope — is not the loop's to resolve.
+  for (const other of [[...appliedHistory, { id: 'later', action: 'requirements', state: 'applied', input, reason: 'A master narrowed it' }], [{ ...appliedHistory[0], reason: 'A master narrowed it' }]])
+    assert.notEqual(neededDecision(narrowed, { autoMerge: true }, [], rescopeOutcomes(narrowed, other))?.action, 'resolve');
 });
