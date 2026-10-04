@@ -6,6 +6,7 @@ import { interventionKindLabel, interventionKinds, interventionWindows, judgemen
 import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
+import { workIdByRef } from './store/locked-read.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -463,7 +464,7 @@ export async function recordIntervention(store: Store, actor: Principal, input: 
   return store.transaction(async (db, now) => {
     const receipt = (await db.query('SELECT result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (receipt) return receipt.result as Intervention;
-    const work = input.work ? (await db.query("SELECT id, document->>'key' AS key, document->>'title' AS title, document->>'stage' AS stage FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [input.work])).rows[0] : null;
+    const work = input.work ? (await db.query(`SELECT id, document->>'key' AS key, document->>'title' AS title, document->>'stage' AS stage FROM work_items WHERE id = ${workIdByRef('$1')}`, [input.work])).rows[0] : null;
     demand(!input.work || work, 'Work item not found', 404);
     const at = now.toISOString(), since = input.since ? new Date(input.since).toISOString() : at;
     demand(Date.parse(since) <= now.getTime(), 'since must not lie in the future');
@@ -482,7 +483,7 @@ export async function recordJudgement(store: Store, actor: Principal, input: Jud
   return store.transaction(async (db, now) => {
     const receipt = (await db.query('SELECT result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (receipt) return receipt.result as Judgement;
-    const work = input.work ? (await db.query("SELECT id, document->>'key' AS key, document->>'title' AS title FROM work_items WHERE id::text=$1 OR document->>'key'=$1", [input.work])).rows[0] : null;
+    const work = input.work ? (await db.query(`SELECT id, document->>'key' AS key, document->>'title' AS title FROM work_items WHERE id = ${workIdByRef('$1')}`, [input.work])).rows[0] : null;
     demand(!input.work || work, 'Work item not found', 404);
     const recorded = { id: randomUUID(), verdict: input.verdict, text: input.text, work: work ? { id: work.id, key: work.key, title: work.title } : null, page: input.page ?? null, by: actor.id, at: now.toISOString() };
     const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work?.id ?? null, actor.id, 'judgement.recorded', JSON.stringify(recorded)]);

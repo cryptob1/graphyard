@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -9,12 +9,13 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { HumanSignIn, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/auth.js';
+import { HumanSignIn, maxSignInLinks, maxSignInSessions, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/auth.js';
 import { hostSealKey, loginCommand, parkArgs, parkCommand, unsealOnHost } from '../src/cli/session-commands.js';
 import { defaultChoices, requestChoices, resolveHumanAnswer, type HumanRequestRow } from '../src/model/human-request.js';
 import type { Principal, Work } from '../src/model.js';
 import HumanRequestsPage, { signInAction } from '../web/pages/human-requests.js';
 import { redeemSignIn, signInCode } from '../web/pages/login.js';
+import { sealToHost } from '../src/server/waits.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
 import { principalSchema } from '../src/server/principals.js';
@@ -29,12 +30,14 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * runs the real routes, the real answer transaction and the real page on a disposable Postgres.
  */
 const repository = 'owner/human-decisions';
-// As an installation provisions them: an admin operator credential that is not itself declared
-// human, a worker, and a read-only dashboard credential.
-const operator: Principal = { id: 'operator', role: 'admin' };
+// As an installation provisions them: an admin operator credential declared a human session, a
+// worker, and a read-only dashboard credential; and an admin credential that declares no session
+// kind, which the server never treats as human (GY-1186).
+const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
+const undeclaredAdmin: Principal = { id: 'undeclared-admin', role: 'admin' };
 const worker: Principal = { id: 'worker', role: 'worker', sessionKind: 'ai' };
 const reader: Principal = { id: 'dashboard', role: 'reader' };
-const credentials = [operator, worker, reader].map(principal => ({ ...principal, token: `human-decisions-${principal.id}-${'x'.repeat(32)}` }));
+const credentials = [operator, undeclaredAdmin, worker, reader].map(principal => ({ ...principal, token: `human-decisions-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, sealHome: string;
 let serial = 0;
@@ -98,7 +101,7 @@ test('unit:operator-sign-in-link — graphyard login prints a one-time link that
   const status = await ok(session, 'status');
   assert.deepEqual([status.actor.id, status.actor.role, status.actor.sessionKind], [operator.id, 'admin', 'human']);
   // Nobody but the operator's own admin credential issues a link; nothing unauthenticated does.
-  for (const other of [worker, reader]) assert.equal((await call(token(other), 'sign-in-links', {})).status, 403, other.id);
+  for (const other of [worker, reader, undeclaredAdmin]) assert.equal((await call(token(other), 'sign-in-links', {})).status, 403, other.id);
   assert.equal((await call(null, 'sign-in-links', {})).status, 401);
   assert.equal((await call(null, 'sign-in', { code: 'x'.repeat(43) })).status, 401, 'a code never issued opens nothing');
 
@@ -114,14 +117,18 @@ test('unit:operator-sign-in-link — graphyard login prints a one-time link that
   assert.equal(table.authenticate(fresh.token), null, 'the session expires');
   assert.throws(() => table.issue(operator, false), /Only the operator's own admin credential/, 'an unconfigured identity issues none');
   assert.throws(() => table.issue({ id: 'master', role: 'operator-agent' }, true), /Only the operator's own admin credential/);
+  // An admin declared an AI session issues none: redeeming would declare that agent's session human (GY-1041).
+  assert.throws(() => table.issue({ id: 'operator-bot', role: 'admin', sessionKind: 'ai' }, true), /operator-bot is declared an AI session and issues none/);
+  // Nor does an admin that declares nothing: the link would open a human session for it (GY-1186).
+  assert.throws(() => table.issue(undeclaredAdmin, true), /undeclared-admin is not declared "sessionKind": "human" and issues none/);
 
-  // A request the admin credential itself cannot answer, because it is not a human session; the sign-in session can.
+  // A request an admin credential not declared human cannot answer, because it is not a human session; the sign-in session can.
   const work = await park(await claimed(), ['money-or-accounts', 'A', 'hosting', 'plan', '--', 'Staging needs a paid plan']);
   const rows = (await ok(token(operator), 'human-requests')).requests as HumanRequestRow[];
   const row = rows.find(entry => entry.id === work.id)!;
-  assert.equal((await call(token(operator), `work/${work.id}/answer`, { ...row.choices![0].body })).status, 403, 'the admin token is not a human session');
-  // A reader, an agent or the admin credential sees why it cannot answer and the sign-in action, never a command.
-  for (const actor of [reader, worker, { id: 'master', role: 'operator-agent', sessionKind: 'ai' } as Principal, operator]) {
+  assert.equal((await call(token(undeclaredAdmin), `work/${work.id}/answer`, { ...row.choices![0].body })).status, 403, 'an undeclared admin token is not a human session');
+  // A reader, an agent or an undeclared admin credential sees why it cannot answer and the sign-in action, never a command.
+  for (const actor of [reader, worker, { id: 'master', role: 'operator-agent', sessionKind: 'ai' } as Principal, undeclaredAdmin]) {
     const markup = page(actor, rows, [work]);
     assert.ok(markup.includes(signInAction), `${actor.id} is offered ${signInAction}`);
     assert.ok(markup.includes('This session cannot answer it'), `${actor.id} is told why`);
@@ -185,6 +192,37 @@ test('unit:human-request-choices — every human-only request carries its reques
   const written = JSON.stringify((await store.pool.query('SELECT document FROM work_items')).rows) + JSON.stringify((await store.pool.query('SELECT payload FROM events')).rows) + JSON.stringify((await store.pool.query('SELECT result, fingerprint FROM receipts')).rows);
   assert.ok(!written.includes(secret), 'the value is written nowhere in the clear');
   assert.throws(() => resolveHumanAnswer(credential.humanRequest!, { request: randomUUID(), outcome: 'provided', choice: 'decline', secret }), /sent only with the choice that asks for it/);
+});
+
+test('unit:sign-in-tables-bounded — the sign-in link and session tables stay bounded however often an admin asks for a link: the oldest entry goes first and the newest still works (GY-1041)', async () => {
+  // Bounded: the oldest link and session go first once the cap is reached; the newest still work.
+  const now = Date.parse('2026-10-02T12:00:00Z');
+  const table = new HumanSignIn(() => now);
+  const links = Array.from({ length: maxSignInLinks + 5 }, () => table.issue(operator, true));
+  assert.throws(() => table.redeem(links[0].code), /expired or was already used/, 'the oldest link was dropped at the cap');
+  assert.equal(table.redeem(links.at(-1)!.code).actor.id, operator.id, 'the newest link still opens');
+  const sessions = Array.from({ length: maxSignInSessions + 3 }, () => table.redeem(table.issue(operator, true).code));
+  assert.equal(table.authenticate(sessions[0].token), null, 'the oldest session was dropped at the cap');
+  assert.ok(table.authenticate(sessions.at(-1)!.token), 'the newest session stands');
+  const held = table as unknown as { links: Map<string, unknown>; sessions: Map<string, unknown> };
+  assert.ok(held.links.size <= maxSignInLinks && held.sessions.size <= maxSignInSessions, `${held.links.size} links, ${held.sessions.size} sessions`);
+});
+
+test('unit:host-seal-key-recovers-interrupted-write — a sealing key a killed first use left truncated is replaced, a whole key missing its public half keeps its key, and either way the host opens what is sealed to it (GY-1186)', async () => {
+  const home = await temporaryDirectory('seal-recovery');
+  await mkdir(join(home, 'seal'), { recursive: true });
+  // The private key file was created, then the process died before every byte or the public half was written.
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+  await writeFile(join(home, 'seal', 'cut-host.pem'), privateKey.slice(0, privateKey.indexOf('\n') + 5), { mode: 0o600 });
+  const replaced = await hostSealKey('cut-host', home);
+  assert.match(replaced, /^-----BEGIN PUBLIC KEY-----/);
+  const secret = `sealed-${randomUUID()}`;
+  assert.equal(await unsealOnHost(sealToHost(replaced, secret), 'cut-host', home), secret, 'the replaced key opens what is sealed to its public half');
+  assert.equal(await hostSealKey('cut-host', home), replaced, 'the next use reads the same key');
+  // A whole private key whose public half never landed: the key stays, and the public half is derived from it.
+  await rm(join(home, 'seal', 'cut-host.pem.pub'));
+  assert.equal(await hostSealKey('cut-host', home), replaced, 'the existing key is kept');
+  assert.deepEqual((await readdir(join(home, 'seal'))).sort(), ['cut-host.pem', 'cut-host.pem.pub'], 'no scratch file is left behind');
 });
 
 test('unit:operator-principal-declared-human — the install plan declares its operator principal a human session and no agent principal; a roster rotation keeps it so', async () => {

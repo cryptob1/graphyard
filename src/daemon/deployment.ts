@@ -87,8 +87,16 @@ export const productionEnvironmentRecord = (environment: unknown, production: st
 
 /** GitHub's node ids are opaque base64-like tokens; anything else is not sent inside a query. */
 const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
-/** How many of a deployment's statuses the batched read asks for, to tell whether it ever reached success. */
-const deploymentStatusHistory = 20;
+/**
+ * How many of a deployment's statuses the batched read asks for at each end of its history, to tell
+ * whether it ever reached success: the earliest and the latest, GitHub's connection maximum each, so
+ * the success is seen whichever order the connection lists them in and however many statuses were
+ * added after it. Only a deployment with more than twice this many statuses, its success in the
+ * middle, is unseen, and that one fails closed.
+ */
+const deploymentStatusHistory = 100;
+/** States of a deployment still on its way: it does not serve yet, so it supersedes nothing. */
+const inFlightStates = new Set(['pending', 'queued', 'in_progress', 'waiting']);
 /**
  * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
  * has only a per-deployment status listing. A deployment whose status could not be read has no
@@ -102,7 +110,7 @@ async function deploymentStates(repository: string, deployments: any[], run: Chi
   if (!readable.length) return { states: [], succeeded: [], failure: 'GitHub listed it without a node id' };
   let nodes: any[];
   try {
-    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } statuses(first: ${deploymentStatusHistory}) { nodes { state } } } } }`;
+    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } statuses(first: ${deploymentStatusHistory}) { nodes { state } } recent: statuses(last: ${deploymentStatusHistory}) { nodes { state } } } } }`;
     const answer = JSON.parse(await run('gh', ['api', 'graphql', '-f', `query=${query}`]));
     nodes = Array.isArray(answer?.data?.nodes) ? answer.data.nodes : [];
   } catch (error) { return { states: [], succeeded: [], failure: message(error) }; }
@@ -115,7 +123,8 @@ async function deploymentStates(repository: string, deployments: any[], run: Chi
   return {
     failure: null,
     states: answers.map(node => node === undefined ? undefined : typeof node.latestStatus?.state === 'string' ? node.latestStatus.state.toLowerCase() : 'pending'),
-    succeeded: answers.map(node => Array.isArray(node?.statuses?.nodes) && node.statuses.nodes.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success')),
+    succeeded: answers.map(node => [node?.statuses?.nodes, node?.recent?.nodes].some(history => Array.isArray(history)
+      && history.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success'))),
   };
 }
 
@@ -151,8 +160,9 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // Whether a production deployment newer than the one being read has been listed: a release
     // Railway marked inactive is served only while nothing newer was deployed to production.
     let newerProduction = false;
-    // Environments named like production under another identity, reported when no release is found
-    // so an unconfigured Railway installation is told the name to configure rather than left pending.
+    // Environments named like production under another identity, reported when the production
+    // environment records nothing so an unconfigured Railway installation is told the name to
+    // configure rather than left pending. Only the unfiltered page below can list them.
     const namesake = new Set<string>();
     for (let page = 1; page <= deploymentListingPages && !sha && !exhausted; page++) {
       let deployments: any[];
@@ -174,10 +184,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         // The base branch and its commits are deployed to staging and previews as readily as to
         // production, whether the ref names the branch or the commit; only the production
         // environment's record says what production serves.
-        if (!productionEnvironmentRecord(deployment?.environment, production)) {
-          if (typeof deployment?.environment === 'string' && deployment.environment.endsWith(` / ${production}`) && namesake.size < 5) namesake.add(deployment.environment);
-          continue;
-        }
+        if (!productionEnvironmentRecord(deployment?.environment, production)) continue;
         // A release is the base branch or a commit on it; another branch's deployment is not.
         const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
         let candidate = true;
@@ -199,6 +206,8 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       // GitHub deactivates it when a newer deployment succeeds. Behind any newer production record
       // — a successful one, a failed attempt, one whose status is unread or not a release — an
       // inactive deployment is never taken, so a superseded or rolled-back release is not served.
+      // A newer release still pending, queued or in progress is the exception: production keeps
+      // serving the release until it concludes, so a deploy window leaves no delivery pending.
       for (const { deployment, candidate } of records) {
         if (candidate) {
           const index = candidates.indexOf(deployment);
@@ -209,6 +218,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
             if (state === 'inactive') inactive = `${production} deployment ${deployment.id} reached success and was later marked inactive with no newer ${production} deployment, so it is the release production serves`;
             break;
           }
+          if (inFlightStates.has(state)) continue;
         }
         newerProduction = true;
       }

@@ -183,13 +183,15 @@ export const snapshotBaseSql = `SELECT b.seq, b.payload->'work' AS work, (SELECT
  * Append one save to the ledger: a delta on the item's last full snapshot when it is small
  * and recent, or whenever the save is routine; the whole document otherwise.
  */
-export async function appendSave(db: pg.PoolClient, work: Work, actor: string, kind: string, details?: unknown) {
-  const document: Work = JSON.parse(JSON.stringify(work));
-  const full = JSON.stringify({ work: document, details });
+export async function appendSave(db: pg.PoolClient, work: Work, actor: string, kind: string, details?: unknown, text = JSON.stringify(work)) {
+  // `text` is the document as `save` just wrote it; it is parsed only to diff against a snapshot.
+  const detailText = JSON.stringify(details) as string | undefined;
+  const full = detailText === undefined ? `{"work":${text}}` : `{"work":${text},"details":${detailText}}`;
   const base = (await db.query(snapshotBaseSql, [work.id])).rows[0] as { seq: string; work: Work; since: number } | undefined;
   const routine = routineSave.has(kind);
   let row = full;
-  if (base?.work && (routine || base.since < snapshotEvery) && base.work.stage === document.stage && equal(base.work.delivery ?? null, document.delivery ?? null)
+  const document: Work | undefined = base?.work && JSON.parse(text);
+  if (base?.work && document && (routine || base.since < snapshotEvery) && base.work.stage === document.stage && equal(base.work.delivery ?? null, document.delivery ?? null)
     && !(kind === 'github.observed' && document.delivery?.mergedAt && !(await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND ${DELIVERY_EVENT_PREDICATE} LIMIT 1`, [work.id])).rows.length)) {
     const delta = JSON.stringify({ delta: workDelta(Number(base.seq), base.work, document), details });
     if (routine || delta.length <= full.length * deltaSizeFraction) row = delta;

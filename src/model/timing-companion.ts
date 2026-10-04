@@ -45,7 +45,7 @@ export function timingBaselineCompanion(base: string, head: string, tests: reado
 
 /** True when the item's planned scope or observed diff holds a test file, so the baseline is implied by it. */
 export const addsTestFile = (item: { plannedFiles?: readonly string[]; observation?: { files?: readonly string[] } | null }) =>
-  (item.plannedFiles ?? []).some(planned => { const scope = pathScope(planned); return scope.path !== timingBaselinePath && (scope.prefix ? /^tests\//.test(scope.path) : timedTestFile(scope.path)); })
+  (item.plannedFiles ?? []).some(planned => { const scope = pathScope(planned); return scope.path !== timingBaselinePath && (scope.prefix ? scope.path === 'tests/' : timedTestFile(scope.path)); })
   || changedTestFiles((item.observation?.files ?? []).map(path => ({ path }))).length > 0;
 
 /**
