@@ -256,8 +256,9 @@ test('unit:parallel-observation-jobs — twenty due jobs whose observations each
       return observation;
     } finally { inFlight.set(work.id, concurrent - 1); }
   }) as typeof github.observe;
-  const concurrency = observationConcurrency(12);
-  assert.equal(concurrency, 4, 'the default concurrency is four jobs at once');
+  // The default is eight workers beside a pool of sixteen (GY-1114); a pool of twelve holds six.
+  assert.equal(observationConcurrency(), 8, 'the default concurrency is eight jobs at once');
+  assert.equal(observationConcurrency(12), 6, 'never more than half the pool');
   const started = Date.now();
   await observationWorkers(engine, github, 4, () => seen.size >= 20);
   const elapsedMs = Date.now() - started;
@@ -288,8 +289,10 @@ test('unit:observation-lag-visible — master status reports what the workers ac
   assert.equal(report.head, 'GY-HEAD', 'the queue head is named');
   assert.equal(report.oldestDueJobMs, 3_600_000, 'the locked and the held job are not backlog; the head\'s own job is the oldest due one');
   assert.ok(report.headObservationAgeMs! > observationFreshnessMs, 'the head has passed the freshness the merge gate demands');
-  assert.equal(report.attention.length, 1);
-  const [lagItem] = report.attention;
+  // The head is its own item; the entry behind it, as stale and in the merge band, is the band's (GY-1114).
+  assert.equal(report.attention.length, 2);
+  const [lagItem, bandItem] = report.attention;
+  assert.match(bandItem.text, /^The merge band has 1 of 2 item\(s\) observed longer ago than its 2m0s bound \(oldest GY-MID, 3m1s\)/);
   assert.equal(lagItem.subject, 'github');
   assert.match(lagItem.text, /The merge-queue head GY-HEAD has gone 3m\d?s without an observation/);
   assert.match(lagItem.text, /the oldest due job has waited 60m0s/);
@@ -300,7 +303,7 @@ test('unit:observation-lag-visible — master status reports what the workers ac
   const freshDocs = docs.map((work, index) => ({ ...work, observation: observed(work, new Date(now - 20_000).toISOString()) as Work['observation'] }));
   assert.deepEqual(observationThroughputStatus(coordinator, { ...snapshot, work: freshDocs }, now).attention, [], 'a head observed within two minutes is not lag');
   assert.deepEqual(observationThroughputStatus(coordinator, { ...snapshot, work: [], jobs: [] }, now).attention, [], 'no queue head, nothing to raise');
-  assert.deepEqual(observationThroughputStatus(null, snapshot, now).attention.length, 1, 'the item is raised without a budget reading too');
+  assert.deepEqual(observationThroughputStatus(null, snapshot, now).attention.length, 2, 'the items are raised without a budget reading too');
   // The throughput arithmetic itself: windowed, ordered, and empty when nothing ran.
   const durations = [12_000, 4_000, 8_000, 16_000].map((ms, index) => ({ at: now - index * 60_000, ms }));
   assert.deepEqual(observationThroughput(durations, now), { windowMs: 600_000, count: 4, jobsPerMinute: 0.4, medianDurationMs: 12_000, p90DurationMs: 16_000 });
