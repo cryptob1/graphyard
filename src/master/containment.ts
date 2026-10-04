@@ -1,11 +1,13 @@
 // Concern: containment quarantines — their phase against the lease, and verifying a supervisor is gone.
 import type { Work } from '../model.js';
-import { type ContainmentVerification, containmentGraceMs, containmentAttestation, containmentVerificationSchema, containmentSettlementRefusals, boundContainmentVerification } from '../quarantine.js';
+import { type ContainmentVerification, containmentAttestation, containmentVerificationSchema, containmentSettlementRefusals, boundContainmentVerification } from '../quarantine.js';
 import { type SupervisorProbe, probeSupervisorAbsence } from '../containment-probe.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { watchAssignment } from '../supervisor.js';
 import { watchSupervisorRunning } from './dispatch-reservation.js';
+import { type ContainmentPhase, containmentPhase, containmentGraceMs } from '../model/containment.js';
+export { type ContainmentPhase, containmentPhase, containmentGraceMs };
 
 export interface ContainmentAssessment {
   key: string; id: string; epoch: number; owner: string; at: string;
@@ -16,28 +18,6 @@ export interface ContainmentAssessment {
   verification: ContainmentVerification | null;
 }
 
-export type ContainmentPhase =
-  | { state: 'live'; owner: string; epoch: number; expiresAt: string }
-  | { state: 'grace'; lapsedAt: string; remainingMs: number }
-  | { state: 'lapsed'; lapsedAt: string | null };
-/**
- * Where a containment quarantine stands against its worker's lease. Every supervised launch
- * records one, so while its owner still holds the quarantined epoch's lease it is a session at
- * work, not something to act on. Once the lease lapses, the grace window runs from the later of
- * the lease and launch deadlines, and only then can supervisor absence be verified.
- */
-export function containmentPhase(work: Work, now: number, graceMs = containmentGraceMs): ContainmentPhase | null {
-  const quarantine = work.containmentQuarantine;
-  if (!quarantine) return null;
-  const lease = work.lease;
-  if (lease && lease.owner === quarantine.owner && lease.epoch === quarantine.epoch && Date.parse(lease.expiresAt) > now)
-    return { state: 'live', owner: lease.owner, epoch: lease.epoch, expiresAt: lease.expiresAt };
-  const deadlines = [lease?.epoch === quarantine.epoch ? lease.expiresAt : undefined, quarantine.leaseExpiresAt, quarantine.launchExpiresAt]
-    .map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
-  if (!deadlines.length) return { state: 'lapsed', lapsedAt: null };
-  const lapsed = Math.max(...deadlines), lapsedAt = new Date(lapsed).toISOString();
-  return lapsed + graceMs > now ? { state: 'grace', lapsedAt, remainingMs: lapsed + graceMs - now } : { state: 'lapsed', lapsedAt };
-}
 /** Why a quarantined item cannot be dispatched: in progress by its live owner, or unverified containment. */
 export function containmentHold(work: Work, now: number): string | null {
   const phase = containmentPhase(work, now);
