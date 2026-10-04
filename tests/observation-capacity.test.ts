@@ -185,65 +185,64 @@ type Soak = { settledPolls: number; settledCharged: number; settledMax: number; 
  * review request finds a pushed head and is paid for in full. What GitHub charged is counted per poll.
  */
 async function soak(conditional: boolean): Promise<Soak> {
-  const api = new Provider(), realFetch = globalThis.fetch;
-  globalThis.fetch = api.fetch as typeof fetch;
-  try {
-    const github = new GitHub({ repository: REPOSITORY, base: 'main', appId: APP, installationId: 2, privateKey: 'not-used' });
-    Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3 * 3_600_000 });
-    github.controlPlaneLogin = async () => 'graphyard-owner-project[bot]';
-    const start = Date.now(); let clock = 0;
-    github.clock = () => start + clock;
-    const queued = Array.from({ length: 20 }, (_, index) => { const pr = api.open(300 + index, `graphyard/gy-q${index}-1`, true);
-      return item(`GY-Q${index}`, 300 + index, pr.head, api.main, { queue: { sequence: index + 1, enqueuedAt: new Date(start - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>); });
-    const review = Array.from({ length: 180 }, (_, index) => { const pr = api.open(600 + index, `graphyard/gy-r${index}-1`, false);
-      return item(`GY-R${index}`, 600 + index, pr.head, api.main, { stage: 'review', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] } as Partial<Work>); });
-    let all: Work[] = [...queued, ...review];
-    const apply = (work: Work, observation: Work['observation'], at: number) => {
-      const next = { ...work, candidate: observation!.candidate, observation } as Work;
-      const fleet = all.map(entry => entry.id === work.id ? next : entry);
-      return { ...next, ...evaluate(next, fleet, new Date(at), [CI]) } as Work;
-    };
-    // The fleet settles before the hour: every item is observed, with every peer observed, until a whole round costs nothing.
-    for (let round = 0, before = -1; before !== api.charged; round++) {
-      assert.ok(round < 4, `the fleet settles within four rounds (${api.charged} charged)`);
-      before = api.charged;
-      for (const work of [...all]) {
-        const observation = await github.observe(all.find(entry => entry.id === work.id)!, all);
-        all = all.map(entry => entry.id === work.id ? apply(entry, observation, start) : entry);
-      }
+  const api = new Provider();
+  const github = new GitHub({ repository: REPOSITORY, base: 'main', appId: APP, installationId: 2, privateKey: 'not-used' });
+  // The provider is injected into this one client (GY-1208), so no other request in the process reaches it.
+  github.fetch = api.fetch as typeof fetch;
+  Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3 * 3_600_000 });
+  github.controlPlaneLogin = async () => 'graphyard-owner-project[bot]';
+  const start = Date.now(); let clock = 0;
+  github.clock = () => start + clock;
+  const queued = Array.from({ length: 20 }, (_, index) => { const pr = api.open(300 + index, `graphyard/gy-q${index}-1`, true);
+    return item(`GY-Q${index}`, 300 + index, pr.head, api.main, { queue: { sequence: index + 1, enqueuedAt: new Date(start - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>); });
+  const review = Array.from({ length: 180 }, (_, index) => { const pr = api.open(600 + index, `graphyard/gy-r${index}-1`, false);
+    return item(`GY-R${index}`, 600 + index, pr.head, api.main, { stage: 'review', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] } as Partial<Work>); });
+  let all: Work[] = [...queued, ...review];
+  const apply = (work: Work, observation: Work['observation'], at: number) => {
+    const next = { ...work, candidate: observation!.candidate, observation } as Work;
+    const fleet = all.map(entry => entry.id === work.id ? next : entry);
+    return { ...next, ...evaluate(next, fleet, new Date(at), [CI]) } as Work;
+  };
+  // The fleet settles before the hour: every item is observed, with every peer observed, until a whole round costs nothing.
+  for (let round = 0, before = -1; before !== api.charged; round++) {
+    assert.ok(round < 4, `the fleet settles within four rounds (${api.charged} charged)`);
+    before = api.charged;
+    for (const work of [...all]) {
+      const observation = await github.observe(all.find(entry => entry.id === work.id)!, all);
+      all = all.map(entry => entry.id === work.id ? apply(entry, observation, start) : entry);
     }
-    assert.ok(all.filter(work => work.key.startsWith('GY-R')).every(work => nextAction(work, all, new Date(start))?.kind === 'request-review'), 'the 180 review requests are review-requested on their real observations');
-    const steadyMs = steadyStateInterval(all.length, null, null);
-    api.conditional = conditional; api.charged = 0;
-    const hour = 3_600_000, due = new Map(all.map(work => [work.id, 0])), lastAt = new Map<string, number>();
-    const result: Soak = { settledPolls: 0, settledCharged: 0, settledMax: 0, changedPolls: 0, changedCharged: 0, reviewPolls: 0, reviewWorstGapMs: 0, chargedPerHour: 0 };
-    let reviewPolls = 0;
-    while (true) {
-      const next = Math.min(...due.values()); if (next >= hour) break; clock = next;
-      for (const work of [...all]) {
-        if (due.get(work.id) !== clock) continue;
-        const current = all.find(entry => entry.id === work.id)!, isReview = current.key.startsWith('GY-R');
-        const changed = isReview && ++reviewPolls % 10 === 0;
-        if (changed) api.pulls.get(current.submission!.pr)!.head = sha(`head-${current.key}-${reviewPolls}`);
-        const before = api.charged;
-        const observation = await github.observe(current, all);
-        const charged = api.charged - before;
-        if (changed) { result.changedPolls++; result.changedCharged += charged; }
-        else { result.settledPolls++; result.settledCharged += charged; result.settledMax = Math.max(result.settledMax, charged); }
-        const observed = apply(current, observation, start + clock);
-        all = all.map(entry => entry.id === work.id ? observed : entry);
-        const cadence = observationCadence(observed, all, new Date(start + clock), current.observation, steadyMs);
-        if (isReview) {
-          result.reviewPolls++;
-          if (lastAt.has(work.id)) result.reviewWorstGapMs = Math.max(result.reviewWorstGapMs, clock - lastAt.get(work.id)!);
-          lastAt.set(work.id, clock);
-        }
-        due.set(work.id, clock + cadence.ms);
+  }
+  assert.ok(all.filter(work => work.key.startsWith('GY-R')).every(work => nextAction(work, all, new Date(start))?.kind === 'request-review'), 'the 180 review requests are review-requested on their real observations');
+  const steadyMs = steadyStateInterval(all.length, null, null);
+  api.conditional = conditional; api.charged = 0;
+  const hour = 3_600_000, due = new Map(all.map(work => [work.id, 0])), lastAt = new Map<string, number>();
+  const result: Soak = { settledPolls: 0, settledCharged: 0, settledMax: 0, changedPolls: 0, changedCharged: 0, reviewPolls: 0, reviewWorstGapMs: 0, chargedPerHour: 0 };
+  let reviewPolls = 0;
+  while (true) {
+    const next = Math.min(...due.values()); if (next >= hour) break; clock = next;
+    for (const work of [...all]) {
+      if (due.get(work.id) !== clock) continue;
+      const current = all.find(entry => entry.id === work.id)!, isReview = current.key.startsWith('GY-R');
+      const changed = isReview && ++reviewPolls % 10 === 0;
+      if (changed) api.pulls.get(current.submission!.pr)!.head = sha(`head-${current.key}-${reviewPolls}`);
+      const before = api.charged;
+      const observation = await github.observe(current, all);
+      const charged = api.charged - before;
+      if (changed) { result.changedPolls++; result.changedCharged += charged; }
+      else { result.settledPolls++; result.settledCharged += charged; result.settledMax = Math.max(result.settledMax, charged); }
+      const observed = apply(current, observation, start + clock);
+      all = all.map(entry => entry.id === work.id ? observed : entry);
+      const cadence = observationCadence(observed, all, new Date(start + clock), current.observation, steadyMs);
+      if (isReview) {
+        result.reviewPolls++;
+        if (lastAt.has(work.id)) result.reviewWorstGapMs = Math.max(result.reviewWorstGapMs, clock - lastAt.get(work.id)!);
+        lastAt.set(work.id, clock);
       }
+      due.set(work.id, clock + cadence.ms);
     }
-    result.chargedPerHour = api.charged;
-    return result;
-  } finally { globalThis.fetch = realFetch; }
+  }
+  result.chargedPerHour = api.charged;
+  return result;
 }
 
 let measured: Promise<Soak> | null = null;
