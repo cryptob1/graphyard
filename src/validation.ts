@@ -15,6 +15,7 @@ import { EvidenceReuse, reuseScopeSchema } from './evidence-reuse.js';
 import { ArtifactReplay } from './evidence-replay.js';
 import { appendAttribution, candidateManifest, compatibilitySignature, signatureDifferences, type TargetIdentity, type SignatureComponent } from './attribution.js';
 import { Reanchoring, TargetMismatchRefusal, type RequestAttribution } from './reanchor.js';
+import { lockedWork } from './store/locked-read.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -188,7 +189,7 @@ export class Validation {
   }
   async persist(db: pg.PoolClient, r: ValidationRequest) { await db.query('UPDATE validation_requests SET document=$2 WHERE id=$1', [r.id, JSON.stringify(r)]); }
   async changed(db: pg.PoolClient, w: Work, actor: string, kind: string, now: Date, details: unknown) {
-    const all: Work[] = (await db.query('SELECT document FROM work_items')).rows.map(r => r.document);
+    const all = await lockedWork(db, [w.id]);
     this.engine.evaluate(w, all.map(x => x.id === w.id ? w : x), now);
     await save(db, w, actor, `validation.${kind}`, now, details); await wakeJob(db, w.id);
   }
@@ -577,7 +578,7 @@ export class Validation {
       await this.persist(db, current);
       // GY-135: the collector lane mints trusted evidence too, so a pass here is held to the same
       // rule as the evidence command: trusted only beside a stripped run that failed.
-      const all: Work[] = (await db.query('SELECT document FROM work_items')).rows.map(row => row.document as Work).map(x => x.id === w.id ? w : x);
+      const all = (await lockedWork(db, [w.id])).map(x => x.id === w.id ? w : x);
       const unexercised = result.passed ? exerciseRefusal(w, all, { proof: c.proof, result: 'pass', exercise: data.exercise }) : null;
       const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: !unexercised, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution,
         ...(data.exercise ? { exercise: data.exercise } : {}), ...(unexercised ? { unexercised } : {}) };
@@ -949,7 +950,7 @@ export class Validation {
       WITH selected AS MATERIALIZED (
         SELECT w.document AS work, (v.value->>'requestId')::uuid AS request_id, (v.value->>'candidateId')::uuid AS candidate_id
         FROM work_items w CROSS JOIN LATERAL jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v
-        WHERE w.document->>'stage'<>'done' AND v.value ? 'requestId'
+        WHERE w.id IN (SELECT id FROM work_index WHERE stage <> 'done') AND v.value ? 'requestId'
       )
       SELECT document FROM validation_requests WHERE document->>'state' IN ('queued','dispatched','running','collecting')
       UNION ALL
