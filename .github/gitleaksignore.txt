@@ -2,3 +2,5 @@
 # Only fake credentials in test fixtures belong here, never a real secret and never a src/ or config path.
 # GY-409: fake API key in the connect-an-account test fixture.
 31d6c0f2b6e173b2dfaaaf7ad473ceebe665de2a:tests/connect-account.test.ts:generic-api-key:25
+# GY-1186: a truncated fake PEM header in the interrupted-seal-key test fixture (now generated at runtime).
+6f6c98c44a7e39120578367fe641beab8cb8acf4:tests/human-decisions-ui.test.ts:private-key:215
