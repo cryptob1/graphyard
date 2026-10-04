@@ -47,6 +47,9 @@ export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> =
   codex: [...providerUsageErrors],
   opencode: [...providerUsageErrors],
   cursor: [...providerUsageErrors],
+  // GY-1135: agy's own banner, `⚠ Individual quota reached. Please upgrade your subscription to
+  // increase your limits. Resets in 1h31m31s.`, followed by an `Error ID: …` line.
+  agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i],
 };
 /** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
 export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
@@ -71,7 +74,8 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     if (line.length > exhaustionNoticeMaxLength) continue;
     const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
-    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ');
+    // A compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads.
+    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
   }
   return null;
