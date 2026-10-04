@@ -8,6 +8,7 @@ import { claimRunWatch, listRunDirectories, runsDirectory, superviseRun, writeRu
 import type { Run, RunResult, Runner } from './runner/types.js';
 import { save } from './store.js';
 import type { Services } from './server/routes.js';
+import { lockedWork } from './store/locked-read.js';
 
 // ---------------------------------------------------------------------------
 // Research before build (GY-259).
@@ -401,7 +402,7 @@ async function receipt(db: Db, actor: Principal, key: string, fingerprint: strin
 async function transact(services: Services, actor: Principal, id: string, key: string, fingerprint: string, change: (work: Work, now: Date) => { kind: string; details: unknown }) {
   return services.engine.store.transaction(async (db, now) => {
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
-    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id);
     demand(work, 'Work item not found', 404);
     demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
