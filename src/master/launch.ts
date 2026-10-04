@@ -308,14 +308,24 @@ export function outputAfterCommand(screen: string | null, command: string) {
  * Who holds the pane's terminal foreground, as `herdr pane process-info` reports it: `shell` when
  * the pane's own shell does (nothing the launch typed is still running), `command` when another
  * process group does (the typed launch command — its supervisor, then the runtime — is executing),
- * null when Herdr cannot say.
+ * null when Herdr cannot say. Given the runtime's program, a group Herdr lists the processes of is
+ * told apart (GY-1184): `supervisor` when one is a `graphyard watch` supervisor, `runtime` when one
+ * runs that program, and `other` (naming it) when none is — an unrelated job left in a reused pane,
+ * not this launch. The real Herdr lists them; a group listed empty stays `command`.
  */
-export async function paneForeground(pane: string, run?: ChildRun): Promise<'shell' | 'command' | null> {
+export async function paneForeground(pane: string, run?: ChildRun, program?: string): Promise<'shell' | 'command' | 'supervisor' | 'runtime' | { other: string } | null> {
   try {
     const raw = await herdrJson(['pane', 'process-info', '--pane', pane], run);
     const info = raw?.process_info ?? raw;
     if (!Number.isSafeInteger(info?.shell_pid) || info.shell_pid <= 0 || !Number.isSafeInteger(info?.foreground_process_group_id) || info.foreground_process_group_id <= 0) return null;
-    return info.foreground_process_group_id === info.shell_pid ? 'shell' : 'command';
+    if (info.foreground_process_group_id === info.shell_pid) return 'shell';
+    const processes: { argv?: unknown; name?: unknown }[] = Array.isArray(info.foreground_processes) ? info.foreground_processes : [];
+    const argvs = processes.map(entry => Array.isArray(entry?.argv) ? entry.argv.filter((word): word is string => typeof word === 'string') : []);
+    if (!program || !argvs.some(argv => argv.length)) return 'command';
+    if (argvs.some(argv => { const at = argv.indexOf('watch'); return at > 0 && argv[at + 3] === '--'; })) return 'supervisor';
+    if (argvs.some(argv => argv.some(word => word.split('/').at(-1) === program))) return 'runtime';
+    const first = processes[0], named = typeof first?.name === 'string' && first.name ? first.name : argvs[0]?.[0]?.split('/').at(-1);
+    return { other: named || 'an unnamed process' };
   } catch { return null; }
 }
 /** Whether the pane's own shell holds its terminal's foreground (paneForeground). False when Herdr cannot say. */
@@ -330,8 +340,8 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // started one is, and has not read its request (GY-130).
   if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
-  let foreground: 'shell' | 'command' | null | undefined;
-  const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run)));
+  let foreground: Awaited<ReturnType<typeof paneForeground>> | undefined;
+  const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run, launchProgram(kind))));
   // A runtime that printed below its command and handed the terminal back to the shell has exited
   // before it was ready — Cursor's IDE launcher saying "No Cursor IDE installation found", a
   // command not found — and nothing will start in that pane however long the bound (GY-976).
@@ -360,11 +370,17 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // spawns the runtime. That launch is starting, given until the ceiling, never refused as absent
   // at the bound (GY-1033). Its detail quotes what the supervisor last printed, if anything. Only
   // a pane whose shell is back in the foreground with nothing printed, or one Herdr cannot
-  // describe, is absent. A pane where Herdr reports a different agent is absent (GY-1053).
-  if (!agent?.agent && (printed || commandEchoing(last, command)) && await readForeground() === 'command') {
+  // describe, is absent. A pane where Herdr reports a different agent is absent (GY-1053). So is
+  // one whose foreground Herdr lists as neither the supervisor nor the runtime (GY-1184): an
+  // unrelated job is refused at the bound, not waited on to the ceiling.
+  const echoing = !agent?.agent && (printed || commandEchoing(last, command));
+  const held = echoing ? await readForeground() : null;
+  if (held === 'runtime') return { state: 'starting', agent: null, line, detail: `the ${kind} runtime holds the pane's foreground before Herdr reports it` };
+  if (held === 'command' || held === 'supervisor') {
     const said = printed?.at(-1);
     return { state: 'starting', agent: null, line, detail: said ? `the launch command is running, its supervisor setting up: "${said}"` : 'the launch command is running, its supervisor still setting up' };
   }
+  if (held && typeof held === 'object') return { state: 'absent', agent: null, line, detail: `the pane's foreground is held by ${held.other}, not the launch command` };
   return { state: 'absent', agent: null, line, detail: agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : commandEchoing(last, command) ? 'command still echoing' : 'no runtime under the pane' };
 }
 export async function awaitRuntimeStart(pane: string, kind: string, command: string, run?: ChildRun, bounds: StartBounds = {}) {
