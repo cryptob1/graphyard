@@ -12,12 +12,11 @@ import { needsHumanActions, routedScopeStatus } from './owed-report.js';
 import { loopAttestations } from './hand-actions.js';
 import { installationMerger } from '../executor.js';
 import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
-import { slowCycleAttention } from '../daemon/liveness.js';
 import { readReviewLedger, reconcileReviews, reviewLedgerSpec, sessionLedgerHeadroom, summarizeReviews } from '../reviewer.js';
 import { producerLedgerSpec, readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
-import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
+import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, directMergeLine, docsBudgetAttention, nameOrphanSupervisors } from './status-attention.js';
+import { directMergeLine, loopHealthAttention, docsBudgetAttention, nameOrphanSupervisors } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -110,10 +109,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
-  diskAttention.push(...loopMemoryAttention(cycling));
   // The loop's own health comes first: a stalled coordinator is why nothing else moves.
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling)]
+    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...loopHealthAttention(cycling)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
