@@ -65,66 +65,68 @@ export async function ensureRetroIndex(pool: pg.Pool): Promise<'present' | 'buil
 }
 
 export const retroIndexRetryIntervalMs = 60_000;
+/** The longest a persistently failing build waits between attempts, so it logs at most twice an hour. */
+export const retroIndexMaxRetryIntervalMs = 30 * 60_000;
 
 export interface RetroIndexWatchOptions {
   intervalMs?: number;
+  maxIntervalMs?: number;
   periodic?: boolean;
   announce?: (outcome: 'present' | 'built' | 'building elsewhere') => void;
   failed?: (error: unknown) => void;
 }
 
 /**
- * Start the retro-index build beside startup and re-check periodically if another replica is
- * building or an error occurs, until the index is present or built (GY-1048 follow-up 26).
+ * Start the retro-index build beside startup and re-check if another replica is building or an
+ * error occurs, until the index is present or built (GY-1048 follow-up 26). Consecutive failures
+ * back off exponentially up to `maxIntervalMs`, so a persistent fault (a role lacking CREATE) is not
+ * logged every minute for the process lifetime; another replica building re-checks at the base
+ * interval. `ready` settles with 'stopped' when the watch is stopped first, so no awaiter hangs (GY-1189).
  */
 export function startRetroIndexWatch(pool: pg.Pool, options: RetroIndexWatchOptions = {}) {
   let stopped = false;
   let timer: NodeJS.Timeout | null = null;
-  let inFlight = false;
-  let resolveReady: (outcome: 'present' | 'built') => void;
-  const ready = new Promise<'present' | 'built'>(resolve => { resolveReady = resolve; });
+  let failures = 0;
+  let settleReady: (outcome: 'present' | 'built' | 'stopped') => void;
+  const ready = new Promise<'present' | 'built' | 'stopped'>(resolve => { settleReady = resolve; });
   const interval = options.intervalMs ?? retroIndexRetryIntervalMs;
+  const maxInterval = Math.max(interval, options.maxIntervalMs ?? retroIndexMaxRetryIntervalMs);
 
-  const attempt = async () => {
-    if (stopped || inFlight) return;
-    inFlight = true;
-    try {
-      const outcome = await ensureRetroIndex(pool);
-      options.announce?.(outcome);
-      if (outcome === 'present' || outcome === 'built') {
-        resolveReady(outcome);
-        if (!options.periodic && timer) {
-          clearInterval(timer);
-          timer = null;
-        }
-        return;
-      }
-      schedule();
-    } catch (error) {
-      options.failed?.(error);
-      schedule();
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  const schedule = () => {
-    if (stopped || timer) return;
-    timer = setInterval(() => { void attempt(); }, interval);
+  const schedule = (delay: number) => {
+    if (stopped) return;
+    timer = setTimeout(() => { timer = null; void attempt(); }, delay);
     timer.unref?.();
   };
 
+  const attempt = async () => {
+    if (stopped) return;
+    try {
+      const outcome = await ensureRetroIndex(pool);
+      failures = 0;
+      options.announce?.(outcome);
+      if (outcome === 'present' || outcome === 'built') {
+        settleReady(outcome);
+        if (!options.periodic) return;
+      }
+      schedule(interval);
+    } catch (error) {
+      failures += 1;
+      options.failed?.(error);
+      schedule(Math.min(maxInterval, interval * 2 ** (failures - 1)));
+    }
+  };
+
   void attempt();
-  if (options.periodic) schedule();
 
   return {
     ready,
     stop: () => {
       stopped = true;
       if (timer) {
-        clearInterval(timer);
+        clearTimeout(timer);
         timer = null;
       }
+      settleReady('stopped');
     }
   };
 }
