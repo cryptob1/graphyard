@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-Restarting `graphyard master run` never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95); cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3).
+Restarting `graphyard master run` never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95); cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, *already recording deployment* (follow-up item). Without `--deployment-url` it reads `productionEnvironment` deployments; the newest successful counts even when inactive.
+`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, *already recording deployment* (follow-up item). Without `--deployment-url` it reads `productionEnvironment` deployments.
 
 ## Lost worker before submission
 
@@ -23,7 +23,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Retro synthesis
 
-`GRAPHYARD_INTERVENTION_PATTERNS=1`: scans group refusal/rework interventions by cause; at the threshold → unapplied drafts (`retro.drafted`) (wording, check, producer method, fault-catalogue entry). An AI operator agent with `decision:approve` (not human, drafter, recorder) [approves](protocol/work-commands.md)/refuses each, applied at registry revision. Requirements → [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete` (`409`); catalogue entries count under fault classes.
+`GRAPHYARD_INTERVENTION_PATTERNS=1`: scans group refusal/rework interventions by cause; at the threshold → unapplied drafts (`retro.drafted`) (wording, check, producer method, fault-catalogue entry). An AI operator agent with `decision:approve` (not the drafter) [approves](protocol/work-commands.md)/refuses each. Requirements → [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete` (`409`); catalogue entries count under fault classes.
 
 ## Flaky CI check
 
