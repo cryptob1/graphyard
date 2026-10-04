@@ -61,7 +61,7 @@ A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher 
 
 ### Acknowledgement, the one re-prompt, and never started
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`), then [elsewhere](master-agent-reference.md#producer-runtime-faults).
 
 ### Resume, idle-with-lease and exited sessions
 
