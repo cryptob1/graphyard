@@ -152,9 +152,12 @@ export const workspaceCommands = defineCommands([
       '                                name the shipped items behind each remaining conflict, and',
       '                                list every file outside plannedFiles that no longer matches',
       '                                the base; run before every push',
-      '  sync GY-N --restore           The same, then restore every such file to the base in one new commit',
-      '                                naming them; push it plainly. A force push is never needed or allowed',
-      '  sync GY-N --push-via-control-plane COMMIT  The control plane pushes a base sync refused for workflows',
+      '  sync GY-N --restore           The same, then restore every such file to the base in one new',
+      '                                commit naming them; push it plainly. A force push is never',
+      '                                needed or allowed',
+      '  sync GY-N --push-via-control-plane COMMIT',
+      '                                Have the control plane push a base-sync merge whose push was',
+      '                                refused for the workflows permission',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
@@ -174,8 +177,9 @@ export const workspaceCommands = defineCommands([
     name: 'restore-branch',
     scope: 'work',
     help: [
-      '  restore-branch GY-N EPOCH     Replace the leased attempt\'s own branch with HEAD after an ejected',
-      '                                or contaminated tip: a lease push conditional on the fetched tip',
+      '  restore-branch GY-N EPOCH     Replace the leased attempt\'s own branch with HEAD after an',
+      '                                ejected or contaminated tip: a lease push to that one branch,',
+      '                                conditional on the tip just fetched; run after reset and sync',
     ],
     async run(context, work) {
       // The worker's one history rewrite (GY-128). Its harness denies every raw force push, the lease

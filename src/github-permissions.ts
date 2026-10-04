@@ -75,6 +75,11 @@ export function blockedFeatures(shortfalls: readonly PermissionShortfall[]): Per
   return [...new Set(shortfalls.flatMap(shortfall => shortfall.features))];
 }
 export const permissionLabel = (permission: string) => permissionLabels[permission] ?? permission;
+/**
+ * `workflows` keeps its API key in shortfall sentences: the worker-credential attention has named
+ * the missing grant `workflows: write` since GY-1100 (before it had a label), matching GitHub's own
+ * push refusal ("without `workflows` permission"); the permission tables still show `Workflows`.
+ */
 export const describePermission = (permission: string, level: PermissionLevel) => `${permission === 'workflows' ? 'workflows' : permissionLabel(permission)}: ${level}`;
 /**
  * One operator-facing sentence per shortfall. It names the missing permission, why it is
