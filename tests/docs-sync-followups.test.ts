@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runChild, ChildProcessError, type ChildRun } from '../src/child-runner.js';
 import { localConflictPaths } from '../src/docs-sync.js';
 import { GitHub } from '../src/github.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1062: follow-ups from the review of GY-566's docs-sync. Each test is named for the proof it produces.
 
@@ -38,23 +38,21 @@ test('unit:docs-sync-conflict-probe-async — the loop\'s conflict probe runs ev
 });
 
 test('unit:docs-sync-conflict-probe-git — the probe names the paths git itself reports conflicting', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'gy-docs-probe-'));
-  try {
-    const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    git('init', '--quiet', '-b', 'main'); git('config', 'user.email', 't@example.com'); git('config', 'user.name', 't');
-    await writeFile(join(root, 'page.md'), 'one\n'); await writeFile(join(root, 'code.ts'), 'a\n');
-    git('add', '.'); git('commit', '--quiet', '-m', 'base');
-    git('checkout', '--quiet', '-b', 'item');
-    await writeFile(join(root, 'page.md'), 'item\n'); await writeFile(join(root, 'code.ts'), 'item\n');
-    git('commit', '--quiet', '-am', 'item');
-    const head = git('rev-parse', 'HEAD');
-    git('checkout', '--quiet', 'main');
-    await writeFile(join(root, 'page.md'), 'main\n');
-    git('commit', '--quiet', '-am', 'main');
-    const base = git('rev-parse', 'HEAD');
-    // No origin exists: the fetches fail and the commits already here serve.
-    assert.deepEqual(await localConflictPaths(root, 'item', head, base, runChild), ['page.md'], 'only the path that really conflicts, not every path both sides changed');
-  } finally { await rm(root, { recursive: true, force: true }); }
+  const root = await temporaryDirectory('docs-probe');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('init', '--quiet', '-b', 'main'); git('config', 'user.email', 't@example.com'); git('config', 'user.name', 't');
+  await writeFile(join(root, 'page.md'), 'one\n'); await writeFile(join(root, 'code.ts'), 'a\n');
+  git('add', '.'); git('commit', '--quiet', '-m', 'base');
+  git('checkout', '--quiet', '-b', 'item');
+  await writeFile(join(root, 'page.md'), 'item\n'); await writeFile(join(root, 'code.ts'), 'item\n');
+  git('commit', '--quiet', '-am', 'item');
+  const head = git('rev-parse', 'HEAD');
+  git('checkout', '--quiet', 'main');
+  await writeFile(join(root, 'page.md'), 'main\n');
+  git('commit', '--quiet', '-am', 'main');
+  const base = git('rev-parse', 'HEAD');
+  // No origin exists: the fetches fail and the commits already here serve.
+  assert.deepEqual(await localConflictPaths(root, 'item', head, base, runChild), ['page.md'], 'only the path that really conflicts, not every path both sides changed');
 });
 
 test('unit:docs-sync-patch-id-docs-pages — the kept-approval patch-id leaves out only docs pages, not every file under docs/', async () => {
