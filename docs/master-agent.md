@@ -19,19 +19,21 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 
 Review findings, rework, idle workers and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
+`master run` is `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
 
-The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
+The loop launches, wakes and rotates its [master session](master-agent-sessions.md#the-loops-own-master-session).
 
 ### System-driven items
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
+Unproduced `manual:` proofs are the loop's: one `attest` decision per proof, head, base and policy revision, an independent approver launched, withdrawn on head change (`loopDecisions.attestations`, not needs-human).
+
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
 that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
-that host's loop. `sessions.unseen` lists stale handles. `dispatch.sessionReconcile` reports each closure:
+that host's loop. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
@@ -76,7 +78,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's pane closes next dispatch tick; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); unposted reviewers are reminded first. Killed or vanished producer runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then quoting rework.
 
-**Every role fails over on spent quota** or waits as one `capacity` line, uncounted, relaunching oldest-first.
+**Every role fails over on spent quota** or waits as a `capacity` line, uncounted, relaunching oldest-first.
 
 The master launches reviews or producers by hand only via `master review GY-N [PROFILE]` once relaunching stops.
 
@@ -96,7 +98,7 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The first no-admin-bypass exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15m, checks passed, with an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
+First exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15m, checks passed, with an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
 
 The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: confirmed required-suite failures on main traced to culprits land reverts on the base tip — refused if later merges touched the culprit's files — head-bound through the bypass, recorded `optimistic.revert.*`, reopening items as rework.
 
