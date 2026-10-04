@@ -7,7 +7,7 @@ import type { HerdrAgent } from '../../src/master.js';
 import { Refusal, type Observation, type Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
 import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '../../src/landable-check.js';
-import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
+import { heldBase, mergeableNow, queueRef, type BaseRefresh, type LandingRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { SpeculativeConflict } from '../../src/model/refusal.js';
 import { revertRefusal, type OptimisticMerge, type OptimisticRevert } from '../../src/optimistic-merge.js';
@@ -173,6 +173,8 @@ export class SimulatedGitHub {
   slowMergeable = new Map<string, number>();
   /** Every write a branch restore made or was refused, per item, in order (GY-854). */
   restoreWrites: { key: string; write: 'reset' | 'merge'; refused: boolean; at: number }[] = [];
+  /** GY-1131: every landing verification of a waiting queue entry, as the production method recorded it. */
+  landingRefreshes: (LandingRefresh & { key: string })[] = [];
   /** GY-831. Items whose reviewer verdict is posted by the bound reviewer App identity itself. */
   botReviewers = new Set<string>();
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
@@ -598,6 +600,25 @@ export class SimulatedGitHub {
         if (!world.flakeTips.has(work.key)) world.flakeTips.set(work.key, tip);
         return { ...base, tip, tipTree: sha('tree', tip), reviewedHead: from,
           merge: { from, parents: [from, predicted], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: changed, diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } };
+      },
+      // GY-1131: the production landing verification over this repository. The landed diff is read
+      // from the base branch's own history, and a clean merge is published by this world's
+      // publisher, as the queue head's tip is; no merge in this world conflicts.
+      async refreshWaitingEntry(work: Work, needed: Parameters<GitHub['refreshWaitingEntry']>[1], beforeWrite: () => Promise<void> = async () => {}) {
+        const provider: GitHub = Object.assign(Object.create(GitHub.prototype), {
+          config: { repository: world.options.repository, base: world.options.baseBranch },
+          changedFiles: async (from: string, to: string) => world.baseChangesSince(from, to),
+          // The GY-375 test merge on a scratch branch: recorded off every branch a person or check reads.
+          mergeOnScratch: async (_key: string, own: string, tip: string, message: string) => world.record({ sha: sha('check', own, tip), tree: sha('tree', 'check', own, tip), parents: [own, tip],
+            files: [...new Set([...world.commits.get(own)!.files, ...world.commits.get(tip)!.files])], at: clock.now(), message }, world.mergedContents(own, tip, work.plannedFiles ?? [])).sha,
+          publishSpeculativeTip: async (subject: Work, placement: QueuePlacement, before: () => Promise<void>, trigger: QueueSpeculation['trigger']) => {
+            await before();
+            return { ...await adapter.publishSpeculativeTip(subject, placement), trigger };
+          },
+        });
+        const result = await provider.refreshWaitingEntry(work, needed, beforeWrite);
+        world.landingRefreshes.push({ ...result.record, key: work.key });
+        return result;
       },
       async refreshCandidateBase(work: Work): Promise<BaseRefresh> {
         // Only a docs conflict is real in this world; any other GitHub reading of one is stale, as GY-375 found.

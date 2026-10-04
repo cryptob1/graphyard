@@ -2352,6 +2352,16 @@ test('unit:soak-invariants-hold — the parallel-tip window validates several qu
   assert.equal(await new Engine(store).loadParallelTips(), reconfigure.window, 'a restarted control plane reads the window back from the installation ledger');
   const status = await api(principals.coordinator, 'GET', 'status');
   assert.equal(status.mergeQueue.parallelTips, reconfigure.window, 'status reports the narrowed window');
+  // GY-1131: the entries waiting behind the window are verified when work lands behind them, not at
+  // their turn. Across the day each landing is examined at most once per entry, a clean one is
+  // published as the entry's tip, and no entry is conflict-ejected when its turn comes.
+  const verified = github.landingRefreshes;
+  assert.ok(verified.some(entry => entry.outcome !== 'skipped'), `a waiting entry was merged onto a landing behind it: ${JSON.stringify(verified.map(entry => [entry.key, entry.outcome]))}`);
+  const perLanding = new Map<string, number>();
+  for (const entry of verified) perLanding.set(`${entry.key}@${entry.landing}`, (perLanding.get(`${entry.key}@${entry.landing}`) ?? 0) + 1);
+  assert.deepEqual([...perLanding].filter(([, count]) => count > 1), [], 'at most one verification per entry per landing');
+  assert.deepEqual(verified.filter(entry => entry.outcome === 'skipped' && entry.overlap.length), [], 'only a disjoint landing is skipped');
+  assert.deepEqual(final.flatMap(item => (item.queueHistory ?? []).filter(entry => entry.event === 'ejected' && /without resolving a conflict/.test(entry.reason ?? '')).map(entry => `${item.key}: ${entry.reason}`)), [], 'no entry was conflict-ejected at its turn');
   const seconds = (performance.now() - began) / 1000;
   assert.ok(seconds < 150, `the queue-only day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
