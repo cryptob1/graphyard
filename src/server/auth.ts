@@ -49,10 +49,14 @@ export const operatorAgentRouteGuard: Route = {
  * redeems it for a short-lived session bound to that principal and declared human, so the
  * decisions only a human may make are answered in that browser with one click. A link is single
  * use and expires in minutes; the session it opens expires in hours. Only digests are held, in
- * this process: a restart signs everyone out, and nothing about either is ever written.
+ * this process: a restart signs everyone out, and nothing about either is ever written. Both
+ * tables are bounded: past the cap the entry nearest expiry goes first, so repeated
+ * `graphyard login` calls cannot grow them between prunes.
  */
 export const signInLinkTtlMs = 10 * 60_000;
 export const signInSessionTtlMs = 12 * 3_600_000;
+export const maxSignInLinks = 16;
+export const maxSignInSessions = 32;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 
 export class HumanSignIn {
@@ -60,11 +64,19 @@ export class HumanSignIn {
   private readonly sessions = new Map<string, { actor: Principal; expiresAt: number }>();
   constructor(private readonly clock: () => number = Date.now) {}
 
-  /** A link for the issuing principal. Only a configured admin credential issues one: never an agent identity, a reader, or a worker. */
+  /**
+   * A link for the issuing principal. Only a configured admin credential declared a human session
+   * issues one: never an agent identity, a reader, or a worker, and never an admin declared an AI
+   * session or declaring nothing, since redeeming the link declares the session human and would hand
+   * whoever holds that credential the decisions only a human may make. An install declares its
+   * operator human (install/index.ts), and the server treats an undeclared session as never human.
+   */
   issue(issuer: Principal, configured: boolean) {
     demand(configured && issuer.role === 'admin', 'Only the operator\'s own admin credential issues a sign-in link', 403);
+    demand(issuer.sessionKind === 'human', `A sign-in link opens a human session; ${issuer.id} is ${issuer.sessionKind === 'ai' ? 'declared an AI session' : 'not declared "sessionKind": "human"'} and issues none`, 403);
     const now = this.prune(), code = randomBytes(32).toString('base64url');
     const { displayName } = issuer;
+    bounded(this.links, maxSignInLinks - 1);
     this.links.set(digest(code), { principal: { id: issuer.id, role: 'admin', ...(displayName ? { displayName } : {}) }, expiresAt: now + signInLinkTtlMs });
     return { code, principal: issuer.id, expiresAt: new Date(now + signInLinkTtlMs).toISOString() };
   }
@@ -76,6 +88,7 @@ export class HumanSignIn {
     demand(link && link.expiresAt > now, 'This sign-in link has expired or was already used; ask for a new one', 401);
     const token = `gyh_${randomBytes(32).toString('base64url')}`;
     const actor: Principal = { ...link!.principal, sessionKind: 'human' };
+    bounded(this.sessions, maxSignInSessions - 1);
     this.sessions.set(digest(token), { actor, expiresAt: now + signInSessionTtlMs });
     return { token, actor, expiresAt: new Date(now + signInSessionTtlMs).toISOString() };
   }
@@ -91,6 +104,11 @@ export class HumanSignIn {
     for (const table of [this.links, this.sessions]) for (const [key, entry] of table) if (entry.expiresAt <= now) table.delete(key);
     return now;
   }
+}
+
+/** Drop the entries nearest expiry until at most `room` remain. Every entry of a table has the same lifetime, so insertion order is expiry order. */
+function bounded(table: Map<string, { expiresAt: number }>, room: number) {
+  for (const key of table.keys()) { if (table.size <= room) break; table.delete(key); }
 }
 
 const signIns = new WeakMap<Services, HumanSignIn>();

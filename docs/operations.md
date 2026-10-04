@@ -13,7 +13,7 @@
   - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; an explained `lease-loss` is settleable by `admin --attestation` alone.
   - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
-- **Merge refused**: wait or repair the cause; never bypass.
+- **Merge refused**: wait or repair the cause; never bypass. Auto-merge `BLOCKED` past ten minutes with every gate passing is asked of GitHub as a head-bound merge; GitHub's refusal is the item's merge refusal in `master status`, and after 30 minutes one `merge-blocked` attention item names the pull request and GitHub's last answer.
 - **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
 - **Wrong accepted evidence**: [revoke it](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).
 - **GitHub paused or webhook silent**: [request budget](operations-reference.md#github-request-budget).
@@ -39,6 +39,7 @@ Never attest a stop you have not confirmed. Merged work changes only through a f
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
 - Only guarded or audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
+- Under the coordination lock a write reads whole only its item, overlapping open items and dependencies; the rest are cached projections or `work_index` summaries, so at 1,000 items claims, heartbeats, submissions and registry selects hold it under 500 ms and a reconcile pass under 5 s.
 - History is append-only; only routine rows past their retention window are [compacted](operations-reference.md#storage-retention), each batch audited.
 
 ## Deeper references
