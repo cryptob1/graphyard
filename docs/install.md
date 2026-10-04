@@ -30,7 +30,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery` and `release.*` actions plan the [candidate pipeline](delivery.md#managed-repositories). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`); human approves plan and `drift`.
+Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan the [candidate pipeline](delivery.md#managed-repositories). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`); human approves plan and `drift`.
 
 ## Step 2: apply
 
