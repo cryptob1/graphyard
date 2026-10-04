@@ -110,7 +110,7 @@ export interface Observation {
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string }[];
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[] }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
@@ -172,7 +172,7 @@ export interface Work extends Create {
    * ended that attempt's lease and parked the item; the answer clears it, and answered requests
    * are kept in `humanRequests` (see model/human-request.ts).
    */
-  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[];
+  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[]; /** The loop's last probe of the blocker's cause (GY-1008). */ blockerProbe?: import('./blocker-class.js').BlockerProbe | null;
   /** What the research step found before build, and the product questions it asked (src/research.ts). */
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
