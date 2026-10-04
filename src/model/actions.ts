@@ -243,14 +243,35 @@ export function openActions(all: Work[], now: Date, kinds?: readonly NextActionK
 }
 
 /**
- * Claim the first open row this executor can run, in claim order, under a bounded lease.
+ * The row this executor claimed most recently, when that attempt is the row's last record and it
+ * failed — the attempt a worker shortage or any other standing refusal turns away.
+ */
+function lastFailedClaim(all: Work[], executor: string): ActionRow | null {
+  let latest: { row: ActionRow; at: number } | null = null;
+  for (const work of all) for (const row of work.actionQueue?.actions ?? []) for (const entry of row.history) {
+    if (entry.event !== 'claimed' || entry.executor !== executor) continue;
+    const at = Date.parse(entry.at);
+    if (!latest || at > latest.at) latest = { row, at };
+  }
+  const last = latest?.row.history.at(-1);
+  return last?.event === 'failed' && last.executor === executor ? latest!.row : null;
+}
+
+/**
+ * Claim the first open row this executor can run, in claim order, under a bounded lease. The row
+ * this executor last failed on yields to any other claimable row (`lastFailedClaim`).
  *
  * Called inside the coordination transaction, so two executors reading the same queue at the same
  * instant are serialized: the first writes the claim, the second sees it and takes the next row.
  * Neither knows the other exists, which is the point — executors coordinate through the record.
  */
 export function claimAction(all: Work[], executor: { id: string; host: string; principal: string }, now: Date, options: { kinds?: readonly NextActionKind[]; leaseMs?: number; work?: string } = {}): { work: Work; row: ActionRow } | null {
-  const entry = openActions(all, now, options.kinds).find(candidate => !options.work || candidate.work.id === options.work || candidate.work.key === options.work);
+  const open = openActions(all, now, options.kinds).filter(candidate => !options.work || candidate.work.id === options.work || candidate.work.key === options.work);
+  // The row this executor's last attempt failed on goes behind every other claimable row, so one
+  // executor never takes the same failing row twice running while something else could progress
+  // (GY-1132); with nothing else open it is taken again.
+  const failed = lastFailedClaim(all, executor.id);
+  const entry = open.find(candidate => candidate.row !== failed) ?? open[0];
   if (!entry) return null;
   const { work, row } = entry;
   const at = now.toISOString();

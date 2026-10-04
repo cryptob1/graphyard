@@ -91,39 +91,48 @@ test('unit:claim-order-priority-before-age — a later P0 resync at the merge st
   assert.deepEqual(await candidates(withMalformed), servedItems(withMalformed, now), 'the SQL lists it in the same place instead of failing');
 });
 
-test('unit:failing-dispatch-row-yields-to-others — a dispatch row that failed for want of a worker waits out its retryAt while the other rows are claimed', async () => {
+test('unit:failing-dispatch-row-yields-to-others — a dispatch row that failed for want of a worker backs off, and one executor does not take it twice running while another row is claimable', async () => {
   const start = new Date();
-  // The failing row is the first in claim order, so nothing but its backoff lets the others ahead.
+  // The failing row is first in every order — highest priority and oldest — so neither priority nor
+  // age lets the others ahead of it; only its backoff and the executor's last failure do.
   const failing = item({ priority: 0, stage: 'ready', kind: 'dispatch', requestedAt: new Date(start.getTime() - 7_200_000) });
-  const others = Array.from({ length: 3 }, (_unused, index) => item({ priority: 2, stage: 'ready', kind: 'dispatch', requestedAt: new Date(start.getTime() - 3_600_000 + index * 1_000) }));
+  const others = Array.from({ length: 2 }, (_unused, index) => item({ priority: 2, stage: 'ready', kind: 'dispatch', requestedAt: new Date(start.getTime() - 3_600_000 + index * 1_000) }));
   const all = [failing, ...others];
 
-  let now = start;
-  let previous: string | null = null;
-  const claims: string[] = [];
-  for (let round = 0; round < 4; round++) {
-    const claimed = claimAction(all, executor, now, { kinds: ['dispatch'] });
-    assert.ok(claimed, `round ${round}: a claimable row exists`);
-    assert.notEqual(claimed!.row.id, previous, `round ${round}: one executor never claims the same failing row twice in a row while another is claimable`);
-    claims.push(claimed!.work.key);
-    previous = claimed!.row.id;
-    fail(claimed!.work, noWorker(claimed!.work.key), now);
-    now = new Date(now.getTime() + 1_000);
-  }
-  assert.equal(claims[0], failing.key, 'the failing row was taken first');
-  assert.deepEqual(claims.slice(1), others.map(work => work.key), 'while it backs off, the other rows are claimed in their turn');
+  const first = claimAction(all, executor, start, { kinds: ['dispatch'] });
+  assert.equal(first?.row.id, rowOf(failing).id, 'the failing row is claimed first');
+  fail(failing, noWorker(failing.key), start);
 
-  const retryAt = rowOf(failing).retryAt!;
-  assert.ok(retryAt && Date.parse(retryAt) > start.getTime(), 'the failure set a retryAt');
-  const before = new Date(Date.parse(retryAt) - 1);
-  assert.equal(claimable(rowOf(failing), before), false, 'it is not claimable before its retryAt');
-  assert.ok(!openActions(all, before).some(entry => entry.row.id === rowOf(failing).id), 'openActions does not offer it before its retryAt');
-  assert.equal(claimable(rowOf(failing), new Date(retryAt)), true, 'it is claimable again at its retryAt');
-
-  // The SQL excludes it too while it backs off: the database clock is now, well inside the backoff.
-  const listed = await candidates([failing, ...others.slice(0, 1).map(work => ({ ...work, actionQueue: { actions: [{ ...rowOf(work), state: 'pending', claim: null, retryAt: undefined }], history: [] } }) as unknown as Work)], ['dispatch']);
+  // It is not claimable until its retryAt, and executors claim the other rows meanwhile.
+  const retryAt = new Date(rowOf(failing).retryAt!);
+  assert.ok(retryAt.getTime() > start.getTime(), 'the failure set a retryAt');
+  const backingOff = new Date(retryAt.getTime() - 1);
+  assert.equal(claimable(rowOf(failing), backingOff), false, 'it is not claimable before its retryAt');
+  assert.ok(!openActions(all, backingOff).some(entry => entry.row.id === rowOf(failing).id), 'openActions does not offer it before its retryAt');
+  assert.equal(claimAction(structuredClone(all), { ...executor, id: 'executor-b', principal: 'executor-b' }, backingOff, { kinds: ['dispatch'] })?.row.id, rowOf(others[0]).id,
+    'while it backs off, another executor claims the next row');
+  const listed = await candidates(all, ['dispatch']);
   assert.ok(!listed.includes(failing.id), 'the claim SQL does not list an item whose only row is backing off');
-  assert.equal(listed.length, 1, 'the claim SQL lists the other claimable item');
+  assert.deepEqual(listed, others.map(work => work.id), 'the claim SQL lists the other claimable items');
+
+  // At its retryAt it is claimable again and still first in claim order, yet the executor whose
+  // last attempt failed on it takes another claimable row instead of the same failing one.
+  assert.equal(claimable(rowOf(failing), retryAt), true, 'it is claimable again at its retryAt');
+  assert.equal(openActions(all, retryAt)[0].row.id, rowOf(failing).id, 'it heads the claim order again');
+  const second = claimAction(all, executor, retryAt, { kinds: ['dispatch'] });
+  assert.ok(second, 'a claimable row exists');
+  assert.notEqual(second!.row.id, rowOf(failing).id, 'two consecutive claims by one executor do not return the same failing row while another is claimable');
+  assert.equal(second!.row.id, rowOf(others[0]).id, 'the next row in claim order is taken instead');
+
+  // It yields only one turn: once that executor's last attempt is elsewhere, it is taken again.
+  fail(others[0], noWorker(others[0].key), retryAt);
+  assert.equal(claimAction(all, executor, retryAt, { kinds: ['dispatch'] })?.row.id, rowOf(failing).id, 'the failing row is claimed on the next turn');
+  fail(failing, noWorker(failing.key), retryAt);
+
+  // With nothing else claimable, the same executor takes it again rather than idling.
+  const alone = [failing];
+  const later = new Date(rowOf(failing).retryAt!);
+  assert.equal(claimAction(alone, executor, later, { kinds: ['dispatch'] })?.row.id, rowOf(failing).id, 'alone, the failing row is claimed again');
 });
 
 test('unit:claim-order-age-within-peers — among rows of equal priority and kind the oldest is claimed first, and a lower-priority row is reached within one pass', async () => {
