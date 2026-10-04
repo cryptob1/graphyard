@@ -55,9 +55,10 @@ export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
     tradeoff: 'Copilot CLI runs every tool and reaches every path it proposes without asking.' },
   muse: { args: ['--approval-mode', 'never', '--trust-workspace'], environment: {}, prompts: 'approval and workspace-trust prompts',
     tradeoff: 'Muse never asks for approval and trusts the assigned worktree without asking.' },
-  // Google Antigravity CLI (agy 1.2+): one flag auto-approves every tool permission request.
-  agy: { args: ['--dangerously-skip-permissions'], environment: {}, prompts: 'per-tool permission prompts',
-    tradeoff: 'Antigravity CLI (`agy`) approves every tool permission request it proposes without asking.' },
+  // Google Antigravity CLI (agy 1.2+): one flag auto-approves every tool permission request; no
+  // flag skips its workspace-trust prompt, so the folder is recorded trusted first (trustAgyFolder).
+  agy: { args: ['--dangerously-skip-permissions'], environment: {}, trust: trustAgyFolder, prompts: "per-tool permission prompts, and the fresh-worktree workspace-trust prompt ('Do you trust the contents of this project?')",
+    tradeoff: 'Antigravity CLI (`agy`) approves every tool permission request it proposes without asking and trusts the assigned worktree without asking.' },
 };
 
 /**
@@ -164,6 +165,50 @@ export async function trustClaudeFolder(directory: string, environment: Record<s
     } catch (error) {
       if (error instanceof LaunchRefusedError) throw error;
       throw refuse(`the folder could not be recorded as trusted in ${file} (${error instanceof Error ? error.message : String(error)}); fix the config's directory, then launch again`);
+    }
+  }
+}
+
+/**
+ * Antigravity CLI asks "Do you trust the contents of this project?" the first time it starts in a
+ * folder its settings do not list, and `--dangerously-skip-permissions` does not skip it (GY-1152):
+ * every fresh worktree stopped there holding its lease. Its "Yes, I trust this folder" adds the
+ * exact folder (no ancestor counts) to `trustedWorkspaces` in `~/.gemini/antigravity-cli/settings.json`
+ * of the home the session runs under, so Graphyard records it there before the session starts,
+ * under the same lock, read-back and test-runner rules as trustClaudeFolder. Antigravity loads no
+ * repository-controlled configuration on that record, so nothing is refused for carrying one.
+ */
+export const agyConfigFile = (environment: Record<string, string> = {}) => resolve(environment.HOME ?? homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+export async function trustAgyFolder(directory: string, environment: Record<string, string> = {}): Promise<FolderTrust> {
+  const file = agyConfigFile(environment), folder = canonicalPath(directory);
+  if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(file).startsWith(`${temporary}${sep}`))) return { file, directory: folder, written: false };
+  const refuse = (why: string) => new LaunchRefusedError('agy', `Graphyard refuses to launch the agy runtime in ${folder}: ${why}, so the session would stop at Antigravity's workspace-trust prompt for a human.`);
+  const read = async () => {
+    let document: Record<string, any> = {};
+    try { document = JSON.parse(await readFile(file, 'utf8')); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw refuse(`its settings ${file} could not be read as JSON (${error instanceof Error ? error.message : String(error)}); fix or remove them, then launch again`);
+    }
+    if (!document || typeof document !== 'object' || Array.isArray(document)) throw refuse(`its settings ${file} are not a JSON object; fix or remove them, then launch again`);
+    const workspaces: unknown[] = Array.isArray(document.trustedWorkspaces) ? document.trustedWorkspaces : [];
+    return { document, workspaces, trusted: workspaces.includes(folder) };
+  };
+  if ((await read()).trusted) return { file, directory: folder, written: false };
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const recorded = await withConfigLock(file, async () => {
+        const { document, workspaces, trusted } = await read();
+        if (trusted) return false;
+        const staged = `${file}.graphyard-${randomUUID()}`;
+        await writeFile(staged, `${JSON.stringify({ ...document, trustedWorkspaces: [...workspaces, folder] }, null, 2)}\n`, { mode: 0o600 });
+        await rename(staged, file);
+        return true;
+      });
+      if ((await read()).trusted) return { file, directory: folder, written: recorded };
+      if (attempt >= 3) throw refuse(`the folder's trust record in ${file} was overwritten ${attempt} times by another writer of those settings`);
+    } catch (error) {
+      if (error instanceof LaunchRefusedError) throw error;
+      throw refuse(`the folder could not be recorded as trusted in ${file} (${error instanceof Error ? error.message : String(error)}); fix the settings' directory, then launch again`);
     }
   }
 }
