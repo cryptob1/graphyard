@@ -42,7 +42,7 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, stops no process. Concurrency and names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. Concurrency and names count live sessions only. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
 **Instead of closing sessions by hand:** nothing for finished or dead sessions (`graphyard master run --once` sweeps); attach to an overlong one via its handle's command. Never mark
 another session's handle finished to free a slot.
