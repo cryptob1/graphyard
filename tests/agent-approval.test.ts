@@ -104,7 +104,8 @@ test('integration:agent-approval-flow — release, unblock, requirement rewrite,
   approved = await approve(approver.token, work, requested.body.id, 'Confirmed the decision is recorded');
   assert.equal(approved.body.state, 'applied', JSON.stringify(approved.body));
   assert.equal((await reload(work.id)).blocker, null);
-  work = await engine.execute(implementer, 'release', work.id, { epoch: work.epoch }, randomUUID());
+  // The blocker ended the attempt and released its lease in the same transaction (GY-1008).
+  assert.equal(work.lease, null);
 
   // A requirement rewrite, which an operator agent alone may never make, applies with approval
   // and still raises the requirement-weakening escalation, which two agents then resolve.
