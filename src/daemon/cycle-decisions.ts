@@ -10,7 +10,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import { sessionName } from '../session-name.js';
@@ -575,7 +575,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    let decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? routineDecision(item, config, clock, assessment, exhausted);
+    let decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, exhausted);

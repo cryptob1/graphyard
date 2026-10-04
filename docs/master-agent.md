@@ -5,7 +5,7 @@ The master (`coordinator`) routes, merges, verifies deployments, administers Git
 
 ## Agents approve agents
 
-The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent and never asks a human to run what an agent may run.
+The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent.
 
 ## Operate
 
@@ -47,6 +47,8 @@ A closure decides no gate, ends no lease, and stops no process. A profile's conc
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
 that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
+
+`blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
 
 ### System invariants
 
