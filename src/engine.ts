@@ -172,7 +172,7 @@ const actionSettleSchema = z.object({ executor: executorName.optional(), result:
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
-const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional() }).strict();
+const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 // The merge request names the executor instance that recorded it — one daemon process or one
 // interactive `master merge` request — bound here to the principal that authenticates it (GY-92).
@@ -1643,7 +1643,8 @@ export class Engine {
     const wake = data.wake !== false;
     // The observation job only exists for an item with a candidate to observe; waking it for one
     // without a submission would schedule a read of nothing.
-    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id); });
+    // `prioritized` claims the job ahead of the polled backlog, as a webhook wake is (GY-1099).
+    if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id, data.prioritized === true); });
     if (wake) await this.reconcile();
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
     // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
@@ -1692,7 +1693,10 @@ export class Engine {
       const standing = await this.enqueueRequest(work.id, db);
       if (!standing || standing.sha !== request.sha || standing.baseSha !== request.baseSha || standing.policyRevision !== request.policyRevision)
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'merge.enqueue.requested', JSON.stringify({ details: request })]);
-      await wakeJob(db, work.id);
+      // The enqueue is the observation job's, and the authorization holds only while the
+      // observation is under two minutes old: the wake is claimed ahead of the polled backlog, so a
+      // candidate observed on request is not left to go stale again behind it (GY-1099).
+      await wakeJob(db, work.id, true);
       const result = { key: work.key, revision: work.revision, enqueue: standing && standing.sha === request.sha && standing.baseSha === request.baseSha && standing.policyRevision === request.policyRevision ? standing : request };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
