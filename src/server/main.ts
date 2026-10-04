@@ -33,7 +33,9 @@ export async function main(options: MainOptions = {}) {
   const generatedFiles = configuredGeneratedFiles();
   const credentials = principalSchema.parse(JSON.parse(process.env.GRAPHYARD_PRINCIPALS ?? '[]'));
   demand(new Set(credentials.map(p => p.id)).size === credentials.length && new Set(credentials.map(p => p.token)).size === credentials.length, 'Principal IDs and tokens must be unique');
-  const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard');
+  // The pool and the observation workers are sized together (GY-1114): workers at most half the pool.
+  const capacity = observationCapacity();
+  const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard', { max: capacity.poolMax });
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
@@ -130,8 +132,8 @@ export async function main(options: MainOptions = {}) {
     });
     // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
     // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
-    observing = github ? startObservationWorkers(engine, github) : null;
-    console.log(`Observation workers: ${observing?.concurrency ?? 0}`);
+    observing = github ? startObservationWorkers(engine, github, capacity.concurrency) : null;
+    console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
   };
   const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
   http.removeAllListeners('request');
@@ -203,16 +205,24 @@ export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
 export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;
 
 /**
- * The observation concurrency (GY-492): `GRAPHYARD_OBSERVATION_CONCURRENCY`, four jobs at once
- * by default, bounded by the database pool's background share — a worker beyond it only queues on
- * a connection the API and the tick need. Every worker waits for the one shared pace before it
- * claims (GY-567), so extra workers raise throughput only as far as the budget to the reset allows.
+ * The database pool and the observation workers, configured together (GY-492, GY-1114):
+ * `GRAPHYARD_DATABASE_POOL_SIZE` connections (default 16) and `GRAPHYARD_OBSERVATION_CONCURRENCY`
+ * workers (default 8), never more than half the pool — the background share; a worker beyond it
+ * only queues on a connection the API and the tick need. Naming only the workers grows the pool to
+ * fit them; naming the pool caps the workers at half of it. The default keeps the merge and review
+ * bands inside their freshness bounds at 100 open items (tests/observation-capacity.test.ts), and
+ * every worker waits for the one shared pace before it claims (GY-567), so extra workers raise
+ * throughput only as far as GitHub's budget to the reset allows.
  */
-export const observationConcurrency = (poolMax = 12) => {
-  const bound = Math.max(1, Math.floor(poolMax / 2));
-  const configured = Number(process.env.GRAPHYARD_OBSERVATION_CONCURRENCY);
-  return Number.isFinite(configured) && configured >= 1 ? Math.min(Math.floor(configured), bound) : Math.min(4, bound);
-};
+export const defaultDatabasePoolSize = 16, defaultObservationConcurrency = 8;
+export function observationCapacity(env: Record<string, string | undefined> = process.env) {
+  const count = (value: string | undefined) => { const parsed = Number(value); return value && Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : null; };
+  const workers = count(env.GRAPHYARD_OBSERVATION_CONCURRENCY), pool = count(env.GRAPHYARD_DATABASE_POOL_SIZE);
+  const poolMax = Math.max(2, pool ?? Math.max(defaultDatabasePoolSize, 2 * (workers ?? 0)));
+  return { poolMax, concurrency: Math.max(1, Math.min(workers ?? defaultObservationConcurrency, Math.floor(poolMax / 2))) };
+}
+/** The worker count for a pool of `poolMax` connections, from the environment's configured workers. */
+export const observationConcurrency = (poolMax = defaultDatabasePoolSize) => observationCapacity({ GRAPHYARD_OBSERVATION_CONCURRENCY: process.env.GRAPHYARD_OBSERVATION_CONCURRENCY, GRAPHYARD_DATABASE_POOL_SIZE: String(poolMax) }).concurrency;
 
 /**
  * The observation workers (GY-492): `concurrency` long-lived loops beside the reconciliation tick,
