@@ -182,7 +182,9 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1] }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
   const rows = observed.rows ?? buildMasterStatus(snapshot, master.workers, observed.runtime.available ? observed.runtime.agents : [], {}, {}, reviews, master.baseBranch, coordinator ?? undefined,
-    { producers: summarizeProducers(observed.producers), failures: [], retries: [] }).work;
+    // The retry schedule of every settled session (GY-533): without it a failed session whose next
+    // attempt is already scheduled reads as a request nothing will answer.
+    { producers: summarizeProducers(observed.producers), failures: [], retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] }).work;
   const scopeRequests = [...scopeRequestAttention(snapshot, observed.approvals), ...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
   const unobtainable = unobtainableReviewAttention(rows, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(rows);
