@@ -1111,6 +1111,9 @@ export function ejectingCheck(work: Work, ciAppIds: readonly number[] | null): {
   for (const required of requiredChecksOf(work)) {
     const run = requiredCheckRun(required, observation.checks ?? [], ciAppIds);
     if (requiredRunFailed(required, run) && !holdingCheckRerun(work, candidate.sha, required.name, run)) return { name: required.name, run: run! };
+    // GY-1161: a check GitHub kept cancelling past its cancelled-rerun allowance is not left pending
+    // indefinitely: its cancelled run is the bounded end-state, and the entry leaves the queue for it.
+    if (run && run.result === 'cancelled' && cancelledRerunsSpent(work, candidate.sha, required.name)) return { name: required.name, run };
   }
   return null;
 }
@@ -2013,6 +2016,8 @@ export interface CheckRerun {
   rerequestedAt?: string;
   /** GY-1109: the run this rerun answers was cancelled by GitHub, not failed; such reruns have their own allowance. */
   cancelled?: boolean;
+  /** GY-1161: the rerun expired because GitHub cancelled its attempts `cancelledRerunLimit` times. */
+  cancelledSpent?: boolean;
   detail?: string;
   resolvedAt?: string;
 }
@@ -2028,11 +2033,32 @@ export const checkRerunVisibilityMs = 15 * 60_000;
 export const checkRerunProbeMs = 5 * 60_000;
 /** An accepted rerun whose workflow run GitHub fails to return for this long no longer holds the failure. */
 export const checkRerunUnreadableMs = 2 * checkRerunVisibilityMs;
-/** GY-1109: reruns of a cancelled run per candidate sha and check; past it the check stays pending, never failed. */
+/**
+ * GY-1109: reruns of a cancelled run per candidate sha and check. A cancelled run is never a failure,
+ * but past this allowance the check no longer waits (GY-1161): `cancelledRerunsSpent` makes its
+ * cancelled run eject the entry with that reason, so no queue slot is held indefinitely.
+ */
 export const cancelledRerunLimit = 3;
 /** Rerun records kept on an item; older ones remain on the ledger. */
 export const checkRerunLimit = 20;
 const holdingRerun = new Set<CheckRerun['state']>(['owed', 'requested']);
+/** How many times an accepted rerun was asked again after GitHub cancelled its attempt, as the integration job records it (`cancelled:N:<at>`). */
+const cancelledAttempts = (entry: CheckRerun) => Number(entry.detail?.match(/^cancelled:(\d+)/)?.[1] ?? 0);
+/**
+ * GY-1161: an accepted rerun whose attempts GitHub cancelled `cancelledRerunLimit` times and whose
+ * latest attempt was cancelled again: the integration job asks no further, so it holds nothing.
+ */
+const cancelledAttemptsSpent = (entry: CheckRerun) => entry.state === 'requested' && entry.waiting?.status === 'cancelled' && cancelledAttempts(entry) >= cancelledRerunLimit;
+/**
+ * GY-1161: whether `check` on `sha` spent its cancelled-rerun allowance with nothing still holding
+ * it: `cancelledRerunLimit` reruns of cancelled runs were made, or one rerun's attempts were
+ * cancelled that many times. Its newest run being cancelled is then the check's end-state.
+ */
+export function cancelledRerunsSpent(work: Pick<Work, 'checkReruns'>, sha: string, check: string): boolean {
+  const made = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check);
+  if (made.some(entry => holdingRerun.has(entry.state) && !cancelledAttemptsSpent(entry))) return false;
+  return made.filter(entry => entry.cancelled).length >= cancelledRerunLimit || made.some(entry => entry.cancelledSpent || cancelledAttemptsSpent(entry));
+}
 
 export function checkReruns(work: Pick<Work, 'checkReruns'>): CheckRerun[] {
   return work.checkReruns ?? [];
@@ -2040,7 +2066,7 @@ export function checkReruns(work: Pick<Work, 'checkReruns'>): CheckRerun[] {
 /** The rerun holding `run`, the failed latest run of `check` on `sha`: owed or requested for exactly that run. */
 export function holdingCheckRerun(work: Pick<Work, 'checkReruns'>, sha: string, check: string, run: Observation['checks'][number] | undefined): CheckRerun | null {
   if (!run || run.id === undefined || !failedConclusions.has(run.result)) return null;
-  return checkReruns(work).find(entry => entry.sha === sha && entry.check === check && entry.failedRunId === run.id && holdingRerun.has(entry.state)) ?? null;
+  return checkReruns(work).find(entry => entry.sha === sha && entry.check === check && entry.failedRunId === run.id && holdingRerun.has(entry.state) && !cancelledAttemptsSpent(entry)) ?? null;
 }
 /**
  * Whether `check`'s newest run on the observed current candidate failed and is held by its one
@@ -2091,6 +2117,12 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
       if (entry.state === 'owed') { const started = { ...entry, state: 'requested' as const, rerunId: run.id }; transitions.push({ kind: 'check.rerun.requested', rerun: started }); return started; }
       return entry.rerunId === run.id ? entry : { ...entry, rerunId: run.id };
     }
+    // GY-1161: one whose attempts GitHub cancelled past the allowance is asked no further, so it
+    // expires with that reason instead of holding the check pending indefinitely.
+    if (cancelledAttemptsSpent(entry)) {
+      const expired = { ...entry, state: 'expired' as const, cancelledSpent: true, detail: `GitHub cancelled ${cancelledAttempts(entry)} attempts of the ${entry.check} rerun, the ${cancelledRerunLimit} allowed for a cancelled run`, resolvedAt: at };
+      transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
+    }
     // An accepted rerun naming its workflow run is asked of GitHub by the integration job instead
     // (GY-1096): queued behind busy runners it is a wait, not a failure, however long it takes.
     if (entry.state === 'requested' && entry.runId !== undefined) return entry;
@@ -2106,7 +2138,8 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
     const made = reruns.filter(entry => entry.sha === candidate.sha && entry.check === name);
     if (made.some(entry => entry.failedRunId === run.id)) continue;
     // A cancelled run is not a failure, so it does not spend the failure's rerun allowance (GY-1109):
-    // it is rerun on its own small allowance (none when reruns are disabled), and past that the check stays pending, never failed.
+    // it is rerun on its own small allowance (none when reruns are disabled); past that it is never
+    // failed, but no longer waits: `cancelledRerunsSpent` ejects the entry for it (GY-1161).
     const cancelled = run.result === 'cancelled';
     if (cancelled ? limit <= 0 || made.filter(entry => entry.cancelled).length >= cancelledRerunLimit : made.filter(entry => !entry.cancelled).length >= limit) continue;
     const owed: CheckRerun = { sha: candidate.sha, check: name, failedRunId: run.id, state: 'owed', at, ...(cancelled ? { cancelled: true } : {}) };
@@ -2130,7 +2163,7 @@ export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckR
 export function dueCheckRerunProbes(work: Work, ciAppIds: readonly number[], now: Date): CheckRerun[] {
   const observation = work.observation, candidate = work.candidate;
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
-  return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'requested' && entry.runId !== undefined
+  return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'requested' && entry.runId !== undefined && !cancelledAttemptsSpent(entry)
     && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId
     && now.getTime() - Date.parse(entry.detail?.match(/cancelled:\d+:(\S+)/)?.[1] ?? entry.rerequestedAt ?? entry.at) >= checkRerunVisibilityMs
     && (!entry.probedAt || now.getTime() - Date.parse(entry.probedAt) >= checkRerunProbeMs));
@@ -2159,10 +2192,14 @@ export function classifyRerunRun(entry: Pick<CheckRerun, 'attempt'>, run: RerunW
   if (run.conclusion && failedConclusions.has(run.conclusion)) return { kind: 'failed', conclusion: run.conclusion };
   return { kind: 'waiting', status: 'completed' };
 }
-const runnerWait = (entry: CheckRerun) => entry.waiting && entry.waiting.status !== 'completed'
+// A cancelled attempt (GY-1109) is not a runner-queue wait, and is not labelled as one (GY-1161).
+const runnerWait = (entry: CheckRerun) => entry.waiting && entry.waiting.status !== 'completed' && entry.waiting.status !== 'cancelled'
   ? `, waiting for a runner (its workflow run is ${entry.waiting.status.replace(/_/g, ' ')} in the runner queue)` : '';
 /** What the last rerun of `check` on `sha` came to, as a clause for the failure it did not clear. */
 function rerunOutcome(work: Work, sha: string, check: string): string {
+  // GY-1161: the ejection made for a spent cancelled-rerun allowance says so, not a failure.
+  if (requiredCheck(work, check)?.result === 'cancelled' && cancelledRerunsSpent(work, sha, check))
+    return `; GitHub cancelled every run of it, and the ${cancelledRerunLimit} reruns allowed for a cancelled run are spent`;
   const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
   return !last ? '' : last.state === 'failed' ? ', again after one rerun of its failed jobs'
     : last.state === 'refused' ? `; its rerun was refused: ${last.detail ?? 'no reason given'}`
