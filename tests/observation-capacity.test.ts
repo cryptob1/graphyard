@@ -3,11 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { evaluate, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
-import { observationCadence, steadyStateInterval } from '../src/github.js';
+import { assumedObservationRequests, defaultHourlyLimit, mergePathReserve, observationCadence, steadyStateInterval } from '../src/github.js';
 import { observationThroughputStatus } from '../src/cli/master-status.js';
-import { observationClaim, observationFreshnessBounds, reviewCadenceCapMs, reviewObservationFreshnessMs } from '../src/observation-priority.js';
+import { observationClaim, observationClaimBatch, observationFreshnessBounds, reviewCadenceCapMs, reviewObservationFreshnessMs } from '../src/observation-priority.js';
 import { simulateObservationScheduler } from '../src/observation-simulation.js';
-import { reviewLaunchObservationMaxAgeMs } from '../src/reviewer.js';
 import { defaultDatabasePoolSize, defaultObservationConcurrency, observationCapacity, observationConcurrency } from '../src/server/main.js';
 
 // GY-1114: unit:observation-priority-keeps-merge-and-review-fresh.
@@ -51,7 +50,6 @@ test('unit:observation-priority-keeps-merge-and-review-fresh — at 100 open ite
   const date = new Date(now);
   const reviewItems = all.filter(work => work.key.startsWith('GY-R'));
   assert.ok(reviewItems.every(work => nextAction(work, all, date)?.kind === 'request-review'), 'the forty candidates are review-requested');
-  assert.equal(reviewLaunchObservationMaxAgeMs, reviewObservationFreshnessMs, 'the review band bound is the reviewer launch bound itself');
   assert.deepEqual(observationFreshnessBounds, { merge: 120_000, review: 30 * 60_000, steady: null });
 
   // At 100 open candidates the fleet's steady-state interval reaches an hour, past the review bound:
@@ -101,7 +99,66 @@ test('unit:observation-priority-keeps-merge-and-review-fresh — at 100 open ite
     [['merge', 2, 120_000, 1, 'GY-Q1'], ['review', 3, 1_800_000, 1, 'GY-R1'], ['steady', 2, null, 0, report.bands[2].oldest]]);
   assert.equal(report.bands[1].lagMs, 41 * 60_000);
   assert.deepEqual(report.attention.map(entry => entry.text.slice(0, 40)), ['The merge band has 1 of 2 item(s) observ', 'The review band has 1 of 3 item(s) obser']);
-  assert.match(report.attention[1].text, /oldest GY-R1, 41m0s\): reviewer launches refuse them/);
+  assert.match(report.attention[1].text, /oldest GY-R1, 41m0s\): their review requests may name heads that have since moved/);
   assert.match(String(report.attention[0].next), /GRAPHYARD_OBSERVATION_CONCURRENCY with GRAPHYARD_DATABASE_POOL_SIZE/);
   assert.deepEqual(observationThroughputStatus(null, { work: fleet(4, 3), now: new Date(now).toISOString(), jobs: [] }, now).attention, [], 'every band inside its bound raises nothing');
+});
+
+// GY-1178: the follow-ups of GY-1114's review.
+
+test('the merge band master status reports spans the queue positions the workers claim with the merge path, parallel tips included', () => {
+  // Queue positions 2 and 3 are claimed with the merge path under four parallel tips (processJob's
+  // band); with no tips in flight their lag was reported as steady, understating the merge band.
+  const all = fleet(6, 0).map(work => work.key === 'GY-Q3' ? { ...work, observation: { ...work.observation!, at: new Date(now - 200_000).toISOString() } } : work) as Work[];
+  const claimed = observationClaim(all, observationClaimBatch(1, 4), now);
+  const byKey = new Map(all.map(work => [work.id, work.key]));
+  assert.deepEqual(claimed.order.slice(0, claimed.headCount).map(id => byKey.get(id)), ['GY-Q0', 'GY-Q1', 'GY-Q2', 'GY-Q3']);
+  const status = (mergeQueue: { batchSize: number; parallelTips: number } | null) => observationThroughputStatus(mergeQueue ? { mergeQueue } : null, { work: all, now: new Date(now).toISOString(), jobs: [] }, now);
+  const tips = status({ batchSize: 1, parallelTips: 4 });
+  assert.deepEqual(tips.bands.map(entry => [entry.band, entry.items, entry.pastBound]), [['merge', 4, 1], ['review', 0, 0], ['steady', 2, 0]]);
+  assert.match(tips.attention[0].text, /The merge band has 1 of 4 item\(s\).*oldest GY-Q3/);
+  assert.deepEqual(status({ batchSize: 3, parallelTips: 1 }).bands[0].items, 3, 'a batch wider than the tips sets the band');
+  // Unpublished settings keep the head band of two, as the workers' defaults do.
+  assert.deepEqual(status(null).bands.map(entry => [entry.band, entry.items, entry.pastBound]), [['merge', 2, 0], ['review', 0, 0], ['steady', 4, 0]]);
+  assert.equal(observationClaimBatch(), 1);
+});
+
+test('a large review-requested fleet stays inside the review bound without spending past the hourly limit less the merge-path reserve', () => {
+  // 180 review requests polled at the ten-minute cap, a tenth of readings changed. A settled reading
+  // is answered with free 304s and "costs at most a couple of charged requests" (src/github.ts); a
+  // changed one costs a full observation. Polling the cap faster, or removing it, fails one bound.
+  const settledPollRequests = 2;
+  const all = fleet(20, 180), durationMs = 2 * 3_600_000;
+  const run = simulateObservationScheduler({ all, workers: observationCapacity({}).concurrency, steadyMs: steadyStateInterval(all.length, null, null), jobMs: 13_000, durationMs, changedShare: 0.1 });
+  const review = run.bands.find(entry => entry.band === 'review')!;
+  assert.equal(review.items, 180);
+  assert.ok(run.withinBounds && review.worstLagMs <= reviewObservationFreshnessMs, `the review band's worst lag ${review.worstLagMs} ms is inside thirty minutes`);
+  const perHour = ((run.claims - run.changedReadings) * settledPollRequests + run.changedReadings * assumedObservationRequests) / (durationMs / 3_600_000);
+  assert.ok(perHour <= defaultHourlyLimit - mergePathReserve, `the fleet charges ${perHour} requests an hour, inside ${defaultHourlyLimit - mergePathReserve}`);
+  // The cap alone: every review request polled once per cap interval, all settled.
+  assert.ok(180 * (3_600_000 / reviewCadenceCapMs) * settledPollRequests <= defaultHourlyLimit - mergePathReserve);
+});
+
+test('with advance the simulation moves items between bands as their readings change, and the bounds still hold', () => {
+  // A changed reading of a review request approves it into the back of the queue; one of the queue
+  // head merges it. Items leave the review band, queued entries move up into the merge band.
+  const all = fleet(10, 30);
+  let sequence = 100;
+  const advance = (work: Work, fleet: Work[], at: number): Work | null => {
+    if (work.key.startsWith('GY-R') && !work.queue) {
+      const queued = { ...work, stage: 'merge', queue: { sequence: ++sequence, enqueuedAt: new Date(at).toISOString(), policyRevision: 1, speculation: null }, observation: observed(work, new Date(at).toISOString(), true) } as Work;
+      return { ...queued, ...evaluate(queued, fleet.map(entry => entry.id === work.id ? queued : entry), new Date(at), [CI]) } as Work;
+    }
+    const head = fleet.filter(entry => entry.queue && entry.stage !== 'done').sort((a, b) => a.queue!.sequence - b.queue!.sequence)[0];
+    return head?.id === work.id ? { ...work, stage: 'done', queue: null } as Work : null;
+  };
+  const options = { all, workers: 8, steadyMs: steadyStateInterval(all.length, null, null), jobMs: 13_000, durationMs: 3_600_000, changedShare: 0.3 };
+  const fixed = simulateObservationScheduler(options);
+  assert.equal(fixed.bandChanges, 0, 'without advance every item keeps its starting band');
+  const moving = simulateObservationScheduler({ ...options, advance });
+  const count = (band: string) => moving.bands.find(entry => entry.band === band)!.items;
+  assert.ok(moving.bandChanges > 10, `items moved between bands ${moving.bandChanges} times`);
+  assert.ok(count('review') < 30, `review requests were approved out of the review band (${count('review')} left)`);
+  assert.ok(count('merge') <= 2 && count('merge') + count('review') + count('steady') < 40, 'merged heads leave the open fleet');
+  assert.ok(moving.withinBounds, JSON.stringify(moving.bands));
 });
