@@ -214,6 +214,14 @@ test('unit:stale-wait-escalation-bounded — a stale wait with another failing r
     assert.equal(state.actions[`wait:merge:${work.id}`].since, new Date(clock).toISOString());
     assert.deepEqual(calls.observed, []);
   }
+  // A wait that ended without a merge attempt (fresh observation, another gate failing) is cleared, so a
+  // later stale wait of the same head does not inherit its since.
+  {
+    const work = item(['Pull request is not mergeable against the current base'], clock - 30_000);
+    const { state, calls } = await run(work, waiting(item([staleObservationReason]), longAgo));
+    assert.equal(state.actions[`wait:merge:${work.id}`], undefined);
+    assert.ok(calls.persisted.length, 'the cleared wait is persisted');
+  }
   // The server refuses a candidate whose gates all passed when read, for freshness alone: observed, not reworked.
   {
     const work = item([], clock - 30_000);

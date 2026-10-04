@@ -294,9 +294,12 @@ export async function mergeStep(cycle: Cycle) {
     // observation is not asked — the refusal would only restate it — but wakes the item's
     // observation job, and is asked on the first cycle after that observation lands.
     const stale = mergeObservationWait(item);
+    const waitKey = `wait:merge:${item.id}`;
+    const waitPrevious = state.actions[waitKey];
+    // A stale wait that ended without a merge attempt (the observation turned fresh) is cleared, so
+    // a later stale wait of the same head starts its own ten-minute bound (GY-1202).
+    if (!stale && waitPrevious) { delete state.actions[waitKey]; await effects.persist(state); }
     if (stale) {
-      const waitKey = `wait:merge:${item.id}`;
-      const waitPrevious = state.actions[waitKey];
       const reason = `Merge authorization is no longer current: ${staleObservationReason}`;
       const since = staleWaitSince(waitPrevious, previous, item, stale, now());
       // A wait record written before it carried `since` is re-recorded once with it, so the bound
