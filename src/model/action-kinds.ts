@@ -139,6 +139,9 @@ export const observationWaitBoundMs = 30 * 60_000;
  */
 export const workerSlotWaitBoundMs = 30 * 60_000;
 
+/** Agent states that end a session, so a profile reporting one is not busy (GY-1141). */
+const terminatedAgentStates = new Set([...endedRuntimeStates, 'terminated', 'exited-error']);
+
 /**
  * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
  *
@@ -147,8 +150,6 @@ export const workerSlotWaitBoundMs = 30 * 60_000;
  * capacity. A configuration fault (no launch profiles configured or only existing profiles), an unavailable credential, or a
  * profile cooling off after a failed launch is not a wait and stalls on the standard threshold.
  */
-const terminatedAgentStates = new Set([...endedRuntimeStates, 'terminated', 'exited-error']);
-
 export function workerSlotWait(reason: string): boolean {
   const match = reason.match(/^no worker profile can take \S+: (.+)$/);
   if (!match) return false;
