@@ -275,6 +275,27 @@ test('unit:gy-1158-finding-2 — an OpenCode account logged in to another provid
   }
 });
 
+test('unit:gy-1158-finding-2 — an OpenCode account logged in through OAuth stays logged in with no Z.AI call', async () => {
+  const runtime: any = { name: 'opencode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'XDG_DATA_HOME', modelFlag: '--model', login: null, loginFile: null } };
+  for (const entry of [{ anthropic: { type: 'oauth', refresh: 'r', access: 'a', expires: 0 } }, { openai: { type: 'oauth', refresh: 'r', access: '', expires: 0 } }]) {
+    const home = await temporaryDirectory('opencode-oauth');
+    await mkdir(join(home, 'opencode'), { recursive: true });
+    await writeFile(join(home, 'opencode/auth.json'), JSON.stringify(entry));
+    const account: any = { name: 'opencode-a', runtime: 'opencode', model: 'sonnet', enabled: true, credential: { host: HOST, home } };
+    const called: string[] = [];
+    const fetchStub = (async (url: string) => { called.push(String(url)); return new Response('{}', { status: 401 }); }) as typeof fetch;
+    const observed = await observeAccount(account, runtime, { fetch: fetchStub, cacheMs: 0, now: () => now });
+    assert.deepEqual(called, [], 'nothing is sent to Z.AI');
+    assert.equal(observed.quota.loggedIn, true, `${Object.keys(entry)[0]} OAuth login keeps the OpenCode account logged in`);
+  }
+  const empty = await temporaryDirectory('opencode-empty-auth');
+  await mkdir(join(empty, 'opencode'), { recursive: true });
+  await writeFile(join(empty, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'oauth' } }));
+  const account: any = { name: 'opencode-a', runtime: 'opencode', model: 'sonnet', enabled: true, credential: { host: HOST, home: empty } };
+  const observed = await observeAccount(account, runtime, { cacheMs: 0, now: () => now, quota: false });
+  assert.equal(observed.quota.loggedIn, false, 'an entry without credential material is no login');
+});
+
 test('unit:gy-1158-finding-2 — an explicitly declared Z.AI plan still requires a Z.AI credential to be logged in', async () => {
   const home = await temporaryDirectory('opencode-declared-zai');
   await mkdir(join(home, 'opencode'), { recursive: true });

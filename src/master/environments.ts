@@ -240,7 +240,11 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
       return { loggedIn: hasZaiKey, usage: [], note: hasZaiKey ? 'quota not read' : null };
     }
   } else {
-    const hasOpencodeAuth = !!opencodeAuth && Object.values(opencodeAuth).some((v: any) => v && (typeof v === 'string' || v.key || v.apiKey || v.token));
+    // Any provider entry carrying credential material is an OpenCode login: an API key (`type: 'api'`), a well-known
+    // token, or the access/refresh pair `opencode auth login` stores for OAuth providers (Anthropic, OpenAI, Copilot).
+    const credentialField = (value: unknown) => typeof value === 'string' && value.length > 0;
+    const hasOpencodeAuth = !!opencodeAuth && Object.values(opencodeAuth).some((v: any) => credentialField(v)
+      || !!v && typeof v === 'object' && ['key', 'apiKey', 'token', 'access', 'refresh'].some(field => credentialField(v[field])));
     const loggedIn = hasZaiKey || hasOpencodeAuth;
     if (!loggedIn || probe.quota === false) {
       return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
