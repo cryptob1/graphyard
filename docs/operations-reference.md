@@ -120,7 +120,7 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) share one pace per token. Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, review requests 15+ min stale, never-observed, due, waits, sessions. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
-Reconcile opens on [cached stand-ins](operations.md#safety-facts-that-never-change), reads each live item whole once per pass, unlocked, and row-locks only its batch, so other mutations never wait. Contended batches back off, then defer a tick; deferrals and >5 s ticks warn.
+Reconcile opens on [cached stand-ins](operations.md#safety-facts-that-never-change), reads each live item whole once, unlocked, and row-locks only its batch, skipping writer-held rows. Renewals never contend; contended batches rerun twice, halved, then defer; deferrals and >5 s ticks warn. Resyncs share one tick per server, holding one pool connection.
 
 The server listens before startup validation; until it completes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
 
