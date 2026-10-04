@@ -32,5 +32,6 @@ test('unit:workspace-cli-headroom — src/cli/workspace.ts and every split modul
     const text = await read(file);
     const count = lines(text);
     assert.ok(count <= 260, `${file} has ${count} lines; budget is 260 lines (AC-2)`);
+    if (file !== 'src/cli/workspace.ts') assert.match(text.split('\n')[0], /^\/\/ Concern: \S.{10,}$/, `${file} opens with a "// Concern: …" header naming what it owns`);
   }
 });
