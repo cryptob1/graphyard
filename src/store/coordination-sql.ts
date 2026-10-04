@@ -117,8 +117,18 @@ export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM w
   JOIN (SELECT unnest($1::uuid[]) AS id UNION SELECT i.id FROM work_index i WHERE NOT i.settled) live ON live.id = w.id`;
 /**
  * One batch item's row lock, taken as the batch reaches it (GY-727), with the version of the row
- * it locked: after waiting for a writer, the version is the one that writer committed, never the
- * statement's older snapshot. Locked row by row, a batch holds only its own items, so a mutation
- * on any other item commits while the batch holds its transaction.
+ * it locked. Locked row by row, a batch holds only its own items, so a mutation on any other item
+ * commits while the batch holds its transaction. A row a writer holds is skipped, never waited on
+ * (GY-1115): a batch waiting on a row held its other rows and its connection behind that writer,
+ * and the writer, holding the coordination lock, made the batch's commit fail anyway. No row means
+ * the item is locked or gone; the pass tries it once more at its end.
  */
-export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE';
+export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE SKIP LOCKED';
+/**
+ * Whether a session holding the coordination lock (`$1`, a single-key advisory lock) waits on this
+ * session (GY-1115): a reconciliation batch queuing for that lock then would deadlock with it.
+ */
+export const reconcileCommitBlockingSql = `SELECT EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND l.granted
+  AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND l.classid = ($1::bigint >> 32)::oid AND l.objid = ($1::bigint & 4294967295)::oid AND l.objsubid = 1
+  AND pg_backend_pid() = ANY(pg_blocking_pids(l.pid))) AS blocking`;
