@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { evaluate, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
-import { assumedObservationRequests, defaultHourlyLimit, mergePathReserve, observationCadence, steadyStateInterval } from '../src/github.js';
+import { assumedObservationRequests, CHECK_NAME, defaultHourlyLimit, GitHub, mergePathReserve, observationCadence, steadyStateInterval } from '../src/github.js';
 import { observationThroughputStatus } from '../src/cli/master-status.js';
 import { observationClaim, observationClaimBatch, observationFreshnessBounds, reviewCadenceCapMs, reviewObservationFreshnessMs } from '../src/observation-priority.js';
 import { simulateObservationScheduler } from '../src/observation-simulation.js';
@@ -123,11 +123,151 @@ test('the merge band master status reports spans the queue positions the workers
   assert.equal(observationClaimBatch(), 1);
 });
 
-test('a large review-requested fleet stays inside the review bound without spending past the hourly limit less the merge-path reserve', () => {
+// GY-1195: the follow-ups of GY-1178's review. The hourly guard below priced a settled poll at a
+// fixed two charged requests; the soak here measures it from the real `observe` path instead.
+
+const APP = 1234, REPOSITORY = 'owner/project';
+const etagOf = (body: string) => `"${createHash('sha1').update(body).digest('hex')}"`;
+
+/**
+ * GitHub's REST surface at the fetch level, as tests/github-rate-budget.test.ts models it: every GET
+ * answers with an ETag and honours If-None-Match with a free 304, every other answer is charged.
+ * `conditional = false` is the regression the soak must catch: settled polls paid in full.
+ */
+class Provider {
+  main = sha('main-soak');
+  pulls = new Map<number, { head: string; branch: string; approved: boolean }>();
+  conditional = true;
+  charged = 0;
+  open(pr: number, branch: string, approved: boolean) { this.pulls.set(pr, { head: sha(`head-${pr}`), branch, approved }); return this.pulls.get(pr)!; }
+  private contains(base: string, head: string) { return base === head || base === this.main && [...this.pulls.values()].some(pr => pr.head === head); }
+  private body(path: string): unknown {
+    const [route, query = ''] = path.replace(`/repos/${REPOSITORY}`, '').split('?'); const params = new URLSearchParams(query);
+    if (route === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: this.main } };
+    if (route === '/rules/branches/main') return [];
+    let match = /^\/pulls\/(\d+)$/.exec(route);
+    if (match) {
+      const pr = this.pulls.get(Number(match[1]))!;
+      return { number: Number(match[1]), state: 'open', draft: false, merged: false, mergeable: true, merge_commit_sha: null, merged_at: null, created_at: '2026-10-02T10:00:00Z', user: { login: 'implementer', id: 7 },
+        head: { sha: pr.head, ref: pr.branch, repo: { full_name: REPOSITORY } }, base: { sha: this.main, ref: 'main', repo: { full_name: REPOSITORY } } };
+    }
+    match = /^\/pulls\/(\d+)\/reviews$/.exec(route);
+    if (match) { const pr = this.pulls.get(Number(match[1]))!; return params.get('page') !== '1' || !pr.approved ? [] : [{ id: 900 + Number(match[1]), user: { login: 'independent-reviewer' }, commit_id: pr.head, state: 'APPROVED', submitted_at: '2026-10-02T10:05:00Z' }]; }
+    match = /^\/pulls\/(\d+)\/files$/.exec(route);
+    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/server/routes/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
+    match = /^\/commits\/([a-f0-9]{40})\/check-runs$/.exec(route);
+    if (match) return params.get('check_name') ? { check_runs: [] } : { check_runs: ['test', 'typecheck'].map((name, index) => ({ id: index + 1, name, status: 'completed', conclusion: 'success', app: { id: CI } })) };
+    match = /^\/commits\/([a-f0-9]{40})$/.exec(route);
+    if (match) return { sha: match[1], parents: [], commit: { tree: { sha: sha(`tree-${match[1]}`) } }, author: { login: 'implementer' } };
+    match = /^\/compare\/([a-f0-9]{40})\.\.\.([a-f0-9]{40})$/.exec(route);
+    // Every head is one commit cut from the base tip, so a comparison lists that commit, as GitHub's does.
+    if (match) { const commits = match[1] === match[2] ? [] : [{ sha: match[2] }]; return { status: match[1] === match[2] ? 'identical' : this.contains(match[1], match[2]) ? 'ahead' : 'diverged', total_commits: commits.length, commits, files: [] }; }
+    if (route.endsWith('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: APP }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+    throw new Error(`Unexpected request ${path}`);
+  }
+  fetch = async (url: unknown, options: any = {}): Promise<Response> => {
+    const method = options.method ?? 'GET', path = String(url).replace('https://api.github.com', '');
+    const headers = { 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': '5000', 'x-ratelimit-used': '0', 'x-ratelimit-reset': String(Math.ceil(Date.now() / 1000) + 3000), 'x-ratelimit-resource': 'core' };
+    assert.equal(method, 'GET', `observation only reads (${method} ${path})`);
+    const text = JSON.stringify(this.body(path)), etag = etagOf(`${path}:${text}`);
+    if (this.conditional && options.headers?.['If-None-Match'] === etag) return new Response(null, { status: 304, headers: { ...headers, etag } });
+    this.charged++;
+    return new Response(text, { status: 200, headers: { ...headers, etag, 'content-type': 'application/json' } });
+  };
+}
+
+type Soak = { settledPolls: number; settledCharged: number; settledMax: number; changedPolls: number; changedCharged: number; reviewPolls: number; reviewWorstGapMs: number; chargedPerHour: number };
+
+/**
+ * One simulated hour of the real observation loop over 20 queued entries and 180 review requests:
+ * each item is observed through `GitHub.observe` against the provider when the cadence its observed
+ * state earns says so, the shared per-cycle reads timed on the simulated clock. Every tenth poll of a
+ * review request finds a pushed head and is paid for in full. What GitHub charged is counted per poll.
+ */
+async function soak(conditional: boolean): Promise<Soak> {
+  const api = new Provider(), realFetch = globalThis.fetch;
+  globalThis.fetch = api.fetch as typeof fetch;
+  try {
+    const github = new GitHub({ repository: REPOSITORY, base: 'main', appId: APP, installationId: 2, privateKey: 'not-used' });
+    Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3 * 3_600_000 });
+    github.controlPlaneLogin = async () => 'graphyard-owner-project[bot]';
+    const start = Date.now(); let clock = 0;
+    github.clock = () => start + clock;
+    const queued = Array.from({ length: 20 }, (_, index) => { const pr = api.open(300 + index, `graphyard/gy-q${index}-1`, true);
+      return item(`GY-Q${index}`, 300 + index, pr.head, api.main, { queue: { sequence: index + 1, enqueuedAt: new Date(start - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>); });
+    const review = Array.from({ length: 180 }, (_, index) => { const pr = api.open(600 + index, `graphyard/gy-r${index}-1`, false);
+      return item(`GY-R${index}`, 600 + index, pr.head, api.main, { stage: 'review', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] } as Partial<Work>); });
+    let all: Work[] = [...queued, ...review];
+    const apply = (work: Work, observation: Work['observation'], at: number) => {
+      const next = { ...work, candidate: observation!.candidate, observation } as Work;
+      const fleet = all.map(entry => entry.id === work.id ? next : entry);
+      return { ...next, ...evaluate(next, fleet, new Date(at), [CI]) } as Work;
+    };
+    // The fleet settles before the hour: every item is observed, with every peer observed, until a whole round costs nothing.
+    for (let round = 0, before = -1; before !== api.charged; round++) {
+      assert.ok(round < 4, `the fleet settles within four rounds (${api.charged} charged)`);
+      before = api.charged;
+      for (const work of [...all]) {
+        const observation = await github.observe(all.find(entry => entry.id === work.id)!, all);
+        all = all.map(entry => entry.id === work.id ? apply(entry, observation, start) : entry);
+      }
+    }
+    assert.ok(all.filter(work => work.key.startsWith('GY-R')).every(work => nextAction(work, all, new Date(start))?.kind === 'request-review'), 'the 180 review requests are review-requested on their real observations');
+    const steadyMs = steadyStateInterval(all.length, null, null);
+    api.conditional = conditional; api.charged = 0;
+    const hour = 3_600_000, due = new Map(all.map(work => [work.id, 0])), lastAt = new Map<string, number>();
+    const result: Soak = { settledPolls: 0, settledCharged: 0, settledMax: 0, changedPolls: 0, changedCharged: 0, reviewPolls: 0, reviewWorstGapMs: 0, chargedPerHour: 0 };
+    let reviewPolls = 0;
+    while (true) {
+      const next = Math.min(...due.values()); if (next >= hour) break; clock = next;
+      for (const work of [...all]) {
+        if (due.get(work.id) !== clock) continue;
+        const current = all.find(entry => entry.id === work.id)!, isReview = current.key.startsWith('GY-R');
+        const changed = isReview && ++reviewPolls % 10 === 0;
+        if (changed) api.pulls.get(current.submission!.pr)!.head = sha(`head-${current.key}-${reviewPolls}`);
+        const before = api.charged;
+        const observation = await github.observe(current, all);
+        const charged = api.charged - before;
+        if (changed) { result.changedPolls++; result.changedCharged += charged; }
+        else { result.settledPolls++; result.settledCharged += charged; result.settledMax = Math.max(result.settledMax, charged); }
+        const observed = apply(current, observation, start + clock);
+        all = all.map(entry => entry.id === work.id ? observed : entry);
+        const cadence = observationCadence(observed, all, new Date(start + clock), current.observation, steadyMs);
+        if (isReview) {
+          result.reviewPolls++;
+          if (lastAt.has(work.id)) result.reviewWorstGapMs = Math.max(result.reviewWorstGapMs, clock - lastAt.get(work.id)!);
+          lastAt.set(work.id, clock);
+        }
+        due.set(work.id, clock + cadence.ms);
+      }
+    }
+    result.chargedPerHour = api.charged;
+    return result;
+  } finally { globalThis.fetch = realFetch; }
+}
+
+let measured: Promise<Soak> | null = null;
+const settledSoak = () => measured ??= soak(true);
+
+test('a real-loop hour over a large review-requested fleet: settled polls cost what the budget guard prices them at, and GitHub is charged inside the hourly limit less the merge-path reserve', async () => {
+  const run = await settledSoak();
+  const reserved = defaultHourlyLimit - mergePathReserve;
+  assert.ok(run.reviewPolls >= 180 * (3_600_000 / reviewCadenceCapMs), `every review request is polled at the cap (${run.reviewPolls} polls)`);
+  assert.ok(run.reviewWorstGapMs <= reviewCadenceCapMs, `no review request waits past the cap (${run.reviewWorstGapMs} ms)`);
+  assert.ok(run.changedPolls > 0 && run.changedCharged / run.changedPolls > 2, 'a pushed head is paid for, so the soak counts real charges');
+  assert.ok(run.changedCharged / run.changedPolls <= assumedObservationRequests, `a changed reading costs ${run.changedCharged / run.changedPolls} on average, inside the ${assumedObservationRequests} the guard prices it at`);
+  assert.ok(run.settledMax <= 2, `a settled poll costs at most a couple of charged requests on the real observe path; the dearest cost ${run.settledMax}`);
+  assert.ok(run.chargedPerHour <= reserved, `the real loop charged ${run.chargedPerHour} requests in the hour, inside ${reserved}`);
+  // The soak discriminates: settled polls paid in full — conditional reads lost — breach the bound.
+  const regressed = await soak(false);
+  assert.ok(regressed.settledMax > 2 && regressed.chargedPerHour > reserved, `without free 304s the same hour charges ${regressed.chargedPerHour}, past ${reserved}`);
+});
+
+test('a large review-requested fleet stays inside the review bound without spending past the hourly limit less the merge-path reserve', async () => {
   // 180 review requests polled at the ten-minute cap, a tenth of readings changed. A settled reading
-  // is answered with free 304s and "costs at most a couple of charged requests" (src/github.ts); a
+  // is priced at the dearest settled poll the real-loop soak measured, never below one request; a
   // changed one costs a full observation. Polling the cap faster, or removing it, fails one bound.
-  const settledPollRequests = 2;
+  const settledPollRequests = Math.max(1, (await settledSoak()).settledMax);
   const all = fleet(20, 180), durationMs = 2 * 3_600_000;
   const run = simulateObservationScheduler({ all, workers: observationCapacity({}).concurrency, steadyMs: steadyStateInterval(all.length, null, null), jobMs: 13_000, durationMs, changedShare: 0.1 });
   const review = run.bands.find(entry => entry.band === 'review')!;

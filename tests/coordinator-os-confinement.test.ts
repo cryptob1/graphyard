@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
-import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, secretsBusPath, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutWorktreeAdminDirectory, coordinatorConfinement, coordinatorConfinementRefusal, hostProcessLaunchTargets, processLaunchMaskWords, readOnlyMountWrapper, secretsBusPath, sessionGitAdminDirectory, sessionMountNamespaceWorks, workerConfinementRefusal } from '../src/master/profiles.js';
 import { createServer } from 'node:net';
-import { headlessConfinementWrapper, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
+import { headlessConfinementWrapper, keyringEndpointWarning, type KeyringEndpointVerdict, secretsBusEndpointProblem, secretsBusMigration, secretsBusUnjudged, launcherCoordinatorRoot, launcherRootUndetermined, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { confiningSpawn } from '../src/runner/roles.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -263,6 +264,31 @@ test('unit:sandbox-keyring-proxy — the session bus is replaced by the keyring-
   }
 });
 
+test('unit:own-credential-no-keyring — a session that carries its own GitHub credential never gets the keyring-only proxy, even when it is live (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-own-credential');
+  const server = createServer();
+  const saved = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, GRAPHYARD_SECRETS_BUS: process.env.GRAPHYARD_SECRETS_BUS };
+  try {
+    // A worker pushes with the credential minted for its attempt (GY-999) and a reviewer posts with
+    // its own; the keyring behind the proxy holds the operator's login, which neither may read.
+    const runtime = join(base, 'run'), root = join(base, 'checkout'), session = join(root, '.graphyard', 'worktrees', 'GY-1-1');
+    mkdirSync(runtime, { recursive: true }); mkdirSync(session, { recursive: true });
+    const bus = join(runtime, 'bus'), proxy = join(runtime, 'graphyard-secrets-bus');
+    writeFileSync(bus, '');
+    await new Promise<void>(done => server.listen(proxy, done));
+    process.env.XDG_RUNTIME_DIR = runtime; delete process.env.GRAPHYARD_SECRETS_BUS;
+    const replacement = (wrapper: readonly string[]) => wrapper[wrapper.indexOf(realpathSync(bus)) - 1];
+    assert.equal(replacement(readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: session })), realpathSync(proxy), 'a session without a credential of its own reaches the keyring through the proxy');
+    assert.equal(replacement(readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: session, ownGitHubCredential: true })), '/dev/null', 'a session with its own credential keeps the bus unconnectable');
+    const confinement = await coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: session, bwrap: '/usr/bin/bwrap', platform: 'linux', mountNamespaceWorks: true, ownGitHubCredential: true });
+    assert.equal(replacement(confinement!.wrapper), '/dev/null', 'the launch confinement passes the flag through');
+  } finally {
+    for (const [name, value] of Object.entries(saved)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('unit:linked-worktree-coordinator-reviewer-confined — a reviewer or producer of a linked-worktree coordinator pins its own checkout\'s Git admin and cannot switch the coordinator', async () => {
   // GY-957, review finding: a reviewer or producer starts from the coordinator root and is allocated
   // a managed checkout outside every worktree, holding its linked worktree as the `checkout` child
@@ -320,6 +346,58 @@ test('unit:linked-worktree-coordinator-reviewer-confined — a reviewer or produ
   }
 });
 
+test('unit:keyring-proxy-units — the shipped units keep the proxy read-only and its endpoint stable across restarts (GY-1039)', () => {
+  const unit = (name: string) => readFileSync(fileURLToPath(new URL(`../deploy/systemd/${name}`, import.meta.url)), 'utf8');
+  const filter = unit('graphyard-secrets-bus-filter.service');
+  assert.doesNotMatch(filter, /--talk=|--own=/, 'no bus name is opened wholesale');
+  const calls = [...filter.matchAll(/--call=org\.freedesktop\.secrets=([\w.]+)@/g)].map(match => match[1]);
+  assert.ok(calls.includes('org.freedesktop.Secret.Item.GetSecret') && calls.includes('org.freedesktop.Secret.Collection.SearchItems'), 'the reads `gh auth git-credential` makes stay allowed');
+  for (const call of calls) assert.doesNotMatch(call, /\.(Delete|CreateItem|CreateCollection|SetSecret|SetAlias|Lock|ChangeLock|GetSecrets|Set)$/, `${call} reads, never writes or bulk-reads`);
+  // systemd holds the endpoint sessions bind-mount, so a restarted proxy never replaces its inode.
+  assert.match(unit('graphyard-secrets-bus.socket'), /^ListenStream=%t\/graphyard-secrets-bus$/m);
+  const forwarder = unit('graphyard-secrets-bus.service');
+  assert.match(forwarder, /systemd-socket-proxyd %t\/graphyard-secrets-bus-filter$/m);
+  assert.doesNotMatch(forwarder + filter, /rm -f %t\/graphyard-secrets-bus\s/, 'no unit unlinks the endpoint');
+  assert.equal(secretsBusPath(1000, { XDG_RUNTIME_DIR: '/run/user/1000' }), '/run/user/1000/graphyard-secrets-bus', 'the launcher binds the socket unit\'s endpoint');
+});
+
+test('unit:keyring-endpoint-unheld-reported — a launch that binds an endpoint graphyard-secrets-bus.socket does not hold names it with its migration, and nothing is guessed (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-endpoint-held');
+  const server = createServer();
+  try {
+    const endpoint = join(base, 'graphyard-secrets-bus'), plain = join(base, 'plain-file');
+    writeFileSync(plain, '');
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const asked: string[][] = [];
+    const show = (output: string) => (command: string, args: string[]) => { asked.push([command, ...args]); return output; };
+    assert.equal(await secretsBusEndpointProblem(show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint), null, 'the socket unit listening at the endpoint holds it');
+    assert.deepEqual(asked[0], ['systemctl', '--user', 'show', '--property=ActiveState', '--property=Listen', 'graphyard-secrets-bus.socket']);
+    // An earlier install enabled the service itself: xdg-dbus-proxy listens at the path and the socket unit is not loaded.
+    const unheld = await secretsBusEndpointProblem(show('ActiveState=inactive\n'), endpoint);
+    assert.ok(unheld && unheld !== secretsBusUnjudged && unheld.text.includes(endpoint) && unheld.text.includes('is inactive'), 'an endpoint the socket unit does not hold is named');
+    assert.equal(unheld.next, secretsBusMigration);
+    assert.match(secretsBusMigration, /disable --now graphyard-secrets-bus\.service && systemctl --user enable --now graphyard-secrets-bus\.socket/);
+    const elsewhere = await secretsBusEndpointProblem(show('ActiveState=active\nListen=/run/user/1/graphyard-secrets-bus (Stream)\n'), endpoint);
+    assert.ok(elsewhere && elsewhere !== secretsBusUnjudged && elsewhere.text.includes('listens at /run/user/1/graphyard-secrets-bus instead'), 'a socket unit listening elsewhere does not hold this endpoint');
+    assert.equal(await secretsBusEndpointProblem(() => { throw new Error('Failed to connect to bus'); }, endpoint), secretsBusUnjudged, 'no answering user manager judges nothing');
+    assert.equal(await secretsBusEndpointProblem(show(''), endpoint), secretsBusUnjudged, 'unreadable output judges nothing');
+    assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), plain), null, 'a path that is no socket is not an endpoint');
+    assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), join(base, 'missing')), null, 'no endpoint, nothing to migrate');
+    assert.equal(await secretsBusEndpointProblem(show('ActiveState=inactive\n'), null), null);
+    // The launcher logs it for a session whose wrapper binds the endpoint, and for no other.
+    const bound = { mechanism: 'read-only-mount' as const, wrapper: ['bwrap', '--ro-bind', realpathSync(endpoint), '/run/user/1/bus', '--'], detail: '' };
+    const warning = await keyringEndpointWarning('gy-approver', bound, show('ActiveState=inactive\n'), endpoint, new Map());
+    assert.ok(warning && warning.startsWith('graphyard: gy-approver: ') && warning.endsWith(`migrate: ${secretsBusMigration}`), 'a session given the unheld endpoint is logged with the migration');
+    assert.equal(await keyringEndpointWarning('gy-approver', bound, show(`ActiveState=active\nListen=${endpoint} (Stream)\n`), endpoint, new Map()), null, 'a held endpoint logs nothing');
+    assert.equal(await keyringEndpointWarning('gy-worker', { ...bound, wrapper: ['bwrap', '--ro-bind', '/dev/null', '/run/user/1/bus', '--'] }, show('ActiveState=inactive\n'), endpoint, new Map()), null, 'a session with its own credential is never given the endpoint');
+    assert.equal(await keyringEndpointWarning('gy-codex', { mechanism: 'runtime-sandbox', wrapper: [], detail: '' }, show('ActiveState=inactive\n'), endpoint, new Map()), null, 'a runtime sandbox binds no endpoint');
+    assert.equal(await keyringEndpointWarning('gy-master', null, show('ActiveState=inactive\n'), endpoint, new Map()), null, 'an unconfined session binds no endpoint');
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer names no Git directory refuses every launch instead of confining the pointer file', async () => {
   const base = await temporaryDirectory('confinement-pointer');
   try {
@@ -354,7 +432,140 @@ test('unit:unresolved-git-pointer-refused — a coordinator whose `.git` pointer
   }
 });
 
-test('unit:allocated-checkout-re-exposed —a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
+test('unit:keyring-endpoint-judged-once — an unmigrated endpoint socket is probed and reported once per launcher process, and a socket replaced at the path is judged afresh (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-endpoint-once');
+  let server = createServer();
+  try {
+    const endpoint = join(base, 'graphyard-secrets-bus');
+    await new Promise<void>(done => server.listen(endpoint, done));
+    let probes = 0;
+    const unheld = () => { probes++; return 'ActiveState=inactive\n'; };
+    const bound = () => ({ mechanism: 'read-only-mount' as const, wrapper: ['bwrap', '--ro-bind', realpathSync(endpoint), '/run/user/1/bus', '--'], detail: '' });
+    const verdicts = new Map<string, KeyringEndpointVerdict>();
+    // Launches racing on the same socket share one probe, and only the first logs.
+    const first = await Promise.all([keyringEndpointWarning('gy-a', bound(), unheld, endpoint, verdicts), keyringEndpointWarning('gy-b', bound(), unheld, endpoint, verdicts)]);
+    assert.equal(first.filter(Boolean).length, 1, 'concurrent launches on one socket log the line once');
+    assert.equal(probes, 1, 'and ask the user manager once');
+    assert.equal(await keyringEndpointWarning('gy-c', bound(), unheld, endpoint, verdicts), null, 'a later launch on the same socket repeats nothing');
+    assert.equal(probes, 1, 'and probes nothing');
+    // The socket at the path is replaced — a restarted proxy, or the socket unit after a migration.
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const fresh = await keyringEndpointWarning('gy-d', bound(), unheld, endpoint, verdicts);
+    assert.ok(fresh && fresh.startsWith('graphyard: gy-d: '), 'a new socket at the path is judged and reported again');
+    assert.equal(probes, 2);
+    let held = 0;
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    assert.equal(await keyringEndpointWarning('gy-e', bound(), () => { held++; return `ActiveState=active\nListen=${endpoint} (Stream)\n`; }, endpoint, verdicts), null, 'a socket the unit holds logs nothing');
+    assert.equal(await keyringEndpointWarning('gy-f', bound(), () => { held++; return ''; }, endpoint, verdicts), null);
+    assert.equal(held, 1, 'and its verdict is kept too');
+    // A probe that cannot judge the socket is not kept as its verdict (GY-1039 follow-up 8): once
+    // the user manager answers, a later launch in the same process still reports the endpoint.
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    let asked = 0;
+    assert.equal(await keyringEndpointWarning('gy-g', bound(), () => { asked++; throw new Error('Failed to connect to bus'); }, endpoint, verdicts), null, 'no answering user manager logs nothing');
+    assert.equal(await keyringEndpointWarning('gy-h', bound(), () => { asked++; return ''; }, endpoint, verdicts), null, 'nor does an unreadable answer');
+    assert.equal(asked, 2, 'and neither is remembered, so each launch asks again');
+    const later = await keyringEndpointWarning('gy-i', bound(), unheld, endpoint, verdicts);
+    assert.ok(later && later.startsWith('graphyard: gy-i: ') && later.endsWith(`migrate: ${secretsBusMigration}`), 'the user manager answering later reports the unmigrated endpoint');
+    assert.equal(probes, 3);
+    assert.equal(await keyringEndpointWarning('gy-j', bound(), unheld, endpoint, verdicts), null, 'and that judged verdict is kept');
+    assert.equal(probes, 3);
+    // A launch racing a probe that turns out unjudged asks again itself (GY-1039 follow-up 9).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const raced = await Promise.all([
+      keyringEndpointWarning('gy-k', bound(), async () => { await new Promise(done => setTimeout(done, 20)); throw new Error('Failed to connect to bus'); }, endpoint, verdicts),
+      keyringEndpointWarning('gy-l', bound(), unheld, endpoint, verdicts),
+    ]);
+    assert.equal(raced[0], null, 'the unjudged probe logs nothing');
+    assert.ok(raced[1] && raced[1].startsWith('graphyard: gy-l: '), 'the launch that awaited it probes again and reports the unmigrated endpoint');
+    assert.equal(probes, 4);
+    // Every replaced incarnation leaves nothing behind: one entry per endpoint path (follow-up 13).
+    assert.equal(verdicts.size, 1, 'only the latest socket\'s verdict is kept for the endpoint');
+    // A launch that fails logs nothing under its name, and its verdict is not kept, so the next
+    // launch on that socket reports the endpoint (follow-up 12).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    assert.equal(await keyringEndpointWarning('gy-m', bound(), unheld, endpoint, verdicts, Promise.resolve(false)), null, 'a failed launch logs nothing');
+    const next = await keyringEndpointWarning('gy-n', bound(), unheld, endpoint, verdicts);
+    assert.ok(next && next.startsWith('graphyard: gy-n: '), 'the next launch reports the endpoint instead');
+    assert.equal(probes, 6);
+    assert.equal(verdicts.size, 1);
+    // When the launch that started a shared probe fails, a racing launch that succeeds reports
+    // the endpoint instead of staying silent (GY-1039 follow-up 14).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const racing = await Promise.all([
+      keyringEndpointWarning('gy-o', bound(), unheld, endpoint, verdicts, Promise.resolve(false)),
+      keyringEndpointWarning('gy-p', bound(), unheld, endpoint, verdicts, Promise.resolve(true)),
+    ]);
+    assert.equal(racing[0], null, 'the failed launch that started the probe logs nothing');
+    assert.ok(racing[1] && racing[1].startsWith('graphyard: gy-p: '), 'the racing launch that succeeded reports the unmigrated endpoint');
+    assert.equal(probes, 7, 'and they shared one probe');
+    assert.equal(await keyringEndpointWarning('gy-q', bound(), unheld, endpoint, verdicts), null, 'a later launch on that socket repeats nothing');
+    assert.equal(probes, 7);
+    // When every racing launch on a shared probe fails, nothing is logged and the verdict is
+    // forgotten, so the next launch reports the endpoint (follow-up 14).
+    await new Promise<void>(done => server.close(() => done()));
+    server = createServer();
+    await new Promise<void>(done => server.listen(endpoint, done));
+    const allFailed = await Promise.all([
+      keyringEndpointWarning('gy-r', bound(), unheld, endpoint, verdicts, Promise.resolve(false)),
+      keyringEndpointWarning('gy-s', bound(), unheld, endpoint, verdicts, Promise.resolve(false)),
+    ]);
+    assert.deepEqual(allFailed, [null, null], 'all failed launches log nothing');
+    assert.equal(probes, 8, 'sharing one probe');
+    const recovered = await keyringEndpointWarning('gy-t', bound(), unheld, endpoint, verdicts);
+    assert.ok(recovered && recovered.startsWith('graphyard: gy-t: '), 'the next launch after all failed racing launches probes again and reports');
+    assert.equal(probes, 9);
+    assert.equal(verdicts.size, 1);
+  } finally {
+    await new Promise<void>(done => server.close(() => done()));
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:keyring-probe-off-launch-path — a launch never waits on the keyring endpoint probe: the runtime start is observed while the probe runs, its line is logged when it answers, and a failed launch logs none (GY-1039)', async () => {
+  const base = await temporaryDirectory('confinement-endpoint-path');
+  try {
+    let answer!: (line: string | null) => void;
+    const probing: string[] = [];
+    const logged: string[] = [];
+    const keyringWarning = (name: string) => { probing.push(name); return new Promise<string | null>(done => { answer = done; }); };
+    const run = (_command: string, args: string[]) => startedAtOnce(args) ?? '';
+    // A hung user manager: the probe never answers before the launch returns.
+    const launched = await startAgentSession('gy-approver', 'pi', 'pane-1', [], 'Judge the candidate', run, { directory: base, confinement: false, keyringWarning, log: line => logged.push(line) });
+    assert.equal(launched.started.state, 'started', 'the runtime start is observed while the probe is still asking');
+    assert.deepEqual(probing, ['gy-approver'], 'the probe was started for the launch');
+    assert.ok(!logged.some(line => line.includes('keyring endpoint')), 'nothing about the endpoint is logged before the probe answers');
+    answer('graphyard: gy-approver: The keyring endpoint /run/user/1/graphyard-secrets-bus is a socket graphyard-secrets-bus.socket does not hold');
+    await new Promise(done => setImmediate(done));
+    assert.ok(logged.some(line => line.startsWith('graphyard: gy-approver: The keyring endpoint')), 'the probe\'s line is logged once it answers');
+    // A launch whose runtime never starts tells the probe so, and nothing is logged under the failed
+    // session's name (follow-up 12).
+    const outcomes: Promise<boolean>[] = [];
+    const failing = (session: string, _bound: unknown, started: Promise<boolean>) => { outcomes.push(started); return started.then(ok => ok ? `graphyard: ${session}: The keyring endpoint` : null); };
+    const dead = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') return ''; throw new Error('herdr: pane gone'); };
+    await assert.rejects(startAgentSession('gy-failed', 'pi', 'pane-2', [], 'Judge the candidate', dead, { directory: base, confinement: false, keyringWarning: failing, timeoutMs: 50, log: line => logged.push(line) }));
+    assert.equal(outcomes.length, 1);
+    assert.equal(await outcomes[0], false, 'the probe learns the launch failed');
+    await new Promise(done => setImmediate(done));
+    assert.ok(!logged.some(line => line.startsWith('graphyard: gy-failed: The keyring endpoint')), 'and logs nothing under the failed session\'s name');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('unit:allocated-checkout-re-exposed — a reviewer or producer launched from the coordinator root gets its allocated checkout writable, never the checkout itself', async () => {
   const base = await temporaryDirectory('confinement-session');
   try {
     const { root } = coordinatorFixture(base);
