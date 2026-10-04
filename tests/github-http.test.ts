@@ -134,7 +134,7 @@ test('the permission preflight compares the installation with the declaration, h
   const {generateKeyPairSync} = await import('node:crypto');
   const {privateKey} = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 77, installationId: 4242, privateKey: privateKey.export({type:'pkcs8',format:'pem'}).toString() });
-  let permissions: Record<string, string> = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
+  let permissions: Record<string, string> = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' };
   let failing = false; const seen: string[] = [];
   t.mock.method(globalThis, 'fetch', async (url: unknown, options: any) => {
     seen.push(String(url));
@@ -175,7 +175,7 @@ test('a suspended installation holds every feature and a permission refusal repo
   const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 1, installationId: 2, privateKey: privateKey.export({type:'pkcs8',format:'pem'}).toString() });
   Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3600000 });
   t.mock.method(globalThis, 'fetch', async (url: unknown) => String(url).includes('/app/installations/')
-    ? new Response(JSON.stringify({ id: 2, app_slug: 'graphyard-fixture', html_url: 'https://github.com/settings/installations/2', permissions: { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write' }, suspended_at: '2026-09-18T00:00:00Z' }))
+    ? new Response(JSON.stringify({ id: 2, app_slug: 'graphyard-fixture', html_url: 'https://github.com/settings/installations/2', permissions: { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' }, suspended_at: '2026-09-18T00:00:00Z' }))
     : new Response('{}', { status: 403 }));
   const report = await github.preflight();
   assert.equal(report.suspended, true); assert.deepEqual(report.missing, []);
