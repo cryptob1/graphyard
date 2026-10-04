@@ -9,7 +9,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, approverLaunchKey, approverPrefixes, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, prioritizeCapacityWaiters, recordWatchEnded, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, approverLaunchKey, attestDecisions, approverPrefixes, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, prioritizeCapacityWaiters, recordWatchEnded, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
@@ -300,14 +300,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A request whose response was lost is already standing on the item, and the server refuses a
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
-      // Only a merge decision names what it binds. One standing for an earlier candidate can never
+      // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
-      if (standing && decision.action === 'merge' && !(standing.input?.sha === item.candidate?.sha && standing.input?.baseSha === item.candidate?.baseSha && standing.input?.policyRevision === item.policyRevision)) {
-        const stale = `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${decision.binding.slice(0, 12)}`;
-        if (standing.state !== 'requested' || !effects.withdraw) throw new Error(`${stale}, and ${effects.withdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${item.key}`);
-        await effects.withdraw(item, standing.id, `The candidate moved to ${decision.binding.slice(0, 12)}; ${stale}, so it can never apply and is withdrawn for a request that names the current candidate`);
-        standing = undefined;
-      }
+      const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
+      if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
       // it would settle this watch while the lease-loss still stands, and the binding would never
@@ -552,6 +548,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A producer request whose attempts are used up calls for a rework once its escalation has stood
   // a cycle (GY-496): the proof step raised it on an earlier cycle, with each attempt's outcome.
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
+  // A needed decision with no watch is requested once ready to retry, or escalated.
+  const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
+    const previous = state.actions[key];
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
+    if (effects.decide && effects.approver) return request(item, decision, key, null);
+    const escalationKey = `escalation:decision:${item.id}:${decision.binding}`, input = decision.action === 'attest' ? ` '${JSON.stringify(decision.input)}'` : '';
+    const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
+    if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  };
   for (const item of workToProcess) await isolate('decision', item, item.key, async () => {
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
@@ -581,34 +586,32 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
-      // The refusal wakes the item's observation job at once (GY-710), and the rework is decided
-      // on the first cycle after that observation lands, not whenever the cadence reaches it. The
-      // wake is stamped on the snapshot's clock, the one the observation's time is on.
+      // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
       await wakeObservationJob(cycle, item, 'rework');
       return;
     }
-    // A settled watch is supervised no more, but a registry session its close could not end still
-    // holds the role's slot: ending it is tried again each cycle until the registry is told.
+    // A settled watch is supervised no more; an unclosed registry session is retried.
     if (watch) {
       if (!watch.settledAt) await supervise(item, decision, key, watch);
       else if (watch.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
       return;
     }
-    const previous = state.actions[key];
-    // A `done` entry with no watch is a cursor written before requests were supervised; the
-    // request path adopts the decision it left standing and launches an approver for it.
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
-    if (!effects.decide || !effects.approver) {
-      const escalationKey = `escalation:decision:${item.id}:${decision.binding}`;
-      const detail = `${item.key} needs a ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action} REASON, then graphyard master approver ${item.key} DECISION`;
-      if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    await request(item, decision, key, null);
+    // A done entry with no watch adopts the standing decision and launches an approver.
+    await requestNeeded(item, decision, key);
   });
-  // A watch whose item no longer needs its decision — applied and moved on, or overtaken by a new
-  // head — has nothing left to judge. Its session is closed rather than left holding a provider
-  // seat, and the watch goes with it; one Herdr cannot be read for stays until it can.
+  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
+  for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
+    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
+    for (const decision of attestations) {
+      const key = decisionKey(item, decision), watch = state.approvals[key];
+      needed.add(key);
+      if (watch && !watch.settledAt) { judging = true; await supervise(item, decision, key, watch); }
+      else if (watch?.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
+    }
+    const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
+    if (next) await requestNeeded(item, next, decisionKey(item, next));
+  });
+  // A watch whose item no longer needs its decision is closed rather than left holding a provider seat.
   for (const [key, watch] of Object.entries(state.approvals)) await isolate('decision', snapshot.work.find(candidate => candidate.key === watch.work) ?? null, watch.work, async () => {
     // A watch the loop made for a session it did not launch has no request of the loop's to take back (below).
     if (needed.has(key) || key.startsWith(handWatchPrefix)) return;
