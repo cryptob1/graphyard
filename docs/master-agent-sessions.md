@@ -53,7 +53,7 @@ Reviewers and producers are `awaiting acknowledgement` until 30 s active (`count
 
 A resolved blocker or scope request re-prompts the inactive session once (item, epoch, change, `complete GY-N EPOCH PR`); re-blocking that epoch ends attempt and blocker for a fresh session. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
 
-Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts; lost ones retry free.
+Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
 ### Panes are closed and reclaimed
 
@@ -61,4 +61,4 @@ Ending a session closes its pane; each cycle closes ≤**6** more launched **on 
 
 ### The dispatcher's own state
 
-Its state is bounded (cuts marked `…`); a cursor failing its schema is repaired and logged. Tick failures surface as `dispatch.lastFailure`; three in a row raise attention (`graphyard master restart` repairs the cursor). A runtime exiting **at launch** is classified by `herdr pane read`: a limit notice fails over; otherwise refused with its last words and retried.
+The dispatcher bounds its own state where it composes it, each cut marked with an ellipsis; a cursor failing its schema is repaired, not fatal, logged once with the path that failed. A tick failure is attributed and surfaced: `dispatch.lastFailure`. Three consecutive failures raise one attention item (no reviewer or producer session is being launched for any item); `graphyard master restart` repairs the cursor. A session that exits at launch is classified from its pane: `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so `herdr pane read` decides: a provider limit notice fails over exactly as a mid-session exhaustion does; otherwise it is refused with the pane's last words and retried.
