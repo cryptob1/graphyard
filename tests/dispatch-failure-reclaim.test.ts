@@ -11,8 +11,12 @@ import { defaultChildRun } from '../src/child-runner.js';
 import { masterConfigSchema, prepareWorkerLaunch, saveWorkerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { dispatchFailureBlockAfter, dispatchFailureCause, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
-import { branchHolders } from '../src/worktree-holders.js';
-import type { Work } from '../src/model.js';
+import { branchHolders, reclaimBranchHolders } from '../src/worktree-holders.js';
+import { randomUUID } from 'node:crypto';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Store } from '../src/store.js';
+import { Engine } from '../src/engine.js';
+import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1078: GY-859 waited 5.4 hours through about forty failed dispatches because a session worktree
@@ -257,4 +261,149 @@ test('a repeated failure that spent no epoch, refused before any claim, never re
   assert.equal(state.dispatchFailures['item-7'].count, 1, 'the snapshot epoch never moved, so the run stays at its first failure');
   for (const epoch of [5, 6]) noteDispatchFailure(state, { ...work, epoch }, 'Dispatch blocked by exclusive resources: db held by GY-8', new Date().toISOString());
   assert.equal(state.dispatchFailures['item-7'].count, dispatchFailureBlockAfter, 'failures that each followed a spent epoch count');
+});
+
+// GY-1082: follow-ups from the review of GY-1078.
+
+/** A session worktree of GY-7 at `.graphyard/worktrees/GY-7-EPOCH` on `branch`, with one commit of its own. */
+async function sessionHolder(root: string, epoch: number, branch: string) {
+  const path = join(root, '.graphyard', 'worktrees', `GY-7-${epoch}`);
+  await mkdir(join(root, '.graphyard', 'worktrees'), { recursive: true });
+  git(root, 'worktree', 'add', '-q', path, branch);
+  await writeFile(join(path, `epoch-${epoch}.txt`), 'work\n'); git(path, 'add', '.'); git(path, 'commit', '-q', '-m', `epoch ${epoch}`);
+  return path;
+}
+const abandoned = { key: 'GY-7', lease: null };
+
+test('a bisect holder is reset without an unsupported flag, and a holder with ignored files is detached rather than removed so they survive', async () => {
+  const branch = 'graphyard/gy-7-3';
+  const root = await repository(branch);
+  try {
+    const target = join(root, '.graphyard', 'worktrees', 'GY-7-3');
+    const bisecting = await sessionHolder(root, 1, branch);
+    git(bisecting, 'bisect', 'start'); git(bisecting, 'bisect', 'bad'); git(bisecting, 'bisect', 'good', 'HEAD~1');
+    assert.deepEqual(branchHolders(root, branch, target).map(entry => entry.via), ['bisect']);
+    const [bisect] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: false });
+    assert.equal(bisect.action, 'aborted the bisect and removed the worktree');
+    assert.ok(!existsSync(bisecting));
+
+    const rebasing = join(root, '.graphyard', 'worktrees', 'GY-7-2');
+    await rebasingHolder(root, rebasing, branch);
+    await mkdir(join(root, '.git', 'info'), { recursive: true }); await writeFile(join(root, '.git', 'info', 'exclude'), 'secret.env\n');
+    await writeFile(join(rebasing, 'secret.env'), 'TOKEN=local-only\n');
+    const [kept] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: false });
+    assert.match(kept.action, /^aborted the rebase and detached its HEAD \(it holds ignored files, which removing it would delete\)$/);
+    assert.ok(existsSync(join(rebasing, 'secret.env')), 'the ignored file survives');
+    assert.deepEqual(branchHolders(root, branch, target), [], 'the branch is free');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a rework reclaim keeps the aborted holder\'s unpushed tip under a ref before the branch is reset', async () => {
+  const branch = 'graphyard/gy-7-1';
+  const root = await repository(branch);
+  try {
+    const holder = join(root, '.graphyard', 'worktrees', 'GY-7-2'), target = join(root, '.graphyard', 'worktrees', 'GY-7-3');
+    await mkdir(join(root, '.graphyard', 'worktrees'), { recursive: true });
+    git(root, 'update-ref', `refs/remotes/origin/${branch}`, branch);
+    await rebasingHolder(root, holder, branch);
+    const [reclaimed] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true });
+    const tip = git(root, 'rev-parse', branch);
+    assert.equal(git(root, 'log', '-1', '--format=%s', tip), 'two', 'the abort left the branch on the abandoned commit');
+    assert.equal(reclaimed.action, `aborted the rebase, kept its tip ${tip.slice(0, 12)} as refs/graphyard/reclaimed/GY-7-2 and removed the worktree`);
+    git(root, 'branch', '-f', branch, `refs/remotes/origin/${branch}`);
+    assert.equal(git(root, 'rev-parse', 'refs/graphyard/reclaimed/GY-7-2'), tip, 'the commit is still referenced after the reset');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('the record of a deleted session worktree is removed on a first attempt, and an ordinary checkout is judged like an operation: a dirty one is named, a clean one detached, and one outside the sessions keeps the rework path\'s detach', async () => {
+  const branch = 'graphyard/gy-7-3';
+  const root = await repository(branch);
+  try {
+    const target = join(root, '.graphyard', 'worktrees', 'GY-7-3');
+    const deleted = await sessionHolder(root, 1, branch);
+    await rm(deleted, { recursive: true, force: true });
+    assert.deepEqual(branchHolders(root, branch, target).map(entry => [entry.via, entry.missing]), [['checkout', true]]);
+    const [pruned] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: false });
+    assert.equal(pruned.action, 'removed the record of the deleted worktree');
+    git(root, 'worktree', 'add', '-q', target, branch);
+    git(root, 'worktree', 'remove', target);
+
+    const checkout = await sessionHolder(root, 2, branch);
+    await writeFile(join(checkout, 'a.txt'), 'unsaved\n');
+    assert.throws(() => reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true }), new RegExp(`${checkout} \\(checked out\\) has uncommitted changes`));
+    assert.equal(git(checkout, 'symbolic-ref', '--short', 'HEAD'), branch, 'the dirty checkout is left on the branch');
+    git(checkout, 'checkout', '--', 'a.txt');
+    await writeFile(join(checkout, 'scratch.txt'), 'scratch\n');
+    const [detached] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true });
+    assert.equal(detached.action, 'detached its HEAD', 'an untracked file, which a detach cannot touch, does not hold the checkout');
+    assert.ok(existsSync(join(checkout, 'scratch.txt')));
+
+    const foreign = join(root, '..', `${root.split('/').at(-1)}-foreign`);
+    git(root, 'worktree', 'add', '-q', foreign, branch);
+    try {
+      await writeFile(join(foreign, 'a.txt'), 'unsaved\n');
+      assert.throws(() => reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true }), new RegExp(`${foreign} \\(checked out\\) has uncommitted changes`));
+      assert.equal(git(foreign, 'symbolic-ref', '--short', 'HEAD'), branch, 'the dirty foreign checkout is left on the branch');
+      git(foreign, 'checkout', '--', 'a.txt');
+      const [earlier] = reclaimBranchHolders(root, branch, target, abandoned, Date.now(), { checkouts: true });
+      assert.equal(earlier.action, 'detached its HEAD', 'a clean earlier checkout outside the sessions is detached, as the rework path always did');
+      assert.throws(() => git(foreign, 'symbolic-ref', '--short', 'HEAD'));
+    } finally { git(root, 'worktree', 'remove', '--force', foreign); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a failure run is retired when the snapshot shows the item blocked, claimed by another dispatcher, or past an epoch this loop did not spend', async () => {
+  const directory = await temporaryDirectory('gy-1082-loop');
+  try {
+    const credential = join(directory, 'coordinator.token'); await writeFile(credential, coordinatorToken, { mode: 0o600 });
+    const config = loopConfig(credential);
+    const run = (epoch: number, count: number) => ({ key: 'GY-7', cause: 'Worker launch failed: fatal: held', count, epoch, firstAt: new Date().toISOString(), lastAt: new Date().toISOString() });
+    const cases: [string, Partial<Work>, number][] = [
+      // The loop recorded the blocker and stopped before forgetting the run: the unblock must not re-record it.
+      ['blocked', { epoch: 3, blocker: 'Dispatch failed 3 consecutive times' }, 3],
+      ['claimed by another executor', { epoch: 4, lease: { owner: 'executor', epoch: 4, expiresAt: new Date(Date.now() + 600_000).toISOString() } }, 3],
+      ['launched by a hand dispatch in between', { epoch: 4 }, 2],
+    ];
+    for (const [name, overrides, count] of cases) {
+      const state = emptyDaemonState(config);
+      state.dispatchFailures['item-7'] = run(2, count);
+      let dispatched = 0;
+      const loop = loopEffects([ready(overrides)], async () => { dispatched++; return { pane: null }; });
+      await runCycle(config, state, loop.effects, loop.clock);
+      assert.equal(state.dispatchFailures['item-7'], undefined, `${name}: the run is retired`);
+      assert.deepEqual(loop.blocked, [], `${name}: no blocker is recorded from the stale run`);
+      if (!overrides.blocker && !overrides.lease) assert.equal(dispatched, 1, `${name}: the item is dispatched afresh`);
+    }
+    // A run the last failure spent the epoch of stands.
+    const state = emptyDaemonState(config);
+    state.dispatchFailures['item-7'] = run(2, 2);
+    const loop = loopEffects([ready({ epoch: 3 })], async () => { throw new Error('Worker launch failed: fatal: held'); });
+    await runCycle(config, state, loop.effects, loop.clock);
+    assert.equal(loop.blocked.length, 1, 'consecutive failures still reach the bound');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('dispatchblock is refused off a dispatchable stage, over a standing blocker, or without failed attempts on the record, and names the attempts it verified', async () => {
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1082;
+  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy-1082-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  try {
+    await store.init();
+    const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' }, worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' }, loop: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
+    const engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [human, worker, loop];
+    const refused = (work: Work, pattern: RegExp) => assert.rejects(engine.execute(loop, 'dispatchblock', work.id, { reason: 'fatal: held' }, randomUUID()), pattern);
+    let work = await engine.execute(human, 'create', null, { title: 'held', plannedFiles: ['src/held.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+    await refused(work, /not awaiting a dispatch/);
+    work = await engine.execute(human, 'ready', work.id, {}, randomUUID());
+    await refused(work, /did not each end without a submission/);
+    for (let n = 0; n < dispatchFailureBlockAfter; n++) {
+      work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+      if (n < dispatchFailureBlockAfter - 1) await refused(work, /is held by engineer-a/);
+      work = await engine.execute(worker, 'release', work.id, { epoch: work.epoch }, randomUUID());
+    }
+    work = await engine.execute(loop, 'dispatchblock', work.id, { reason: 'Dispatch failed 3 consecutive times: fatal: held' }, randomUUID());
+    assert.equal(work.blocker, 'Dispatch failed 3 consecutive times: fatal: held [attempts 1, 2, 3 each ended without a submission]');
+    await refused(work, /already carries a blocker/);
+  } finally { await store.close(); await database.stop(); }
 });
