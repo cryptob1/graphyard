@@ -13,7 +13,7 @@
   - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; an explained `lease-loss` is settleable by `admin --attestation` alone.
   - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
-- **Merge refused**: wait or repair the cause; never bypass.
+- **Merge refused**: wait or repair the cause; never bypass. Auto-merge `BLOCKED` past ten minutes with every gate passing is asked of GitHub as a head-bound merge; GitHub's refusal is the item's merge refusal in `master status`, and after 30 minutes one `merge-blocked` attention item names the pull request and GitHub's last answer.
 - **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
 - **Wrong accepted evidence**: [revoke it](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).
 - **GitHub paused or webhook silent**: [request budget](operations-reference.md#github-request-budget).

@@ -17,6 +17,7 @@ import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { researchReviewSection } from './research.js';
 import { openFollowUpItem } from './model/machine-backlog.js';
+import { reviewObservationFreshnessMs } from './observation-priority.js';
 import { heldFollowUps, shippedFollowUpsOwed } from './model/followups-held.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
@@ -446,6 +447,8 @@ export async function reviewerBindingHealth(config: Pick<MasterConfig, 'credenti
   return { registered: app, bound: config.reviewer ? { appId: config.reviewer.appId, slug: config.reviewer.slug } : null, attention };
 }
 
+/** How old the observation of the exact requested head may be when a reviewer is launched for it (GY-710). */
+export const reviewLaunchObservationMaxAgeMs = reviewObservationFreshnessMs;
 // A launched reviewer reads one exact candidate. Everything a verdict is bound to is verified
 // here, before a token exists: a superseded or unobserved candidate never reaches a reviewer session.
 // The launch binds the head, not the observation's age (GY-710): the item's latest observation must
