@@ -200,10 +200,13 @@ test('unit:setup-generates-candidate-and-promotion-workflows — the generated w
     // Promotion follows only a successful candidate run, and production gets the promoted SHA.
     const promotion = renderPromotionWorkflow(policy);
     assert.match(triggersOf(promotion), new RegExp(`workflow_run:\\n {4}workflows: \\['${candidateWorkflowName}'\\]\\n {4}types: \\[completed\\]`));
-    const promote = jobsOf(promotion).get('promote')!;
-    assert.match(promote, /if: github\.event_name == 'workflow_dispatch' \|\| github\.event\.workflow_run\.conclusion == 'success'/);
+    const promote = jobsOf(promotion).get('promote')!, resolve = jobsOf(promotion).get('candidate')!;
+    assert.match(resolve, /if: github\.event_name == 'workflow_dispatch' \|\| github\.event\.workflow_run\.conclusion == 'success'/);
+    assert.match(resolve, /CANDIDATE="\$\{CANDIDATE:-latest\}"/);
+    assert.match(promote, /needs: candidate\n {4}if: needs\.candidate\.outputs\.id != ''/);
     assert.match(promote, /environment: production/);
-    assert.match(promote, /release promote "\$\{CANDIDATE:-latest\}"/);
+    assert.match(promote, /release promote "\$CANDIDATE"/);
+    assert.match(promote, /CANDIDATE: \$\{\{ needs\.candidate\.outputs\.id \}\}/);
     assert.match(promote, /GRAPHYARD_CANDIDATE_SHA: \$\{\{ steps\.promote\.outputs\.sha \}\}/);
     assert.match(promote, adapter === 'railway' ? /tracks release\/production/ : / {10}\.\/deploy\.sh production\n/);
     assert.ok(promote.indexOf('release promote') < promote.indexOf('GRAPHYARD_CANDIDATE_SHA'), 'production deploys only after promotion accepted the candidate');
@@ -344,11 +347,16 @@ test('GY-1190 follow-ups — reachable pin, one pin resolution per render, exact
   const uat = jobsOf(renderCandidateWorkflow(railwayPolicy(), { cli })).get('uat')!;
   assert.match(uat, /> graphyard-candidate\.txt/);
   assert.match(uat, /actions\/upload-artifact@v4\n {8}with: \{ name: graphyard-candidate/);
+  const resolve = jobsOf(renderPromotionWorkflow(railwayPolicy(), { cli })).get('candidate')!;
+  assert.match(resolve, /actions: read/);
+  assert.match(resolve, /if: github\.event_name == 'workflow_run'\n(?: {8}#.*\n)? {8}continue-on-error: true\n {8}uses: actions\/download-artifact@v4/);
+  assert.match(resolve, /run-id: \$\{\{ github\.event\.workflow_run\.id \}\}/);
+  assert.match(resolve, /elif \[ -f graphyard-candidate\.txt \]; then CANDIDATE="\$\(cat graphyard-candidate\.txt\)";/);
+  // A triggering run that validated no candidate (so uploaded no artifact) promotes nothing rather than failing or promoting `latest`.
+  assert.match(resolve, /else CANDIDATE=''; echo "The triggering run validated no candidate; nothing to promote\."; fi/);
   const promote = jobsOf(renderPromotionWorkflow(railwayPolicy(), { cli })).get('promote')!;
-  assert.match(promote, /actions: read/);
-  assert.match(promote, /if: github\.event_name == 'workflow_run'\n {8}uses: actions\/download-artifact@v4/);
-  assert.match(promote, /run-id: \$\{\{ github\.event\.workflow_run\.id \}\}/);
-  assert.ok(promote.indexOf('graphyard-candidate.txt') < promote.indexOf('release promote'), 'the downloaded id is read before promotion');
+  assert.match(promote, /if: needs\.candidate\.outputs\.id != ''/);
+  assert.doesNotMatch(promote, /:-latest/, 'a workflow_run promotion never falls back to the newest candidate');
 
   // Railway names with spaces stay one argument, and the listed command quotes them.
   const commands: { program: string; args: string[] }[] = [];
@@ -363,6 +371,10 @@ test('GY-1190 follow-ups — reachable pin, one pin resolution per render, exact
   assert.ok(!('steps' in plan[0]), 'the plan carries display commands only');
   await railwayDeploymentAdapter.provision(ctx, { createPaid: true });
   assert.deepEqual(commands[0], { program: 'railway', args: ['link', '--project', 'orders app'] });
+  // Each service is created tracking its release branch, never the default branch.
+  for (const environment of ['uat', 'production'])
+    assert.ok(commands.some(({ args }) => args.join(' ') === `add --service orders-${environment} --repo owner/orders --branch release/${environment}`), `the ${environment} service tracks release/${environment}`);
+  assert.ok(plan.slice(1).every(action => !!action.command?.includes('--branch release/') && !/source branch/.test(action.human ?? '')), 'the source branch is no longer an operator step');
   assert.deepEqual(railwayDeploymentAdapter.plan({ ...ctx, policy: railwayPolicy({ project: null }) })[0].command, "railway init --name orders-app --workspace 'My Team'");
 
   // The GitHub environments action lists every command apply runs.

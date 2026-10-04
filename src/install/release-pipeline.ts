@@ -222,37 +222,58 @@ concurrency:
   group: graphyard-promotion
   cancel-in-progress: false
 jobs:
-  promote:
+  candidate:
     # A candidate run that failed UAT concludes as a failure and promotes nothing.
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      id: \${{ steps.resolve.outputs.id }}
+    steps:
+      - name: Fetch the id of the candidate the triggering run validated
+        if: github.event_name == 'workflow_run'
+        # A scheduled run that cut no candidate skips UAT and uploads nothing; that run promotes nothing.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${candidateArtifact}
+          run-id: \${{ github.event.workflow_run.id }}
+          github-token: \${{ github.token }}
+      - name: Resolve the candidate to promote
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then CANDIDATE="\${CANDIDATE:-latest}";
+          elif [ -f ${candidateArtifact}.txt ]; then CANDIDATE="$(cat ${candidateArtifact}.txt)";
+          else CANDIDATE=''; echo "The triggering run validated no candidate; nothing to promote."; fi
+          echo "id=$CANDIDATE" >> "$GITHUB_OUTPUT"
+        env:
+          CANDIDATE: \${{ inputs.candidate }}
+  promote:
+    needs: candidate
+    if: needs.candidate.outputs.id != ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
-      actions: read
     environment: production
     steps:
       - uses: actions/checkout@v4
         with: { ref: ${base}, fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: '24' }
-      - name: Fetch the id of the candidate the triggering run validated
-        if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${candidateArtifact}
-          run-id: \${{ github.event.workflow_run.id }}
-          github-token: \${{ github.token }}
       - name: Promote the UAT-passed candidate by its exact SHA
         id: promote
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f ${candidateArtifact}.txt ]; then CANDIDATE="$(cat ${candidateArtifact}.txt)"; fi
-          ${cli} release promote "\${CANDIDATE:-latest}" --base ${base} | tee promote.json
+          ${cli} release promote "$CANDIDATE" --base ${base} | tee promote.json
           echo "sha=$(node -p "require('./promote.json').sha")" >> "$GITHUB_OUTPUT"
         env:
-          CANDIDATE: \${{ inputs.candidate }}
+          CANDIDATE: \${{ needs.candidate.outputs.id }}
 ${deployStep(policy, 'production', '${{ steps.promote.outputs.sha }}')}
       - name: Confirm production serves the promoted SHA
         run: ${cli} release verify --base ${base} --url "$PRODUCTION_URL" --wait 1200

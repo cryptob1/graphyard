@@ -75,14 +75,14 @@ function railwayActions(ctx: DeploymentContext): RailwayAction[] {
         human: 'Opens a billable Railway project on your account. Approve it, then rerun --apply with --create-environments, or name an existing project as delivery.deploy.project in graphyard.json.' },
     ...releaseEnvironments.map(environment => {
       const service = railwayService(ctx, environment);
-      const steps = [['railway', 'environment', 'new', environment], ['railway', 'add', '--service', service, '--repo', ctx.repository], ['railway', 'environment', environment], ['railway', 'service', service], ['railway', 'domain']];
+      const steps = [['railway', 'environment', 'new', environment], ['railway', 'add', '--service', service, '--repo', ctx.repository, '--branch', releaseBranchNames[environment]], ['railway', 'environment', environment], ['railway', 'service', service], ['railway', 'domain']];
       return {
         id: `release.railway.${environment}`, target: 'provider' as const, state: state(`release.railway.${environment}`),
         title: `Create the Railway ${environment} environment with service ${service} deploying ${releaseBranchNames[environment]} (never ${ctx.baseBranch})${environment === 'uat' ? ', holding no GITHUB_* credential' : ''}`,
         steps, command: displayed(steps),
-        // The Railway CLI has no command that sets a service's source branch, so that stays the
-        // operator's step; `release validate` and `release verify` refuse a service serving another SHA.
-        human: `${costNote(`the ${environment} environment and its running service`)} After it exists, set the service's source branch to ${releaseBranchNames[environment]} and store its URL as ${environment === 'uat' ? 'UAT_URL' : 'PRODUCTION_URL'} on the ${environment} GitHub environment.`,
+        // `railway add --branch` sets the service's source branch, so it deploys the release branch
+        // from its first build; `applyWiring` creates both branches before provision runs.
+        human: `${costNote(`the ${environment} environment and its running service`)} After it exists, store its URL as ${environment === 'uat' ? 'UAT_URL' : 'PRODUCTION_URL'} on the ${environment} GitHub environment.`,
       };
     }),
   ];
