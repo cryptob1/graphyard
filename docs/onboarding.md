@@ -7,13 +7,13 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Each session needs a worker identity and host ID; raise `install --workers` or connect:
+Sessions need a worker identity and host ID; raise `install --workers` or connect:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`.
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker.
 
 ### Documentation policy
 

@@ -17,7 +17,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: set `productionEnvironment`.
 5. Close finished agent sessions; repeat.
 
-Review findings, rework, idle workers and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 `master run` is `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
 
@@ -79,7 +79,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Every role fails over on spent quota** or waits as a `capacity` line, uncounted, relaunching oldest-first.
 
-The master launches reviews or producers by hand only via `master review GY-N [PROFILE]` once relaunching stops.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops.
 
 ### Proofs must exercise their criterion
 
