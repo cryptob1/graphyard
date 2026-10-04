@@ -1,7 +1,7 @@
 import type { Work } from '../model.js';
 
-/* One window for fault counting, settlement and status: the dependency-free model layer owns it and
-   quarantine.ts imports it, so the browser bundle never loads node-only modules for it (GY-1179). */
+/* Must equal src/quarantine.ts containmentGraceMs (settlement and status); kept here because the browser
+   bundle cannot load quarantine.ts's node-only imports. tests/containment-followups.test.ts pins them equal (GY-1179). */
 export const containmentGraceMs = 120_000;
 
 export type ContainmentPhase =
