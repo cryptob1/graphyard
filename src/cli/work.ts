@@ -17,7 +17,7 @@ import { classifyGateRefusals } from '../model/retro-synthesis.js';
 export async function withRetroStanding(work: any, api: (path: string) => Promise<any>) {
   let standing: any[] = [];
   try { standing = (await api('retro/standing')).standing ?? []; } catch (error: any) {
-    if (error?.status === 404 || /\b404\b/.test(String(error?.message ?? error))) return work;
+    if (error?.status === 404) return work;
     throw error;
   }
   const inForce = standing.filter(registry => registry.entries?.length);

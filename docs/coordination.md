@@ -13,13 +13,13 @@ A criterion states an outcome and its proofs:
 
 ## Revise requirements explicitly
 
-`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the whole document against `expectedPolicyRevision`; stop the worker first (a plannedFiles-only widening excepted), as prior evidence, review and authorization lapse.
+`graphyard master requirements GY-N revision.json "REASON"` adds; rewriting, removing or narrowing is a two-party `master decide GY-N requirements @revision.json "REASON"`. A revision replaces the document against `expectedPolicyRevision`; stop the worker first, plannedFiles-only widenings excepted: prior evidence, review and authorization lapse.
 
 ## Dispatch optimistically, smallest scope first
 
 `plannedFiles` (paths, or directory prefixes ending `/`) is the change-scope contract, not a lock: the [merge queue](github.md#merge-queue) and `sync` rework integrate overlapping items. `master status` records `overlap.concurrent` and candidates `git merge-tree` cannot merge. A root-level directory is `highConflict`, refused without `--allow-broad-scope`. Only `exclusiveResources`, reserved at claim, hold a dispatch.
 
-Before `worktree GY-N EPOCH` adds the worktree it frees the branch: a rework checkout holding it is detached; an abandoned session worktree of the item under `.graphyard/worktrees` mid-rebase, `am` or bisect has the operation aborted and is removed, reported as `reclaimed` and in the dispatch record. One dirty, unreadable, under a live lease or outside that directory is named in the error and left alone. Every failure carries git's stderr. After **3** consecutive dispatch failures of one item with one cause, each spending an epoch, the loop records the cause as its blocker (`dispatchblock`; a refusal is retried after 5 minutes, doubling to an hour) and stops dispatching it until `graphyard unblock GY-N REASON`.
+Before `worktree GY-N EPOCH` adds the worktree it frees the branch: an earlier attempt's worktree holding it — checked out, or mid-rebase, merge or cherry-pick — has its refs and uncommitted diff recorded as `workspace.preserved`, the operation ended and its HEAD detached; the branch never moves. An abandoned session worktree of the item under `.graphyard/worktrees` mid-`am` or bisect has the operation aborted and is removed, reported as `reclaimed` and in the dispatch record (one that is dirty or unreadable is named and left alone). A holder under a live lease, or an operation outside that directory, is named in the error and left alone. Every failure carries git's stderr; a workspace failure releases the claim without spending the epoch or cooling the profile. After **3** consecutive dispatch failures of one item with one cause, each spending an epoch, the loop records the cause as its blocker (`dispatchblock`; a refusal is retried after 5 minutes, doubling to an hour) and stops dispatching it until `graphyard unblock GY-N REASON`.
 
 ## Review gate: verdicts, not threads
 
@@ -47,8 +47,8 @@ The full suite is CI's gate, not the worker's (GY-853). Every worker request say
 
 ## Ship in under thirty minutes
 
-The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci) and conflict avoidance, never weaker gates.
+The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance; never weaker gates.
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the refusing gate and what else holds it; conflicting `base-behind`/`base-conflict` get rework. Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
+`graphyard diagnose GY-N` explains the refusing gate and what else holds it; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Three unobserved observation jobs in a row are `observation-starved`, raised as master attention and `/api/status` `starvedJobs`.
