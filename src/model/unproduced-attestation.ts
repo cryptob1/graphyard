@@ -2,7 +2,6 @@ import type { Work } from './work.js';
 import type { ActionWait } from './action-account.js';
 import { automatableProof, dispatchIneligibility } from './mechanical-proofs.js';
 import { currentEvidence } from './evidence.js';
-import { inheritedObligations } from './bootstrap.js';
 
 /**
  * The `manual:` proofs the loop puts to a two-party attestation itself (GY-521), or none. A proof
@@ -13,28 +12,35 @@ import { inheritedObligations } from './bootstrap.js';
  * live, observed candidate with no violation, and every one of its refusals is such a proof with
  * no evidence at all on this head, the loop requests one attest decision per proof, exactly as it
  * requests a merge decision. A proof whose attestation failed stays the operator's judgement.
+ *
+ * Only the item's own criteria offer a proof here (GY-1051): the control plane refuses an attest
+ * whose proof no criterion of the item requires (`decisionPrecondition`, src/model/approval.ts), so
+ * an inherited bootstrap obligation would fail its request on every retry while the delivery step,
+ * taking it for the loop's, no longer escalated it. Such a proof stays the operator's.
  */
-export function unproducedManualProofs(work: Work, all: Work[], now: Date): string[] {
+export function unproducedManualProofs(work: Work, _all: Work[], now: Date): string[] {
   if (!work.candidate || work.violations.length || dispatchIneligibility(work)) return [];
   const failing = work.gates.find(gate => !gate.passed);
   if (failing?.name !== 'acceptance' || !failing.reasons.length) return [];
   const requested = new Set((work.autoDispatch?.producers ?? []).filter(request => request.state === 'requested').flatMap(request => request.proofs ?? []));
-  // Every proof the item could be required to hold, its lane unapplied: the acceptance gate's own
+  // Every proof the item's own criteria could require, its lane unapplied: the acceptance gate's own
   // refusals below decide which of them the lane requires, so a loop reading the item through a
   // view that carries no scope files (and would recompute another lane) asks for exactly those.
-  const candidates = [...work.criteria.flatMap(criterion => criterion.bootstrap ? [] : criterion.proofs), ...inheritedObligations(work, all).map(obligation => obligation.proof)];
-  const proofs = [...new Set(candidates)].filter(proof => loopAttested(work, proof, now) && !requested.has(proof));
+  const proofs = [...new Set(work.criteria.flatMap(criterion => criterion.bootstrap ? [] : criterion.proofs))].filter(proof => loopAttested(work, proof, now) && !requested.has(proof));
   const named = (reason: string) => proofs.find(proof => reason.includes(`: ${proof} needs trusted passing evidence`));
   if (!failing.reasons.every(reason => named(reason))) return [];
   return proofs.filter(proof => failing.reasons.some(reason => named(reason) === proof));
 }
 /**
  * Whether the loop, not a person, attests `proof` once it is the only refusal left: a `manual:` proof
- * no producer may run with no evidence on this head. The delivery step does not escalate one to an
- * operator while the rest of the candidate settles; a failed attestation is evidence, and stays theirs.
+ * one of the item's own criteria requires, no producer may run, with no evidence on this head. The
+ * delivery step does not escalate one to an operator while the rest of the candidate settles; a
+ * failed attestation is evidence, and stays theirs, as does an inherited bootstrap obligation the
+ * control plane would refuse to take an attest decision for.
  */
 export function loopAttested(work: Work, proof: string, now: Date): boolean {
-  return proof.startsWith('manual:') && !automatableProof(work, proof) && !currentEvidence(work, proof, now);
+  return proof.startsWith('manual:') && work.criteria.some(criterion => !criterion.bootstrap && criterion.proofs.includes(proof))
+    && !automatableProof(work, proof) && !currentEvidence(work, proof, now);
 }
 /** Who owns the attestation of an unproduced `manual:` proof: the loop's decisions step, never a person. */
 export const attestationOwner = 'graphyard';
@@ -42,4 +48,15 @@ export const attestationOwner = 'graphyard';
 export function attestationWait(work: Work, all: Work[], now: Date): ActionWait | null {
   const proofs = unproducedManualProofs(work, all, now);
   return proofs.length ? { kind: 'session', on: attestationOwner, detail: `${work.key} waits on the loop's two-party attestation request for ${proofs.join(', ')} on ${work.candidate!.sha.slice(0, 12)}: master run requests one attest decision per proof and launches an independent approver for it` } : null;
+}
+/**
+ * GY-1051. The quiet wait of `proof`'s attestation while an attest decision for another proof stands on
+ * the item's current head, base and policy revision, or null. That one is judged first: the control plane
+ * holds one attest decision per item (src/server/decisions.ts), so an item with several unproduced proofs
+ * takes one approver round each, and the loop records this wait rather than a failed step every cycle.
+ */
+export function otherProofAttest(work: Work, proof: unknown, standing: { id: string; state: string; input?: any }): string | null {
+  const input = standing.input ?? {}, candidate = work.candidate;
+  const head = !!candidate && input.sha === candidate.sha && input.baseSha === candidate.baseSha && input.policyRevision === work.policyRevision;
+  return head && input.proof !== proof ? `${work.key}'s attest decision for ${String(proof)} waits: attest decision ${standing.id} is ${standing.state} for ${String(input.proof)} on ${String(input.sha).slice(0, 12)}; the control plane holds one attest decision at a time, so it is requested once that one settles` : null;
 }

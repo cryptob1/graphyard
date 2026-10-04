@@ -283,22 +283,27 @@ export async function assertHandDispatch(work: Work, now: string, intervalSecond
 }
 
 /** One `manual:` attestation the loop's decisions step requests itself (GY-521), as `master status` lists it. */
-export interface LoopAttestation { key: string; proof: string; sha: string; decision: string | null; approver: string | null; state: 'to-request' | 'judging' | 'settled'; detail: string }
+export interface LoopAttestation { key: string; proof: string; sha: string; decision: string | null; approver: string | null; state: 'to-request' | 'judging' | 'refused'; detail: string }
 type AttestWatch = { key?: string; work: string; action: string; decision: string; agentName?: string | null; settledAt?: string | null };
 /**
  * The loop's pending decisions on unproduced `manual:` proofs: every item waiting on nothing but
  * such a proof, with the attest decision the loop requested for it and the approver judging it.
  * These are the loop's own steps, not a person's: `master status` names them here and never under
  * needs-human, as `next-action.ts` names their wait on the loop.
+ *
+ * A watch the loop settled is listed only while its proof still has no evidence on the head, and an
+ * applied attestation writes that evidence, while an approved one not yet applied is still judging:
+ * so a settled watch still listed is a refusal (GY-1051). The loop neither requests it again nor
+ * launches another approver, and the row says that answering it is the operator's.
  */
 export function loopAttestations(snapshot: { work: Work[]; now: string }, approvals: readonly AttestWatch[] = []): LoopAttestation[] {
-  const now = Date.parse(snapshot.now);
+  const now = Date.parse(snapshot.now), watches = new Map(approvals.map(entry => [entry.key, entry]));
   return snapshot.work.flatMap(work => attestDecisions(work, snapshot.work, now).map(decision => {
-    const key = decisionKey(work, decision), watch = approvals.find(entry => entry.key === key);
+    const watch = watches.get(decisionKey(work, decision));
     const proof = String(decision.input?.proof), sha = work.candidate!.sha;
-    const state = !watch ? 'to-request' : watch.settledAt ? 'settled' : 'judging';
+    const state = !watch ? 'to-request' : watch.settledAt ? 'refused' : 'judging';
     const detail = !watch ? `the loop requests the attest decision for ${proof} on ${sha.slice(0, 12)} on its next decisions step and launches an independent approver for it`
-      : watch.settledAt ? `attest decision ${watch.decision} for ${proof} is judged; a refusal is answered with graphyard master decisions ${work.key}`
+      : watch.settledAt ? `attest decision ${watch.decision} for ${proof} was refused, and the loop does not request it again: answering it is the operator's — read the refusal with graphyard master decisions ${work.key}, then request the attestation citing ${watch.decision} with what it lacked, or act on the refusal`
         : `attest decision ${watch.decision} for ${proof} is with approver session ${watch.agentName ?? '(not launched yet)'}`;
     return { key: work.key, proof, sha, decision: watch?.decision ?? null, approver: watch?.agentName ?? null, state, detail };
   }));

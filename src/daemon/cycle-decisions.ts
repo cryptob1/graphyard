@@ -6,6 +6,7 @@ import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
 import { recordSettledDecision } from '../model/project-memory.js';
+import { otherProofAttest } from '../model/unproduced-attestation.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
@@ -287,7 +288,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
-    const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+    const previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     try {
       const history = effects.decisions ? (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions : [];
@@ -297,17 +298,17 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key} already holds an applied merge decision for candidate ${decision.binding.slice(0, 12)}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      // A request whose response was lost is already standing on the item, and the server refuses a
-      // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
+      // A request whose response was lost is already standing on the item, and the server refuses a second one; adopting it
+      // is what keeps a retry from leaving a decision nobody will judge. One attest for another proof on this head waits (GY-1051).
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
+      const held = standing && decision.action === 'attest' ? otherProofAttest(item, decision.input?.proof, standing) : null; if (held) { const waiting = await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: held, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist); if (detailChanged(previous, held)) performed.push(waiting); return; }
       // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
       const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
       if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
-      // Nor does the server keep more than one resolve standing, whatever its trigger. One for
-      // another escalation (a security-concern a master asked about) is not this decision: adopting
-      // it would settle this watch while the lease-loss still stands, and the binding would never
-      // ask again. It is left to its own requester, and this one is asked once it settles.
+      // Nor does the server keep more than one resolve standing, whatever its trigger. One for another escalation (a
+      // security-concern a master asked about) is not this decision: adopting it would settle this watch while the lease-loss
+      // still stands, and the binding would never ask again. It is left to its own requester, and this one is asked once it settles.
       if (standing && decision.action === 'resolve' && decision.escalation && !resolveCovers(standing, decision.escalation)) {
         throw new Error(`resolve decision ${standing.id} is ${standing.state} for ${String(standing.input?.trigger)}, not the ${decision.escalation.trigger} raised at ${decision.escalation.at}; the control plane holds one resolve at a time, so this one is requested once it settles: graphyard master decisions ${item.key}`);
       }
@@ -611,13 +612,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A done entry with no watch adopts the standing decision and launches an approver.
     await requestNeeded(item, decision, key);
   });
-  // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
+  // 4c+. Attestations (GY-521): one attest per `manual:` proof no producer may run, bound to its head; one per item, so N proofs take N rounds, the next requested in the cycle that settles one (GY-1051).
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
     const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);
-      if (watch && !watch.settledAt) { judging = true; await supervise(item, decision, key, watch); }
+      if (watch && !watch.settledAt) { await supervise(item, decision, key, watch); if (!state.approvals[key]?.settledAt) judging = true; }
       else if (watch?.session) await endApproverSession(item, watch, `approver for ${watch.work} decision ${watch.decision} settled`);
     }
     const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
