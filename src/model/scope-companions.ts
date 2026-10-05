@@ -7,7 +7,7 @@
 // not optional add-ons" (GY-945, GY-883). These rules ground them per path,
 // so the loop grants them with no approver, and `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
-import { pathScope, pathScopeContains, testFile } from './scope.js';
+import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
 interface CompanionCriterion { id: string; text: string; proofs?: readonly string[] }
 
@@ -66,15 +66,65 @@ export function proofTestFiles(criteria: readonly CompanionCriterion[], layout =
 /** A criterion that describes a change in the web UI: what makes a single file under `web/` the feature it describes. */
 const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
 
+import type { WorkOrigin } from './interventions.js';
+
+/** The fields of an item that make it a review follow-up and say what it names (GY-1116). */
+export type FollowUpSource = { origin?: WorkOrigin | null; description?: string | null };
+
+/**
+ * The files a review follow-up names (GY-1116): each finding's own path, and the paths its text or the
+ * item's description name unambiguously — a directory and a file extension. A dotted API name
+ * (`store.init`) is prose, not a file, so it never lands in plannedFiles or implies scope.
+ */
+export function followUpPaths(findings: readonly { path?: string | null; text: string }[], description?: string | null): string[] {
+  const named = (text: string) => namedPaths(text).filter(token => /\/[^/]+\.[A-Za-z0-9]{1,5}$/.test(token));
+  return [...new Set([...findings.flatMap(finding => [...(finding.path ? [finding.path] : []), ...named(finding.text)]), ...(description ? named(description) : [])])];
+}
+
+/**
+ * Structural ground for a peer module: an existing source module that a planned file directly
+ * imports by relative specifier, or that directly imports a planned file.
+ * `read` answers a module's text on the base branch, null when absent.
+ */
+export async function peerModuleGround(path: string, text: string | null, plannedFiles: readonly string[], read: (path: string) => Promise<string | null>): Promise<string | null> {
+  if (pathScope(path).prefix || !codeExtension.test(path) || testFile(path)) return null;
+  const planned = plannedFiles.filter(scope => !pathScope(scope).prefix && codeExtension.test(scope) && scope !== path && !testFile(scope));
+  if (!planned.length) return null;
+  const targetStem = moduleStem(path);
+
+  // 1. A planned file imports path (peer dependency / implementation delegate):
+  for (const scope of planned) {
+    const source = await read(scope);
+    if (!source) continue;
+    const imports = relativeImports(scope, source);
+    if (imports.includes(targetStem)) {
+      return `${path} is imported by ${scope}, a planned file whose behaviour the item changes`;
+    }
+  }
+
+  // 2. path imports a planned file (peer consumer):
+  if (text) {
+    const stems = new Map(planned.map(scope => [moduleStem(scope), scope]));
+    const imports = relativeImports(path, text);
+    for (const stem of imports) {
+      if (stems.has(stem)) {
+        return `${path} imports ${stems.get(stem)}, a planned file whose behaviour the item changes`;
+      }
+    }
+  }
+
+  return null;
+}
+
 /**
  * The ground a requested path stands on as a companion the item's own record implies, or null. These
  * need no file read: the documentation-budget gate, when the ask or the plan holds documentation;
  * the test-duration baseline, when it holds a test file; the test file named for the criteria's proofs (`proofTestFiles`); and a single file under `web/`
  * when a criterion describes a change in the web UI (GY-945's page and stylesheet). The engine's rule grants
  * these; what needs the base branch — imports, and which proofs a file already holds — is the
- * loop's (`importingTestGround`, `newProofTestGround`).
+ * loop's (`importingTestGround`, `newProofTestGround`, `peerModuleGround`).
  */
-export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[] }, ask: readonly string[], documentation: readonly string[]): string | null {
+export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null }, ask: readonly string[], documentation: readonly string[]): string | null {
   if (pathScope(path).prefix) return null;
   if (documentationBudgetGate(path)) {
     const documented = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && documentationPath(entry, documentation));
@@ -165,7 +215,7 @@ export async function importingTestGround(path: string, text: string | null, pla
  * the one already named for the proofs on the base, or the new one `proofTestFile` names — and the
  * documentation-budget gate the tree holds, when the plan holds documentation.
  */
-export function plannedCompanions(item: { plannedFiles: readonly string[]; criteria: readonly CompanionCriterion[] }, tree: ReadonlySet<string>, documentation: readonly string[]) {
+export function plannedCompanions(item: { plannedFiles: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null }, tree: ReadonlySet<string>, documentation: readonly string[]) {
   const added: { path: string; criterion: string | null; why: string }[] = [];
   const covered = (path: string) => item.plannedFiles.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path);
   const layout = testLayout(tree);
@@ -176,5 +226,8 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
     for (const file of tree) if (timingBaseline(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the test-duration baseline a new test file must be recorded in' });
   if (item.plannedFiles.some(entry => documentationPath(entry, documentation)))
     for (const file of tree) if (documentationBudgetGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the documentation-budget gate a documented change must keep passing' });
+  if (item.origin?.reviewFollowUps)
+    for (const file of followUpPaths(item.origin.reviewFollowUps.findings ?? [], item.description))
+      if (tree.has(file) && !covered(file)) added.push({ path: file, criterion: 'FOLLOWUP', why: 'the file a review follow-up names' });
   return added;
 }
