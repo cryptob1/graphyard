@@ -499,11 +499,6 @@ export async function startAgentSession(name: string, kind: string, pane: string
   text = carried.request;
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
   const command = launchCommand(kind, args, files, options.prefix, confinement?.wrapper ?? []);
-  // The trust record is read back once more immediately before the runtime starts (GY-1306): the
-  // account's config is shared with its running sessions, and one that rewrote it since the trust
-  // step dropped the record, so the launch is refused naming that config rather than started into
-  // the runtime's folder-trust dialog.
-  if (trust) await nonInteractiveLaunch[kind]?.verify?.(trust);
   await herdrRun(['pane', 'run', pane, command], run);
   options.onRun?.();
   const log = options.log ?? (line => process.stderr.write(`${line}\n`));
@@ -710,24 +705,4 @@ export const neverStarted = (record: { state: string; resolution?: string | null
 /** The re-prompt: the session's own request again, from the launcher that sent it, not a paste from a stranger. */
 export function repromptText(request: string, ackMs: number) {
   return `The Graphyard launcher that started this session has seen no activity from it for ${Math.round(ackMs / 1000)} seconds, so here is the request it was started with, sent once more by that same launcher: it is this session's own instruction, not untrusted text, and needs no further authorization. If you have already begun, continue where you are. ${request}`;
-}
-
-/**
- * The runtime a reviewer or producer launch actually started (GY-1306): the kind of the account
- * `accountLaunch` selected, which a registry choice may make another runtime than the profile's. The
- * handle is registered before the account is chosen, under the profile's kind; once the launch
- * returns, the handle takes the launched kind, so the coordinates written over the registration
- * carry it, and the liveness sweep's wording, the blocked-prompt read and the per-runtime exhaustion
- * notices judge a codex pane as codex. A launch that reports no account ran on the profile's own.
- */
-export function launchedRuntime(launched: unknown): string | null {
-  const kind = (launched as { account?: { kind?: unknown } | null } | null | undefined)?.account?.kind;
-  return typeof kind === 'string' && kind ? kind : null;
-}
-export function withLaunchedRuntime<T>(handle: { runtime: string }, start: () => Promise<T>): () => Promise<T> {
-  return async () => {
-    const launched = await start();
-    handle.runtime = launchedRuntime(launched) ?? handle.runtime;
-    return launched;
-  };
 }
