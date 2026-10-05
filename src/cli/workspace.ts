@@ -19,7 +19,7 @@ import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import { restoreAndReport } from './sync-restore.js';
-import { pushViaControlPlane } from './sync-push.js';
+import { baseWorkflowChanges, pushViaControlPlane, workflowPushNext } from './sync-push.js';
 import { defineCommands, workMutation } from './registry.js';
 import { keepBlockedWork } from './lease.js';
 
@@ -135,11 +135,11 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   const refused = findings.filter(finding => finding.refused);
   // `--restore` takes the remedy itself (GY-859): one plain commit, so a plain push updates the PR.
   if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read });
-
-  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
-    files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
+  const head = git('rev-parse', 'HEAD'), workflows = baseWorkflowChanges(quietly, head);
+  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head, merged: true, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
+    files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`), ...(workflows.length ? { workflows } : {}),
     next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so a plain push updates the PR; a force push is never needed or allowed. Do not push until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
-      : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.` });
+      : `Every file outside plannedFiles matches origin/${baseBranch}. Push, then complete ${work.key} EPOCH PR.${workflowPushNext(work.key, baseBranch, head, workflows)}` });
   if (refused.length) process.exitCode = 1;
 }
 

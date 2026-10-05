@@ -103,7 +103,8 @@ export function attributeConflicts(paths: string[], all: Work[], landed: (sha: s
  * base that changed them — the worker names the merge commit instead and the control plane pushes it
  * with its own App, which holds `workflows: write`, only when the commit is a pure base sync:
  * a merge whose first parent is the assigned branch's head on GitHub (a fast-forward), whose
- * second parent is in origin/BASE, and whose workflow files are byte-identical to that parent
+ * second parent is in origin/BASE (any commit the base tip contains, not only the tip, so a sync of
+ * an older base carries that commit's workflows: still the base's own history), and whose workflow files are byte-identical to that parent
  * except for paths in plannedFiles. The control plane rebuilds the commit from the base tree plus
  * the listed entries through GitHub's Git Data API and refuses unless the rebuilt tree and commit
  * are the named ones, so an entry list that hides a workflow change cannot produce the commit; entries
@@ -119,6 +120,10 @@ export const syncPushRequest = z.object({
   blobs: z.array(z.object({ sha: sha40, content: z.string() }).strict()).max(5_000),
 }).strict();
 export type SyncPushRequest = z.infer<typeof syncPushRequest>;
+/** The largest sync-push body the control plane reads: base64 blobs of every file the merge adds beyond both parents. */
+export const syncPushBodyLimit = 64 * 1024 * 1024;
+/** The refusal of a sync-push body over the limit, naming the limit and the way past it (GY-1203). */
+export const syncPushTooLarge = (bytes?: number) => `The base-sync push request${bytes === undefined ? '' : ` (${Math.ceil(bytes / (1024 * 1024))} MiB)`} exceeds the ${syncPushBodyLimit / (1024 * 1024)} MiB the control plane reads: the merge carries too many new blob bytes to rebuild through GitHub's API. Push the branch's own large files plainly first, so the merge adds fewer, then sync and ask again`;
 /** The slice of the GitHub client the guarded push uses; `GitHub` satisfies it. */
 export interface GitDataApi { config: { base: string }; request(path: string, method?: string, body?: unknown): Promise<any> }
 
