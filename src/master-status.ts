@@ -160,7 +160,7 @@ export function attributeAttention(items: AttentionItem[], readings: ResourceRea
     if (item.subject.startsWith('resource:')) return item;
     const reading = attributionFor(item.text, readings);
     if (!reading) return item;
-    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy, kind: 'resource-bound' };
+    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy, kind: 'resource-bound', resource: reading.id };
   });
 }
 

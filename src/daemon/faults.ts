@@ -53,7 +53,8 @@ export interface FaultSources {
  * pause, unserved executors, no GitHub connection); and disk below its bound. Each has a stable
  * subject, so a fault that keeps standing is one instance; one that clears and returns is another.
  * The lines go through the report's own attribution first, so a symptom the report names as its
- * cause (a full ledger, a resource at its bound) is tracked as that cause alone. A derived line that
+ * cause (a full ledger, a resource at its bound) is tracked as that cause alone: a resource at its
+ * bound is one fault on its own subject, however many subjects it holds (GY-1272). A derived line that
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
  * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
@@ -63,7 +64,7 @@ export interface FaultSources {
 export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
   const routes = sources.scopeRoutes ?? true;
   const own = work.flatMap(item => workFaults(item, now, routes));
-  const derived: FaultObservation[] = [];
+  const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
   const { config } = sources;
   if (config) {
     let status: { work: any[]; attentionItems: AttentionItem[] } = { work: [], attentionItems: [] };
@@ -80,7 +81,12 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now)))
-        derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+        if (item.kind === 'resource-bound' && item.resource) attributed.push({ kind: item.kind, faultClass: item.faultClass, subject: `resource:${item.resource}`, text: item.text.slice(0, 500) });
+        else derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+    // GY-1272: a symptom the report attributes to a registered resource is that resource's one fault, on the resource's own subject:
+    // one spent GitHub budget holding five subjects at once was six instances of its class. The resource's own line stands for it,
+    // and where none was listed the first symptom does.
+    for (const fault of attributed) if (!derived.some(other => other.kind === fault.kind && other.subject === fault.subject)) derived.push(fault);
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
