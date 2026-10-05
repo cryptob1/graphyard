@@ -3,8 +3,11 @@ import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
-import { assertSavable } from './locked-read.js';
+import { noteSaved } from './locked-read.js';
 import { advisoryLocks } from './locks.js';
+import { StaleWrite, lockItem, staleWriteAttempts, type StoreTransactionOptions } from './item-lock.js';
+import { saveDocument } from './document-write.js';
+export { saveDocument, rewriteDocument } from './document-write.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
 // the lock budget stays exported here with the store that applies it.
@@ -14,6 +17,7 @@ import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js'
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
+export * from './item-lock.js';
 export type { CoordinationTrim } from './coordination-sql.js';
 
 /**
@@ -88,14 +92,28 @@ export class Store {
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request', coordinationLock: takeCoordinationLock = true }: { lane?: StoreLane; coordinationLock?: boolean } = {}): Promise<T> {
+  /**
+   * Run `fn` in one transaction under the locks `options` name. A `StaleWrite` reruns the whole of
+   * `fn` on a fresh transaction (up to `staleWriteAttempts` runs), so `fn` must keep its effects in
+   * the database: an external call or in-memory change it makes is repeated by each rerun.
+   */
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions = {}): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.transactionOnce(fn, options); } catch (error) {
+        if (!(error instanceof StaleWrite) || options.retryStaleWrites === false || attempt >= staleWriteAttempts) throw error;
+      }
+    }
+  }
+  private async transactionOnce<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions): Promise<T> {
+    const { lane = 'request', itemLock } = options;
+    const fleetLock = options.fleetLock ?? (options.coordinationLock !== false);
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
-      // Serializes short coordination decisions across replicas, including dependency edits and cross-task workspace
-      // reservations; never held during external I/O. Reconciliation batches lock their own rows instead (GY-727).
-      if (takeCoordinationLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      // Serializes coordination decisions: fleet lock first, then per-item lock in fixed order so no deadlock is possible (GY-1124).
+      if (fleetLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      if (itemLock !== undefined && itemLock !== null) await lockItem(db, itemLock);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       // Job wakes are taken last, in work-id order (GY-1115): see `wakeJob`.
       pendingWakes.set(db, new Map());
@@ -292,11 +310,8 @@ export async function wakeJobs(db: Pick<pg.PoolClient, 'query'>, ids: string[], 
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
-  assertSavable(work);
-  work.revision++;
-  work.updatedAt = now.toISOString();
-  const text = JSON.stringify(work);
-  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, text]);
+  const text = await saveDocument(db, work, now);
+  noteSaved(work, text);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details, text);
 }
