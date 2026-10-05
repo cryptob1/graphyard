@@ -8,6 +8,7 @@ import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { actionableSubjects, approvalStep, approvalWatchSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { approverSettleMs } from '../src/daemon/decisions.js';
+import { applyKey, maxApplyAttempts } from '../src/daemon/cycle-approvers.js';
 import * as metrics from '../src/daemon/metrics.js';
 
 const { approverWait, approverWaitWording } = metrics;
@@ -119,6 +120,36 @@ test('unit:approved-decision-applies-on-cycle — an application the control pla
   await harness.run();
   assert.deepEqual(harness.applied, [], 'nothing was applied');
   assert.deepEqual(harness.requested, ['rework'], 'the superseded approval is replaced by a request for the current candidate');
+});
+
+test('unit:approved-decision-applies-on-cycle — a failing application is retried on the widening interval, escalated once its bound is spent, and applied once the control plane recovers', async () => {
+  // The control plane cannot apply it (it throws, or answers it still approved), then recovers.
+  const decision = approvedRework(), calls: number[] = [];
+  let failing = true, cycleNo = 0;
+  const harness = loop(decision, async (_work, id) => {
+    calls.push(cycleNo);
+    if (failing) { if (calls.length % 2) throw new Error('the control plane is unreachable: timeout'); return { id, state: 'approved' }; }
+    Object.assign(decision, { state: 'applied', outcome: 'Rework authorized' });
+    return { id, state: 'applied', outcome: 'Rework authorized' };
+  });
+  const cycles = 12;
+  for (cycleNo = 1; cycleNo <= cycles; cycleNo += 1) await harness.run();
+  // Never every cycle: attempts on cycles 1, 2, 4, 8 — each failure doubles the wait.
+  assert.deepEqual(calls, [1, 2, 4, 8], 'the apply backs off on the widening retry interval');
+  const escalations = Object.entries(harness.state.actions).filter(([key]) => key === `escalation:decision-unapplied:${decision.id}`);
+  assert.equal(escalations.length, 1, 'escalated once the bound is spent');
+  assert.equal(escalations[0][1].kind, 'escalation');
+  assert.match(escalations[0][1].detail, new RegExp(`${maxApplyAttempts} applications by the loop have failed.*graphyard master approve GY-949 ${decision.id}`));
+  assert.equal(harness.state.actions[applyKey(decision.id)].attempts, 4, 'one failed action per attempt, not per cycle');
+  assert.deepEqual(harness.approvers, [], 'no approver session is launched to judge it again');
+  assert.deepEqual(harness.requested, [], 'and no second rework is requested');
+  assert.equal(Object.keys(harness.state.approvals).length, 1, 'one watch, not one per cycle');
+  // The control plane recovers: the next retry on the interval applies it, and nothing more is attempted.
+  failing = false;
+  for (; cycleNo <= cycles + 20; cycleNo += 1) await harness.run();
+  assert.equal(calls.length, 5, 'applied on the next retry, then never called again');
+  assert.ok(Object.values(harness.state.approvals)[0].settledAt, 'the watch is settled');
+  assert.equal(Object.keys(harness.state.actions).filter(key => key.startsWith('escalation:')).length, 1, 'no further escalation');
 });
 
 test('unit:loop-silence-decision-state — a decision approved but never applied is named as such, with its approvedAt, not as waiting for an approver to judge it', () => {

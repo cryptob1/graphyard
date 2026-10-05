@@ -40,7 +40,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
-  const { sessions, invalidate, closeApprover, endApproverSession, launch, capacityRelaunchWaits, approverExhausted, escalateUnjudged, actOnStep, applyApproved } = approvers;
+  const { sessions, invalidate, closeApprover, endApproverSession, launch, capacityRelaunchWaits, approverExhausted, escalateUnjudged, actOnStep, applyBounded, applyApproved } = approvers;
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
@@ -65,16 +65,18 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
       if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
       // An approval already judged is applied, never put to another approver (GY-1298). Applied, it
-      // settles this binding; superseded or failed, the decision is requested afresh below.
-      if (standing?.state === 'approved' && effects.applyDecision && !(clock - Date.parse(standing.approvedAt ?? '') < approverSettleMs)) {
-        const applied = await effects.applyDecision(item, standing.id, `${item.key}'s ${decision.action} decision ${standing.id} was approved by ${standing.approvedBy ?? 'its approver'} at ${standing.approvedAt ?? 'an unrecorded time'} and never applied; the loop applies the recorded approval (GY-1298)`);
-        if (applied.state === 'applied') {
-          const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing.id, requestedAt: stamp, settledAt: stamp });
-          recordSettledDecision(state.projectMemory, watch, { ...standing, state: 'applied' }, stamp);
-          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Applied decision ${standing.id} (${decision.action}), approved by ${standing.approvedBy ?? 'its approver'} at ${standing.approvedAt ?? 'an unrecorded time'} and never applied: ${applied.outcome ?? 'applied'}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      // settles this binding; superseded or failed, the decision is requested afresh below. A failing
+      // application is retried on the widening interval and escalated, never every cycle.
+      const settling = standing?.state === 'approved' && !(clock - Date.parse(standing.approvedAt ?? '') < approverSettleMs);
+      if (settling && effects.applyDecision) {
+        const applied = await applyBounded(item, standing!.id, `${item.key}'s ${decision.action} decision ${standing!.id} was approved by ${standing!.approvedBy ?? 'its approver'} at ${standing!.approvedAt ?? 'an unrecorded time'} and never applied`);
+        if (applied?.state === 'applied') {
+          const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing!.id, requestedAt: stamp, settledAt: stamp });
+          recordSettledDecision(state.projectMemory, watch, { ...standing!, state: 'applied' }, stamp);
+          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Applied decision ${standing!.id} (${decision.action}), approved by ${standing!.approvedBy ?? 'its approver'} at ${standing!.approvedAt ?? 'an unrecorded time'} and never applied: ${applied.outcome ?? 'applied'}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
           return;
         }
-        if (applied.state !== 'approved') standing = undefined;
+        if (applied) standing = undefined;
       }
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
@@ -216,7 +218,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // queue (GY-849): while another waiter's relaunch is queued or running on the launcher, this
       // one hands off nothing and is made again on a later cycle, through the guarded relaunch path.
       const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding`
-        : (requested as { state?: string }).state === 'approved' ? 'left it to the approver applying it; the loop applies it once the settle window passes (GY-1298)'
+        : (requested as { state?: string }).state === 'approved' ? (settling ? 'left it unapplied this cycle; the loop retries its application on the widening interval (GY-1298)' : 'left it to the approver applying it; the loop applies it once the settle window passes (GY-1298)')
         : watch.capacity && capacityRelaunchWaits(watch) ? 'held its capacity wait behind the relaunch already in flight'
         : await launch(item, watch, true);
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));

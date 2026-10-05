@@ -33,6 +33,7 @@ import { staleObservationReason } from '../src/daemon/cycle-delivery.js';
 import { retainedActions } from '../src/daemon/state.js';
 import { adoptHeadlessRuns, noteWatchdog } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
+import { maxApplyAttempts } from '../src/daemon/cycle-approvers.js';
 import { decisionReadDeadlineMs, decisionRefreshMs } from '../src/daemon/decision-reads.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
 import { applyDecision, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
@@ -520,6 +521,12 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
 let days = 0;
 async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
+  /**
+   * GY-1298: the approver of each listed item's rework approves it and its session ends before the
+   * application, leaving it approved with no outcome; the control plane then fails the loop's first
+   * `failApplies` applications of it before it recovers.
+   */
+  strandedApprovals?: { items: number[]; failApplies: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -581,7 +588,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // apply at the moment it is requested would be; every later one goes through.
   const laneApplications: { key: string; refused: boolean; at: number }[] = [];
   const executeAll = engine.execute.bind(engine);
+  // GY-1298: the work whose next rework application dies with its approver session (see `strandedApprovals`).
+  let strandNext: string | null = null;
   engine.execute = (async (actor, command, id, input, key, context) => {
+    if (command === 'rework' && strandNext && id === strandNext) { strandNext = null; throw new Error('Simulated: the approver session ended while applying the rework'); }
     const laneWork = plan.lowLane ? items[plan.lowLane - 1] : undefined;
     if (command === 'rework' && laneWork && id === laneWork.id && /approved by graphyard-risk-lane/.test(actor.displayName ?? '')) {
       const refused = !laneApplications.length;
@@ -1152,6 +1162,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // GY-475: the scenario's refusals and every request the loop sent, so the day can be judged on
   // what its first request after the loss of the loop's own cursor already cited.
   const refused: { key: string; decision: string }[] = [];
+  // GY-1298: the approvals stranded without an outcome, every approver launch by decision, and every application the loop asked for.
+  const stranded: { key: string; decision: string; at: number; cycle: number }[] = [], approverLaunches: string[] = [], applyCalls: { key: string; decision: string; at: number; cycle: number; failed: boolean }[] = [];
   const decideCalls: { key: string; action: string; reason: string; input: unknown }[] = [];
   // GY-551: decisions a master requested and put to an approver by hand (`master approver`), whose
   // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
@@ -1174,6 +1186,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const name = approverSessionName(work, decision);
     if (herdr.list().some(agent => agent.name === name && !stoppedStates.includes(agent.agent_status ?? '')))
       throw new Error(`Approver session ${name} is already live in Herdr; let it finish or close it first`);
+    approverLaunches.push(decision);
     // The window is read on the day's own schedule too, as the waiters at its close and the launches
     // after it are: the simulated clock runs real time forward, so on a slow host a window read from
     // it would close minutes early and let a rework decision it should hold launch at once.
@@ -1246,9 +1259,17 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       if (!current || current.state !== 'requested') { herdr.status(pane, 'done'); return; }
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
         && current.action === 'rework';
+      const strandDue = !!options.strandedApprovals?.items.includes(numberOf(work)) && !stranded.some(entry => entry.key === work.key) && current.action === 'rework';
       if (refuseDue) {
         await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
         refused.push({ key: work.key, decision });
+      } else if (strandDue) {
+        // The approval is recorded; the session dies inside the application, which records no outcome.
+        strandNext = work.id;
+        await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` }).then(
+          () => { throw new Error(`soak: ${work.key}'s stranded approval was applied`); }, (error: Error) => { if (/stranded approval was applied/.test(error.message)) throw error; });
+        strandNext = null;
+        stranded.push({ key: work.key, decision, at: clock.now(), cycle: state.cycle });
       } else {
         await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` });
       }
@@ -1435,6 +1456,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
+    // GY-1298: the loop applies an approval whose approver ended before applying it; the stranded day's control plane fails the first few.
+    applyDecision: async (work, decision, reason) => {
+      const failed = !!options.strandedApprovals && stranded.some(entry => entry.decision === decision) && applyCalls.filter(call => call.decision === decision).length < options.strandedApprovals.failApplies;
+      applyCalls.push({ key: work.key, decision, at: clock.now(), cycle: state.cycle, failed });
+      if (failed) throw new Error(`Simulated: the control plane timed out applying ${decision}`);
+      return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'apply', decision, reason });
+    },
     faultClassPolicy: { threshold: 3, windowHours: 24 },
     fileFaultClass: (input, key) => {
       // The documentation trim item is what the once-only filing assertion reads (GY-574).
@@ -2407,7 +2435,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
-    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
+    mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, stranded, approverLaunches, applyCalls, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory };
@@ -3392,6 +3420,40 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
     assert.deepEqual(calls[1].input, reworks[0].input, `${key}: the cited request carries the refused request's exact input`);
     assert.ok(escalations.some(detail => detail.includes(decision) && /does not request it again/.test(detail)), `${key}: the refusal was escalated, not re-requested, while it stood`);
     assert.ok(!Object.values(state.approvals).some(watch => watch.work === key), `${key}: no watch is left open on the item`);
+  }
+  assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
+});
+
+test('unit:soak-invariants-hold — rework approvals whose approver ended before applying them are applied by the loop within a bounded number of cycles, a failing apply backs off and escalates once, no approver is relaunched, nothing piles up, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1298: items 3 and 7's approvers approve their rework and die inside the application, as
+  // GY-949's did: approved, no outcome. The control plane then fails the loop's first three
+  // applications of each. The loop must apply them itself — never relaunching an approver to judge
+  // them again — on the widening retry interval, escalate each once its bound is spent, and leave
+  // no watch or action behind per cycle.
+  const failApplies = maxApplyAttempts;
+  const day = await simulateDay({ hours: 6, strandedApprovals: { items: [3, 7], failApplies } });
+  const { final, violations, observed, failures, lost, escalations, stranded, approverLaunches, applyCalls, state, herdr } = day;
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the stranded approvals');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
+  assert.equal(stranded.length, 2, 'both approvals were stranded without an outcome');
+  for (const { key, decision, cycle } of stranded) {
+    const item = final.find(entry => entry.key === key)!;
+    const history = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(item.id)}/decisions`)).decisions as { id: string; state: string; approvedBy: string | null }[];
+    const settled = history.find(entry => entry.id === decision)!;
+    assert.deepEqual([settled.state, settled.approvedBy], ['applied', principals.approver.id], `${key}: the stranded approval was applied, under its recorded approver`);
+    assert.equal(approverLaunches.filter(entry => entry === decision).length, 1, `${key}: its approver was launched once and never relaunched to judge it again`);
+    const calls = applyCalls.filter(call => call.decision === decision);
+    assert.deepEqual(calls.map(call => call.failed), [...Array(failApplies).fill(true), false], `${key}: one application per retry, the first ${failApplies} failing, then applied`);
+    // The widening interval: each failure at least doubles the wait, so the attempts are never every cycle.
+    const gaps = calls.slice(1).map((call, index) => call.cycle - calls[index].cycle);
+    gaps.forEach((gap, index) => assert.ok(gap >= 2 ** index, `${key}: attempt ${index + 2} waited ${gap} cycle(s), at least ${2 ** index}`));
+    assert.ok(calls.at(-1)!.cycle - cycle <= 2 ** (failApplies + 1), `${key}: applied within ${2 ** (failApplies + 1)} cycles of the approval (${calls.at(-1)!.cycle - cycle})`);
+    assert.equal(escalations.filter(detail => detail.includes(decision) && /applications by the loop have failed/.test(detail)).length, 1, `${key}: the failing apply was escalated exactly once`);
+    assert.ok(Object.values(state.approvals).filter(watch => watch.decision === decision).every(watch => watch.settledAt), `${key}: no watch of it is left open`);
+    assert.ok(Object.keys(state.actions).filter(action => action.includes(decision)).length <= 4, `${key}: its actions stay bounded, one row per kind, not one per cycle`);
   }
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });

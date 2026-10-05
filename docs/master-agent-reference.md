@@ -57,7 +57,7 @@ A dead supervisor fences its item; `containment` lists survivors' pid, cmdline a
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-An approved decision its approver never applied is applied by the loop a minute after approval (`approverSettleMs`), under that approver, not put to another; a re-request of its action applies it too. A `rework`/`recover` approval whose candidate has moved is superseded (`stale`), and the re-request is recorded for the current one.
+An approved decision its approver never applied is applied by the loop a minute after approval (`approverSettleMs`), under that approver, not put to another; a failing apply is retried on the widening retry interval and escalated once after three failures. A re-request of its action applies it too. A `rework`/`recover` approval whose candidate has moved is superseded (`stale`), and the re-request is recorded for the current one.
 
 ### Producer-runtime faults
 
