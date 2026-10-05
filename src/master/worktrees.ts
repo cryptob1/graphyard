@@ -5,6 +5,7 @@ import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFi
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
+import { submittedBranchMoved } from '../model/assignment.js';
 import { branchHolders, heldBranchRefusal, holderRefusals } from '../worktree-holders.js';
 import { reclaimCommand, type CheckoutReclaimReport, type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
 import type { MasterConfig, MasterRun } from './profiles.js';
@@ -754,7 +755,7 @@ export async function submittedBranchRefusal(root: string, branch: string, remot
   try {
     await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
     const remoteSha = String(await run('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim();
-    return !candidateSha || remoteSha !== candidateSha ? 'Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace' : null;
+    return !candidateSha || remoteSha !== candidateSha ? submittedBranchMoved : null;
   } catch (error) { return `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`; }
 }
 
