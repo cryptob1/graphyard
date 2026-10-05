@@ -14,7 +14,7 @@ export const decisionReadConcurrency = 8;
 /** How long the decisions step's control-plane reads may take in all, from the step's start (GY-1241). */
 export const decisionReadDeadlineMs = 10_000;
 /** How long a kept history may go without being read afresh, whatever the ledger says (GY-1241). */
-export const decisionRefreshMs = 5 * 60_000;
+export const decisionRefreshMs = 30 * 60_000;
 /**
  * GY-1142. The decisions step read each item's decision history from the control plane once for
  * every place it looked — the request, its supervision, the moved-past sweep, the hand-launched
