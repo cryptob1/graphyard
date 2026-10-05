@@ -11,6 +11,7 @@ import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type Diagnosi
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { record } from './effects.js';
+import { maxDecisionRequests } from './decisions.js';
 import type { Cycle } from './cycle.js';
 
 // ---------------------------------------------------------------------------
@@ -383,6 +384,7 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     entry.state = current.state === 'refused' ? 'refused' : 'failed';
     return note(entry, 'failed', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state}: ${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}; the diagnosis stands for the master to act on`);
   }
+  if (current.state === 'stale' || current.state === 'withdrawn') return rerequest(cycle, diagnostician, entry, target, current, note);
   if (current.state !== 'applied') return;
   if (entry.state === 'releasing') {
     await note(entry, 'done', `${decision.work} was released on the approved decision ${decision.id} (approved by ${current.approvedBy})`);
@@ -401,6 +403,35 @@ async function request(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   await note(entry, 'done', `Requested ${action} decision ${decision.id} on ${work.key} for the diagnosis of ${entry.subject}`);
   return launchApprover(cycle, entry, work, note);
 }
+/**
+ * GY-1296: the server settled the entry's decision without applying it — 'stale' when the item's
+ * revision moved before the approval (the loop's own writes to the item it asked about move it),
+ * 'withdrawn' when it was taken back. Its outcome says to reload and request again, so the same
+ * decision is requested against the item's current revision. The requests are bounded like the
+ * decisions step's (maxDecisionRequests, counted from the item's own decision history, so the bound
+ * survives a restart); once spent the diagnosis fails and an escalation names the manual route.
+ */
+async function rerequest(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, target: Work, current: { id: string; state: string; outcome?: string | null }, note: Note) {
+  const { state, effects, now } = cycle, decision = entry.decision!;
+  const history = (await effects.decisions!(target)).decisions;
+  const spent = history.filter(candidate => candidate.action === decision.action && (candidate.state === 'stale' || candidate.state === 'withdrawn')).length;
+  const why = `The ${decision.action} decision ${decision.id} on ${decision.work} was settled ${current.state}: ${current.outcome ?? 'no reason recorded'}`;
+  if (spent >= maxDecisionRequests) {
+    entry.state = 'failed';
+    await note(entry, 'failed', `${why}; ${spent} ${decision.action} request(s) for the diagnosis of ${entry.subject} settled without applying, so it is not requested again`);
+    const detail = `${decision.work} still needs the ${decision.action} the diagnosis of ${entry.subject} asked for, but ${spent} requests settled stale or withdrawn (last ${decision.id}). `
+      + `${decision.action === 'release' ? 'Release it by hand' : 'Close it by hand'}: graphyard master decide ${decision.work} ${decision.action}${decision.action === 'close' ? ` '{"kind":"duplicate","ref":"${entry.fix ?? entry.diagnosis?.covering}"}'` : ''} REASON, then graphyard master approver ${decision.work} DECISION`;
+    cycle.performed.push(await record(state, `escalation:diagnosis-stale:${decision.id}`, { kind: 'escalation', work: decision.work, principal: null, state: 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    return;
+  }
+  const input = decision.action === 'close' ? { kind: 'duplicate', ref: entry.fix ?? entry.diagnosis!.covering! } : {};
+  const reason = decision.action === 'release'
+    ? `Release ${target.key}, the root-cause fix the diagnostician found for ${entry.subject}, at priority ${target.priority}; requested again against revision ${target.revision} because decision ${decision.id} was settled ${current.state}. Cause: ${entry.diagnosis?.cause ?? ''}`
+    : `${entry.work} is answered by ${input.ref}, so it is closed as its duplicate; requested again against revision ${target.revision} because decision ${decision.id} was settled ${current.state}`;
+  await note(entry, 'done', `${why}; requesting it again against revision ${target.revision} (request ${spent + 1} of ${maxDecisionRequests})`);
+  return request(cycle, diagnostician, entry, target, decision.action, input, reason, note);
+}
+
 /** The independent approver for the entry's decision; a launch that fails is tried again next cycle while the decision stands. */
 async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, note: Note) {
   const decision = entry.decision!;

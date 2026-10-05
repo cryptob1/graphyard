@@ -135,7 +135,7 @@ async function launchedMaster() {
   await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, reviewerVerify);
   await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
   const tokenFile = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
-  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-claude-1', kind: 'claude', credentialFile: await tokenFile('producer') }, producerVerify);
+  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-claude-1', kind: 'claude', credentialFile: await tokenFile('producer'), concurrency: 1 }, producerVerify);
   const config = await loadMasterConfig(root);
   const [workerToken, approverToken, operatorToken] = await Promise.all([tokenFile('worker'), tokenFile('approver'), tokenFile('operator')]);
   const enriched = {
