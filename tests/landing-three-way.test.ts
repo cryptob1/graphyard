@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { GitHub, CHECK_NAME } from '../src/github.js';
+import { GitHub, CHECK_NAME, comparePath } from '../src/github.js';
 import { evaluate, Refusal, type Work, type Observation } from '../src/model.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -58,7 +58,7 @@ test('unit:landing-check-three-way — base-only edits survive, but a candidate 
     assert.equal(f.git('rev-parse', `${merged}:A`), f.blob(f.base, 'A'));
     assert.deepEqual(regressionRefusals(f.work, seen, []), []);
     assert.deepEqual(seen.landing!.files!.map(file => file.path), ['B']);
-    assert.ok(f.calls.includes(`/compare/${f.root}...${f.head()}`));
+    assert.ok(f.calls.includes(comparePath(f.root, f.head())));
     // Also exercise the predicted-base path independently of the live-base shortcut.
     const predicted = { ...f.work, queue: { sequence: 1, speculation: { tip: f.head(), base: f.base, baseTree: 'different', predecessors: ['GY-A'], policyRevision: 1 } } } as Work;
     const landing = await (f.github as any).landingCheck(predicted, f.head(), [], f.base, f.base, { tip: f.root, tree: 'root-tree' }, undefined, { remaining: 200 });

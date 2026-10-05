@@ -7,18 +7,18 @@ import { approvalConflict, approveCapability, assertDecisionAuthority, decisionA
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { onlyActionsMovedSince, sameBesideBookkeeping } from '../engine.js';
-import { refuseDecision, withdrawDecision } from './decision-refusal.js';
+import { refuseDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { closeWork } from './close.js';
-import { answerWith, applyLaneRework, laneApprover, resumeLaneReworks } from './lane-rework.js';
+import { answerWith, applyLaneRework, laneApprover, resumeLaneReworks, settleApprovedDecisions, supersedeMoved, withdrawOrSettle } from './lane-rework.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
 export { readDecisions, type DecisionRecord } from './decision-ledger.js';
-// The risk lane's own application of a rework lives in lane-rework.ts (GY-1110).
-export { laneApprover, resumeLaneReworks } from './lane-rework.js';
+// The risk lane's own application of a rework (GY-1110), and the settlement of any approval left unapplied (GY-1297), live in lane-rework.ts.
+export { laneApprover, resumeLaneReworks, settleApprovedDecisions } from './lane-rework.js';
 export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')} FOR UPDATE`, [id])).rows[0]?.document;
@@ -56,7 +56,7 @@ async function requesterAuthority(services: Services, db: Db, decision: Pick<Dec
  * caller's own request back instead of creating one.
  */
 export async function requestDecision(services: Services, caller: Principal, id: string, body: unknown, key: string) {
-  if ((body as any)?.action === 'withdraw') return withdrawDecision(services, caller, id, body, key);
+  if ((body as any)?.action === 'withdraw') return withdrawOrSettle(services, caller, id, body, key);
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
@@ -64,9 +64,13 @@ export async function requestDecision(services: Services, caller: Principal, id:
   // the item, whatever its key (GY-1110). One that applied answers a new rework request in its
   // place; one that failed no longer stands, so the new request is recorded and supersedes it.
   // Only a caller with authority for the request it makes triggers the resumption (GY-1244).
+  // Any other approved decision left unapplied is settled first (GY-1297): superseded once its
+  // situation no longer holds, or, past the grace, resumed to applied or failed.
   await callerMayRequest(services, caller, id, data.action, input, key, fingerprint);
-  const resumed = await resumeLaneReworks(services, id);
-  const answered = data.action === 'rework' ? resumed.find(decision => decision.state === 'applied') : undefined;
+  const settled = await settleApprovedDecisions(services, caller, id);
+  const resumed = [...settled, ...await resumeLaneReworks(services, id)];
+  const answered = resumed.find(decision => decision.state === 'applied' && decision.action === data.action
+    && (data.action === 'rework' || JSON.stringify(canonical(decision.input)) === JSON.stringify(canonical(input))));
   if (answered) return answerWith(services, caller, key, fingerprint, answered);
   // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): once recorded,
   // it is applied at once with the lane as its ground. A replayed request whose application was
@@ -97,7 +101,8 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
-    const history = await readDecisions(db, work!);
+    // An approved decision the item has moved past never blocks this request (GY-1297): it settles superseded here, in this transaction.
+    const history = await supersedeMoved(db, work!, (await readDecisions(db, work!)).filter(decision => decision.state === 'approved'), actor).then(() => readDecisions(db, work!));
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
     // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
     const situation = decisionSituation(data.action, work!);

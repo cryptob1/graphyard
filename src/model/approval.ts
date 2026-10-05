@@ -79,7 +79,7 @@ export const decisionRefusalSchema = z.object({ action: z.literal('refuse'), dec
  * refused, why and when. It is distinct from `refusals`, the conflicted approvals the server
  * turned away, and from a decision still `requested` because no session ever judged it.
  */
-export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused';
+export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded';
 export interface Decision {
   id: string; workId: string; action: DecisionAction; input: any; reason: string;
   requestedBy: string; requestedAt: string; state: DecisionState;
@@ -95,6 +95,7 @@ export interface Decision {
   concurrences: { requester: string; reason: string; precedent: string[]; context: string | null; at: string }[];
   /** For a rework or recover request, the candidate it was requested against (GY-229); null otherwise and for requests recorded before it was kept. */
   situation?: DecisionSituation | null;
+  superseded?: { bound: DecisionSituation; current: DecisionSituation } | null; // GY-1297: the situation it was bound to, and the item's
 }
 /**
  * What a rework or recover request judged: the item's candidate head and the base it was built
@@ -120,6 +121,15 @@ const sameSituation = (recorded: DecisionSituation | null | undefined, current: 
  */
 const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
   !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
+// GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
+// and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
+export const approvalApplyGraceMs = 60_000, approvedDecisionBoundMs = 300_000;
+export function supersededSituation(decision: { action: string; state: string; situation?: DecisionSituation | null }, work: Pick<Work, 'candidate'>): { bound: DecisionSituation; current: DecisionSituation } | null {
+  const bound = decision.state === 'approved' ? decision.situation : null, current = bound ? decisionSituation(decision.action, work) : null;
+  return !bound || !current || sameSituation(bound, current) ? null : { bound: { sha: bound.sha ?? null, baseSha: bound.baseSha ?? null }, current };
+}
+export const stalledApproval = (decision: { state: string; approvedAt?: string | null }, now: number) => decision.state === 'approved' && !!decision.approvedAt && now - Date.parse(decision.approvedAt) >= approvalApplyGraceMs;
+export const situationLabel = (situation: DecisionSituation) => situation.sha ? `head ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : 'no candidate';
 export interface DecisionEvent { kind: string; actor: string; at: string; payload: any }
 
 /** Rebuild every decision on an item from its append-only ledger entries, oldest first. */
@@ -142,6 +152,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (event.kind === 'decision.approved') Object.assign(decision, { state: 'approved', approvedBy: event.actor, approvedAt: event.at, approvalReason: details.reason });
     if (event.kind === 'decision.applied') Object.assign(decision, { state: 'applied', outcome: details.outcome ?? null });
     if (event.kind === 'decision.failed') Object.assign(decision, { state: 'failed', outcome: details.error ?? null });
+    if (event.kind === 'decision.superseded') Object.assign(decision, { state: 'superseded', outcome: details.reason ?? null, superseded: { bound: details.bound ?? null, current: details.current ?? null } });
   }
   return [...decisions.values()];
 }
