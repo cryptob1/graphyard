@@ -1989,3 +1989,116 @@ export async function reworkRoundsWithOwnCauses<T extends Record<string, any>>(r
   if (cache) await writeReworkSplitCache(cache.root, { at: ownChange.at, items, tip: population.tip, split: ownChange }).catch(() => {});
   return { ...rounds, ownChange } as T;
 }
+
+/**
+ * Delivery speed on the GitHub path (GY-1232): ready→merged into main, and merged→promoted to
+ * production. Read from the work documents alone, over the items merged into main in each window:
+ * the merge is GitHub's own merge instant on the repository clock, the promotion is the first
+ * release observed serving the merge commit in the production environment (`releaseObservedAt`),
+ * and ready is the item's earliest recorded `ready` event, or its creation for an item created
+ * ready. An item merged but not yet promoted is pending: counted, never a duration.
+ */
+export const deliverySpeedWindows = [{ id: '24h', ms: day }, { id: '7d', ms: 7 * day }] as const;
+export type DeliverySpeedWindow = typeof deliverySpeedWindows[number]['id'];
+export interface DeliverySpeedTargets { readyToMergedP90Ms: number; mergedToProductionP90Ms: number }
+export const defaultDeliverySpeedTargets: DeliverySpeedTargets = { readyToMergedP90Ms: 2 * 3_600_000, mergedToProductionP90Ms: 8 * 3_600_000 };
+/** The window a breach is judged over: a week's sample, so one slow item in a quiet day is not an alarm. */
+export const deliverySpeedJudgedWindow: DeliverySpeedWindow = '7d';
+export interface DeliverySpeedSample { key: string; ms: number; pending?: boolean }
+export interface DeliverySpeedFigure { count: number; p50Ms: number | null; p90Ms: number | null; pending?: number; slowest: DeliverySpeedSample[] }
+export interface DeliverySpeed {
+  readyToMerged: Record<DeliverySpeedWindow, DeliverySpeedFigure>;
+  mergedToProduction: Record<DeliverySpeedWindow, DeliverySpeedFigure>;
+  targets: DeliverySpeedTargets; productionEnvironment: string; at: string;
+}
+const slowestShown = 3;
+const figure = (samples: DeliverySpeedSample[], pending?: DeliverySpeedSample[]): DeliverySpeedFigure => {
+  const spread = distribution(samples.map(sample => sample.ms));
+  const slowest = [...samples, ...(pending ?? [])].sort((a, b) => b.ms - a.ms || a.key.localeCompare(b.key)).slice(0, slowestShown);
+  return { count: spread.n, p50Ms: spread.medianMs, p90Ms: spread.p90Ms, ...(pending ? { pending: pending.length } : {}), slowest };
+};
+export function deliverySpeed(items: readonly Work[], options: { now: number; readyAt?: ReadonlyMap<string, string>; targets?: Partial<DeliverySpeedTargets>; productionEnvironment?: string }): DeliverySpeed {
+  const productionEnvironment = options.productionEnvironment ?? defaultProductionEnvironment, now = options.now;
+  const merged = items.flatMap(work => {
+    if (work.stage !== 'done' || work.closure || !work.delivery) return [];
+    const mergedAt = time(work.delivery.mergedAtRepository ?? work.delivery.mergedAt);
+    if (mergedAt === null || mergedAt > now) return [];
+    const readyAt = time(options.readyAt?.get(work.id) ?? work.createdAt), promotedAt = time(releaseObservedAt(work, productionEnvironment));
+    return [{ key: work.key, mergedAt, readyAt, promotedAt: promotedAt !== null && promotedAt <= now ? promotedAt : null }];
+  });
+  const readyToMerged = {} as DeliverySpeed['readyToMerged'], mergedToProduction = {} as DeliverySpeed['mergedToProduction'];
+  for (const window of deliverySpeedWindows) {
+    const inWindow = merged.filter(entry => entry.mergedAt > now - window.ms);
+    readyToMerged[window.id] = figure(inWindow.flatMap(entry => entry.readyAt === null ? [] : [{ key: entry.key, ms: Math.max(0, entry.mergedAt - entry.readyAt) }]));
+    mergedToProduction[window.id] = figure(inWindow.flatMap(entry => entry.promotedAt === null ? [] : [{ key: entry.key, ms: Math.max(0, entry.promotedAt - entry.mergedAt) }]),
+      inWindow.filter(entry => entry.promotedAt === null).map(entry => ({ key: entry.key, ms: now - entry.mergedAt, pending: true })));
+  }
+  return { readyToMerged, mergedToProduction, targets: { ...defaultDeliverySpeedTargets, ...options.targets }, productionEnvironment, at: new Date(now).toISOString() };
+}
+const hours = (ms: number) => `${Math.round(ms / 360_000) / 10}h`;
+/**
+ * One line per measure whose p90 over the judged window exceeds its target, naming the slowest
+ * items; a pending item already older than the merged→production target is among them, since it
+ * will land above the target whenever it is promoted.
+ */
+export function deliverySpeedBreaches(speed: DeliverySpeed): { measure: 'readyToMerged' | 'mergedToProduction'; text: string }[] {
+  const measures = [
+    { measure: 'readyToMerged' as const, label: 'Ready→merged into main', target: speed.targets.readyToMergedP90Ms },
+    { measure: 'mergedToProduction' as const, label: `Merged→promoted to ${speed.productionEnvironment}`, target: speed.targets.mergedToProductionP90Ms },
+  ];
+  return measures.flatMap(({ measure, label, target }) => {
+    const value = speed[measure][deliverySpeedJudgedWindow];
+    if (value.p90Ms === null || value.p90Ms <= target) return [];
+    const slowest = value.slowest.map(sample => `${sample.key} ${hours(sample.ms)}${sample.pending ? ' (pending)' : ''}`).join(', ');
+    return [{ measure, text: `${label} p90 is ${hours(value.p90Ms)} over 7 days (${value.count} item${value.count === 1 ? '' : 's'}), above the ${hours(target)} target; slowest: ${slowest}` }];
+  });
+}
+/**
+ * Earliest `ready` event per work item from a bounded paged read since `since`; items created
+ * ready hold no such event and are measured from their creation instead.
+ */
+export async function readReadyInstants(readEvents: (path: string) => Promise<any>, since: string, pageBound = reworkEventPages): Promise<{ readyAt: Map<string, string>; complete: boolean }> {
+  const readyAt = new Map<string, string>();
+  let cursor: string | null = null, complete = false, pages = 0;
+  while (pages < pageBound) {
+    const params = new URLSearchParams({ kind: 'ready', order: 'asc', payload: 'none', view: 'history', since, limit: String(eventHistoryLimits.page) });
+    if (cursor) params.set('cursor', cursor);
+    const history = await readEvents(`events?${params}`);
+    for (const event of history.events ?? []) {
+      const at = event.created_at instanceof Date ? event.created_at.toISOString() : String(event.created_at ?? '');
+      if (event.work_id && time(at) !== null && !readyAt.has(event.work_id)) readyAt.set(event.work_id, at);
+    }
+    pages++;
+    complete = !history.page?.hasMore;
+    cursor = complete ? null : history.page?.nextCursor ?? null;
+    if (!cursor) break;
+  }
+  return { readyAt, complete };
+}
+/**
+ * The speed measures `master status` adds beside the snapshot's own: rework rounds split by cause
+ * (GY-643), written onto `speed`, and delivery speed on the GitHub path (GY-1232) with one attention
+ * line per breached target. Ready instants come from a bounded read of `ready` events since the
+ * oldest creation the 7-day window can hold; a failed read marks its section and measures from creation.
+ */
+export async function speedSections(speed: Record<string, any>, masterApi: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string },
+  options: { root: string; targets?: Partial<DeliverySpeedTargets>; sections: { mark(section: string, route: string | null, error: unknown): void } }) {
+  const { sections } = options, now = Date.parse(snapshot.now) || Date.now();
+  try { speed.reworkRounds = await reworkRoundsWithOwnCauses(speed.reworkRounds, masterApi, snapshot, 100, { root: options.root }); }
+  catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
+  const window = merged7d(snapshot.work, now), since = window.reduce((oldest, work) => Math.min(oldest, time(work.createdAt) ?? oldest), now);
+  const read = window.length ? await readReadyInstants(masterApi, new Date(since).toISOString())
+    .catch(error => { sections.mark('delivery speed', 'GET /api/events?kind=ready', error); return { readyAt: new Map<string, string>(), complete: false }; }) : { readyAt: new Map<string, string>(), complete: true };
+  let productionEnvironment: string | undefined;
+  try { productionEnvironment = productionEnvironmentFromEnv(); } catch { /* an invalid name falls back to the default */ }
+  const report = { ...deliverySpeed(snapshot.work, { now, readyAt: read.readyAt, targets: options.targets, productionEnvironment }), readyEventsComplete: read.complete };
+  const attention = deliverySpeedBreaches(report).map(breach => ({ subject: 'delivery speed', text: breach.text,
+    // agentOwner('master', …)'s shape, built here: src/master/attention.ts imports Node-only modules this browser-bundled file must not.
+    role: 'master' as const, approvedBy: null, human: false, humanOnly: null,
+    next: 'Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json' }));
+  return { report, attention };
+}
+const merged7d = (items: readonly Work[], now: number) => items.filter(work => {
+  const mergedAt = work.stage === 'done' && !work.closure && work.delivery ? time(work.delivery.mergedAtRepository ?? work.delivery.mergedAt) : null;
+  return mergedAt !== null && mergedAt <= now && mergedAt > now - 7 * day;
+});
