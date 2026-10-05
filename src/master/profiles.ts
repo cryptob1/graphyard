@@ -345,7 +345,9 @@ export const masterConfigSchema = z.object({
   // The loop publishes these to the control plane on every change.
   // `optimistic` and `optimisticExclude` are retired (GY-1233): GitHub delivery merges every
   // passing candidate, so optimistic merge and its main guard are gone. Both keys are still
-  // accepted so an existing master.json loads, and neither is read.
+  // accepted so an existing master.json loads, but parsing drops them (GY-1264): nothing reads
+  // them, and every writer re-parses before it saves, so the next master init or profile change
+  // removes them from the file instead of leaving inert settings an operator would trust.
   // `ciConcurrency` (GY-501): the repository's concurrent Actions job limit as the operator declares
   // it (GitHub does not report it); master protection compares it with parallelTips × jobs per run.
   mergeQueue: z.object({
@@ -355,16 +357,16 @@ export const masterConfigSchema = z.object({
     ciConcurrency: z.number().int().min(1).max(10000).optional(),
     rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
     optimisticExclude: z.unknown().optional(),
-  }).strict().optional(),
+  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, ...kept }) => kept).optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
-  // The master's own operator-agent identity, and the separate approver identity whose session
-  // approves the master's two-party decisions (master autonomy). Paths only, never tokens.
+  // The master's operator-agent identity and the approver identity for its two-party decisions. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   approver: agentIdentitySchema.optional(),
-  // The system invariants' thresholds (GY-404, src/model/invariants.ts): every field optional,
-  // each defaulting to the bound the loop checks every cycle.
+  // The system invariants' thresholds (GY-404, src/model/invariants.ts), each defaulting to the loop's bound.
   invariants: invariantThresholdsSchema.optional(),
+  // Delivery-speed p90 targets master status judges (GY-1232); unset keeps 2h ready→merged, 8h merged→production.
+  deliverySpeed: z.object({ readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(), mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional() }).strict().optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /**

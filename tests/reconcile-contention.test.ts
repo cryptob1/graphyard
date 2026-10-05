@@ -76,8 +76,9 @@ test('unit:reconcile-tick-bounded-under-contention — a tick over 100 live item
   const ticks = engine.reconcileTicks.slice(before);
   assert.ok(ticks.length >= 1, 'the tick was recorded');
   assert.ok(elapsedMs < 30_000, `the tick took ${Math.round(elapsedMs)} ms under contention, over the 30 s bound`);
+  // A tick evaluates what moved (GY-1124); under raw moves other items read, that is the whole live fleet.
+  assert.ok(ticks.some(tick => tick.candidates >= 100), `a tick ran over the whole live fleet (${ticks.map(tick => tick.candidates)})`);
   for (const tick of ticks) {
-    assert.ok(tick.candidates >= 100, `the tick ran over the whole live fleet (${tick.candidates})`);
     assert.ok(tick.ms < 30_000, `a tick took ${tick.ms} ms, over the 30 s bound`);
     assert.equal(tick.evaluated + tick.deferred, tick.candidates, `every candidate was evaluated or deferred (${JSON.stringify(tick)})`);
     assert.ok(tick.maxAttempts <= 3, `a batch ran ${tick.maxAttempts} attempts: one run and at most two reruns`);
