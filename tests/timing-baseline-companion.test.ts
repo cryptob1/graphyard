@@ -8,7 +8,8 @@ import { applyScopeDecision } from '../src/engine.js';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, Refusal, type Work, type Observation } from '../src/model.js';
 import { decideScopeRequest, redecidableScopeRefusal, scopeRequestOutcome } from '../src/model/scope.js';
-import { timingBaselineCompanion, timingBaselinePath } from '../src/model/timing-companion.js';
+import { impliedScopeRequests } from '../src/model/work.js';
+import { addsTestFile, timingBaselineCompanion, timingBaselinePath } from '../src/model/timing-companion.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { localScopeFindings } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -120,8 +121,26 @@ test('unit:timing-baseline-scope-request-granted — scope-request for the basel
   assert.match(planned.reason, /records the timing line of a test file this item adds or changes/);
   const observed = decideScopeRequest({ plannedFiles: ['src/thing.ts'], criteria, observation: { files: ['src/thing.ts', 'tests/new-thing.test.ts'] } }, request);
   assert.equal(observed.state, 'approved', observed.reason);
-  const directory = decideScopeRequest({ plannedFiles: ['src/thing.ts', 'tests/thing/'], criteria }, request);
-  assert.equal(directory.state, 'approved', directory.reason);
+  // Top-level tests/ directory scope marks addsTestFile true; nested test directory scopes can never contain a timed test file (top-level tests/*.test.ts only).
+  assert.equal(addsTestFile({ plannedFiles: ['src/thing.ts', 'tests/'] }), true);
+  assert.equal(addsTestFile({ plannedFiles: ['src/thing.ts', 'tests/*'] }), true);
+  assert.equal(addsTestFile({ plannedFiles: ['src/thing.ts', 'tests/thing/'] }), false);
+  assert.equal(addsTestFile({ plannedFiles: ['src/thing.ts', 'tests/helpers/'] }), false);
+  const nested = decideScopeRequest({ plannedFiles: ['src/thing.ts', 'tests/thing/'], criteria }, request);
+  assert.equal(nested.state, 'refused');
+  const helpers = decideScopeRequest({ plannedFiles: ['src/thing.ts', 'tests/helpers/'], criteria }, request);
+  assert.equal(helpers.state, 'refused');
+  // GY-1187: the ask's or plan's test file grounds the baseline only when the baseline times it —
+  // a nested, browser or .tsx test has no line the merge gate accepts, so nothing is granted for it.
+  for (const tested of ['tests/unit/foo.test.ts', 'browser-tests/login.spec.ts', 'tests/foo.test.tsx'])
+    for (const [plan, ask] of [[[tested], [timingBaselinePath]], [[], [tested, timingBaselinePath]]] as const) {
+      const verdict = decideScopeRequest({ plannedFiles: ['src/thing.ts', ...plan], criteria }, { paths: [...ask] });
+      assert.equal(verdict.state, 'refused', `${tested}: ${verdict.reason}`);
+      assert.equal(impliedScopeRequests([{ key: 'GY-1', stage: 'build', criteria, plannedFiles: ['src/thing.ts', ...plan], scopeRequest: { epoch: 1, paths: [timingBaselinePath], reason: 'r', requestedBy: 'worker', at: '2026-10-04T00:00:00Z' } }] as never).count, 0, tested);
+    }
+  const asked = decideScopeRequest({ plannedFiles: ['src/thing.ts'], criteria: [{ ...criteria[0], proofs: ['unit:new-thing'] }] }, { paths: ['tests/new-thing.test.ts', timingBaselinePath] });
+  assert.equal(asked.state, 'approved', asked.reason);
+  assert.match(asked.reason, /test-duration baseline a change to tests\/new-thing\.test\.ts must keep covering/);
   // No test file behind it: still the operator's call.
   const untested = decideScopeRequest({ plannedFiles: ['src/thing.ts'], criteria }, request);
   assert.equal(untested.state, 'refused');

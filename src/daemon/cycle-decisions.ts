@@ -1,7 +1,6 @@
 // Concern: cycle step 4c — request and supervise the routine decisions and their approver sessions.
 import { decisionSituation, uncitedRefusals } from '../model/approval.js';
 import type { Work } from '../model.js';
-import { detectRuntimeExhaustion } from '../master/environments.js';
 import { approverRuntime } from '../master/autonomy.js';
 import { canonicalJson } from '../onboarding.js';
 import { type ContainmentAssessment, type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName, approvedMerge, decisionInput } from '../master.js';
@@ -9,23 +8,23 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, type ApprovalStep, approverLaunchKey, attestDecisions, approverPrefixes, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, recordWatchEnded, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { decisionReads } from './decision-reads.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
-import { sessionName } from '../session-name.js';
 import type { Cycle } from './cycle.js';
+import { baseRefreshConflict } from '../merge-queue.js';
+import { docsSyncRoute } from './docs-sync-route.js';
 import { wakeObservationJob } from './cycle-delivery.js';
+import { sessionExhaustion } from './cycle-sessions.js';
 
-/** The launcher key of the approver launch for a decision (GY-616). */
-const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
-/** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
-export const handWatchPrefix = 'hand:';
-/** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
-const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+/** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
+export { handWatchPrefix };
 
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
-  const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
+  const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
+  const effects = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals));
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
   //     used to wait for a master session to notice. The loop requests the decision with the
@@ -73,15 +72,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       await note(key, item, 'close', 'done', `Closed approver session ${watch.agentName} (${session.agent_status ?? 'unknown'}): ${why}`); return true;
     }
     catch (error) { inventory = null; watch.closeAttempts += 1; await note(key, item, 'close', 'failed', `Could not close approver session ${watch.agentName}: ${message(error)}`); return false; }
-  };
-  /**
-   * Keep how a watch's session ended, named by its launch so two sessions that ended alike under
-   * the same name stay two reasons (GY-551). The same step taken again on the same session — a
-   * close or re-request retried next cycle — records nothing new.
-   */
-  const recordEnded = (watch: ApprovalWatch, detail: string) => {
-    const entry = `${watch.agentName ? `session ${watch.launches}: ` : ''}${detail}`.slice(0, 300);
-    if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
   };
   const approverCapacity = capacities.find(capacity => capacity.role === 'approver');
   const capacityWait = () => `every approver account is spent, so no approver is launched before ${approverCapacity?.retryAt ?? 'an account reports quota again'}`;
@@ -220,10 +210,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const approverExhausted = async (item: Work, watch: ApprovalWatch) => {
     if (!effects.sessionOutput || !effects.reportCapacity || !watch.agentName) return false;
     const agent = (await sessions()).agents.find(candidate => candidate.name === watch.agentName);
-    if (!agent || !stoppedStates.includes(agent.agent_status ?? '')) return false;
+    if (!agent) return false;
     // Judged against the approver's own runtime's provider messages: free prose about a quota is
-    // not a provider limit notice, whatever it mentions (GY-421).
-    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? detectRuntimeExhaustion(output, watch.runtime ?? approverRuntime(config), clock) : null, () => null);
+    // not a provider limit notice, whatever it mentions (GY-421). A working approver counts only
+    // when its runtime is retrying on the notice (GY-973).
+    const signal = await Promise.resolve(effects.sessionOutput(agent)).then(output => output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), watch.runtime ?? approverRuntime(config), clock) : null, () => null);
     if (!signal) return false;
     const session = `${watch.decision}:${watch.launchedAt ?? watch.launches}`;
     const key = failoverKey('approver', item, session), previous = state.actions[key];
@@ -251,7 +242,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const ended = `approver session ${watch.agentName} exhausted ${spentOn} mid-session (${signal.reason}; ${resets})`;
       // The registry slot goes first (closeApprover ends it): at a role concurrency of 1 the replacement is refused while it is held.
       if (!await closeApprover(item, watch, ended)) throw new Error(`the session could not be closed, so its name or registry slot still refuses a replacement`);
-      recordEnded(watch, ended);
+      recordWatchEnded(watch, ended);
       Object.assign(watch, { launches: Math.max(0, watch.launches - 1), agentName: null, pane: null });
       const next = await launch(item, watch, false);
       performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `${ended} judging ${watch.action} decision ${watch.decision}; ${next}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
@@ -289,7 +280,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       catch (error) { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`); }
       return 'done';
     }
-    recordEnded(watch, step.detail);
+    recordWatchEnded(watch, step.detail);
     if (step.step === 'rerequest') return 'rerequest';
     if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return 'done'; }
     try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
@@ -550,6 +541,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
     return judged?.state === 'done' && !/^Widened /.test(judged.detail);
   };
+  // GY-566: a docs-only conflict routes to a docs-sync session instead of a rework decision. The
+  // route — classification, session watch, hotspot log — lives in docs-sync-route.ts; the step
+  // runs its sweep here and consults `holds` where a conflict rework decision would be requested.
+  const docsSync = docsSyncRoute({ config, state, effects, snapshot, sessions, note, inventorySpent: () => { inventory = null; }, stamp, clock });
+  await docsSync.sweep();
   // GY-849: when capacity frees, the capacity-refused decisions are relaunched oldest first. The
   // items a waiting decision belongs to move to the front of the step in age order, and their
   // relaunches enter the launcher one at a time (`capacityRelaunchInFlight`), so the oldest waiting
@@ -593,6 +589,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       return;
     }
     const key = decisionKey(item, decision);
+    // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566).
+    if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
     needed.add(key);
     const watch = state.approvals[key];
     // Rework waits for an observation that still describes the item (GY-144). A request already
@@ -603,6 +601,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);
       // The refusal wakes the item's observation job at once (GY-710); rework is decided once it lands.
+      // Its one-per-item wake:observation entry stays for guarded merge; pruneDaemonState bounds it.
       await wakeObservationJob(cycle, item, 'rework');
       return;
     }

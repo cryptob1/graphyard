@@ -17,7 +17,7 @@ Tag `vX.Y.Z` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z`. `/healthz` reports ve
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string |
 | `HOST` / `PORT` | `0.0.0.0` / `4310` |
-| `GRAPHYARD_PRINCIPALS` | JSON array of `role`+`sessionKind` principals; the operator is declared `human`, rotation refuses the rest |
+| `GRAPHYARD_PRINCIPALS` | JSON array of `role`+`sessionKind` principals; the operator is declared `human`, rotation refuses the rest; an AI `admin` judging retro artefacts must declare `sessionKind: "ai"` (undeclared is refused) |
 | `GITHUB_REPOSITORY` / `GITHUB_BASE_BRANCH` | `owner/repo` / `main` |
 | `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_PRIVATE_KEY` (or `_FILE`), `GITHUB_WEBHOOK_SECRET` | The control-plane App |
 | `GITHUB_CI_APP_IDS` | Trusted CI App IDs |
@@ -45,7 +45,7 @@ Store its token as `GRAPHYARD_CI_PRODUCER_TOKEN`, with `GRAPHYARD_URL`, on the `
 
 ### Production deployment observation
 
-When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once, recorded (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. One unserved after five minutes is a `delivery.deployment-incident`; `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+When the serving commit (`GRAPHYARD_BUILD_SHA`) changes, undeployed merges are compared once, recorded (`delivery.deployment-contained`, `production.deployment-pending`); a same-commit restart compares nothing. When `release/production` exists (or the branch `GRAPHYARD_PRODUCTION_BRANCH` names), production is measured against it, not main: a merge no promoted release holds is pipeline lag (pending, no incident, no attention; `master status` says how far main is ahead of the release), and only a promoted release unserved after five minutes raises `release/production is N commits ahead of production` and an incident per delivery it holds. Without that branch, one merge unserved after five minutes is a `delivery.deployment-incident` and `master status` shows `main is N commits ahead of production`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 

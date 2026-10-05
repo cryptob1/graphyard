@@ -103,17 +103,7 @@ export const coordinationTrimSql = (kept: string, keep: number) => `jsonb_build_
   'actionHistory', GREATEST(0, ${length("d.document->'actionQueue'->'history'")} - ${keep}),
   'sessions', ${length("d.document->'sessions'")} - ${length(`${kept}->'sessions'`)})`;
 
-/**
- * The items a reconciliation pass can change (GY-727): everything that is not a settled delivery.
- * `settled` is the work index's own flag, kept current beside every write by the same trigger, so
- * the filter is an index lookup that never reads a document: the pass reads only these documents,
- * once, and takes a settled delivery's summary from the index instead of its document.
- */
-export const reconcileCandidatesSql = `SELECT w.id, w.number, w.document FROM work_items w
-  WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) ORDER BY w.number`;
-/** The settled deliveries' summaries: the rest of the fleet a batch evaluates its items against. */
-export const reconcileSettledSql = 'SELECT i.id, i.number, i.summary FROM work_index i WHERE i.settled ORDER BY i.number';
-/** Items a pass already read that moved since, read again: the only documents a pass reads twice. */
+/** Items a pass reads whole after its opening stand-ins (GY-727, GY-1027): each batch's own items, and those that moved since. */
 export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS version, w.document FROM work_items w WHERE w.id = ANY($1::uuid[])';
 /**
  * The versions of the rows a pass can be affected by, never their documents: the pass's own
@@ -127,8 +117,18 @@ export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM w
   JOIN (SELECT unnest($1::uuid[]) AS id UNION SELECT i.id FROM work_index i WHERE NOT i.settled) live ON live.id = w.id`;
 /**
  * One batch item's row lock, taken as the batch reaches it (GY-727), with the version of the row
- * it locked: after waiting for a writer, the version is the one that writer committed, never the
- * statement's older snapshot. Locked row by row, a batch holds only its own items, so a mutation
- * on any other item commits while the batch holds its transaction.
+ * it locked. Locked row by row, a batch holds only its own items, so a mutation on any other item
+ * commits while the batch holds its transaction. A row a writer holds is skipped, never waited on
+ * (GY-1115): a batch waiting on a row held its other rows and its connection behind that writer,
+ * and the writer, holding the coordination lock, made the batch's commit fail anyway. No row means
+ * the item is locked or gone; the pass tries it once more at its end.
  */
-export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE';
+export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE SKIP LOCKED';
+/**
+ * Whether a session holding the coordination lock (`$1`, a single-key advisory lock) waits on this
+ * session (GY-1115): a reconciliation batch queuing for that lock then would deadlock with it.
+ */
+export const reconcileCommitBlockingSql = `SELECT EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND l.granted
+  AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND l.classid = ($1::bigint >> 32)::oid AND l.objid = ($1::bigint & 4294967295)::oid AND l.objsubid = 1
+  AND pg_backend_pid() = ANY(pg_blocking_pids(l.pid))) AS blocking`;

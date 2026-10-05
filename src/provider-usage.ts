@@ -324,11 +324,12 @@ export function clearPlanUsageCache(): void {
 
 export function detectPlanKind(text: string, runtime = '', model = ''): ProviderPlanKind {
   const lower = `${text} ${runtime} ${model}`.toLowerCase();
-  if (lower.includes('z.ai') || lower.includes('zai') || lower.includes('glm') || /\bpi\b/.test(lower) || lower.includes('opencode')) return 'zai';
+  if (lower.includes('claude') || lower.includes('anthropic')) return 'claude';
   if (lower.includes('codex') || lower.includes('openai') || lower.includes('chatgpt')) return 'codex';
   if (lower.includes('cursor')) return 'cursor';
   if (lower.includes('muse')) return 'muse';
   if (lower.includes('antigravity') || lower.includes('agy')) return 'antigravity';
+  if (lower.includes('z.ai') || lower.includes('zai') || lower.includes('glm') || /\bpi\b/.test(lower) || lower.includes('opencode')) return 'zai';
   return 'claude';
 }
 
@@ -358,14 +359,18 @@ export function deriveAccountPlan(
     }
   }
 
-  // 3. pi-X and opencode-X sharing Z.AI key by suffix
+  // 3. pi-X and opencode-X sharing verified Z.AI credential identity
+  const hasZaiCredential = (acc: typeof account) =>
+    acc.credential?.key?.variable === 'ZAI_API_KEY' || (!!acc.credential?.key?.file && /zai/i.test(acc.credential.key.file));
   const match = /^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(account.name);
-  if (match) {
+  // A Z.AI-credentialed pi-X/opencode-X always names plan zai-X, alone or beside others, so its plan id never depends on
+  // the registry's size; only a sibling with its own Z.AI credential joins it (GY-1158). The credential read is the
+  // registry's key alone, never the login a host's auth.json holds: the control plane derives plans without the
+  // account's host, so an auth.json-only login would give that host and the control plane two plan ids for one
+  // account. Such an account shares a budget by declaring it, `--plan zai-X` (GY-1210).
+  if (match && hasZaiCredential(account)) {
     const suffix = match[1];
-    const sharesSuffix = allAccounts.find(o => o.name !== account.name && new RegExp(`^(?:pi|opencode)[-_]${suffix}$`, 'i').test(o.name));
-    if (sharesSuffix || account.credential?.key?.variable === 'ZAI_API_KEY' || account.runtime === 'pi' || account.runtime === 'opencode') {
-      return { planId: `zai-${suffix.toLowerCase()}`, planName: `Z.AI (${suffix})`, planKind: 'zai' };
-    }
+    return { planId: `zai-${suffix.toLowerCase()}`, planName: `Z.AI (${suffix})`, planKind: 'zai' };
   }
 
   // 4. Default by runtime/provider

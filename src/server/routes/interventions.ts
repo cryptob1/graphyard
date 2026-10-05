@@ -97,6 +97,6 @@ export const interventionRoutes = defineRoutes('interventions', [
   },
   {
     method: 'POST', path: /^\/api\/retro\/([0-9a-f-]{36})\/(approve|refuse)$/,
-    handle: async (context, [id, verdict]) => judgeRetroArtefact(context.services.engine.store, context.actor, context.services.repository, id, verdict as 'approve' | 'refuse', retroJudgementSchema.parse(await parseJson(context)).reason),
+    handle: async (context, [id, verdict]) => judgeRetroArtefact(context.services.engine.store, context.actor, context.services.repository, id, verdict as 'approve' | 'refuse', retroJudgementSchema.parse(await parseJson(context)).reason, context.services.engine.operatorAuthorizer),
   },
 ]);
