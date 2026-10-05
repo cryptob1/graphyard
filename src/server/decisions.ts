@@ -6,6 +6,7 @@ import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionSituation, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
+import { onlyActionsMovedSince, sameBesideBookkeeping } from '../engine.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
@@ -299,6 +300,19 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // accepted at once.
       if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin)
         && precondition?.startsWith('Task revision changed')) precondition = null;
+      // GY-1296: a release, an unblock or a diagnostician's closure is pinned to the item's whole
+      // revision, and the loop that requested it moves that revision itself — the approver session
+      // it launches is recorded on the very item, and each report of that session is saved there too. A revision that moved
+      // only in that bookkeeping (sessions, gates, next action, action queue: sameBesideBookkeeping)
+      // leaves what the requester judged in place, so the decision is judged at the current
+      // revision, and applied at it; any other change to the item still settles it stale below.
+      let judged = decision!;
+      const revisionPinned = decision!.action === 'release' || decision!.action === 'unblock' || (decision!.action === 'close' && decision!.input.triageAt === undefined && decision!.input.expectedRevision !== undefined);
+      if (revisionPinned && decision!.input.expectedRevision !== work!.revision
+        && await onlyActionsMovedSince(db, work!, decision!.input.expectedRevision, sameBesideBookkeeping)) {
+        judged = { ...decision!, input: { ...decision!.input, expectedRevision: work!.revision } };
+        if (!resuming) precondition = decisionPrecondition(judged.action, judged.input, work!);
+      }
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.
@@ -313,7 +327,7 @@ export async function approveDecision(services: Services, caller: Principal, id:
           : await resolveInTransaction(services, db, now, work!, decision!, actor, data.reason);
         return finish(db, work!, actor, decision!.id, 'decision.applied', { outcome }, key, fingerprint);
       }
-      approved = { decision: decision!, work: work!, approver: actor };
+      approved = { decision: judged, work: work!, approver: actor };
       return null;
     });
     if (settled) return settled;

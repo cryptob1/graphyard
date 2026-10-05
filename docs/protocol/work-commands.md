@@ -7,9 +7,10 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted.
 - `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` with `payload.children` makes the [split](#splitting-an-item).
-- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands.
+- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands. A two-party `release`, `unblock` or revision-pinned `close` decision still applies when the item moved since its `expectedRevision` only in loop bookkeeping (sessions, gates, next action, action queue); any other move settles it `stale`.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
 - `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
+- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…, "base":SHA}` (coordinator, admin or an operator agent with `intent:unblock`) merges the observed base tip into an open candidate's branch, keeping its approval under the carry rules.
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `release` may carry `"cause"` or `"failure":{"message":…}` (`workspace.failed`; an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`, optional `preserved` (`workspace.preserved`).
 - `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
