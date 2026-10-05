@@ -896,15 +896,27 @@ export class GitHub {
     if (response.status === 401) return new GitHubPermissionRefusal(`GitHub ${context} failed (401): the App credentials were rejected; check GITHUB_APP_ID, GITHUB_INSTALLATION_ID and the private key`, 'authentication');
     if (response.status === 403) {
       this.preflightDueAt = 0;
-      return new GitHubPermissionRefusal(`GitHub ${context} failed (403): ${this.permissionHint()}`, 'permission');
+      return new GitHubPermissionRefusal(`GitHub ${context} failed (403): ${this.permissionHint(text)}`, 'permission');
     }
     return new Refusal(`GitHub ${context} failed (${response.status})`, 502);
   }
-  private permissionHint() {
+  /**
+   * Why GitHub answered 403. A suspended installation or a shortfall the preflight found is named;
+   * otherwise no permission is known to be missing (GY-1329: GitHub also answers 403 to a rerun of
+   * an unfinished workflow run), so GitHub's own answer is carried with the preflight's reading
+   * instead of a guessed shortfall.
+   */
+  private permissionHint(body: string) {
     const report = this.preflightState;
     if (report?.suspended) return `the App installation is suspended; restore it at ${report.installationUrl}`;
     if (report?.missing.length) return describeShortfall(report.missing[0], report.app, report.installationUrl);
-    return `the installed App lacks a permission this request needs; compare its installation at ${report?.installationUrl ?? installationSettingsUrl(this.config.installationId)} with graphyard github-setup --update-permissions`;
+    let said = body.trim();
+    try { const parsed = JSON.parse(said); if (typeof parsed?.message === 'string') said = parsed.message; } catch { /* Not JSON: the text is GitHub's answer. */ }
+    const answer = said ? `GitHub said "${said.replace(/\s+/g, ' ').slice(0, 200)}"` : 'GitHub gave no reason';
+    const reading = !report ? 'no App permission preflight has run yet'
+      : report.verifiedAt ? `the App permission preflight at ${report.observedAt} found no missing permission`
+      : `the App permission preflight at ${report.observedAt} could not read the installation: ${report.error ?? 'no reason given'}`;
+    return `${answer}; ${reading}`;
   }
   private appHeaders() {
     return { Authorization: `Bearer ${appJwt(this.config.appId, this.config.privateKey)}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
@@ -2033,9 +2045,15 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * An Actions check run's id is its job's id, which names the run; only the failed jobs rerun, on
    * the same sha, so the rerun's check run is the one the gates read next.
    */
-  async rerunFailedJobs(checkRunId: number): Promise<{ runId: number; attempt?: number }> {
+  async rerunFailedJobs(checkRunId: number, options: { completedOnly?: boolean } = {}): Promise<{ runId: number; attempt?: number; waiting?: string }> {
     const job = await this.request(`/actions/jobs/${checkRunId}`);
     demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
+    // GitHub refuses (403) to rerun a workflow run whose other jobs are still running (GY-1329): an
+    // owed rerun waits for the run to complete instead of being asked and refused.
+    if (options.completedOnly) {
+      const run = await this.rerunWorkflowRun(job.run_id);
+      if (run && run.status !== 'completed') return { runId: job.run_id, ...(Number.isSafeInteger(job.run_attempt) ? { attempt: job.run_attempt } : {}), waiting: run.status };
+    }
     await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
     return { runId: job.run_id, ...(Number.isSafeInteger(job.run_attempt) ? { attempt: job.run_attempt } : {}) };
   }
@@ -2835,12 +2853,17 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // A required check that failed on this candidate is rerun once before it counts (GY-516): the
       // observation recorded the rerun as owed, holding the entry's position; GitHub is asked here,
       // outside any transaction, and its answer recorded. A refusal lets the failure stand at once.
+      // A workflow run still running its other jobs keeps the rerun owed, waiting, until it completes (GY-1329).
       for (const owed of owedCheckReruns(work, engine.ciAppIds)) {
         const rerunHold = hold('check-rerun');
         if (rerunHold) { held ??= rerunHold; break; }
-        let outcome: { state: 'requested' | 'refused'; runId?: number; attempt?: number; detail?: string };
+        let outcome: Parameters<Engine['recordCheckRerun']>[3];
         if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
-        else try { const requested = await github.rerunFailedJobs(owed.failedRunId); outcome = { state: 'requested', runId: requested.runId, ...(requested.attempt !== undefined ? { attempt: requested.attempt } : {}) }; }
+        else try {
+          const requested = await github.rerunFailedJobs(owed.failedRunId, { completedOnly: true });
+          const attempt = requested.attempt !== undefined ? { attempt: requested.attempt } : {};
+          outcome = requested.waiting ? { state: 'waiting', runId: requested.runId, ...attempt, status: requested.waiting } : { state: 'requested', runId: requested.runId, ...attempt };
+        }
         catch (error) { outcome = { state: 'refused', detail: error instanceof Error ? error.message.slice(0, 300) : 'GitHub refused the rerun' }; }
         work = await engine.recordCheckRerun(work.id, job.token, owed, outcome);
       }

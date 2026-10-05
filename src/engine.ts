@@ -16,7 +16,7 @@ import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { unauthorizedMergeViolation } from './merge-queue.js';
-import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
+import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -592,9 +592,10 @@ export class Engine {
   /**
    * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
    * job outside any transaction: `requested` holds the failure until the rerun concludes,
-   * `refused` lets it stand, and the item is re-evaluated at once either way.
+   * `refused` lets it stand, and the item is re-evaluated at once either way. `waiting` (GY-1329)
+   * keeps the rerun owed while its workflow run is unfinished; an unchanged wait adds no ledger entry.
    */
-  async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: { state: 'requested' | 'refused'; runId?: number; attempt?: number; detail?: string }) {
+  async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: OwedRerunOutcome) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
       requireCurrent(job, 'Integration job lease expired or superseded');
@@ -603,8 +604,9 @@ export class Engine {
       demand(work, 'Work item not found', 404);
       const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
       if (index < 0 || work.checkReruns![index].state !== 'owed') return work;
-      const rerun: CheckRerun = { ...work.checkReruns![index], state: outcome.state, ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}), ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), ...(outcome.detail ? { detail: outcome.detail } : {}), ...(outcome.state === 'refused' ? { resolvedAt: now.toISOString() } : {}) };
+      const current = work.checkReruns![index], rerun = owedRerunAfter(current, outcome, now.toISOString());
       work.checkReruns = work.checkReruns!.map((entry, at) => at === index ? rerun : entry).slice(-checkRerunLimit);
+      if (outcome.state === 'waiting' && current.waiting?.status === outcome.status) { await rewriteDocument(db, work); return work; }
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', `check.rerun.${outcome.state}`, now, rerun);
