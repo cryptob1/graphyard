@@ -1,6 +1,7 @@
 import { deliveredByGitHub } from './model/delivery-mode.js';
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { CHECK_NAME, LANDABLE_CHECK } from './model/work.js';
+import { isClosed } from './model/closure.js';
 import { carriedApproval, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
@@ -592,6 +593,22 @@ export interface BaseRefresh {
    * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
    */
   stale?: StaleMergeability | null;
+  /**
+   * With a conflict (GY-1200): when a conflict was first recorded for this same head and policy
+   * revision. A refresh onto each new base tip rewrites `at`, so on a base that moves often `at`
+   * alone would keep restarting the bound an unhandled conflict is counted against (faults.ts
+   * baseConflictInMotion). Absent on records that predate the rule, which read as `at`.
+   */
+  conflictSince?: string | null;
+}
+/**
+ * GY-1200. When the conflict a refresh records was first found on this head: the earlier record's
+ * own first conflict when it conflicted on the same head and policy revision, else the refresh's own time.
+ */
+export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevision' | 'at' | 'conflict' | 'conflictSince'> | null | undefined, refresh: Pick<BaseRefresh, 'from' | 'policyRevision' | 'at' | 'conflict'>): string | null {
+  if (!refresh.conflict) return null;
+  const same = !!previous?.conflict && previous.from.sha === refresh.from.sha && previous.policyRevision === refresh.policyRevision;
+  return same ? previous!.conflictSince ?? previous!.at : refresh.at;
 }
 /** Why a branch was written by the control plane rather than by its worker (GY-375). */
 export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync';
@@ -1148,7 +1165,8 @@ export function ejectedCheckLift(work: Work, all: Work[], ciAppIds: readonly num
   if (!rerun) return null;
   if (required.some(entry => requiredRunFailed(entry, requiredCheckRun(entry, observation.checks, ciAppIds)))) return null;
   const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
-  const departed = (predicted?.predecessors ?? []).some(key => { const item = all.find(entry => entry.key === key); return !item || (item.stage !== 'done' && !item.queue); });
+  // A predecessor closed without merging (GY-1042) left the queue as surely as one ejected: its commits never landed.
+  const departed = (predicted?.predecessors ?? []).some(key => { const item = all.find(entry => entry.key === key); return !item || isClosed(item) || (item.stage !== 'done' && !item.queue); });
   if (departed) return null;
   const tip = candidate.sha.slice(0, 12);
   return { check: check.name, run: run!, tip: candidate.sha, reason: cancelled

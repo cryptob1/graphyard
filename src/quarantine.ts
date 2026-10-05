@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { ContainmentScope, Work, Workspace } from './model.js';
+import { containmentGraceMs } from './model/containment.js';
 
 export class PrelaunchContainmentError extends Error {
   constructor(message: string, public readonly settleAllowed: boolean) { super(message); }
@@ -145,8 +146,8 @@ export async function settleContainment(
  * on every unverifiable signal instead of assuming death. What cannot be proven still
  * requires the operator attestation path.
  */
-/** Both the worker lease and the launch authority must have been expired this long. */
-export const containmentGraceMs = 120_000;
+/** Both the worker lease and the launch authority must have been expired this long; the model layer owns the window. */
+export { containmentGraceMs };
 /** A host verification older than this is no longer evidence about the present. */
 export const containmentProbeFreshnessMs = 120_000;
 /** Automatic settlement joins two clocks; they must demonstrably agree within this bound. */
