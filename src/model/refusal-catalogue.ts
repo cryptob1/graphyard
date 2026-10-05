@@ -34,6 +34,8 @@ export interface RefusalShape {
    */
   free?: boolean;
 }
+/** Matches the refusal `mechanicalReviewHold` (src/mechanical-findings.ts) words: an approval's mechanical nits awaiting their bot round. */
+export const mechanicalHoldPattern = /^Approval (\d+ )?of [0-9a-f]+ names \d+ findings? classified mechanical, which the worker bot fixes before the reviewer's fresh read \(GY-971\)/;
 export const gateRefusalCatalogue: RefusalShape[] = [
   // ready
   { gate: 'ready', id: 'not-released', match: /^Not released from backlog$/, example: 'Not released from backlog', kinds: ['escalate'] },
@@ -65,6 +67,9 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   // (a head whose mechanical proofs have not passed yet is the producers' dispatch, GY-115).
   { gate: 'review', id: 'changes-requested', match: /^Outstanding change requests must be resolved through a new review$/, kinds: ['request-rework'],
     example: 'Outstanding change requests must be resolved through a new review' },
+  // An approval naming nits classified mechanical holds the head for the worker bot's round (GY-971).
+  { gate: 'review', id: 'mechanical-hold', match: mechanicalHoldPattern, kinds: ['request-rework'],
+    example: "Approval 901 of aaaaaaaaaaaa names 2 findings classified mechanical, which the worker bot fixes before the reviewer's fresh read (GY-971); the head is not merged before that round, or before 2026-10-05T15:00:00.000Z if it never starts" },
   { gate: 'review', id: 'github-approval', match: /^Independent approval of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Independent approval of the current commit is required' },
   { gate: 'review', id: 'github-reset', match: /^A new independent GitHub approval after the requirement-review baseline is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],

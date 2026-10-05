@@ -143,6 +143,31 @@ export const deploymentObservationSchema = z.object({
 }).strict();
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
+/**
+ * GY-1302: the loop's promotion drive. GitHub's scheduled release-candidate runs are best-effort and
+ * on 2026-10-05 four in a row never fired, so the loop dispatches the release-candidate workflow
+ * itself (`promotionCycle`). `dispatchedAt` is the loop's own last dispatch, kept so a run GitHub
+ * has not listed yet is never dispatched twice; `lastDispatchAt` is the later of it and the newest
+ * cut run GitHub lists, from which `run.promoteEveryMinutes` is counted.
+ */
+export const promotionStateSchema = z.object({
+  checkedAt: z.string(),
+  mainSha: z.string().nullable(),
+  promotedSha: z.string().nullable(),
+  promotedAt: z.string().nullable(),
+  /** First-parent merges on the base branch production does not run yet; null when unknown. */
+  behind: z.number().int().min(0).nullable(),
+  /** When the base branch tip and the promotion record were last fetched; reused for `promotionLedgerReadMs`. */
+  ledgerReadAt: z.string().nullable().default(null),
+  inFlight: z.boolean(),
+  runsReadAt: z.string().nullable(),
+  dispatchedAt: z.string().nullable(),
+  lastDispatchAt: z.string().nullable(),
+  nextDueAt: z.string().nullable(),
+  reason: z.string().max(500).nullable(),
+}).strict();
+export type PromotionState = z.infer<typeof promotionStateSchema>;
+
 /** What one reclamation did, kept on the cursor so `master status` reports it without rescanning. */
 export const reclaimSummarySchema = z.object({
   at: z.string(), scanned: z.number().int().min(0), removed: z.number().int().min(0), kept: z.number().int().min(0),
@@ -241,6 +266,8 @@ export const approvalWatchSchema = z.object({
   ended: z.array(z.string().max(300)).max(10).default([]),
   /** Set once the decision is applied: the watch is kept so the same binding is not requested again. */
   settledAt: z.string().nullable().default(null),
+  /** GY-1298. When and by whom the decision was approved while it stood unapplied, so its wait names the apply it owes, not an approver judgement. */
+  approvedAt: z.string().nullable().default(null), approvedBy: z.string().max(200).nullable().default(null),
   /** Set once every launch is spent on a decision still unjudged: the loop has escalated it. */
   exhaustedAt: z.string().nullable().default(null),
   closeAttempts: z.number().int().min(0).default(0),
@@ -440,6 +467,8 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
+  /** The loop's promotion drive (GY-1302). */
+  promotion: promotionStateSchema.nullable().default(null),
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The between-cycles self-upgrade's progress (GY-437). */

@@ -50,7 +50,7 @@ import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAt
 import { docsTrimTitle } from '../src/model/documentation.js';
 import { successorWidening } from '../src/model/successors.js';
 import { checkInvariants, emptyInvariantRecord, invariantDefaults, systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
-import { heldNameAttention, readReviewLedger, settledCloseAttempts, type ReviewRecord } from '../src/reviewer.js';
+import { heldNameAttention, judgeFreshReads, planMechanicalFixes, readReviewLedger, reviewRecordSchema, settledCloseAttempts, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
 import { fleet, requested } from './helpers/review-fleet.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
@@ -74,6 +74,9 @@ import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
 import { approvedDecisionBoundMs } from '../src/model/approval.js';
 import { itemLane, lanes, laneSpeedTargets } from '../src/model/policy.js';
+import { appliedMechanicalRework, freshReadFor, mechanicalFixRequests, mechanicalFixState, type MechanicalFixRequest } from '../src/mechanical-findings.js';
+import { mechanicalHoldPattern } from '../src/model/refusal-catalogue.js';
+import type { InterventionRecordInput } from '../src/model/interventions.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
 import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
@@ -470,26 +473,43 @@ function soakSessionDirectory(): string {
   return directory;
 }
 
-let pgServer: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
-before(async () => {
-  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 404;
-  pgServer = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pgServer.initialise(); await pgServer.start(); await pgServer.createDatabase('soak_test');
-  const connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/soak_test`;
+let pgServer: EmbeddedPostgres, pgPort: number, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+// Every control plane the file started, each closed before the shared Postgres server stops.
+const stores: Store[] = [];
+const listeners: ReturnType<typeof server>[] = [];
+/**
+ * A control plane on its own database of the shared Postgres server, which every later day then
+ * runs against. Days share one by default; a day that needs none of the earlier days' items starts
+ * a fresh one, since the loop's reconciliation and job passes read every item the database holds,
+ * so each earlier day's items make every cycle of a later day slower: the days late in the file ran
+ * past their bounds on a slow CI runner (GY-971).
+ */
+async function controlPlane(database: string) {
+  await pgServer.createDatabase(database);
+  const connection = `postgres://graphyard:testing-only@127.0.0.1:${pgPort}/${database}`;
   // The database reads the simulated clock: its time functions are shadowed before the schema exists.
   const setup = new pg.Client({ connectionString: connection });
   await setup.connect();
   for (const statement of clockSql) await setup.query(statement);
-  await setup.query('ALTER DATABASE soak_test SET search_path = public, pg_catalog');
+  // A later plane starts at the simulated time the earlier days reached.
+  if (stores.length) await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
+  await setup.query(`ALTER DATABASE ${database} SET search_path = public, pg_catalog`);
   await setup.end();
-  clock.install(start);
   store = new Store(connection); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   engine.principals = everyone; engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  stores.push(store); listeners.push(http);
+}
+before(async () => {
+  // An offset no other test file takes: two files sharing a port fail in their `before` hook.
+  pgPort = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 404;
+  pgServer = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak'), user: 'graphyard', password: 'testing-only', port: pgPort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await pgServer.initialise(); await pgServer.start();
+  clock.install(start);
+  await controlPlane('soak_test');
   // The fixture coordinator checkout the simulated launches confine against (GY-888).
   coordinatorBase = await temporaryDirectory('soak-coordinator');
   coordinatorRoot = join(coordinatorBase, 'coordinator');
@@ -502,7 +522,12 @@ before(async () => {
   git('add', '.');
   git('commit', '-m', 'coordinator');
 });
-after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
+after(async () => {
+  clock.uninstall();
+  for (const listener of listeners) await new Promise<void>(resolve => listener.close(() => resolve()));
+  for (const store of stores) await store.close();
+  if (pgServer) await pgServer.stop();
+});
 
 const id = () => randomUUID();
 async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
@@ -529,13 +554,19 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * evidence is held until every other gate passes, and from then until GitHub merges it the
  * observation workers never reach its polled job, so its merge gate refuses only for a stale
  * observation; only a prioritized wake is claimed. `dropFirst` is the item whose first prioritized
- * wake is lost too, so the loop must ask again in the next observation window.
+ * wake is lost too, so the loop must ask again in the next observation window. `mechanical` keeps
+ * the review ledger the dispatcher's reconciliation keeps (GY-971), with the reviews GitHub holds,
+ * and names the item whose first approval raises findings classified mechanical whose bot commit
+ * the fresh read accepts (`applied`) and the one whose bot commit it rejects as a misclassification
+ * (`rejected`).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
-  failover?: Failover }) {
+  failover?: Failover;
+  /** GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run list and dispatch. */
+  promotion?: boolean }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -808,9 +839,65 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // The unrepresentable ask's worker never pushes or submits: its item stays blocked on scope.
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
+  // ---- GY-971: the review ledger, kept as the dispatcher's review reconciliation keeps it. ----
+  // Every verdict the reviewer posts is recorded as its session's, and the real planner and fresh-read
+  // judge run over the ledger on each pass, one pass behind GitHub as the dispatcher's tick is, so
+  // the loop meets each approval unclassified first. The loop reads the ledger's plans each cycle.
+  const mechanicalDay = options.mechanical;
+  const ledger: ReviewRecord[] = [], ledgered = new Set<number>(), bodies = new Map<number, { body: string; sha: string; state: string }>();
+  const misclassified: { signal: InterventionRecordInput; key: string }[] = [];
+  const botRounds: { key: string; approved: string; head: string; reviewId: number; bot: string; epoch: number }[] = [];
+  if (mechanicalDay) for (const n of [mechanicalDay.applied, mechanicalDay.rejected]) github.carriedOnly.add(items[n - 1].key);
+  const mechanicalItem = (key: string) => !!mechanicalDay && [mechanicalDay.applied, mechanicalDay.rejected].some(n => items[n - 1].key === key);
+  const reviewBody = (key: string, review: { sha: string; state: string }) => {
+    const n = items.findIndex(item => item.key === key) + 1, bot = botRounds.find(round => round.head === review.sha);
+    if (bot && review.state === 'CHANGES_REQUESTED') return `AC-1 unmet.\nRejected bot commit: ${review.sha} — it changed the retry bound in ${file(n)}, a behaviour change, not a typo fix`;
+    // The first approval of a scenario item raises one finding of each class.
+    if (mechanicalItem(key) && review.state === 'APPROVED' && !ledger.some(record => record.key === key))
+      return [`AC-1 met.`, `Nit: ${file(n)}:3 — "recieve" is a typo (mechanical: typo)`, `Nit: ${file(n)}:9 — the retry is unbounded when the source keeps failing (substantive: behavior)`].join('\n');
+    return 'AC-1 met.';
+  };
+  // Each review's body is written once, when GitHub's observation or the ledger first reads it: the
+  // observation counts an approval's mechanical nits from it, which hold the review gate (GY-971).
+  const bodyOf = (key: string, review: { id: number; sha: string; state: string }) => {
+    if (!bodies.has(review.id)) bodies.set(review.id, { sha: review.sha, state: review.state, body: reviewBody(key, review) });
+    return bodies.get(review.id)!.body;
+  };
+  if (mechanicalDay) github.reviewBody = (key, review) => review.state === 'APPROVED' && review.reviewer === 'reviewer' && mechanicalItem(key) ? bodyOf(key, review) : '';
+  const ledgerRun = async (_command: string, args: string[]) => {
+    const match = /^repos\/owner\/project\/pulls\/\d+\/reviews\/(\d+)$/.exec(args[1] ?? ''), entry = match ? bodies.get(Number(match[1])) : undefined;
+    if (!entry) throw new Error(`the simulated GitHub cannot answer gh ${args.join(' ')}`);
+    return JSON.stringify({ id: Number(match![1]), state: entry.state, commit_id: entry.sha, body: entry.body });
+  };
+  // A head as GitHub reports its commit: its parents and the paths it changed from its first parent.
+  const observeCommit = async (head: string) => {
+    const commit = github.commits.get(head)!, parent = github.commits.get(commit.parents[0]!);
+    return { parents: commit.parents, files: commit.files.filter(path => commit.contents.get(path) !== parent?.contents.get(path)), at: new Date(commit.at).toISOString() };
+  };
+  // Each head the review gate held for its mechanical-fix round (GY-971), as the loop's passes saw it.
+  const reviewHolds = new Set<string>();
+  const reconcileLedger = async () => {
+    const work = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
+    for (const item of work) if (item.candidate && item.gates.some(gate => gate.name === 'review' && gate.reasons.some(reason => mechanicalHoldPattern.test(reason)))) reviewHolds.add(`${item.key} ${item.candidate.sha}`);
+    const at = new Date(clock.now());
+    await planMechanicalFixes(ledger, work, repository, ledgerRun, at);
+    await judgeFreshReads(ledger, repository, ledgerRun, async (signal, key) => { misclassified.push({ signal, key }); await api(principals.coordinator, 'POST', 'interventions', signal, key); }, at);
+    for (const pr of github.prs.values()) for (const review of pr.reviews) {
+      const item = work.find(entry => entry.key === pr.key);
+      if (ledgered.has(review.id) || review.reviewer !== 'reviewer' || !item) continue;
+      ledgered.add(review.id);
+      bodyOf(item.key, review);
+      const bot = botRounds.find(round => round.head === review.sha);
+      const fresh = (await freshReadFor(mechanicalFixRequests(ledger), item.key, review.sha, { principal: bot?.bot ?? pr.author, role: 'worker' }, review.reviewer, observeCommit))?.fresh;
+      ledger.push(reviewRecordSchema.parse({ id: randomUUID(), key: item.key, pr: pr.number, sha: review.sha, baseSha: item.candidate?.baseSha ?? github.tip, policyRevision: item.policyRevision,
+        profile: 'soak-reviewer', agentName: `soak-review-${review.id}`, pane: null, sessionDirectory: '/tmp/soak/review', requestedAt: review.submittedAt, tokenExpiresAt: review.submittedAt,
+        state: 'completed', verdict: { state: review.state, reviewer: review.reviewer, reviewId: review.id, submittedAt: review.submittedAt }, ...(fresh ? { freshRead: fresh } : {}) }));
+    }
+  };
+
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked' | 'failed-over'; syncs: number; syncedFor?: string; refusedSince?: number;
-    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[] }
+    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[]; bot?: MechanicalFixRequest }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
@@ -935,6 +1022,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await engine.execute(principal, 'launch', work.id, { epoch, settlementHash }, id());
     }
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
+    // GY-971: an attempt the item's applied mechanical-fix rework started is the bot round, as the
+    // worker launcher reads it; any other rework is ordinary work.
+    const reviewId = mechanicalDay && work.candidate ? appliedMechanicalRework(work, (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions) : null;
+    const bot = reviewId === null ? undefined : mechanicalFixRequests(ledger).find(request => request.key === key && request.reviewId === reviewId && request.head === work.candidate!.sha);
     // GY-711: the routine-remedy item exercises both per-item remedies from the real cycle. Its
     // first attempt asks, a minute in, for the fixture its criterion names, which the control plane
     // widens, and then reports a stale scope refusal naming that fixture — the blocker a widening
@@ -972,7 +1063,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
       // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
       blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + blockerPlan.blockAfterMs : null,
-      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles });
+      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles, ...(bot ? { bot } : {}) });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -1067,6 +1158,24 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
           herdr.status(session.pane, 'done');
           session.state = 'dead';
         }
+        continue;
+      }
+      // The bot round makes one commit on the approved head, changing only the findings' files, and submits it.
+      if (session.bot) {
+        const approved = github.commits.get(session.bot.head)!, head = sha('bot', session.key, session.epoch);
+        const contents = new Map(approved.contents);
+        for (const path of session.bot.paths) contents.set(path, sha('content', path, head));
+        github.record({ sha: head, tree: sha('tree', head), parents: [session.bot.head], files: approved.files, at: now, message: `${session.key}: mechanical review fixes (review ${session.bot.reviewId})` }, contents);
+        const pr = [...github.prs.values()].find(entry => entry.branch === session.branch && entry.open)!;
+        Object.assign(pr, { head, autoMerge: false, mergeRequestedAt: null });
+        pr.pushed.set(head, now);
+        botRounds.push({ key: session.key, approved: session.bot.head, head, reviewId: session.bot.reviewId, bot: principal.id, epoch: session.epoch });
+        // The fresh read of the rejected item's bot commit requests changes; every other head is approved,
+        // a Graphyard-authored tip the queue pushed over the approved head included.
+        if (session.key === items[mechanicalDay!.rejected - 1].key) github.verdicts.set(session.key, ['CHANGES_REQUESTED']);
+        await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'mechanical review fixes only; no documented behaviour changed' }, id());
+        session.state = 'submitted';
+        herdr.kill(session.pane);
         continue;
       }
       const head = sha('head', session.key, session.epoch);
@@ -1263,7 +1372,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       pending.push(async () => { github.push(work.key, overtaker.branch, overtaker.profile.principal, sha('head', work.key, 'moved'), [file(numberOf(work))]); });
       return { agentName, pane };
     }
-    pending.push(async () => {
+    // GY-971: the mechanical-fix day's approvers take ten minutes to judge, as a real session does,
+    // so an approved head the merge step did not hold would land before its bot round was applied.
+    const judgeAt = clock.now() + (mechanicalDay ? 10 * minute : 0);
+    pending.push(async function judge() {
+      if (clock.now() < judgeAt) { pending.push(judge); return; }
       const current = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.find((entry: { id: string; state: string }) => entry.id === decision);
       // A session relaunched onto a decision judged while it was being launched finds the decision
       // applied and exits without judging: the judge itself refuses a second verdict, and the day
@@ -1334,8 +1447,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // only its own items: an earlier day's half-finished item (a rework decision nobody adopted)
   // would otherwise be dispatched, pushed and refused here for its linked pull request. The
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
-  // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well.
-  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.containment || failover ? new Set(items.map(item => item.id)) : null;
+  // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well. The mechanical day (GY-971) starts a plane of its own
+  // and keeps the filter so it does not depend on where it falls in the file.
+  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.containment || options.mechanical || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
   const dip = plan.memoryDip;
@@ -1416,7 +1530,39 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
     return api(principals.coordinator, 'POST', `work/${work.id}/decomposition`, event);
   };
+  // GY-1302: the loop's promotion drive. Main moves with every merge of the day while production
+  // moves only on its deploys, so a promotion is due all day; each dispatched candidate validates
+  // for ninety minutes and GitHub lists it only two minutes after the dispatch, so the loop's own
+  // record of its dispatch is what holds the next one back meanwhile. For the day's first hour every
+  // dispatch is refused (a token without actions: write), and for the half hour after it the remote
+  // cannot be fetched: neither failure is repeated every cycle.
+  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], violations: [] as string[], validationMs: 90 * minute, listedAfterMs: 2 * minute,
+    failDispatchUntil: hour, failLedger: [hour, hour + 30 * minute] as const, failedDispatches: [] as number[], failedLedgerReads: 0 };
+  const promotionEffect: DaemonEffects['promotion'] = options.promotion ? {
+    ledger: async () => {
+      promotion.ledgerReads++;
+      const into = clock.now() - dayStart;
+      if (into >= promotion.failLedger[0] && into < promotion.failLedger[1]) { promotion.failedLedgerReads++; throw new Error('git fetch: Could not resolve host: github.com'); }
+      return { mainSha: github.tip, promotedSha: production.sha, promotedAt: null, behind: github.tip === production.sha ? 0 : 1 };
+    },
+    runs: async () => {
+      promotion.runReads++;
+      return promotion.dispatches.filter(at => clock.now() - at >= promotion.listedAfterMs).reverse()
+        .map(at => ({ status: clock.now() < at + promotion.validationMs ? 'in_progress' : 'completed', createdAt: new Date(at).toISOString(), event: 'workflow_dispatch' }));
+    },
+    dispatch: async () => {
+      const now = clock.now(), last = promotion.dispatches.at(-1);
+      if (now - dayStart < promotion.failDispatchUntil) { promotion.failedDispatches.push(now); throw new Error('gh: HTTP 403: Resource not accessible by integration'); }
+      if (github.tip === production.sha) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while production runs main`);
+      if (last !== undefined && now < last + promotion.validationMs) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while the candidate of +${Math.round((last - dayStart) / minute)} min is in validation`);
+      if (last !== undefined && now - last < 120 * minute) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
+      const refused = promotion.failedDispatches.at(-1);
+      if (refused !== undefined && now - refused < 120 * minute) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - refused) / minute)} min after a refused attempt`);
+      promotion.dispatches.push(now);
+    },
+  } : undefined;
   const effects: DaemonEffects = {
+    ...(promotionEffect ? { promotion: promotionEffect } : {}),
     agents: () => headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(),
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
     ...(headless ? { adoptRuns: () => adoptRuns(headless.root, { approver: async owner => ({ options: approverRunOptions('', String(owner.context.decision), {}, 30 * minute),
@@ -1542,6 +1688,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       },
     } : {}),
     exhaustedProofs: async () => [...abandoned.values()],
+    ...(mechanicalDay ? { mechanicalFixes: async () => mechanicalFixState(ledger) } : {}),
     // A rework decision waiting on a stale observation wakes the item's own job (GY-793): the real
     // resync, with the observation job run while the step waits, as the control plane runs it. Its
     // waking resync is an observation wake like GY-710's, and counts as one; the polls do not.
@@ -2301,6 +2448,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       // GY-916: the supervisor restarts the loop for its own reasons: a new process, the same unit.
       if (loopRestarts.length && elapsed >= loopRestarts[0]) { loopRestarts.shift(); await processStart(state); }
       try {
+        if (mechanicalDay) await reconcileLedger();
         if (headless) for (const run of await adoptHeadlessRuns(state, effects, () => {}, 'cycle')) {
           headless.settling.set(run.directory, run.settled);
           if (headless.pi.processes.get(run.directory)!.state === 'live') { headless.adoptedLive++; continue; }
@@ -2439,10 +2587,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
+  return { promotion, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
-    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
+    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, transientRefused, lateReads };
 }
 
@@ -2479,7 +2627,7 @@ const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit });
+  const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit, promotion: true });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, baseFailure, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
@@ -2497,6 +2645,21 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
+  // GY-1302: the loop drove promotion all day over a moving main: at most one dispatch per
+  // promoteEveryMinutes window, none while a candidate was in validation, and its fetches and run
+  // reads bounded by their read windows, not by the cycle count.
+  const { promotion } = day;
+  if (process.env.SOAK_TRACE) console.error(`promotion: ${JSON.stringify({ ...promotion, dispatches: promotion.dispatches.map(at => Math.round((at - dayStart) / minute)) })}`);
+  // Main moves through the merges of the day's first hours and production catches it at the second
+  // deploy, so the loop promotes on that cadence and then has nothing to promote.
+  assert.ok(promotion.dispatches.length >= 2 && promotion.dispatches.length <= Math.ceil(hours / 2), `the loop promoted every two hours while main moved: ${promotion.dispatches.length} over ${hours} h`);
+  assert.deepEqual(promotion.violations, [], 'never twice in a window, never while a candidate is in validation, never when production runs main');
+  assert.ok(promotion.ledgerReads <= Math.ceil(hours * hour / (5 * minute)) + 2 * basePlan.loopRestarts.length + 2, `fetches once per five-minute read window (${promotion.ledgerReads} over ${cycles} cycles)`);
+  assert.ok(promotion.runReads <= Math.ceil(hours * hour / minute) + 2 * basePlan.loopRestarts.length + 2 && promotion.runReads < cycles, `run reads at most once a minute (${promotion.runReads} over ${cycles} cycles)`);
+  // A refused dispatch counts as an attempt: one per interval, not one per cycle, and the failed
+  // fetches of the unreachable half hour at most one per read window.
+  assert.ok(promotion.failedDispatches.length >= 1 && promotion.failedDispatches.length <= 1 + basePlan.loopRestarts.length, `refused dispatches are not repeated every cycle: ${promotion.failedDispatches.length} in the first hour`);
+  assert.ok(promotion.failedLedgerReads <= Math.ceil(30 * minute / (5 * minute)) + 1, `failed fetches stay bounded (${promotion.failedLedgerReads} in half an hour)`);
   // GY-806: webhooks drove observation all day — every woken job claimed ahead of the polled ones
   // and re-observed within the minute of its delivery, and no poll skipped outside a refresh.
   const { webhook } = day;
@@ -4424,4 +4587,58 @@ test('unit:decisions-step-bounded — a history read slower than the step\'s dea
   assert.deepEqual(Object.fromEntries(refreshed.reads), Object.fromEntries(items.map(item => [item.key, 1])), 'each watched history is read once more, in the cycle the interval passed');
   for (let round = 0; round < 3; round += 1) assert.equal((await cycle()).reads.size, 0, `and none in the cycles after it (round ${round + 1})`);
   assert.equal(new Set(decided).size, decided.length, 'the refresh requested nothing again');
+});
+
+test('unit:soak-invariants-hold — review findings classified mechanical under the real loop: each approved head is planned once and held from merging until its one bot round, the fresh read settles every plan, and a rejected bot commit is recorded once as a misclassified finding, with every invariant holding', { timeout: 300_000 }, async () => {
+  // GY-971: every approval of the day is read from the review ledger the dispatcher keeps. Two
+  // items' first approvals raise a finding classified mechanical: the review gate holds each approved
+  // head from merging, the loop asks for one bot round, and the round's commit on that head is read afresh. One
+  // fresh read accepts it; the other rejects it as a misclassification, which is recorded once, and
+  // that item is reworked and delivered like any change request. The plan, the hold, the rework
+  // decision and the fresh-read judgement repeat per cycle, head and item, which is why they live here.
+  const mechanical = { applied: 2, rejected: 5 };
+  // The day needs none of the earlier days' items, so it runs last, on a control plane of its own:
+  // its cycles stay as fast as the first day's, and no earlier day reads its plane.
+  await controlPlane('soak_mechanical');
+  const { items, final, violations, failures, lost, github, actionKeys, mechanical: world } = await simulateDay({
+    hours: 6, mechanical,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, exhaustedReviewer: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the mechanical-fix rounds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  // Every approval was classified, and every plan settled: applied by its fresh read, or none to make.
+  const approvals = world.ledger.filter(record => record.verdict?.state === 'APPROVED' && !record.freshRead);
+  assert.ok(approvals.length >= items.length, `every item's approval reached the ledger (${approvals.length})`);
+  assert.deepEqual(world.ledger.filter(record => record.mechanicalFix?.state === 'planned').map(record => `${record.key} ${record.sha.slice(0, 12)}`), [], 'no plan is left standing');
+  const plans = world.ledger.filter(record => record.mechanicalFix && record.mechanicalFix.state !== 'none');
+  for (const n of [mechanical.applied, mechanical.rejected]) {
+    const key = items[n - 1].key, id = items[n - 1].id;
+    const own = plans.filter(record => record.key === key);
+    assert.equal(own.length, 1, `${key}: one plan for its approved head: ${JSON.stringify(own.map(record => record.mechanicalFix))}`);
+    const plan = own[0]!.mechanicalFix!;
+    assert.equal(plan.state, 'applied', `${key}: the plan was settled by the fresh read of its bot commit: ${plan.reason ?? ''}`);
+    assert.deepEqual(plan.paths, [file(n)]);
+    const rounds = world.botRounds.filter(round => round.key === key);
+    assert.deepEqual(rounds.map(round => round.approved), [plan.head], `${key}: exactly one bot round, on the approved head`);
+    assert.equal(plan.commit, rounds[0]!.head, `${key}: the fresh read reviewed the bot commit`);
+    assert.equal([...actionKeys].filter(entry => entry.startsWith(`decision:rework:${id}:`) && entry.includes(':mechanical:')).length, 1, `${key}: one mechanical-fix rework decision`);
+    // No merge ahead of the round: the approved head is never what landed.
+    const merged = github.merges.filter(entry => entry.key === key);
+    assert.equal(merged.length, 1, `${key} merged once`);
+    assert.notEqual(github.commits.get(merged[0]!.sha)!.parents[1], plan.head, `${key}: the approved head ${plan.head.slice(0, 12)} was not merged ahead of its bot round`);
+    assert.ok(world.reviewHolds.has(`${key} ${plan.head}`), `${key}: the review gate held the approved head for the round: ${[...world.reviewHolds].join(', ')}`);
+  }
+  // The accepted bot commit is what landed for its item.
+  const accepted = world.botRounds.find(round => round.key === items[mechanical.applied - 1].key)!;
+  assert.ok(github.contains(github.merges.find(entry => entry.key === accepted.key)!.sha, accepted.head), 'the accepted bot commit landed');
+  assert.equal(world.ledger.find(record => record.sha === accepted.head)?.freshRead?.judged?.outcome, 'accepted');
+  // The rejected one is recorded once as a misclassified finding, and its item was reworked and delivered without it.
+  const rejected = world.botRounds.find(round => round.key === items[mechanical.rejected - 1].key)!;
+  assert.equal(world.ledger.find(record => record.sha === rejected.head)?.freshRead?.judged?.outcome, 'rejected');
+  assert.deepEqual(world.misclassified.map(entry => [entry.signal.kind, entry.signal.work]), [['misclassified-finding', rejected.key]], 'one intervention per rejection');
+  assert.ok(!github.contains(github.merges.find(entry => entry.key === rejected.key)!.sha, rejected.head), 'the rejected bot commit did not land');
+  const report = await api(principals.coordinator, 'GET', `interventions?kind=misclassified-finding&work=${rejected.key}`);
+  assert.equal(report.byKind?.find((entry: { kind: string }) => entry.kind === 'misclassified-finding')?.count, 1, `the control plane holds the one misclassification: ${JSON.stringify(report.byKind)}`);
 });

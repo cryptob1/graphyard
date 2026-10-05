@@ -22,6 +22,7 @@ import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { baseRefreshConflict, currentRestore } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
+import { containmentGraceMs, containmentPhase } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
@@ -59,12 +60,15 @@ export interface FaultSources {
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
  * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
- * which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
+ * nor a lapsed fence the loop is still settling (containmentInMotion), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
  * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
-export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
+export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
   const routes = sources.scopeRoutes ?? true;
-  const own = work.flatMap(item => workFaults(item, now, routes));
+  // A fence the loop settled — this cycle's reclaim step included — is gone, though the snapshot the cycle began with still shows it (GY-1299).
+  const work = snapshot.map(item => fenceSettled(state, item) ? { ...item, containmentQuarantine: null } : item);
+  const byKey = new Map(work.map(item => [item.key, item]));
+  const own = work.flatMap(item => workFaults(item, now, routes)).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
   const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
   const { config } = sources;
   if (config) {
@@ -75,9 +79,9 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
-    const byKey = new Map(work.map(item => [item.key, item]));
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
       if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+        && !(containmentKinds.has(item.kind) && containmentInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
@@ -105,6 +109,31 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
   const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
+}
+/** Whether the loop recorded the settlement of the item's standing fence: its settle action for the fence's epoch is done. */
+const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>
+  !!item.containmentQuarantine && state.actions[`settle:${item.id}:${item.containmentQuarantine.epoch}`]?.state === 'done';
+/** The kinds a lapsed fence is counted under: the item's own record, and the settle or hold line master status derives for it. */
+const containmentKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['containment', 'containment-settleable']);
+/** How long a lapsed containment fence may wait, past its grace window, for the loop to verify and settle it before it counts as a containment fault (GY-1299). */
+export const containmentSettleWaitBoundMs = 10 * 60_000;
+/**
+ * GY-1299. Whether a containment fence is still in motion: its owner's lease has lapsed and the
+ * fence is inside its grace window or within `containmentSettleWaitBoundMs` after it. The reclaim
+ * step probes the host and settles a verified-dead fence on its own (settleQuarantine; cycleFaults
+ * reads a fence whose settle action is done as gone, even in the cycle that settled it), so a fence
+ * that recent is a step the loop is already taking, not a fault: on 5 October 2026 GY-1147 counted
+ * 11s past its grace window and autosettled 28s later, and GY-1289 counted twice for one fence —
+ * once as verified settleable while its grace window still ran, once as a hold 90s later, in the
+ * very cycle that settled it. Neither kind counts inside the bound, so a fence the loop settles
+ * opens no instance, and one standing past it counts once, as the item's own `containment` fault
+ * (the settleable line restates it). A fence with no deadline to date it counts at once.
+ */
+export function containmentInMotion(work: Work | undefined, now: number): boolean {
+  const phase = work ? containmentPhase(work, now) : null;
+  if (!phase || phase.state === 'live') return false;
+  if (phase.state === 'grace') return true;
+  return !!phase.lapsedAt && now - Date.parse(phase.lapsedAt) - containmentGraceMs <= containmentSettleWaitBoundMs;
 }
 /** How long an ejected tip's restore may stay owed before its contaminated head counts as a merge fault (GY-1087). */
 export const restoreWaitBoundMs = 30 * 60_000;

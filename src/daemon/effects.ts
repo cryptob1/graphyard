@@ -2,6 +2,8 @@
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -39,7 +41,7 @@ import { withRoleDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment } from './deployment.js';
+import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -54,6 +56,7 @@ import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -124,6 +127,11 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    */
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
+   * GY-1302: the promotion drive's reads and its dispatch of the release-candidate workflow; null
+   * when the repository has no such workflow, absent on a loop wired without it.
+   */
+  promotion?: PromotionReads | null;
+  /**
    * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
    * and `mergeQueue.rerunFailedChecks` to the control plane, whose merge queue batches and
    * validates its window by the first two and reruns a failed required check by the last;
@@ -138,6 +146,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. */ mechanicalFixes?: () => Promise<MechanicalFixState>;
   /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
@@ -671,6 +680,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
+    get promotion() { return promotionReads(current(), root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow))); },
     publishProductionEnvironment: async () => {
       const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
       if (environment === publishedEnvironment) return;
@@ -687,6 +697,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
+    mechanicalFixes: () => readMechanicalFixState(root),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

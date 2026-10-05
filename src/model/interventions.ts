@@ -21,7 +21,7 @@ const stageSchema = z.lazy(() => z.enum(stages));
 // the most attention), and turned into work when one kind at one stage keeps recurring.
 // ---------------------------------------------------------------------------
 
-export const interventionKinds = ['rework', 'scope-widening', 'bypass', 'containment-settlement', 'session-nudge', 'escalation', 'human-only-decision'] as const;
+export const interventionKinds = ['rework', 'scope-widening', 'bypass', 'containment-settlement', 'session-nudge', 'escalation', 'human-only-decision', 'misclassified-finding'] as const;
 export type InterventionKind = typeof interventionKinds[number];
 export const interventionKindLabel = {
   'rework': 'rework decision',
@@ -31,6 +31,7 @@ export const interventionKindLabel = {
   'session-nudge': 'session nudge',
   'escalation': 'escalation',
   'human-only-decision': 'human-only decision',
+  'misclassified-finding': 'finding misclassified as mechanical',
 } as const satisfies Record<InterventionKind, string>;
 
 /** How a signal reached the record: read from the ledger's typed events, or recorded by a session that intervened by hand. */
