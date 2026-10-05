@@ -12,7 +12,7 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
   classifyWait, computeFlow, coveredWindow, dayBuckets, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, flowWindowLabel, flowWindowMessage, flowWindows, gateFactStep,
-  coveredUntil, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
+  coveredUntil, defaultDeliverySpeedTargets, deliverySpeed, deliverySpeedBreaches, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { attributionWindows } from '../src/attribution.js';
 import { createElement } from 'react';
@@ -23,6 +23,7 @@ import { readFile } from 'node:fs/promises';
 import { groupOf } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { masterConfigSchema } from '../src/master/profiles.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
@@ -1479,4 +1480,56 @@ test('manual:review-followups-triaged GY-1164: each follow-up from the approved 
   const [analytics, tests] = await Promise.all([readFile(new URL('../src/flow-analytics.ts', import.meta.url), 'utf8'), readFile(new URL(import.meta.url), 'utf8')]);
   assert.doesNotMatch(analytics, /align with report\s+(?:\*\s+)?figures|count the same delivered\/merged\/gate facts as the report/, 'finding 1: the alignment claim is gone');
   assert.ok(!tests.includes('__CLIENT_' + 'INTERNALS'), 'finding 2: no test reaches into React internals');
+});
+
+// GY-1232: three items merged into main within the last day, two of them promoted to production.
+const hour = 3_600_000, deliveryNow = Date.parse('2026-10-05T12:00:00.000Z');
+const at = (ms: number) => new Date(deliveryNow - ms).toISOString();
+function mergedItem(key: string, createdAgo: number, mergedAgo: number, extra: Partial<Work> = {}, deployment?: number): Work {
+  return { id: `id-${key}`, key, stage: 'done', createdAt: at(createdAgo), closure: undefined,
+    delivery: { mergedAt: at(mergedAgo), mergeSha: key.padEnd(40, '0'), authorizationRevision: 1,
+      ...(deployment === undefined ? {} : { deployment: { sha: 'f'.repeat(40), mergeSha: key.padEnd(40, '0'), source: 'github-deployment', observedAt: at(deployment), covers: 'exact', at: at(deployment), observer: 'graphyard' } }) },
+    ...extra } as unknown as Work;
+}
+const deliveryItems = () => [
+  // Created ready; promoted by a verified production release one hour ago.
+  mergedItem('GY-A', 5 * hour, 3 * hour, { releaseDeliveries: [{ environment: 'production', policyRevision: 1, releaseId: 'r1', releaseRevision: 1, generation: 1, verifiedAt: at(1 * hour), interval: { from: at(4 * hour), to: at(1 * hour) } }] }),
+  // Created ten days ago, made ready two hours ago; the deployment observation promoted it.
+  mergedItem('GY-B', 10 * day, 1.5 * hour, {}, 0.5 * hour),
+  // Merged ten hours ago, not yet promoted: pending.
+  mergedItem('GY-C', 20 * hour, 10 * hour),
+];
+
+test('unit:delivery-speed-measured — master status reports ready→merged and merged→production count, p50 and p90 over 24 hours and 7 days, with the unpromoted item pending', () => {
+  const speed = deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt: new Map([['id-GY-B', at(2 * hour)]]) });
+  for (const window of ['24h', '7d'] as const) {
+    // Ready→merged: 2h (A), 0.5h (B), 10h (C).
+    assert.deepEqual({ count: speed.readyToMerged[window].count, p50Ms: speed.readyToMerged[window].p50Ms, p90Ms: speed.readyToMerged[window].p90Ms }, { count: 3, p50Ms: 2 * hour, p90Ms: 8.4 * hour });
+    // Merged→production: 2h (A), 1h (B); C pending.
+    assert.deepEqual({ count: speed.mergedToProduction[window].count, pending: speed.mergedToProduction[window].pending, p50Ms: speed.mergedToProduction[window].p50Ms, p90Ms: speed.mergedToProduction[window].p90Ms },
+      { count: 2, pending: 1, p50Ms: 1.5 * hour, p90Ms: 1.9 * hour });
+  }
+  // A merge older than a day leaves the 24-hour window and stays in the 7-day one.
+  const older = deliverySpeed([...deliveryItems(), mergedItem('GY-D', 4 * day, 3 * day, {}, 2 * day)], { now: deliveryNow, readyAt: new Map([['id-GY-B', at(2 * hour)]]) });
+  assert.equal(older.readyToMerged['24h'].count, 3);
+  assert.equal(older.readyToMerged['7d'].count, 4);
+  assert.equal(older.mergedToProduction['7d'].count, 3);
+  // Unmerged and closed items are not measured.
+  const open = { ...mergedItem('GY-E', hour, hour), stage: 'merge', delivery: undefined } as unknown as Work;
+  assert.equal(deliverySpeed([open], { now: deliveryNow }).readyToMerged['7d'].count, 0);
+  assert.equal(deliverySpeed([open], { now: deliveryNow }).readyToMerged['7d'].p90Ms, null);
+});
+
+test('unit:delivery-speed-attention — targets default to 2h and 8h, are configurable in master.json, and a breach is one attention line naming the slowest items', () => {
+  assert.deepEqual(defaultDeliverySpeedTargets, { readyToMergedP90Ms: 2 * hour, mergedToProductionP90Ms: 8 * hour });
+  const readyAt = new Map([['id-GY-B', at(2 * hour)]]);
+  // Defaults: ready→merged p90 8.4h breaches 2h; merged→production p90 1.9h is within 8h.
+  assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt })).map(breach => breach.text),
+    ['Ready→merged into main p90 is 8.4h over 7 days (3 items), above the 2h target; slowest: GY-C 10h, GY-A 2h, GY-B 0.5h']);
+  // master.json's deliverySpeed overrides a target; the pending item counts among the slowest.
+  const configured = masterConfigSchema.shape.deliverySpeed.parse({ readyToMergedP90Ms: 10 * hour, mergedToProductionP90Ms: hour });
+  assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt, targets: configured })).map(breach => breach.text),
+    ['Merged→promoted to production p90 is 1.9h over 7 days (2 items), above the 1h target; slowest: GY-C 10h (pending), GY-A 2h, GY-B 1h']);
+  assert.throws(() => masterConfigSchema.shape.deliverySpeed.parse({ readyToMergedP90Ms: 0 }));
+  assert.throws(() => masterConfigSchema.shape.deliverySpeed.parse({ unknown: 1 }));
 });
