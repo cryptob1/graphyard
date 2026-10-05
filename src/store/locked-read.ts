@@ -25,7 +25,13 @@ import { coordinationDocumentSql, coordinationRecords, coordinationRelevance, co
  *
  * A stand-in is never a document: `save` refuses one (`assertSavable`), and it is frozen, shared by
  * every read of its version, so a path that writes or edits an item must name it in `focus`, or read
- * it whole itself.
+ * it whole itself — an assignment to a stand-in throws a TypeError. Nor does it carry everything a
+ * document does: an open item's projection has no `pipeline`, no observation `scopeFiles`, no
+ * evidence `artifacts`, `scopeFiles` or `provenance`, evidence only for its current, carried or
+ * requested heads, and only the recent tails of its histories and sessions; a settled summary is
+ * smaller still. A decision that reads any of these on another item — a landing check reading a peer's
+ * `observation.scopeFiles`, say — must read that item whole (`readWhole`), whatever its overlap.
+ * `unit:projection-contract` in tests/review-followups-gy-1042.test.ts holds a projection to this contract.
  */
 export type Queryable = { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> };
 
@@ -35,6 +41,9 @@ const cache = new Map<string, Work>();
 /** The version each item's stand-in of each kind is cached under, so a newer version replaces it rather than accumulating beside it. */
 const cachedVersion = new Map<string, string>();
 export const lockedSummaryCacheLimit = 20_000;
+let cacheLimit = lockedSummaryCacheLimit;
+/** Bound the stand-in cache at `limit` entries instead of `lockedSummaryCacheLimit`: tests reach eviction with it. */
+export function boundLockedCache(limit = lockedSummaryCacheLimit) { cacheLimit = limit; }
 
 /** Whether `work` is a settled delivery's summary handed out by `lockedWork` rather than its document. */
 export const isSettledSummary = (work: object) => summaries.has(work);
@@ -60,44 +69,43 @@ export async function lockedWork(db: Queryable, focus: readonly (string | null |
 export async function lockedRows(db: Queryable, focus: readonly (string | null | undefined)[] = [], { forUpdate = false, after, limit }: LockedReadOptions = {}): Promise<{ number: number; document: Work }[]> {
   const named = focus.filter((entry): entry is string => !!entry);
   // Versions: a stand-in is keyed by the row it was built from — the document's row for a projection,
-  // the index row for a summary. Either is rewritten (new xmin) with every write to the item, and
-  // transaction ids are never reused within a cluster's lifetime, which the postmaster's start time
-  // and the database name scope.
-  const listed: Listed[] = (await db.query(`SELECT w.number, w.id::text AS id, w.xmin::text AS wx, i.xmin::text AS ix, COALESCE(i.settled AND i.summary IS NOT NULL, false) AS settled,
+  // the index row for a summary — and by the item's revision. The row is rewritten (new xmin) with
+  // every write to the item, within the cluster the postmaster's start time and the database name
+  // scope; the revision, which every save advances, keeps a row version that a wrapped-around
+  // transaction id repeats from naming an older stand-in (GY-1042).
+  const listed: Listed[] = (await db.query(`SELECT w.number, w.id::text AS id, w.xmin::text AS wx, i.xmin::text AS ix, ${revisionSql} AS rev, COALESCE(i.settled AND i.summary IS NOT NULL, false) AS settled,
     (w.id::text = ANY($1::text[]) OR i.key = ANY($1::text[])) AS focus FROM work_items w LEFT JOIN work_index i ON i.id = w.id ORDER BY w.number`, [named])).rows
-    .map(row => ({ number: Number(row.number), id: row.id, wx: row.wx, ix: row.ix, settled: row.settled, focus: row.focus }));
-  const cluster = (await db.query("SELECT current_database() || ':' || pg_postmaster_start_time()::text AS cluster")).rows[0].cluster as string;
-  const versionOf = (row: Listed) => row.settled ? `${cluster}/i/${row.id}:${row.ix}` : `${cluster}/w/${row.id}:${row.wx}`;
+    .map(row => ({ number: Number(row.number), id: row.id, wx: row.wx, ix: row.ix, rev: row.rev, settled: row.settled, focus: row.focus }));
+  const cluster = (await db.query(`SELECT ${clusterSql} AS cluster`)).rows[0].cluster as string;
+  const versionOf = (row: Listed) => row.settled ? `${cluster}/i/${row.id}:${row.ix}@${row.rev}` : `${cluster}/w/${row.id}:${row.wx}@${row.rev}`;
 
   const whole = new Map<number, Work>();
   const own = after === undefined || !limit ? [] : listed.filter(row => !row.settled && !row.focus && row.number > after).slice(0, limit);
   await readWhole(db, [...listed.filter(row => row.focus), ...own].map(row => row.number), forUpdate, whole);
 
-  // The stand-ins: what this call fetched is kept for this call, since the bounded cache may evict it before it is used.
-  const fetched = new Map<string, Work>();
-  const rest = listed.filter(row => !whole.has(row.number));
-  const missingSummaries = rest.filter(row => row.settled && !cache.has(versionOf(row))).map(row => row.id);
+  // The stand-ins, held for this call as they are found: the cache is bounded, so caching what this call
+  // fetches may evict an entry it already found there, and that entry must not fall through to a whole
+  // read under the lock (GY-1042).
+  const rest = listed.filter(row => !whole.has(row.number)), numberOf = new Map(rest.map(row => [row.id, row.number]));
+  const standIns = new Map<number, Work>();
+  for (const row of rest) { const hit = cache.get(versionOf(row)); if (hit) standIns.set(row.number, hit); }
+  const missingSummaries = rest.filter(row => row.settled && !standIns.has(row.number)).map(row => row.id);
   if (missingSummaries.length) {
-    for (const row of (await db.query(`SELECT id::text AS id, xmin::text AS ix, summary::text AS text FROM work_index WHERE settled AND summary IS NOT NULL AND id::text = ANY($1::text[])`, [missingSummaries])).rows) {
+    for (const row of (await db.query(`SELECT i.id::text AS id, i.xmin::text AS ix, ${revisionSql} AS rev, i.summary::text AS text FROM work_index i WHERE i.settled AND i.summary IS NOT NULL AND i.id::text = ANY($1::text[])`, [missingSummaries])).rows) {
       const document = standIn(summaries, row.text);
-      fetched.set(row.id, document); remember(`${cluster}/i/${row.id}:${row.ix}`, document);
+      standIns.set(numberOf.get(row.id)!, document); remember(`${cluster}/i/${row.id}:${row.ix}@${row.rev}`, document);
     }
   }
-  const missingProjections = rest.filter(row => !row.settled && !cache.has(versionOf(row))).map(row => row.number);
+  const missingProjections = rest.filter(row => !row.settled && !standIns.has(row.number)).map(row => row.number);
   if (missingProjections.length) {
-    for (const row of (await db.query(`SELECT d.id, d.wx, x.document::text AS text
-      FROM (SELECT w.id::text AS id, w.xmin::text AS wx, ${detoasted('w.document')} AS document FROM work_items w WHERE w.number = ANY($1::bigint[]) OFFSET 0) d
+    for (const row of (await db.query(`SELECT d.id, d.wx, d.rev, x.document::text AS text
+      FROM (SELECT w.id::text AS id, w.xmin::text AS wx, ${revisionSql} AS rev, ${detoasted('w.document')} AS document FROM work_items w LEFT JOIN work_index i ON i.id = w.id WHERE w.number = ANY($1::bigint[]) OFFSET 0) d
       CROSS JOIN ${coordinationRelevance(coordinationTail)} CROSS JOIN LATERAL (SELECT ${coordinationDocumentSql} AS document) x`, [missingProjections])).rows) {
       const document = standIn(projections, row.text);
-      fetched.set(row.id, document); remember(`${cluster}/w/${row.id}:${row.wx}`, document);
+      standIns.set(numberOf.get(row.id)!, document); remember(`${cluster}/w/${row.id}:${row.wx}@${row.rev}`, document);
     }
   }
-  const standIns = new Map<number, Work>();
-  for (const row of rest) {
-    const document = fetched.get(row.id) ?? cache.get(versionOf(row));
-    // Changed between the two reads (a settled item reopened, say): it is read whole below.
-    if (document) standIns.set(row.number, document);
-  }
+  // A row with no stand-in changed between the two reads (a settled item reopened, say): it is read whole below.
 
   // What the focus's answer turns on, read whole: its dependencies and the open items that overlap it.
   const focused = listed.filter(row => row.focus && whole.has(row.number)).map(row => whole.get(row.number)!);
@@ -117,7 +125,30 @@ export async function lockedRows(db: Queryable, focus: readonly (string | null |
   return rows;
 }
 
-type Listed = { number: number; id: string; wx: string; ix: string | null; settled: boolean; focus: boolean };
+/**
+ * Fill the stand-in cache outside the coordination lock (GY-1042): `db` is a pool, not a locked
+ * transaction. A cold cache — each new process — would otherwise make the first locked read fetch every
+ * settled summary and project every open document while it holds the lock.
+ */
+export async function warmLockedReads(db: Queryable) { await lockedRows(db, []); }
+
+/**
+ * `works` with each stand-in `wanted` selects replaced by its document, read whole (GY-1042): for a
+ * decision outside the coordination lock that reads, on other items, what a projection leaves out.
+ * The documents are a second read after the listing, with no version check, so a peer written in
+ * between is read at its newer version; that suits a pre-check whose result a later observation
+ * re-derives, not a decision that must see one consistent board.
+ */
+export async function withWhole(db: Queryable, works: readonly Work[], wanted: (work: Work) => boolean): Promise<Work[]> {
+  const ids = works.filter(work => isStandIn(work) && wanted(work)).map(work => work.id);
+  if (!ids.length) return [...works];
+  const read = new Map<string, Work>((await db.query(`SELECT id::text AS id, document FROM work_items WHERE id::text = ANY($1::text[])`, [ids])).rows.map(row => [row.id, row.document as Work]));
+  return works.map(work => read.get(work.id) ?? work);
+}
+
+type Listed = { number: number; id: string; wx: string; ix: string | null; rev: string; settled: boolean; focus: boolean };
+/** The item's revision as a stand-in's version names it (`-` for a row the work index does not hold yet), and the cluster that scopes row versions. */
+const revisionSql = "COALESCE(i.revision::text, '-')", clusterSql = "current_database() || ':' || pg_postmaster_start_time()::text";
 
 async function readWhole(db: Queryable, numbers: number[], forUpdate: boolean, into: Map<number, Work>) {
   const wanted = numbers.filter(number => !into.has(number));
@@ -159,14 +190,14 @@ function deepFreeze(value: unknown): unknown {
   return value;
 }
 
-/** Cache a stand-in under its version (`${cluster}/${kind}/${id}:${xmin}`), dropping the item's older version of that kind. */
+/** Cache a stand-in under its version (`${cluster}/${kind}/${id}:${xmin}@${revision}`), dropping the item's older version of that kind. */
 function remember(version: string, document: Work) {
   const slot = version.slice(0, version.lastIndexOf(':')), previous = cachedVersion.get(slot);
   if (previous !== undefined && previous !== version) cache.delete(previous);
   cachedVersion.set(slot, version);
   cache.delete(version);
   cache.set(version, document);
-  while (cache.size > lockedSummaryCacheLimit) {
+  while (cache.size > cacheLimit) {
     const oldest = cache.keys().next().value!;
     cache.delete(oldest);
     const evicted = oldest.slice(0, oldest.lastIndexOf(':'));
@@ -174,31 +205,42 @@ function remember(version: string, document: Work) {
   }
 }
 
+/** The text `save` wrote for each document object, with the revision it wrote it at (`noteSaved`). */
+const savedTexts = new WeakMap<Work, { revision: number; text: string }>();
+/**
+ * Record the exact text `save` wrote for `work` (GY-1042): a stand-in cached from a save is built from
+ * it, never from the object, which the rest of the batch may still change without saving again.
+ */
+export function noteSaved(work: Work, text: string) { savedTexts.set(work, { revision: work.revision, text }); }
+
 /**
  * The rows this coordination transaction saved and still holds at the revision its save left
- * (GY-1027), named by the version each committed row will carry. A reconciliation pass saves most
- * open items it visits, and projecting each saved row again in the next batch cost ~1 ms apiece under
- * the lock. Read once per batch, inside its transaction, from the row versions it wrote itself
- * (`xmin` its own transaction id) and the work index's revision, so a row it did not write last is
- * never mistaken for the document it saved.
+ * (GY-1027), named by the version each committed row will carry, with the text that save wrote. A
+ * reconciliation pass saves most open items it visits, and projecting each saved row again in the
+ * next batch cost ~1 ms apiece under the lock. Read once per batch, inside its transaction, from the
+ * row versions it wrote itself (`xmin` its own transaction id) and the work index's revision, so a
+ * row it did not write last is never mistaken for the document it saved.
  */
 export async function savedVersions(db: Queryable, works: readonly Work[]): Promise<SavedVersion[]> {
   if (!works.length) return [];
-  const rows = (await db.query(`SELECT w.id::text AS id, w.xmin::text AS wx, i.revision::text AS revision, current_database() || ':' || pg_postmaster_start_time()::text AS cluster
+  const rows = (await db.query(`SELECT w.id::text AS id, w.xmin::text AS wx, ${revisionSql} AS rev, ${clusterSql} AS cluster
     FROM work_items w JOIN work_index i ON i.id = w.id WHERE w.id::text = ANY($1::text[]) AND w.xmin::text = (pg_current_xact_id()::xid)::text AND COALESCE(i.settled AND i.summary IS NOT NULL, false) = false`, [works.map(work => work.id)])).rows;
-  const versions = new Map<string, { version: string; revision: number }>(rows.map(row => [row.id, { version: `${row.cluster}/w/${row.id}:${row.wx}`, revision: Number(row.revision) }]));
-  return works.filter(work => versions.get(work.id)?.revision === work.revision).map(work => ({ version: versions.get(work.id)!.version, document: work }));
+  const versions = new Map<string, { version: string; revision: number }>(rows.map(row => [row.id, { version: `${row.cluster}/w/${row.id}:${row.wx}@${row.rev}`, revision: Number(row.rev) }]));
+  return works.flatMap(work => {
+    const row = versions.get(work.id), written = savedTexts.get(work);
+    return row && written && row.revision === work.revision && written.revision === work.revision ? [{ version: row.version, text: written.text }] : [];
+  });
 }
-export type SavedVersion = { version: string; document: Work };
+export type SavedVersion = { version: string; text: string };
 /**
- * Cache what a committed transaction saved (`savedVersions`) as those rows' stand-ins: each saved
- * document projected in-process exactly as `coordinationDocumentSql` projects it from the row
+ * Cache what a committed transaction saved (`savedVersions`) as those rows' stand-ins: the text each
+ * save wrote projected in-process exactly as `coordinationDocumentSql` projects it from the row
  * (`coordinationProjection`), frozen and marked as a stand-in like every other. Called after the
  * commit, outside the lock; a row written again since carries a newer version and is projected afresh.
  */
 export function rememberSaved(saved: readonly SavedVersion[]) {
-  for (const { version, document } of saved) {
-    const projection = deepFreeze(coordinationProjection(JSON.parse(JSON.stringify(document)))) as Work;
+  for (const { version, text } of saved) {
+    const projection = deepFreeze(coordinationProjection(JSON.parse(text))) as Work;
     projections.add(projection);
     remember(version, projection);
   }

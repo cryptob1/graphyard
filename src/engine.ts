@@ -45,7 +45,7 @@ import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMer
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
-import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, workIdByRef, type SavedVersion } from './store/locked-read.js';
+import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -298,6 +298,18 @@ export const unauthorizedMergeViolation = 'Merge observed without a prior author
  * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
  * still counts.
  */
+/**
+ * The refresh record a stale mergeability reading (GY-375) leaves for its head: the reading over
+ * whatever the record for that same head carried onto it. `conflictSince` and `conflictPaths` are
+ * kept only beside a conflict (GY-1230), so what an earlier conflict on the head recorded never
+ * survives on a record whose conflict the stale reading cleared.
+ */
+export function staleRefreshRecord(previous: BaseRefresh | null | undefined, refresh: BaseRefresh): BaseRefresh {
+  const kept = previous?.head === refresh.from.sha ? previous : null;
+  const record: BaseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
+  if (!record.conflict) { delete record.conflictSince; delete record.conflictPaths; }
+  return record;
+}
 export function sameBesideActions(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
@@ -502,6 +514,8 @@ export class Engine {
    * disables the pre-check, and every later observation still re-derives the refusal.
    */
   submissionObserver: ((work: Work, peers?: Work[]) => Promise<Observation>) | null | undefined = undefined;
+  /** Whether this process has warmed the locked read's stand-in cache (`warmLockedReads`). */
+  private lockedReadsWarm = false;
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
@@ -639,7 +653,9 @@ export class Engine {
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const all = await lockedWork(this.store.leasePool, [id]);
+    // The landing check reads each open submitted peer's observation scope, which a projection leaves
+    // out (GY-1042): those peers are read whole. This read holds no coordination lock.
+    const all = await withWhole(this.store.leasePool, await lockedWork(this.store.leasePool, [id]), peer => peer.stage !== 'done' && !!peer.submission && !!peer.candidate);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
@@ -1968,8 +1984,7 @@ export class Engine {
         // GitHub's conflict reading was stale (GY-375): the test merge was clean and nothing was
         // written. The reading replaces the refresh record for this head, keeping what it carried
         // onto the head, and the stored observation has its conflict disproved.
-        const kept = work.baseRefresh?.head === refresh.from.sha ? work.baseRefresh : null;
-        work.baseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
+        work.baseRefresh = staleRefreshRecord(work.baseRefresh, refresh);
         const disproved = work.observation?.conflicting ? disprovedConflict(work, work.observation) : null;
         if (disproved) work.observation = withDisprovedConflict(work.observation!, disproved);
         this.evaluate(work, all, now);
@@ -2298,6 +2313,9 @@ export class Engine {
    */
   private async reconcileTick() {
     const tickStarted = performance.now();
+    // A process's first pass would otherwise open on a cold stand-in cache and project every open
+    // document while it holds the coordination lock: warm it first, outside the lock (GY-1042).
+    if (!this.lockedReadsWarm) { await warmLockedReads(this.store.pool); this.lockedReadsWarm = true; }
     // The pass's view: every item with the row version it was read at, and the candidates in number order.
     const fleet = new Map<string, { number: number; work: Work; version: string }>();
     let all: Work[] = [], candidates: string[] = [], next = 0, contended = 0, cap = Infinity;

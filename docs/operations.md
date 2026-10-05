@@ -33,6 +33,12 @@ graphyard unblock GY-N "reason"                                              # u
 
 Never attest a stop you have not confirmed. Merged work changes only through a follow-up item.
 
+## Worker host keyring proxy
+
+A confined master, approver or proof producer reads its GitHub login with `gh auth git-credential` through a keyring-only D-Bus proxy; workers and reviewers carry their own credential and never get it. Install it once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (an earlier install that enabled `graphyard-secrets-bus.service` itself disables it first). The socket listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (else `/run/user/<uid>/graphyard-secrets-bus`); `GRAPHYARD_SECRETS_BUS` in the launcher's environment names another socket. Without a live socket the session bus is masked by `/dev/null`, and a session pushes with `GH_TOKEN` from its environment.
+
+The filter admits only the Secret Service methods a credential read needs, but by method and path, not by item: a session can read every unlocked item, not only the GitHub login. On such a host keep other secrets out of that keyring, or leave the proxy uninstalled and use `GH_TOKEN`.
+
 ## Safety facts that never change
 
 - Workers never hold `admin`, `coordinator` or `producer` tokens. No AI principal can hold `admin`.
