@@ -2777,7 +2777,9 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   assert.ok(worked >= 0 && master.bannerAt !== null, `the scenario set a live master working and printed its retry banner: ${JSON.stringify({ worked: master.worked, bannerAt: master.bannerAt })}`);
   const workingReads = master.reads.filter(read => read.pane === master.worked && read.status === 'working');
   assert.ok(workingReads.some(read => read.at < master.bannerAt!), `the loop read the working master's own prose before the banner: ${workingReads.length} reads`);
-  assert.ok(workingReads.length <= new Set(workingReads.map(read => read.at)).size, 'a working master is read at most once a cycle');
+  // The soak cadence equals workingOutputReadMs, so this proves one read per cycle, not the
+  // throttle itself; unit:working-session-output-read-throttled pins the throttle.
+  assert.ok(workingReads.length <= new Set(workingReads.map(read => read.at)).size, 'a working master is read at most once a cycle (the throttle is pinned by its unit test)');
   const exhausted = master.rotations.filter(rotation => /\(exhausted\)/.test(rotation.detail));
   assert.equal(exhausted.length, 1, `exactly one rotation off the spent account: ${JSON.stringify(master.rotations)}`);
   assert.ok(exhausted[0].at >= master.bannerAt! && exhausted[0].at <= master.bannerAt! + 2 * minute, `the retrying master rotated within two cycles of its banner: ${JSON.stringify({ bannerAt: master.bannerAt, rotation: exhausted[0] })}`);
