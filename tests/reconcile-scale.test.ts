@@ -20,7 +20,14 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 // What the passes read and lock, seen on every connection the pool opens. `hold` makes the
 // batch's row lock of one item slow by `ms` after the lock is taken, so a test knows the batch
 // is holding its transaction.
-const counts = { documents: 0, locks: 0, locked: [] as string[], versioned: 0 };
+// `documents` counts whole documents returned; `projected` the compact stand-ins the locked read
+// (GY-1027) builds from a document in SQL, returned as text.
+const counts = { documents: 0, projected: 0, locks: 0, locked: [] as string[], versioned: 0 };
+const countDocuments = (text: string, rows: { document?: unknown }[] = []) => {
+  if (!/^\s*select/i.test(text) || !/from\s+work_items/i.test(text)) return;
+  if (text.includes('jsonb_to_record')) counts.projected += rows.length;
+  else counts.documents += rows.filter(row => row.document && typeof row.document === 'object').length;
+};
 // `fired` holds the batch once; `times` holds it for that many consecutive locks instead (the
 // contention-recovery test arms several attempts of the same batch in a row).
 const hold: { id: string | null; ms: number; fired: boolean; times: number } = { id: null, ms: 0, fired: false, times: 0 };
@@ -53,12 +60,11 @@ before(async () => {
     (client as { query: (...args: any[]) => any }).query = (...args: any[]) => {
       const [text, values] = args;
       if (text === reconcileItemLockSql) { counts.locks++; counts.locked.push(values?.[0]); }
-      const documents = typeof text === 'string' && /^\s*select/i.test(text) && /from\s+work_items/i.test(text) && /\bdocument\b/i.test(text);
       const last = args.length - 1;
       if (typeof args[last] === 'function') {
         const done = args[last];
-        args[last] = (error: unknown, result: { rowCount?: number }) => {
-          if (!error && documents) counts.documents += Number(result?.rowCount ?? 0);
+        args[last] = (error: unknown, result: { rowCount?: number; rows?: { document?: unknown }[] }) => {
+          if (!error && typeof text === 'string') countDocuments(text, result?.rows);
           if (!error && text === reconcileVersionsSql) counts.versioned = Math.max(counts.versioned, Number(result?.rowCount ?? 0));
           return done(error, result);
         };
@@ -66,7 +72,7 @@ before(async () => {
       }
       return (async () => {
         const result = await query(...args);
-        if (documents) counts.documents += Number((result as { rowCount?: number }).rowCount ?? 0);
+        if (typeof text === 'string') countDocuments(text, (result as { rows?: { document?: unknown }[] }).rows);
         if (text === reconcileVersionsSql) counts.versioned = Math.max(counts.versioned, Number((result as { rowCount?: number }).rowCount ?? 0));
         if (text === reconcileItemLockSql && onLocked) await onLocked(values[0]);
         if (text === reconcileItemLockSql && hold.id && values?.[0] === hold.id && (!hold.fired || hold.times > 0)) {
@@ -81,6 +87,9 @@ before(async () => {
   await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator];
+  // These cases exercise the batches of a pass that visits every open item (GY-727); which items a
+  // pass evaluates between full passes is tests/incremental-reconcile.test.ts's concern (GY-1124).
+  engine.reconcileFullEvaluationMs = 0;
   // 700 items, 150 of them open (the first created is the template for the rest), 547 settled
   // deliveries, and 3 done ones still holding a lease, a queue entry and a deployment row.
   const template = await createItem('Scale template');
@@ -101,9 +110,11 @@ test('unit:reconcile-reads-open-items-once — a pass reads each candidate once,
   assert.equal(expected, openItems.length + heldDone.length, 'the done items still holding a lease, a queue entry or a row are candidates too');
   // One item per batch: over 150 transactions. The old pass re-read all 700 documents in each.
   engine.reconcileBatchMs = 0;
-  counts.documents = 0; counts.locks = 0; counts.versioned = 0;
+  counts.documents = 0; counts.projected = 0; counts.locks = 0; counts.versioned = 0;
   try { await engine.reconcile(); } finally { engine.reconcileBatchMs = 250; }
-  assert.equal(counts.documents, expected, `a pass reads each candidate's document exactly once (read ${counts.documents})`);
+  assert.equal(counts.documents, expected, `a pass reads each candidate's document whole exactly once (read ${counts.documents})`);
+  // The opening read under the lock projects only the candidates its cache has no stand-in for, each once.
+  assert.ok(counts.projected <= expected, `the opening read projected ${counts.projected} rows for ${expected} candidates`);
   assert.equal(counts.locks, expected, `each candidate is locked row by row, once, and no settled delivery is (locked ${counts.locks})`);
   assert.ok(counts.versioned > 0 && counts.versioned <= expected, `each batch versions only the pass's candidates, never the settled history (${counts.versioned} rows at most)`);
   assert.ok(await candidateCount() < expected, 'the pass settled the done item that still held a queue entry');
@@ -270,7 +281,7 @@ test('unit:reconcile-reads-open-items-once — sustained contention defers a bat
   try { await engine.reconcile(); }
   finally { onLocked = undefined; console.warn = warn; engine.reconcileBatchMs = 250; }
   assert.equal(attempts, engine.reconcileMaxAttempts, 'the contended batch has a finite attempt budget');
-  assert.ok(warnings.some(line => /deferred 1 item\(s\).*6 contended attempts/.test(line)), 'deferral is visible in the server log');
+  assert.ok(warnings.some(line => new RegExp(`deferred 1 item\\(s\\).*${engine.reconcileMaxAttempts} contended attempts`).test(line)), 'deferral is visible in the server log');
   const after = await store.list();
   assert.ok(after.find(item => item.id === written.id)!.lease, 'the deferred write was rolled back');
   assert.equal(after.find(item => item.id === later.id)!.lease, null, 'later candidates made progress in the same tick');

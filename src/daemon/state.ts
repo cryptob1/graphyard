@@ -9,6 +9,7 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
+import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 
@@ -155,6 +156,13 @@ export const reclaimSummarySchema = z.object({
   trees: z.number().int().min(0).default(0), treeBacklog: z.number().int().min(0).default(0),
 }).strict();
 export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
+
+/** The host's memory at the last cycle (GY-612): below its floor, new launches on the host are deferred. */
+export const hostMemoryStateSchema = z.object({
+  host: z.string().max(200).nullable(), at: z.string(), totalBytes: z.number().min(0), availableBytes: z.number().min(0), floorBytes: z.number().min(0),
+  low: z.boolean(), since: z.string().nullable(),
+  consumers: z.array(z.object({ command: z.string().max(200), processes: z.number().int().min(0), rssBytes: z.number().min(0) }).strict()).max(10).default([]),
+}).strict();
 
 export const scopeMeasurementSchema = z.object({
   work: z.string().max(200), epoch: z.number().int().min(0), at: z.string(),
@@ -396,6 +404,8 @@ export const daemonStateSchema = z.object({
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
   reclaim: reclaimSummarySchema.nullable().default(null),
+  /** The host's memory as the last cycle read it, and whether launches are deferred on it. */
+  memory: hostMemoryStateSchema.nullable().default(null),
   /** Per-item passage clocks and the samples they produced; the loop's own latency measurement. */
   clocks: z.record(z.string(), itemClockSchema).default({}),
   latency: z.array(latencySampleSchema).default([]),
@@ -407,6 +417,10 @@ export const daemonStateSchema = z.object({
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
   /** Per decision action key, the request this loop put to an approver and what became of it. */
   approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** Per item, head and base tip, the docs-sync session the loop launched for a docs-only conflict (GY-566). */
+  docsSyncs: z.record(z.string(), docsSyncWatchSchema).default({}),
+  /** Every confirmed conflict the loop routed, newest last: master status reads its hotspots from here (GY-566). */
+  conflicts: z.array(routedConflictSchema).default([]),
   /** Per work item, a live lease whose session Herdr no longer reports while no fence stands (see step 1d). */
   absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
@@ -516,8 +530,9 @@ export function pruneDaemonState(state: DaemonState) {
   // A cleared base failure is retired by its step once its candidates were rerun and refreshed; this bound drops the oldest, cleared first.
   const failures = Object.entries(state.baseFailures).sort((a, b) => Number(!a[1].cleared) - Number(!b[1].cleared) || Date.parse(a[1].raisedAt) - Date.parse(b[1].raisedAt));
   if (failures.length > retainedBaseFailures) for (const [key] of failures.slice(0, failures.length - retainedBaseFailures)) delete state.baseFailures[key];
-  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight.
-  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
+  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight
+  // and never one waiting on its provider: that record is the hold, and dropping it would relaunch its subject early (GY-1245).
+  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry) && entry.state !== 'waiting').sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
   const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
   if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
   const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));

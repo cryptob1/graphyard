@@ -2,6 +2,8 @@
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
 import { routableScopeRequest, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
+import { deliveredByGitHub } from '../model/delivery-mode.js';
+import { unexercisedFindings } from '../model/mechanical-proofs.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
@@ -144,8 +146,15 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // that gate and cancels them when it closes, so the wait is the build's, not the loop's (GY-402).
     // A proof a producer request pending for the head names is that request's to answer, bounded by
     // the producer timeout like every obligation the control plane holds (GY-404).
-    if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && config.run.proofWorkflow && buildPasses(item)) {
+    // A proof recorded on the head as not exercising its criterion is owed no producer either: no
+    // path re-produces a proof on an unchanged head, so it waits on the rework decision that sends
+    // the head back — the routine decision above counts that wait as its own subject (GY-1092, GY-727).
+    // GY-1266: so is any head the routine decision sends back to a worker, and under GitHub delivery
+    // no head is owed a proof at all — CI runs the unit tests, UAT the end-to-end ones, and the control
+    // plane requests no producer — so a missing proof there was a silence no cycle could end.
+    if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && decision?.action !== 'rework' && !deliveredByGitHub(item) && config.run.proofWorkflow && buildPasses(item)) {
       const owned = producerOwnedProofs(item, now, (config.run.producerTimeoutMinutes ?? 120) * 60_000);
+      for (const finding of unexercisedFindings(item)) owned.add(finding.proof);
       const outstanding = missingProofs(item, new Date(now)).filter(proof => !proof.startsWith('manual:') && !owned.has(proof));
       if (outstanding.length) add('proof', item, `${item.key} is missing trusted evidence for ${outstanding.join(', ')}`);
     }

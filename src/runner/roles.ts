@@ -217,6 +217,38 @@ export function piApproverPrompt(config: { repository: string; cliPath: string }
     + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
 }
 
+/**
+ * The one definition of a live-install proof (GY-1170): a manual proof that installs Graphyard
+ * onto a real Hetzner server. The match is keyed to Hetzner and fails closed (GY-1204): only
+ * manual:host-install-live, the host install that provisions a Hetzner server, and a
+ * `manual:…install…-live` name carrying a `hetzner` segment (manual:install-hetzner-live) count.
+ * A live proof for any other provider (railway, docker-host, compose) is not one, so it is never
+ * refused for want of HCLOUD_TOKEN nor handed Hetzner credentials or instructions. The producer's
+ * .env allowlist, its launch refusal and the instructions its session reads all follow from this
+ * match, so a new live-install proof cannot get the instructions without the credential, or neither.
+ */
+export const liveInstallProof = (proof: string) => proof === 'manual:host-install-live'
+  || (/^manual:(?:[a-z0-9-]+-)?install(?:-[a-z0-9-]+)?-live$/.test(proof) && /[:-]hetzner-/.test(proof));
+/** The .env names a live-install session cannot run without; a launch on a host lacking one is refused. */
+export const liveInstallRequiredEnv = ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY'] as const;
+/**
+ * The .env name of an SSH key already registered in the Hetzner project (GY-1170). It is passed
+ * when set and is never required: without it the session registers a throwaway key itself.
+ */
+export const liveInstallSshKeyEnv = 'HETZNER_SSH_KEY';
+/**
+ * What a producer session whose proofs include a live-install proof is told about its Hetzner
+ * credential and SSH key; empty for every other session.
+ */
+export function liveInstallGuidance(proofs: readonly string[], directory: string, key: string, sha: string) {
+  if (!proofs.some(liveInstallProof)) return '';
+  const name = `graphyard-${key.toLowerCase()}-${sha.slice(0, 8)}`, file = `${directory}/hetzner-ssh-key`;
+  return `For the live install proofs (${proofs.filter(liveInstallProof).join(', ')}), ${liveInstallRequiredEnv.join(' and ')} are available in your environment; the spend cap bounds what you may create. `
+    + `The hetzner adapter needs a registered SSH key (--ssh-key NAME). If ${liveInstallSshKeyEnv} is set in your environment, pass --ssh-key "$${liveInstallSshKeyEnv}". `
+    + `Otherwise register a throwaway key with the provided HCLOUD_TOKEN: ssh-keygen -t ed25519 -N '' -C ${name} -f ${file}, then hcloud ssh-key create --name ${name} --public-key-from-file ${file}.pub, and pass --ssh-key ${name}. `
+    + `When the proof is judged, delete every server and volume you created and, if you registered it, the throwaway key (hcloud ssh-key delete ${name}), pass or fail. `;
+}
+
 export function piProducerPrompt(config: { repository: string }, binding: { key: string; pr: number; sha: string; baseSha: string; policyRevision: number; group: string; proofs: string[] },
   criteria: { id: string; text: string; proofs: string[] }[], checkout: { directory: string; worktree: string }, repository: string, memory?: ProjectMemory | null) {
   const stripped = `${checkout.directory}/exercise`;
@@ -225,7 +257,8 @@ export function piProducerPrompt(config: { repository: string }, binding: { key:
   return `You are an independent Graphyard proof producer for ${config.repository}. Produce evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + (memorySection || '')
     + `The criteria these proofs establish: ${attached.map(criterion => `${criterion.id} (${criterion.proofs.filter(proof => binding.proofs.includes(proof)).join(', ')}): ${criterion.text}`).join(' ')} `
-    + `Work in a detached worktree of the exact head at ${checkout.worktree}: git -C ${repository} fetch origin ${binding.sha} && git -C ${repository} worktree add --detach ${checkout.worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests named for it (grep the proof name under tests/) — with every GRAPHYARD_* and HERDR_* variable unset and a free GRAPHYARD_TEST_PORT. A proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed — that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. For live install proofs, HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are available in your environment. `
+    + `Work in a detached worktree of the exact head at ${checkout.worktree}: git -C ${repository} fetch origin ${binding.sha} && git -C ${repository} worktree add --detach ${checkout.worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests named for it (grep the proof name under tests/) — with every GRAPHYARD_* and HERDR_* variable unset and a free GRAPHYARD_TEST_PORT. A proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed — that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
+    + liveInstallGuidance(binding.proofs, checkout.directory, binding.key, binding.sha)
     + 'Do not edit, commit, push, rebase or merge the candidate, and never weaken, skip or narrow a test to make a proof pass. '
     + `A proof that passes against an unchanged tree proves nothing, so for each proof also run it in a second detached worktree of the same head at ${stripped} (git -C ${repository} worktree add --detach ${stripped} ${binding.sha}) with the behaviour its criterion describes removed — revert or stub exactly the lines of the change that implement it. `
     + `Then call the graphyard_submit_evidence tool once per proof with proof, sha "${binding.sha}", baseSha "${binding.baseSha}", policyRevision ${binding.policyRevision}, result pass or fail, executed as the cases that actually ran, skipped, and exercise {criterion, behaviour, result, executed} as the stripped run's true outcome; a failing or incomplete run is submitted as result fail, never omitted. Graphyard submits it as your producer principal and its gates decide whether it is trusted. `

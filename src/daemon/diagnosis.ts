@@ -3,8 +3,9 @@
 // item through the normal two-party decision.
 import { createHash } from 'node:crypto';
 import { createSchema, type Work } from '../model.js';
+import { providerLimit, type ExhaustionSignal } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
-import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance } from '../model/fault-classes.js';
+import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
 import { guardBroadScope } from '../master/autonomy.js';
 import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
 import type { Runner } from '../runner/types.js';
@@ -31,6 +32,14 @@ import type { Cycle } from './cycle.js';
 // The closure names the answering item (answeringItem), so a recurrence before that item is
 // delivered links to the recurring item, and one after it files afresh (standingFaultClassItem).
 // An invariant violation has no item to close: it is linked to the covering or released fix item.
+//
+// A run refused by its provider's quota or rate limit (an HTTP 429, a "limit exhausted" notice)
+// diagnosed nothing, but nothing about the loop failed either (GY-1092): when every run of a
+// diagnosis ends that way it waits for the provider's reset, records no fault, and is run again
+// then — and no other subject is launched into the same spent provider meanwhile. After the reset
+// one subject probes the provider, and the others wait for its answer (diagnosticianGate), so the
+// retries cost one run pair per reset, not one per waiting subject. Recorded as a failed loop
+// action, one spent account filed a loop fault for every subject in flight.
 // ---------------------------------------------------------------------------
 
 export const diagnosticianRole = 'diagnostician';
@@ -81,7 +90,49 @@ export interface DiagnosticianEffects {
 }
 export type FixInput = ReturnType<typeof createSchema.parse> & { reason: string };
 
-interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null }
+/** `limit`: every run ended on its provider's quota or rate limit — the earliest known reset among them. */
+interface Outcome { runs: DiagnosisRecord['runs']; diagnosis: DiagnosisPayload | null; limit?: ExhaustionSignal | null }
+/** How long a diagnosis refused by a provider naming no readable reset waits before it is run again. */
+export const diagnosisLimitHoldMs = 60 * 60_000;
+/** The least a provider-limited diagnosis waits, whatever reset the provider named: never a retry every cycle. */
+export const diagnosisLimitMinimumMs = 5 * 60_000;
+/**
+ * Until when the diagnostician's provider is known spent: the latest retry time any waiting
+ * diagnosis holds, while it is still ahead — the latest, so an older refusal naming a later reset
+ * is never lifted early by a newer one naming a sooner. Null when nothing is waiting on a limit.
+ */
+export function diagnosticianHeldUntil(state: Pick<DaemonState, 'diagnoses'>, clock: number): string | null {
+  const latest = Object.values(state.diagnoses).filter(entry => entry.state === 'waiting' && entry.retryAt).map(entry => entry.retryAt!).sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+  return latest && Date.parse(latest) > clock ? latest : null;
+}
+/**
+ * What the diagnostician may launch this cycle (GY-1092): `open` — anything, nothing waits on a
+ * limit or a run launched since the last refusal came back answered by the provider; `held` — no
+ * launch, the provider's reset is still ahead or the one probe since it is still running; `probe` —
+ * one subject only, the first run after the reset. One probe per reset, never every waiting subject
+ * at once: if the provider still refuses, the probe waits again and the rest wait with it, so a
+ * spent account costs one primary and one fallback run per hold window however many subjects wait.
+ */
+export function diagnosticianGate(state: Pick<DaemonState, 'diagnoses'>, clock: number): 'open' | 'probe' | 'held' {
+  const entries = Object.values(state.diagnoses), waiting = entries.filter(entry => entry.state === 'waiting');
+  if (!waiting.length) return 'open';
+  if (diagnosticianHeldUntil(state, clock)) return 'held';
+  const refused = Math.max(...waiting.map(entry => Date.parse(entry.refusedAt ?? entry.updatedAt)));
+  const since = entries.filter(entry => entry.state !== 'waiting' && Date.parse(entry.startedAt) > refused);
+  if (since.some(entry => entry.state !== 'running')) return 'open';
+  return since.length ? 'held' : 'probe';
+}
+/**
+ * The one subject a probe runs: the waiting subject refused longest ago, so the retry order is
+ * fair and deterministic, else the first subject listed when none of them is waiting (GY-1245).
+ */
+export function probeSubject<T extends { id: string }>(state: Pick<DaemonState, 'diagnoses'>, subjects: readonly T[]): T[] {
+  const refusedAt = (subject: T) => { const entry = state.diagnoses[subject.id]; return entry?.state === 'waiting' ? Date.parse(entry.refusedAt ?? entry.updatedAt) : Infinity; };
+  const oldest = [...subjects].sort((a, b) => refusedAt(a) - refusedAt(b))[0];
+  return oldest ? [oldest] : [];
+}
+/** A waiting diagnosis whose retry time has come. */
+const retryDue = (entry: DiagnosisRecord | undefined, clock: number) => entry?.state === 'waiting' && (!entry.retryAt || Date.parse(entry.retryAt) <= clock);
 const live = new Map<string, Promise<void>>();
 const outcomes = new Map<string, Outcome>();
 /** Every diagnostician run this process has in flight, settled: a test's way to wait for them. */
@@ -110,7 +161,7 @@ export function diagnosisSubjects(state: Pick<DaemonState, 'faults' | 'diagnoses
   const subjects: DiagnosisSubject[] = [];
   for (const item of work) {
     const faultClass = closesFaultClass(item);
-    if (!faultClass || item.stage === 'done' || isClosed(item) || state.diagnoses[item.key]) continue;
+    if (!faultClass || item.stage === 'done' || isClosed(item) || (state.diagnoses[item.key] && !retryDue(state.diagnoses[item.key], clock))) continue;
     const listed = new Set(item.origin?.faultClass?.instances.map(entry => entry.id) ?? []);
     const recorded = state.faults.instances.filter(entry => entry.linkedTo === item.key || listed.has(entry.id));
     const known = new Set(recorded.map(entry => entry.id));
@@ -121,7 +172,7 @@ export function diagnosisSubjects(state: Pick<DaemonState, 'faults' | 'diagnoses
   }
   const bound = settings.invariantBoundMinutes * 60_000, standing = new Set(Object.values(state.faults.open));
   for (const instance of state.faults.instances) {
-    if (!isInvariantKind(instance.kind) || !standing.has(instance.id) || instance.linkedTo || state.diagnoses[instance.id]) continue;
+    if (!isInvariantKind(instance.kind) || !standing.has(instance.id) || instance.linkedTo || (state.diagnoses[instance.id] && !retryDue(state.diagnoses[instance.id], clock))) continue;
     if (Date.parse(instance.at) + bound > clock) continue;
     subjects.push({ id: instance.id, kind: 'invariant', faultClass: instance.faultClass, work: null, instances: [instance] });
   }
@@ -171,12 +222,12 @@ export const diagnosisEvidenceMax = 100_000;
 
 /** Run the primary attempt, and the fallback once when the primary returns no valid diagnosis. */
 async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, prompt: string): Promise<Outcome> {
-  const runs: DiagnosisRecord['runs'] = [], timeoutMs = diagnostician.settings.timeoutMinutes * 60_000;
+  const runs: DiagnosisRecord['runs'] = [], limits: (ExhaustionSignal | null)[] = [], timeoutMs = diagnostician.settings.timeoutMinutes * 60_000;
   for (const attempt of ['primary', 'fallback'] as const) {
     const startedAt = new Date().toISOString();
     let chosen: DiagnosticianRun;
     try { chosen = await diagnostician.runner(attempt, subject); }
-    catch (error) { runs.push({ runtime: 'none', model: attempt, startedAt, endedAt: new Date().toISOString(), result: 'spawn', detail: clip(`No ${attempt} runner: ${message(error)}`, 500) }); continue; }
+    catch (error) { runs.push({ runtime: 'none', model: attempt, startedAt, endedAt: new Date().toISOString(), result: 'spawn', detail: clip(`No ${attempt} runner: ${message(error)}`, 500) }); limits.push(null); continue; }
     const run = chosen.runner.start(prompt, { cwd: diagnostician.cwd, env: { GRAPHYARD_PI_ROLE: diagnosticianRole }, tool: graphyardTools.diagnose, timeoutMs,
       validate: payload => {
         const parsed = diagnosisPayloadSchema.parse(payload);
@@ -188,9 +239,16 @@ async function runDiagnosis(diagnostician: DiagnosticianEffects, subject: Diagno
     runs.push({ runtime: chosen.runtime, model: chosen.model, startedAt, endedAt: new Date().toISOString(), result: result.ok ? 'diagnosed' : result.failure.reason,
       detail: clip(result.ok ? `Diagnosed as ${result.payload.faultClass}: ${result.payload.cause}` : result.failure.detail, 500) });
     if (result.ok) return { runs, diagnosis: result.payload };
+    // Only the provider's own error is read — the last error a run that made no call ended on. An
+    // invalid payload's detail is the agent's submission, and an exit's carries stderr, which can
+    // mix in the agent's output: a limit phrase there must not turn a real failure into a wait.
+    const providerError = result.failure.reason === 'no-payload' ? /\(last error: ([\s\S]*)\)$/.exec(result.failure.detail)?.[1] : undefined;
+    limits.push(providerError ? providerLimit(providerError, Date.now()) : null);
     if (result.failure.reason === 'cancelled') break;
   }
-  return { runs, diagnosis: null };
+  const limited = limits.length > 0 && limits.every(Boolean) ? limits as ExhaustionSignal[] : null;
+  const resets = limited?.map(entry => entry.resetsAt).filter((at): at is string => !!at).sort() ?? [];
+  return { runs, diagnosis: null, limit: limited ? { reason: limited.at(-1)!.reason, resetsAt: resets[0] ?? null } : null };
 }
 
 const iso = (at: number) => new Date(at).toISOString();
@@ -220,12 +278,24 @@ export async function diagnosisStep(cycle: Cycle) {
   const { state, effects, now, snapshot, clock, performed } = cycle;
   const diagnostician = effects.diagnostician;
   if (!diagnostician || !diagnostician.settings.enabled) return;
-  const note = async (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: string) => {
+  const note = async (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: string, faultKind?: FaultKind | null) => {
     entry.detail = clip(detail, 1000); entry.updatedAt = iso(now());
     performed.push(await record(state, diagnosisKey(entry.subject), { kind: 'diagnosis', work: entry.work ?? entry.fix, principal: null, state: outcome, detail,
-      attempts: (state.actions[diagnosisKey(entry.subject)]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
+      attempts: (state.actions[diagnosisKey(entry.subject)]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist, faultKind));
   };
-  for (const subject of diagnosisSubjects(state, snapshot.work, clock, diagnostician.settings)) {
+  const subjects = diagnosisSubjects(state, snapshot.work, clock, diagnostician.settings);
+  // A waiting diagnosis whose subject no longer needs one — the item closed, the violation linked — is dropped.
+  const listed = new Set(subjects.map(subject => subject.id));
+  for (const [key, entry] of Object.entries(state.diagnoses)) if (retryDue(entry, clock) && !listed.has(key)) delete state.diagnoses[key];
+  // While the provider is spent, launching another subject only spends a run on the same refusal;
+  // after its reset one subject probes it, and the rest follow once the provider has answered.
+  // A refusal that came back since the last cycle is folded first, so it holds this cycle's launches.
+  for (const entry of Object.values(state.diagnoses)) {
+    const outcome = entry.state === 'running' ? outcomes.get(entry.subject) : undefined;
+    if (outcome && !outcome.diagnosis && outcome.limit) await cycle.isolate('diagnosis', snapshot.work.find(candidate => candidate.key === entry.work) ?? null, `the diagnosis of ${entry.subject}`, () => advance(cycle, diagnostician, entry, note));
+  }
+  const gate = diagnosticianGate(state, clock);
+  for (const subject of gate === 'held' ? [] : gate === 'probe' ? probeSubject(state, subjects) : subjects) {
     await cycle.isolate('diagnosis', subject.work, `the diagnosis of ${subject.id}`, () => launch(cycle, diagnostician, subject, note));
   }
   for (const entry of Object.values(state.diagnoses)) {
@@ -235,12 +305,12 @@ export async function diagnosisStep(cycle: Cycle) {
   }
 }
 
-type Note = (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: string) => Promise<void>;
+type Note = (entry: DiagnosisRecord, outcome: DaemonAction['state'], detail: string, faultKind?: FaultKind | null) => Promise<void>;
 
 async function launch(cycle: Cycle, diagnostician: DiagnosticianEffects, subject: DiagnosisSubject, note: Note) {
   const { config, state, snapshot, clock } = cycle;
   const entry: DiagnosisRecord = { subject: subject.id, kind: subject.kind, faultClass: subject.faultClass, work: subject.work?.key ?? null, state: 'running',
-    startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, detail: '' };
+    startedAt: iso(clock), updatedAt: iso(clock), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   state.diagnoses[subject.id] = entry;
   const context = await diagnostician.context(subject, namedPullRequests(subject, snapshot.work))
     .catch(error => ({ journal: [`(the excerpts could not be read: ${message(error)})`], serverLog: [], pullRequests: [] }));
@@ -263,6 +333,16 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     }
     outcomes.delete(entry.subject);
     entry.runs = outcome.runs.slice(-4);
+    if (!outcome.diagnosis && outcome.limit) {
+      const named = outcome.limit.resetsAt ? Date.parse(outcome.limit.resetsAt) : Number.NaN;
+      // A reset already past says nothing about when the provider recovers: the hour's hold, as for none.
+      entry.state = 'waiting';
+      entry.retryAt = iso(Number.isFinite(named) && named > clock ? Math.max(named, clock + diagnosisLimitMinimumMs) : clock + diagnosisLimitHoldMs);
+      entry.refusedAt = iso(clock);
+      // The provider's capacity, not the loop's failure: no fault kind, so no loop fault instance.
+      await note(entry, 'waiting', `The diagnostician's provider refused the diagnosis of ${entry.subject} for its quota or rate limit (${outcome.limit.reason}); it is diagnosed again at ${entry.retryAt}, and no other diagnosis is launched before then`, null);
+      return;
+    }
     if (!outcome.diagnosis) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician returned no diagnosis of ${entry.subject}: ${outcome.runs.map(run => `${run.model} ${run.result}: ${run.detail}`).join('; ')}`); return; }
     entry.diagnosis = outcome.diagnosis; entry.state = 'diagnosed';
     await note(entry, 'done', `Diagnosed ${entry.subject} as ${outcome.diagnosis.faultClass}: ${outcome.diagnosis.cause}`);
@@ -270,7 +350,14 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   const subjectItem = entry.work ? snapshot.work.find(item => item.key === entry.work) ?? null : null;
   if (entry.state === 'diagnosed') {
     const diagnosis = entry.diagnosis!;
-    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) { entry.state = 'failed'; await note(entry, 'failed', `${entry.work} is no longer open, so its diagnosis is not acted on`); return; }
+    // GY-1266: a recurring item closed while it was diagnosed — delivered, or closed by the master —
+    // needs nothing from its diagnosis. That is the subject moving on, not the loop failing: recorded
+    // as a failed action it opened a loop fault for every such closure.
+    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) {
+      entry.state = 'answered'; entry.answeredBy = subjectItem ? answeringItem(subjectItem) : null;
+      await note(entry, 'done', `${entry.work} is no longer open, so its diagnosis is not acted on${entry.answeredBy ? `; it was closed as answered by ${entry.answeredBy}` : ''}`, null);
+      return;
+    }
     if (diagnosis.covering) {
       const covering = snapshot.work.find(item => item.key === diagnosis.covering);
       if (!covering || covering.stage === 'done' || covering.key === entry.work) { entry.state = 'failed'; await note(entry, 'failed', `The diagnosis names ${diagnosis.covering} as covering ${entry.subject}, but it is not another open item`); return; }
@@ -337,5 +424,5 @@ export function diagnosisReport(state: Pick<DaemonState, 'diagnoses'>, limit = 2
   const entries = Object.values(state.diagnoses).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return { inFlight: entries.filter(entry => !diagnosisSettled(entry)).length,
     recent: entries.slice(0, limit).map(entry => ({ subject: entry.subject, kind: entry.kind, faultClass: entry.faultClass, state: entry.state, cause: entry.diagnosis?.cause ?? null,
-      covering: entry.diagnosis?.covering ?? null, fix: entry.fix, decision: entry.decision, answeredBy: entry.answeredBy, detail: entry.detail, updatedAt: entry.updatedAt })) };
+      covering: entry.diagnosis?.covering ?? null, fix: entry.fix, decision: entry.decision, answeredBy: entry.answeredBy, retryAt: entry.retryAt, refusedAt: entry.refusedAt, detail: entry.detail, updatedAt: entry.updatedAt })) };
 }

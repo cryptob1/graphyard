@@ -1,11 +1,13 @@
 // Concern: cycle step 4 — dispatch claimable work under capacity and report base refreshes.
 import type { Work } from '../model.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
+import { docsOnlyConflict } from '../model/docs-sync.js';
 import { dispatchSort } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
 import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { type DaemonAction, message } from './state.js';
@@ -18,6 +20,7 @@ import { credentialBlockedMarker } from '../worker-credential.js';
 import { attemptEndsNeedingRetry, attemptRetryHold, capBinding, capBindingPrefix, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
 import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
+import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from './dispatch-failures.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
@@ -38,6 +41,19 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const offered = dispatchSort(open.filter(item => {
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }), hotFiles, clock);
+
+  // GY-1082: a failure run counts this loop's own consecutive failed launches, so it is retired
+  // whenever the snapshot shows the item somewhere a run cannot follow: gone or delivered, carrying
+  // a blocker (the one the run recorded, even when the loop stopped before forgetting it, or anyone
+  // else's), held under a lease no launch of this loop is running, or past an epoch this loop's
+  // last failure did not spend — another dispatcher claimed it in between, so the failures were
+  // not consecutive. A later failure then starts a new run.
+  for (const [id, run] of Object.entries(state.dispatchFailures)) {
+    if (cycle.launcher.keys().some(key => key.startsWith(`dispatch:${id}:`))) continue;
+    const item = snapshot.work.find(entry => entry.id === id);
+    const claimed = !!item?.lease && Date.parse(item.lease.expiresAt) > clock;
+    if (!item || item.stage === 'done' || item.blocker || claimed || item.epoch > run.epoch + 1) delete state.dispatchFailures[id];
+  }
 
   // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
   // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this
@@ -167,6 +183,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await effects.planeHealth() : null;
   if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
     performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  // A host below its memory floor launches no worker (GY-612): the crossing is recorded once each
+  // way — deferred with its reason and top consumers, resumed once memory recovers — and master
+  // status raises one `resources` attention item while it stands. Running sessions are left alone.
+  const memoryLow = await hostMemoryStep(cycle);
   // Each item's profile is chosen in dispatch order, one after another, and taken before the next
   // item chooses; the launches themselves do not depend on each other and are handed to the
   // launcher beside the cycle (GY-616), which runs them a few at a time while the cycle goes on to
@@ -174,9 +194,13 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   // until it settles, across cycles: a profile an earlier cycle's launch still holds is taken.
   const taken = cycle.launcher.held();
   // The `launches` step is the hand-off: choosing each item's profile and handing its launch over.
-  await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
+  await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable || memoryLow ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
+    // GY-860: a workspace failure hands the epoch back, so the next dispatch reuses this key; it
+    // waits out the usual doubling backoff instead of retrying the same host git state every cycle.
+    const failed = state.actions[key];
+    if (failed && workspaceDispatchFailure(failed.detail) && state.cycle - failed.cycle < Math.min(2 ** failed.attempts, 30)) return;
     // GY-1078: an item whose dispatches keep failing for one cause is not dispatched again; the
     // cause is recorded as its blocker, and a block the control plane refused is asked for again.
     const failing = state.dispatchFailures[item.id];
@@ -275,9 +299,14 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           await effects.persist(state);
           return;
         }
-        recordProfileFailure(state, current.profile, message(error), now());
+        // GY-860 AC-2: a failure about the item's own workspace is the host's git state, not the
+        // profile's — it puts no profile into its failure cool-off. The worktree command has
+        // already released the claim with its git message, which hands the epoch back, and the
+        // item's record here keeps that message.
+        const workspace = workspaceDispatchFailure(message(error));
+        if (!workspace) recordProfileFailure(state, current.profile, message(error), now());
         const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)} (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''} (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         if (run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }
@@ -297,10 +326,11 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     // candidate, resolved when the control plane reports what its merge did.
     const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
     if (!target) return;
+    // A docs-sync head (GY-566) is the same head and tip's second outcome, reported under its own key.
     // A restore's retry reads the same head and base tip as the attempt before it, so the attempt
     // is part of the key: the escalated attempt is reported, not folded into the first (GY-854).
     const attempt = !pending && refresh?.restore?.attempts && refresh.restore.attempts > 1 ? `:attempt-${refresh.restore.attempts}` : '';
-    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}${attempt}`;
+    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}${!pending && refresh?.docsSync ? ':docs-sync' : ''}${attempt}`;
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
@@ -317,7 +347,9 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const detail = refresh!.stale
       ? `${item.key}: ${refresh!.stale.reading}; it keeps its head, review and proofs (GY-375)`
       : refresh!.conflict
-      ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: ${refresh!.conflict}`
+      ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; ${docsOnlyConflict(refresh!.conflictPaths) ? `both sides changed only docs pages (${refresh!.conflictPaths!.join(', ')}), so a docs-sync session resolves it unless the loop's own merge finds code conflicting, when it returns to the worker` : 'it returns to the worker'} with the conflict named: ${refresh!.conflict}`
+      : refresh!.docsSync
+      ? `${item.key}${trigger}: a docs-sync session brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}${carry && !carry.approval.carried ? ` (${carry.approval.reason})` : ''}`
       // A restore whose result GitHub does not show is a failure with its reason, never a success
       // re-logged (GY-854): the escalation on the record names why it stops repeating.
       : restore?.outcome === 'unpublished'
@@ -327,6 +359,22 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });
   return { capacities, approversSpent };
+}
+
+/** The key of the loop's host-memory record: one deferral and one resumption per crossing. */
+export const memoryActionKey = 'escalation:dispatch:memory';
+/** Read the host's memory, keep it on the loop's state, and record a crossing of its floor. Whether launches are deferred. */
+export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'config' | 'performed'>) {
+  const { state, effects, now, config, performed } = cycle;
+  if (!effects.hostMemory) return false;
+  const reading = await effects.hostMemory().catch(() => null);
+  // An unreadable host keeps the last judgment: a deferral is not lifted by a failed read.
+  if (!reading) return !!state.memory?.low;
+  const judged = judgeHostMemory(state.memory, reading, now(), config.hostId ?? null);
+  state.memory = judged.state;
+  if (judged.event) performed.push(await record(state, memoryActionKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: judged.detail.slice(0, 1000),
+    attempts: (state.actions[memoryActionKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  return judged.state.low;
 }
 
 /**

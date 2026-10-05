@@ -58,6 +58,12 @@ const budgetJudgement = (counts: { page: string; words: number }[]) => {
   };
 };
 
+/** Facts a criterion requires a budgeted page to state, so trimming for the budget cannot drop them. */
+const REQUIRED_STATEMENTS: [string, RegExp][] = [
+  ['docs/master-agent-reference.md', /decisions step stays within 10 s a cycle/],
+  ['docs/master-agent-reference.md', /history whose ledger has not moved is kept, not read/],
+];
+
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget, counted as wc -w counts them; a total over the budget warns and passes', () => {
   assert.ok(budget, 'graphyard.json configures documentation.wordBudget');
   assert.equal(words('one  two\tthree\n\nfour — `five six` [seven](eight.md)'), 8, 'words are whitespace-separated runs, as wc -w counts them');
@@ -68,6 +74,9 @@ test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and 
   const judgement = budgetJudgement(counts);
   assert.equal(judgement.failed, null, `a page over its budget fails here: ${judgement.failed}`);
   if (judgement.warning) console.warn(`unit:docs-word-budget: ${judgement.warning}`);
+  // Statements a criterion requires the budgeted pages to keep (GY-1142 AC-2): the budget holds
+  // with them in, and a trim that drops one fails here instead of passing silently.
+  for (const [page, statement] of REQUIRED_STATEMENTS) assert.match(read(page), statement, `${page} states ${statement}`);
 });
 
 test('unit:docs-budget-reports-not-blocks — an over-budget total passes with the warning recorded; a page over its per-page cap still fails', () => {

@@ -10,9 +10,9 @@ import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, 
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
+import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
 import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -32,18 +32,20 @@ import { writeProjectMemory } from '../project-memory.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
+import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { withReviewerDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
-import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
+import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
 import type { ResearchEvent } from '../research.js';
+import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
@@ -69,7 +71,7 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects extends BaseFailureEffects {
+export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects> {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -79,7 +81,7 @@ export interface DaemonEffects extends BaseFailureEffects {
    * without it never decides one, and every request waits for the operator as before.
    */
   decideScope?: (work: Work) => Promise<Work>;
-  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: `resync` now, for a step refused on a stale observation
+  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266), for a step refused on a stale observation
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
@@ -114,6 +116,12 @@ export interface DaemonEffects extends BaseFailureEffects {
    */
   refuseMerge?: (work: Work, reason: string, since: string) => Promise<Work>;
   /**
+   * GY-1099. Asks the control plane for an observation of this candidate claimed ahead of the
+   * polled backlog: what a merge refused only for a stale GitHub observation is owed instead of a
+   * rework or an ejection.
+   */
+  observeCandidate?: (work: Work) => Promise<unknown>;
+  /**
    * The deployed release and which deliveries it serves. The containment the previous observation
    * retained is handed back so the cycle re-derives only what the release has not already been
    * shown to contain (see `observeDeployment`).
@@ -129,9 +137,8 @@ export interface DaemonEffects extends BaseFailureEffects {
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
    * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
-   * `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and `mergeQueue.optimisticExclude`
-   * (GY-503) to the control plane, whose merge queue batches and validates its window by the first
-   * two, lets disjoint entries past it by the third and judges shared infrastructure by the last;
+   * and `mergeQueue.rerunFailedChecks` to the control plane, whose merge queue batches and
+   * validates its window by the first two and reruns a failed required check by the last;
    * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
@@ -143,13 +150,7 @@ export interface DaemonEffects extends BaseFailureEffects {
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
-  /**
-   * GY-1118: records a capped change request's non-blocking findings as the item's follow-up batch
-   * (`POST /api/work/KEY/followups`), as the master's operator-agent identity, idempotent on `key`.
-   * With `withdrawReview` absent too, a capped change request is escalated instead.
-   */
-  fileReviewFollowUps?: (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) => Promise<unknown>;
-  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal). */
+  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
@@ -158,7 +159,8 @@ export interface DaemonEffects extends BaseFailureEffects {
    * loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on
    * the release it loaded.
    */
-  selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>;
+  /** `keepAlive` feeds the supervisor's watchdog while the upgrade waits on the executors. */
+  selfUpgrade?: (state: DaemonState, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
   /**
    * GY-437: the release this process loaded, read from its checkout when the effects are built at
    * startup, before anything can move the checkout. The loop records it on the cursor over whatever
@@ -171,13 +173,12 @@ export interface DaemonEffects extends BaseFailureEffects {
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
   reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
-  /**
-   * The resource reclaim pass (GY-132): reaps terminal ledger records, closes finished sessions
-   * holding profile names, and releases the slots of stuck sessions. Runs every cycle.
-   */
+  /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
+  /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
+  hostMemory?: () => Promise<HostMemoryReading | null>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
@@ -212,6 +213,13 @@ export interface DaemonEffects extends BaseFailureEffects {
    * became of every decision this loop requested.
    */
   decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
+  /**
+   * GY-1142. The items whose decision ledger moved after ledger seq `after`, in one read per cycle,
+   * and the seq it now stands at; `after` null reads only where it stands. `complete` false means
+   * more moved than one page holds. The loop keeps a history read on an earlier cycle only for an
+   * item this names unmoved; absent, every history is read again each cycle.
+   */
+  decisionChanges?: (after: string | null) => Promise<{ seq: string; work: string[]; complete: boolean }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -253,8 +261,6 @@ export interface DaemonEffects extends BaseFailureEffects {
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
-  /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
-  migrateFollowUps?: () => Promise<{ merged: number; already?: boolean }>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -495,6 +501,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // would be a runtime read out of code, and the role would decide nothing.
   // The inventory says whether Herdr could be read (GY-205): one it could not judges no approver session gone.
   const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await observeHerdrAgents(run), run, {}, handle => mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session, run: launched.run, settled: launched.settled }; };
+  const docsSyncing = docsSyncEffects(root, run, work => handle => mutate(`work/${work.id}/session`, handle));
   const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
     const config = current();
     if (config.url) await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).end(session, reason);
@@ -502,6 +509,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
+  // One coordinator read of the decision ledger's kinds after the last seq the loop saw (GY-1142).
+  const decisionChanges: DaemonEffects['decisionChanges'] = async after => {
+    const query = new URLSearchParams({ kind: decisionEventKinds.join(','), payload: 'none', routine: 'include', order: after ? 'asc' : 'desc', limit: after ? '1000' : '1', view: 'page' });
+    if (after) query.set('cursor', after);
+    const read = await asCoordinator(`events?${query}`) as { events: { seq: string; work_id: string }[]; page: { hasMore: boolean } };
+    return { seq: (after ? read.events.at(-1)?.seq : read.events[0]?.seq) ?? after ?? '0', work: [...new Set(read.events.map(event => event.work_id))], complete: !!after && !read.page.hasMore };
+  };
   /**
    * The diagnostician's effects under the live configuration (GY-439). Its first run takes the
    * registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
@@ -562,7 +576,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
-    migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
@@ -628,10 +641,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, withReviewerDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
+    hostMemory: readHostMemory,
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, {}),
+    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
@@ -646,10 +660,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get replan() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
-    },
-    get fileReviewFollowUps() {
-      return current().operatorAgent ? async (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) =>
-        asOperatorAgent('POST', `work/${encodeURIComponent(work.key)}/followups`, { findings, reason }, key) : undefined;
     },
     get withdrawReview() {
       const reviewer = current().reviewer;
@@ -670,6 +680,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     merge: work => mergeExecutor(current(), snapshot, mutate, deps.executor, randomUUID(), run)(work),
     refuseMerge: (work, reason, since) => mutate(`work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since }),
+    observeCandidate: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     publishProductionEnvironment: async () => {
@@ -679,7 +690,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
+      const config = { batchSize: mergeBatchSize(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
       if (published === publishedMergeQueue) return;
       await mutate('merge-queue', config);
@@ -712,15 +723,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       try { return { ...withTrees, checkouts: await reclaimCheckouts(root, config) }; }
       catch (error) { return { ...withTrees, errors: [...withTrees.errors, `Ephemeral checkouts: ${writeFailure(error, 'Reclaiming the managed worktree root').message}`] }; }
     },
-    // The decision effects exist only while the live configuration names the master's
-    // operator-agent identity. Without one the loop has no way to request anything, so the cycle
-    // sees them absent and records each routine decision as the escalation naming the two commands,
-    // instead of a request that fails on every retry; provisioning the identity brings them back
-    // on the next reload, with no restart.
+    // The decision effects exist only while the live configuration names the master's operator-agent identity. Without one the loop
+    // has no way to request anything, so the cycle sees them absent and records each routine decision as the escalation naming the
+    // two commands, instead of a request that fails on every retry; provisioning the identity brings them back on the next reload, with no restart.
     get decide() { return current().operatorAgent ? decide : undefined; },
     get approver() { return current().operatorAgent ? approver : undefined; },
+    get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
+    get decisionChanges() { return current().operatorAgent ? decisionChanges : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);
     // the faults it counts are read with the coordinator's visibility, with or without that identity,
     // so an installation that has not provisioned it yet still counts every recurrence.
@@ -744,31 +755,28 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification }),
-    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present
-    // wherever NOTIFY_SOCKET is, and the loop only speaks to it when the supervisor set one.
-    // Node has no unix datagram socket, so the message goes through that short-lived child, which
-    // the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until
-    // the manager has processed the message, so it cannot exit before it is attributed; on an
-    // older systemd a keep-alive can be lost to that race, which is why the packaged window is
-    // 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row.
-    // The keep-alive is a child too: it runs through the same runner, awaited on the event loop
-    // and bounded like every other child, and a keep-alive that fails is logged by the loop.
+    // systemd's own keep-alive channel. `systemd-notify` is part of systemd, so it is present wherever NOTIFY_SOCKET is, and the loop
+    // only speaks to it when the supervisor set one. Node has no unix datagram socket, so the message goes through that short-lived
+    // child, which the unit admits with NotifyAccess=all. Since systemd 246 the tool waits on a barrier until the manager has processed
+    // the message, so it cannot exit before it is attributed; on an older systemd a keep-alive can be lost to that race, which is why
+    // the packaged window is 180s against a cycle of at most 30s: a healthy loop would have to lose six in a row. The keep-alive is a
+    // child too: it runs through the same runner, awaited on the event loop and bounded like every other child, and a keep-alive that fails is logged by the loop.
     // GY-437: the loop upgrades its own checkout between cycles. The executors come first,
     // through the shipped restart command — a refusal (a claim in flight, another restart's
     // fence) leaves the owed restarts on the cursor for the next cycle — and the loop
     // re-executes itself only through the supervisor unit it actually runs under, detected from
     // its own cgroup like an executor's.
     loadedRelease: readRelease(root),
-    selfUpgrade: state => performSelfUpgrade(current(), state, {
+    selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, {
       root, run,
-      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to }),
+      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive }),
       restartSelf: async () => {
         const unit = detectLoopSupervisorUnit();
         if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
-        // --no-block queues the restart and returns: the hand-off is systemd's stop signal, which
-        // the loop takes during its wait, not a call this process must survive.
-        await run('systemctl', ['--user', '--no-block', 'restart', unit]);
+        // --no-block queues the restart; systemd's stop then ends this wait, and reaches this process too (upgrade.ts restartEndedBySupervisorStop).
+        await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
       },
+      alignUnit: () => alignRunningLoopUnit(root, current()),
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },

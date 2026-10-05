@@ -9,6 +9,7 @@ import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
 import { assertHandAction, assertHandDispatch, systemDriven } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
+import { masterHarnessDrift } from './fleet.js';
 
 /** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
 export async function operationsCommand(session: MasterSession): Promise<unknown> {
@@ -20,7 +21,10 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     // The master session's budgets (GY-898) come from this installation's config, not the cursor.
     const summary = report.daemon as typeof report.daemon & { master?: Record<string, unknown> | null };
     const master2 = summary.master ? { ...summary.master, budgetMinutes: masterSessionMinutes(master), heartbeatMinutes: masterHeartbeatMinutes(master) } : null;
-    return print({ ...report, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
+    const harness = await masterHarnessDrift(root, master);
+    const attention = harness ? { attentionItems: [...report.attentionItems, harness], counts: { ...report.counts, attention: report.counts.attention + 1 } } : {};
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');

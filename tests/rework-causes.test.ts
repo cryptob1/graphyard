@@ -160,8 +160,10 @@ test('unit:rework-rounds-split-by-cause — the split excludes causes outside th
   const masterApi = async (path: string) => {
     if (path === 'work-snapshot') return { work: fixtureWork, now };
     if (path.startsWith('events?')) {
-      eventsReads++;
       const query = new URLSearchParams(path.slice('events?'.length));
+      // Delivery speed reads `ready` events (GY-1232); that read is not the rework walk.
+      if (query.get('kind') === 'ready') return { events: [], page: { hasMore: false, nextCursor: null }, filters: { kinds: ['ready'] } };
+      eventsReads++;
       assert.equal(query.get('kind'), 'rework');
       assert.equal(query.get('payload'), 'details');
       return { events: fixtureEvents, page: { hasMore: false, nextCursor: null }, filters: { kinds: ['rework'] } };

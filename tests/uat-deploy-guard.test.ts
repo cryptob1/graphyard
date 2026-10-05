@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import {
-  browserSuite, cut, deployToUat, gitIn, uatBranch, uatValidationWindowMs, validateAndRecord, type BrowserLauncher, type ReleaseCandidate, type Suite,
+  browserSuite, cut, deployBranch, deployToUat, gitIn, uatBranch, uatValidationCeilingMs, uatValidationWindowMs, validateAndRecord, type BrowserLauncher, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
 
 // Follow-ups from the review of GY-1094 (GY-1167): UAT is never moved under a running validation,
@@ -123,4 +123,49 @@ test('the browser suite signs in to the UAT deployment\'s dashboard and opens th
   const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
   assert.match(workflow, /npx playwright install --with-deps chromium/);
   assert.match(workflow, /--suite 'browser=node --import tsx --eval "import\(\\"\.\/src\/release-candidate\.ts\\"\)\.then\(m => m\.runBrowserSuite\(\)\)"'/, 'the uat job runs the browser suite against GRAPHYARD_UAT_URL');
+});
+
+// Follow-ups from the review of GY-1167 (GY-1182): a first deploy is leased on the branch's
+// absence, and the validation window is held above the workflow's own timeouts.
+
+test('a first deploy is leased on release/uat being absent, so a branch created in between is refused', async () => {
+  const repo = await repository();
+  const first = repo.merge('GY-61', 601);
+  const a = (cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-01T12:00:00Z'), push: true }) as any).candidate;
+  const created = run(repo.work, 'rev-list', '--max-parents=0', 'HEAD');
+  const racing = gitIn(repo.work);
+  let createdInBetween = false;
+  const lagging = ((args: string[]) => {
+    const out = racing(args);
+    if (args[0] === 'ls-remote' && !createdInBetween) { createdInBetween = true; run(repo.work, 'push', '-q', 'origin', `${created}:refs/heads/${uatBranch}`); }
+    return out;
+  });
+  assert.throws(() => deployToUat(lagging, a.id, 'main', new Date('2026-10-01T12:10:00Z')), /stale info|rejected/);
+  assert.equal(remoteRef(repo.origin, `refs/heads/${uatBranch}`), created, 'the concurrently created branch is kept');
+
+  // Leasing on absence still lets a genuine first deploy through, and refuses one once the branch exists.
+  run(repo.work, 'push', '-q', 'origin', `:refs/heads/${uatBranch}`);
+  deployBranch(repo.git, uatBranch, first, null);
+  assert.equal(remoteRef(repo.origin, `refs/heads/${uatBranch}`), first);
+  assert.throws(() => deployBranch(repo.git, uatBranch, created, null), /stale info|rejected/);
+  assert.equal(remoteRef(repo.origin, `refs/heads/${uatBranch}`), first);
+});
+
+test('the UAT validation window covers the release-candidate workflow\'s longest run up to its uat job', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
+  const ceiling = uatValidationCeilingMs(workflow);
+  assert.ok(ceiling >= 120 * 60_000, 'the uat job\'s own timeout is counted');
+  assert.ok(uatValidationWindowMs > ceiling, `the ${uatValidationWindowMs / 60_000}-minute window must exceed the workflow's ${ceiling / 60_000}-minute path to a verdict`);
+
+  const sample = ['on:', '  push:', 'jobs:', '  candidate:', '    timeout-minutes: 10', '  slow:', '    needs: candidate', '    timeout-minutes: 90',
+    '  fast:', '    needs: candidate', '    timeout-minutes: 5', '  uat:', '    needs: [candidate, slow, fast]', '    timeout-minutes: 120', '  promote:', '    needs: [uat]', '    timeout-minutes: 600'].join('\n');
+  assert.equal(uatValidationCeilingMs(sample), (10 + 90 + 120) * 60_000, 'the heaviest needs chain ending at uat, not later jobs');
+  assert.ok(uatValidationCeilingMs(sample.replace('timeout-minutes: 90', 'timeout-minutes: 200')) > uatValidationWindowMs, 'a grown timeout is detected');
+  assert.throws(() => uatValidationCeilingMs(sample.replace('    timeout-minutes: 5\n', '')), /fast declares no timeout-minutes/);
+
+  // A block-sequence `needs` counts the same chain; a needs value the parser cannot read throws rather than under-counting.
+  const block = sample.replace('    needs: [candidate, slow, fast]', '    needs:\n      - candidate\n      - slow # heaviest\n    - fast');
+  assert.equal(uatValidationCeilingMs(block), (10 + 90 + 120) * 60_000, 'a block-sequence needs is read in full');
+  assert.throws(() => uatValidationCeilingMs(sample.replace('    needs: [candidate, slow, fast]', '    needs:\n    timeout-minutes: 1')), /uat has a needs value the UAT validation window cannot read/);
+  assert.throws(() => uatValidationCeilingMs(sample.replace('needs: [candidate, slow, fast]', 'needs: ${{ fromJSON(x) }}')), /uat has a needs value/);
 });
