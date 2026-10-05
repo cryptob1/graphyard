@@ -760,6 +760,7 @@ export class Engine {
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
     if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
     const started = new Date();
+    this.renewing++;
     try {
       const work = await this.executeCommand(actor, command, id, input, key, context);
       this.leaseHealth.record('renewed', Date.now() - started.getTime());
@@ -769,10 +770,36 @@ export class Engine {
       this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
       if (!fault || !id) throw error;
       throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
+    } finally {
+      if (--this.renewing === 0) for (const resume of this.renewalsDone.splice(0)) resume();
     }
   }
   /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
   readonly leaseHealth = new LeaseHealth();
+  /** Lease renewals in flight in this process, and the reconciliation steps waiting for them to finish (GY-1290). */
+  private renewing = 0;
+  private readonly renewalsDone: (() => void)[] = [];
+  /**
+   * The longest one reconciliation step waits for the renewals in flight (GY-1290). A renewal takes
+   * no lock a waiting step holds, so the wait ends when they do; the bound only keeps a stream of
+   * overlapping renewals from holding reconciliation back indefinitely.
+   */
+  reconcileYieldMs = 1_000;
+  /**
+   * Let a lease renewal run before reconciliation's next evaluation or write (GY-1290). Evaluation is
+   * CPU work on the one event loop every request shares: a renewal's every query round trip would
+   * otherwise resume only after the evaluation then running, so a renewal of a few round trips waited
+   * through as many evaluations. Reconciliation first lets pending I/O — an arriving request
+   * included — run, then waits until no renewal is in flight, so a renewal waits on at most the one
+   * evaluation it arrived during.
+   */
+  private async yieldToRenewals() {
+    await new Promise(resolve => setImmediate(resolve));
+    if (!this.renewing) return;
+    let timer: NodeJS.Timeout | undefined;
+    await new Promise<void>(resolve => { this.renewalsDone.push(resolve); timer = setTimeout(resolve, this.reconcileYieldMs); });
+    clearTimeout(timer);
+  }
   /**
    * Record a renewal that failed server-side inside its lease's expiry window (GY-558): a
    * `lease.renewal-failed` event naming the owner, epoch and the time the renewal arrived,
@@ -2458,6 +2485,8 @@ export class Engine {
           const planned = new Map<string, Work>();
           while (next < candidates.length) {
             if (next > batch && (plans.length >= this.reconcileBatchWrites || performance.now() - started >= this.reconcileBatchMs)) return false;
+            // The dry run awaits no I/O: between evaluations a renewal runs first (`yieldToRenewals`).
+            await this.yieldToRenewals();
             const id = candidates[next++];
             // Deleted since the pass opened, nothing is left to evaluate; a stand-in from the opening
             // read is read whole as the batch reaches it (GY-1027).
@@ -2524,6 +2553,8 @@ export class Engine {
    * never on the batch's evaluation of other items, nor on a later write that waits for its turn.
    */
   private async reconcileWrite(plan: ReconcilePlan, stale: boolean, pass: ReconcilePass): Promise<ReconcileWritten> {
+    // Before its transaction, so the write holds no lock while a renewal runs.
+    await this.yieldToRenewals();
     return this.store.transaction(async (db, now) => {
       const waitStarted = performance.now(), locked = await this.coordinationLockWithin(db, this.reconcileCommitLockWaitMs);
       pass.lockWait(performance.now() - waitStarted);
