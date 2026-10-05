@@ -18,7 +18,7 @@ The loop attests unproduced `manual:` proofs through an independent approver, on
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+that misses it; an unobserved one is left alone for its first 3 minutes, and a worker handle with no pane yet reads `launching` while its attempt's lease stands, which the launch renews until its supervisor's first heartbeat. A handle another host launched is left to
 that host's loop. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
