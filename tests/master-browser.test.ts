@@ -42,7 +42,7 @@ function work(overrides: Partial<Work> = {}) {
  * the real pages behave, and the API stub reads the same state.
  */
 class StubGitHub {
-  app: Record<string, string> = { actions: 'write', metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read', workflows: 'read' };
+  app: Record<string, string> = { actions: 'write', metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'read', checks: 'write', administration: 'read', deployments: 'read', workflows: 'read' };
   installation: Record<string, string> = { ...this.app };
   pendingRequest = false;
   protection = { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true, strict: true, enforce_admins: true, hasCheck: true, hasRule: true };

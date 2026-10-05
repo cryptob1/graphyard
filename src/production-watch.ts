@@ -82,10 +82,11 @@ const GITHUB_STATUS_READS = 5;
  * is a GitHub deployment in the production environment carrying the commit sha and statuses
  * (queued, in_progress, success, failure, error, inactive), read with the control plane's GitHub
  * App credential. The fallback when no Railway token is set, since Railway issues API and project
- * tokens only from its dashboard. A concluded status (success, failure, error) is kept per
- * deployment and never read again — Railway marks a success inactive minutes later though
+ * tokens only from its dashboard. A concluded status (success, failure, error, inactive) is kept
+ * per deployment and never read again — Railway marks a success inactive minutes later though
  * production still serves it — so a steady pass costs one listing request plus one status read
- * per deployment still in flight.
+ * per deployment still in flight, and deployments past the per-pass read cap are read on later
+ * passes once the newer ones have concluded.
  */
 export function githubDeploymentsProvider(github: { request(path: string): Promise<any>; config?: { repository?: string } }, environment = 'production'): DeploymentProvider {
   const concluded = new Map<string, { status: ProviderDeploymentStatus; providerStatus: string; url: string | null; updatedAt: string | null }>();
@@ -108,7 +109,7 @@ export function githubDeploymentsProvider(github: { request(path: string): Promi
           const latest = (await github.request(`/deployments/${encodeURIComponent(id)}/statuses?per_page=1`))?.[0];
           const raw = typeof latest?.state === 'string' ? latest.state : 'queued';
           state = { status: githubStatus[raw] ?? 'unknown', providerStatus: raw.toUpperCase(), url: typeof latest?.log_url === 'string' && latest.log_url ? latest.log_url : typeof latest?.target_url === 'string' && latest.target_url ? latest.target_url : null, updatedAt: typeof latest?.created_at === 'string' ? latest.created_at : null };
-          if (['success', 'failure', 'error'].includes(raw)) concluded.set(id, state);
+          if (['success', 'failure', 'error', 'inactive'].includes(raw)) concluded.set(id, state);
         }
         deployments.push({ id, ...state, commit: sha, branch: ref, createdAt: String(deployment.created_at ?? '') });
       }
