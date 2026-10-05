@@ -10,9 +10,10 @@ export default defineRailway(ctx => {
   // and without the GitHub App: with no GITHUB_* variable it holds no credential that can write to
   // the production repository, so it never merges, dispatches or spends the App's request budget.
   const uat = ctx.isEnvironment("uat");
-  const Postgres = postgres("Postgres", { region: "us-west2" });
-  Postgres.networking = { privateNetworkEndpoint: "postgres" };
-  const postgresVolume = volume("postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: "us-west2", sizeMB: 20000 });
+  // Each environment keeps the database and volume it was created with; UAT's carry Railway's generated suffixes.
+  const Postgres = postgres(uat ? "Postgres-B0rl" : "Postgres", { region: uat ? "sfo" : "us-west2" });
+  if (!uat) Postgres.networking = { privateNetworkEndpoint: "postgres" };
+  const postgresVolume = volume(uat ? "postgres-volume-MrSK" : "postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: uat ? "sfo" : "us-west2", sizeMB: uat ? 50000 : 20000 });
   const graphyard = service("graphyard", {
     source: github("cryptob1/graphyard", { branch: uat ? releaseBranches.uat : releaseBranches.production }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
