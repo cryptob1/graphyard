@@ -214,19 +214,52 @@ async function codexAccount(environment: AgentEnvironment, probe: EnvironmentPro
   return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
 }
 
-async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe, plan: { id: string | null; now: number }) {
+/**
+ * An environment as the fleet probes a registry account: the plan id derived for it, the plan the operator declared
+ * (null when none), and the account's named key file and variable. Typed here rather than smuggled through `as any`,
+ * so a caller that drops one of them fails to compile instead of silently probing the wrong key (GY-1210).
+ */
+export type ProbedEnvironment = AgentEnvironment & { plan?: string | null; declaredPlan?: string | null; keyFile?: string; keyVariable?: string };
+
+async function zaiAccount(environment: ProbedEnvironment, probe: EnvironmentProbe, plan: { id: string | null; now: number }) {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
-  const keyFileName = (environment as any).keyFile ?? 'zai.key';
+  // A named key file is read as Z.AI's only when it is Z.AI's by its variable or name: an OpenCode account whose
+  // key is Anthropic's is never probed against Z.AI, so its 401 cannot mark the account logged out (GY-1158).
+  const named = environment.keyFile, variable = environment.keyVariable;
+  const keyFileName = named && (variable === 'ZAI_API_KEY' || /zai/i.test(named)) ? named : 'zai.key';
   const fileKey = await readFile(resolve(environment.home, keyFileName), 'utf8').catch(() => null);
   const fallbackKey = keyFileName !== 'zai.key' ? await readFile(resolve(environment.home, 'zai.key'), 'utf8').catch(() => null) : null;
   const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
-  const authFileExists = await access(resolve(environment.home, 'auth.json')).then(() => true, () => false);
-  const opencodeAuthExists = await access(resolve(environment.home, 'opencode/auth.json')).then(() => true, () => false);
-  const key = zaiKey ?? fileKey?.trim() ?? fallbackKey?.trim() ?? auth?.ZAI_API_KEY ?? auth?.key ?? process.env.ZAI_API_KEY;
-  const loggedIn = !!key || authFileExists || opencodeAuthExists || (!!opencodeAuth && Object.keys(opencodeAuth).length > 0) || (!!auth && Object.keys(auth).length > 0);
-  if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
-  if (!key) return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+  const piKey = auth?.zai?.key ?? auth?.['z.ai']?.key ?? auth?.['zai-coding-plan']?.key ?? auth?.ZAI_API_KEY;
+  const key = zaiKey ?? piKey ?? (fileKey?.trim() || undefined) ?? (fallbackKey?.trim() || undefined);
+
+  const hasZaiKey = !!key;
+  // Z.AI-specific only on Z.AI evidence: the Pi runtime, a declared zai plan, or a key named Z.AI's. A plan id derived
+  // from the runtime is no evidence (every OpenCode account defaults to the 'zai' kind), nor is the account's name (GY-1158).
+  const declared = environment.declaredPlan === undefined ? environment.plan : environment.declaredPlan;
+  const isZaiSpecific = (environment.kind as string) === 'pi'
+    || /^zai/i.test(declared ?? '')
+    || keyFileName !== 'zai.key';
+
+  if (isZaiSpecific) {
+    if (!hasZaiKey || probe.quota === false) {
+      return { loggedIn: hasZaiKey, usage: [], note: hasZaiKey ? 'quota not read' : null };
+    }
+  } else {
+    // Any provider entry carrying credential material is an OpenCode login: an API key (`type: 'api'`), a well-known
+    // token, or the access/refresh pair `opencode auth login` stores for OAuth providers (Anthropic, OpenAI, Copilot).
+    const credentialField = (value: unknown) => typeof value === 'string' && value.length > 0;
+    const hasOpencodeAuth = !!opencodeAuth && Object.values(opencodeAuth).some((v: any) => credentialField(v)
+      || !!v && typeof v === 'object' && ['key', 'apiKey', 'token', 'access', 'refresh'].some(field => credentialField(v[field])));
+    const loggedIn = hasZaiKey || hasOpencodeAuth;
+    if (!loggedIn || probe.quota === false) {
+      return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
+    }
+    if (!hasZaiKey) {
+      return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+    }
+  }
   // Accounts on one shared plan read one quota: a fresh plan reading answers without another call
   // to the provider's endpoint, so selecting among N such accounts costs one probe, not N (GY-1180).
   const shared = plan.id ? getCachedPlanUsage(plan.id, plan.now, probe.cacheMs ?? 30_000) : null;
@@ -254,10 +287,10 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
   }
 }
 
-export async function checkAgentEnvironment(environment: AgentEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
+export async function checkAgentEnvironment(environment: ProbedEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
-  const planId = (environment as any).plan ?? (
-    environment.kind === 'opencode' || /zai|glm/i.test(environment.name)
+  const planId = environment.plan ?? (
+    environment.kind === 'opencode' || (environment.kind as string) === 'pi' || /zai|glm/i.test(environment.name)
       ? (/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)?.[1]
         ? `zai-${/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)![1].toLowerCase()}`
         : 'zai')
@@ -269,7 +302,7 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean } =
     environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
     : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
-    : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe, { id: planId, now }))
+    : environment.kind === 'opencode' || (environment.kind as string) === 'pi' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe, { id: planId, now }))
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
 
   if (account.loggedIn && planId) {
