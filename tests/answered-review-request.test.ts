@@ -127,7 +127,7 @@ for (const [index, instance] of instances.entries()) {
       // The executor's request-review row, as in GY-957, GY-811, GY-566, GY-453, GY-887, GY-980 and GY-1078.
       const handlers = controlPlaneHandlers(() => config, {
         snapshot: async () => ({ work: [work], now: new Date().toISOString() }), mutate: async () => ({}), agents: () => [],
-        workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}), observeDeployment: async () => ({}) as any,
+        workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}), launchProducer: async () => ({}), observeDeployment: async () => ({}) as any,
         launchReview: (target, dispatch, herdr, observedAt) => launchReview(master.root, target, 'claude-reviewer', herdr, observedAt, { run: master.run, mint: master.mint, requestId: dispatch.id }),
       });
       const action = { id: 'action-1', work: work.id, key: work.key, gate: 'review', kind: 'request-review', inputs: { kind: 'request-review', provider: 'github', requestId: request.id, pr: instance.pr, sha: instance.sha, baseSha: base, policyRevision: instance.policyRevision } } as unknown as ActionRow;

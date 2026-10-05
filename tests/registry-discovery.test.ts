@@ -187,7 +187,6 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
       closeSession: pane => { state.master.closed.push(pane); state.master.agents = state.master.agents.filter(agent => agent.pane_id !== pane); },
       dispatch: async () => {},
       requestProof: () => {},
-      merge: async () => ({ result: 'merged', merged: true }),
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at.value).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {},
       requestSmoke: () => {},

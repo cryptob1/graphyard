@@ -47,7 +47,7 @@ export const masterCommands = defineCommands([
       '  master settle-containment GY-N REASON',
       '                                Settle a containment quarantine whose supervisor this host',
       '                                verifies dead; unverifiable signals refuse',
-      '  master merge GY-N|--all       Merge exact authorized candidates without bypasses',
+      '  master merge                  Say that GitHub merges; Graphyard runs no merge of its own',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
       '  master verify-deployment GY-N Verify that the deployed release serves a delivery and emits',

@@ -7,7 +7,7 @@ import { automatableOutcomes, producerGroupDecisions, producerManualFailures, ev
 import { deliveredProof } from '../src/model/bootstrap.js';
 import { classifyProofs } from '../src/cli/verify.js';
 import { proofOutcome } from '../src/producer.js';
-import { nextAction } from '../src/model/next-action.js';
+import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { neededDecision, proofRework } from '../src/daemon/decisions.js';
 
 // GY-895. The producer prompts already state the manual-proof rule — a manual: proof is judged,
@@ -59,7 +59,6 @@ function item(evidenceEntries: Partial<Evidence>[] = [], extra: Partial<Work> = 
   return { ...work, stage: graded.stage, gates: graded.gates, violations: graded.violations } as Work;
 }
 const outcomeOf = (work: Work, proof: string) => automatableOutcomes(work, [work], now).find(entry => entry.proof === proof)!.outcome;
-const acceptanceReasons = (work: Work) => work.gates.find(gate => gate.name === 'acceptance')!.reasons;
 const binding = { sha: head, baseSha: base, policyRevision: 1 };
 
 test('unit:manual-proof-not-title-counted — a judged manual pass proves its criterion whatever it executed; unit/integration keep the title rule', () => {
@@ -68,9 +67,11 @@ test('unit:manual-proof-not-title-counted — a judged manual pass proves its cr
   const judged = item([{}, evidence(UNIT, { executed: 3 })]);
   assert.equal(outcomeOf(judged, MANUAL), 'proven', 'the manual pass is proven, never counted from titles');
   assert.deepEqual(producerGroupDecisions(judged, [judged], now).filter(entry => entry.group === 'manual').map(entry => entry.state), ['proven']);
-  assert.deepEqual(acceptanceReasons(judged), [], 'the acceptance gate accepts the attested pass');
   assert.equal(proofOutcome(judged, binding, MANUAL), 'pass', 'the producer session settles the proof as passed');
-  assert.equal(nextAction(judged, [judged], now)?.kind, 'merge', 'nothing is asked for a correct candidate');
+  // Nothing is asked for a correct candidate: GitHub merges it (GY-1235).
+  const account = actionAccount(judged, [judged], now);
+  assert.equal(account.action, null, 'nothing is asked for a correct candidate');
+  assert.equal(account.wait?.on, 'github');
 
   // The skip rule is not weakened with it: an attested pass with a skipped case proves nothing.
   assert.equal(outcomeOf(item([{ skipped: 1 }, evidence(UNIT, { executed: 3 })], {}), MANUAL), 'failed');
@@ -81,10 +82,6 @@ test('unit:manual-proof-not-title-counted — a judged manual pass proves its cr
   // under the proof's title judged nothing.
   assert.equal(outcomeOf(item([{}, evidence(UNIT, { executed: 0 })]), MANUAL), 'proven');
   assert.equal(outcomeOf(item([{}, evidence(UNIT, { executed: 0 })]), UNIT), 'failed');
-  assert.deepEqual(acceptanceReasons(item([{}, evidence(UNIT, { executed: 0 })])), [`AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`]);
-  // The gate names the manual proof without the title-count demand it never had.
-  assert.deepEqual(acceptanceReasons(item([])), [`AC-1: ${MANUAL} needs trusted passing evidence, with skipped = 0, for this candidate and policy`,
-    `AC-2: ${UNIT} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`]);
 });
 
 test('unit:attested-is-manual-only — the zero-execution exception is the manual family alone; e2e keeps the title rule', () => {
@@ -94,14 +91,6 @@ test('unit:attested-is-manual-only — the zero-execution exception is the manua
   assert.equal(evidenceProves(E2E, { result: 'pass', executed: 0, skipped: 0 }), false, 'an e2e pass with nothing executed judged nothing');
   assert.equal(evidenceProves(E2E, { result: 'pass', executed: 1, skipped: 0 }), true, 'an e2e pass with a case executed proves');
   assert.equal(evidenceProves(MANUAL, { result: 'pass', executed: 0, skipped: 0 }), true, 'the attestation rule stays with manual:');
-
-  // The acceptance gate demands executed > 0 of an e2e proof and judges the zero-executed pass failed.
-  const demanded = item([], { criteria: [{ id: 'AC-1', text: 'Checkout runs end to end', proofs: [E2E] }] });
-  assert.deepEqual(acceptanceReasons(demanded), [`AC-1: ${E2E} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`]);
-  const unjudged = item([evidence(E2E, { executed: 0 })], { criteria: [{ id: 'AC-1', text: 'Checkout runs end to end', proofs: [E2E] }] });
-  assert.deepEqual(acceptanceReasons(unjudged), [`AC-1: ${E2E} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`], 'the zero-executed e2e pass proves nothing');
-  const proven = item([evidence(E2E, { executed: 2 })], { criteria: [{ id: 'AC-1', text: 'Checkout runs end to end', proofs: [E2E] }] });
-  assert.deepEqual(acceptanceReasons(proven), [], 'an e2e pass with cases executed proves the criterion');
 });
 
 test('unit:manual-proof-not-title-counted — the verifier names a manual proof outstanding for judgment, and a delivered attested pass discharges a bootstrap obligation', () => {
@@ -136,7 +125,7 @@ test('unit:no-rework-on-manual-zero-executed — a manual record with executed =
   // The fresh attestation answers it: the loop records the attested pass with executed = 1.
   const attested = item([{ result: 'fail' as const, executed: 0 }, evidence(UNIT, { executed: 3 }), { id: 'e2', result: 'pass', executed: 1, at: '2026-09-28T01:00:00.000Z' }]);
   assert.equal(neededDecision(attested, { autoMerge: true }), null);
-  assert.deepEqual(acceptanceReasons(attested), [], 'the attested pass proves the criterion');
+  assert.equal(outcomeOf(attested, MANUAL), 'proven', 'the attested pass proves the criterion');
   // A re-judged pass recorded with executed = 0 answers it too (GY-895): the proof is proven.
   assert.equal(neededDecision(item([{ result: 'fail' as const, executed: 0 }, evidence(UNIT, { executed: 3 }), { id: 'e2', result: 'pass', executed: 0, at: '2026-09-28T01:00:00.000Z' }]), { autoMerge: true }), null);
 

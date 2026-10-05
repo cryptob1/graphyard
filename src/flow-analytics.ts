@@ -5,7 +5,6 @@ import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
 import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 import { eventHistoryLimits } from './events-history.js';
-import { deliveredByGitHub } from './model/delivery-mode.js';
 
 // Delivery-flow analytics.
 //
@@ -2045,14 +2044,11 @@ function mainMerge(work: Work): { mergedAt: number; reverted: boolean } | null {
   return mergedAt === null ? null : { mergedAt, reverted };
 }
 /**
- * The live delivery mode, read from the most recently evaluated item: the server marks every item it
- * gates under GitHub delivery. A closed item, or one never evaluated, carries no current gates, so
- * only open items holding gates are read.
+ * The live delivery mode. GitHub merges every pull request into main on CI and review (GY-1235);
+ * the `graphyard` mode is kept only so a report recorded before then still reads.
  */
-export function deliveryPathMode(items: readonly Work[]): DeliveryPathMode {
-  const latest = items.reduce<Work | null>((newest, work) => work.closure || !work.gates?.length ? newest
-    : !newest || (time(work.updatedAt) ?? 0) > (time(newest.updatedAt) ?? 0) ? work : newest, null);
-  return latest && deliveredByGitHub(latest) ? 'github' : 'graphyard';
+export function deliveryPathMode(_items: readonly Work[]): DeliveryPathMode {
+  return 'github';
 }
 const deliveryModeStatement: Record<DeliveryPathMode, string> = {
   github: 'Delivery mode: GitHub merges each pull request into main on CI and review; UAT gates promotion to production.',

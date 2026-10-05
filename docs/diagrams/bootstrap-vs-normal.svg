@@ -73,22 +73,20 @@
 <text x="32" y="1099.2" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">never removes them.</text>
 <rect x="32" y="1115.96" width="125.2" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
 <text x="40" y="1133.5" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">operator-agent</text>
-<rect x="304" y="936.8400000000001" width="236" height="144.2" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
+<rect x="304" y="936.8400000000001" width="236" height="125.7" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>
 <text x="316" y="966.8" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">Graphyard control</text>
 <text x="316" y="987.9" font-size="16" font-weight="650" fill="#d8ecf9" text-anchor="start">plane</text>
 <text x="316" y="1006.8" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">Ownership, candidates,</text>
-<text x="316" y="1025.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">evidence, gates, merge</text>
-<text x="316" y="1043.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">authorization. Unchanged</text>
-<text x="316" y="1062.2" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">from phase 1.</text>
+<text x="316" y="1025.3" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">evidence, gates. Unchanged</text>
+<text x="316" y="1043.7" font-size="14" font-weight="400" fill="#d8ecf9" text-anchor="start">from phase 1.</text>
 <line x1="260" y1="970.8400000000001" x2="300" y2="970.8400000000001" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<rect x="20" y="1201.96" width="165" height="157.0" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
+<rect x="20" y="1201.96" width="165" height="138.6" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
 <text x="32" y="1231.9" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Master loop</text>
 <text x="32" y="1250.8" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Dispatches,</text>
 <text x="32" y="1269.3" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">shepherds,</text>
-<text x="32" y="1287.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">requests guarded</text>
-<text x="32" y="1306.2" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">merges.</text>
-<rect x="32" y="1323" width="101.8" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
-<text x="40" y="1340.6" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">coordinator</text>
+<text x="32" y="1287.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">records merges.</text>
+<rect x="32" y="1304.52" width="101.8" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="40" y="1322.1" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">coordinator</text>
 <rect x="197" y="1201.96" width="165" height="138.6" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
 <text x="209" y="1231.9" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Slice leads</text>
 <text x="209" y="1250.8" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Optional. One per</text>
@@ -104,8 +102,8 @@
 <text x="386" y="1311.5" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">every implementer.</text>
 <rect x="386" y="1328.28" width="78.4" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
 <text x="394" y="1345.9" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">producer</text>
-<line x1="422" y1="1083.0000000000002" x2="422" y2="1197.96" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<text x="412" y="1146.5" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">ready work, gate state</text>
+<line x1="422" y1="1064.5200000000002" x2="422" y2="1197.96" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="412" y="1137.2" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="end">ready work, gate state</text>
 <rect x="20" y="1408.28" width="520" height="138.6" rx="14" fill="#22311f" stroke="#c5e69b" stroke-width="2"/>
 <text x="32" y="1438.2" font-size="16" font-weight="650" fill="#e1f3c8" text-anchor="start">Worker sessions (n)</text>
 <text x="32" y="1457.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">Each holds its own worker credential, one lease epoch per</text>
@@ -117,9 +115,9 @@
 <text x="110.8" y="1528.4" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">lease · epoch</text>
 <rect x="228.2" y="1510.84" width="78.4" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
 <text x="236.2" y="1528.4" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">worktree</text>
-<line x1="102.5" y1="1361" x2="102.5" y2="1404.28" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
-<text x="112.5" y="1380.1" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">dispatch (invitation, not</text>
-<text x="112.5" y="1397.2" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">ownership)</text>
+<line x1="102.5" y1="1342.52" x2="102.5" y2="1404.28" stroke="#9fb39c" stroke-width="2.5" marker-end="url(#arrow)"/>
+<text x="112.5" y="1370.8" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">dispatch (invitation, not</text>
+<text x="112.5" y="1388.0" font-size="13" font-weight="400" fill="#b8c6b7" text-anchor="start">ownership)</text>
 <rect x="20" y="1592.84" width="520" height="86.1" rx="4" fill="#262d28" stroke="#b8c2bb" stroke-width="2"/>
 <text x="32" y="1622.8" font-size="16" font-weight="650" fill="#e3e9e3" text-anchor="start">GitHub</text>
 <text x="32" y="1641.7" font-size="14" font-weight="400" fill="#e3e9e3" text-anchor="start">PR, reviews, CI checks, branch protection, observed merge —</text>

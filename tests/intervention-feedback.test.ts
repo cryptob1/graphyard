@@ -106,7 +106,7 @@ test('integration:intervention-signals-recorded — one intervention of each kin
   await delay(30);
   await engine.execute(operator, 'requirements', widened.id, { expectedPolicyRevision: refused.policyRevision, criteria: refused.criteria, dependencies: refused.dependencies, plannedFiles: [...refused.plannedFiles, 'src/store/schema.ts'], exclusiveResources: [], producerProofs: [], reason: 'The registry is where the table goes' }, id());
 
-  // bypass: an unproven candidate merged administratively; the record refuses the reconciliation and the operator owns the delivery.
+  // bypass: an unreviewed candidate merged administratively (proofs gate nothing since GY-1235); the record refuses the reconciliation and the operator owns the delivery.
   const bypassed = await submitted('bypass');
   const mergeSha = sha(`merge-${bypassed.key}`);
   const mergedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString().replace('.000Z', 'Z');
@@ -169,9 +169,9 @@ test('integration:intervention-signals-recorded — one intervention of each kin
   assert.ok(scope.waitedMs >= 30); assert.deepEqual(scope.sources.map(source => source.kind), ['scope', 'autoscope', 'requirements']);
 
   const bypass = one('bypass', bypassed.key);
-  assert.match(bypass.blocked, new RegExp(`^guarded merge of ${mergeSha.slice(0, 12)}: .*gate acceptance had not passed`));
+  assert.match(bypass.blocked, new RegExp(`^guarded merge of ${mergeSha.slice(0, 12)}: .*gate review had not passed`));
   assert.equal(bypass.trigger, 'operator-authorized'); assert.equal(bypass.requestedAt, new Date(mergedAt).toISOString());
-  assert.equal(bypass.resolvedBy, operator.id); assert.match(bypass.resolution!, /authorized it outside the guarded path/);
+  assert.equal(bypass.resolvedBy, operator.id); assert.match(bypass.resolution!, new RegExp(`operator ${operator.id} authorized it by decision ${owning.id}, citing refused reconciliation ${first.id}`));
   assert.deepEqual(bypass.sources.map(source => source.kind), ['merge.reconciliation.refused', 'merge.operator-authorized']);
 
   const escalation = one('escalation', fenced.key);

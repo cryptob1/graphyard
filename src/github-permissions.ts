@@ -13,15 +13,15 @@ const levels: PermissionLevel[] = ['read', 'write', 'admin'];
 export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration', workflows: 'Workflows' };
 export const featureLabels: Record<PermissionFeature, string> = {
   repository: 'repository access', observation: 'pull request observation', check: 'the required checks',
-  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'the merge queue', 'workflow-sync': 'workflow sync',
+  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'branch refresh', 'workflow-sync': 'workflow sync',
 };
 
-/** The control-plane App: it observes, publishes the gate check, dispatches reviews, and lands the queue. */
+/** The control-plane App: it observes, publishes the gate check, dispatches reviews, and refreshes candidate branches. */
 export const controlPlanePermissions: readonly PermissionRequirement[] = [
   { permission: 'actions', level: 'write', feature: 'check-rerun', reason: 'rerun failed workflow jobs on the unchanged candidate' },
   { permission: 'metadata', level: 'read', feature: 'repository', reason: 'read the managed repository' },
   { permission: 'contents', level: 'read', feature: 'observation', reason: 'read commits, trees and pull request files' },
-  { permission: 'contents', level: 'write', feature: 'merge-queue', reason: 'publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it' },
+  { permission: 'contents', level: 'write', feature: 'merge-queue', reason: 'push base refreshes, branch restores and main-guard revert branches onto the managed repository' },
   { permission: 'pull_requests', level: 'read', feature: 'observation', reason: 'read pull requests and reviews' },
   { permission: 'pull_requests', level: 'write', feature: 'review-dispatch', reason: 'post review request comments' },
   { permission: 'issues', level: 'read', feature: 'comment-events', reason: 'receive `issue_comment` webhooks carrying review results' },

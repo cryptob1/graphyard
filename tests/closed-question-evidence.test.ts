@@ -55,7 +55,6 @@ const ok = async (credential: string, method: 'GET' | 'POST', path: string, body
 };
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 const events = async (work: Work) => (await store.pool.query('SELECT actor, kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows;
-const acceptance = (work: Work) => work.gates.find(gate => gate.name === 'acceptance')!.reasons;
 
 const flagQuestion = {
   criterion: 'AC-1', proof: 'integration:flag-declared', question: `Does ${flagFile} declare the --json flag the criterion requires?`,
@@ -107,8 +106,8 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
 test('integration:closed-question-evidence — one criterion is judged end to end by asking its question against the bound state, and the record carries every field a reader needs to re-run it', async () => {
   reply = { answer: 'yes', probability: 0.97 };
   let work = await candidate('closed question evidence');
-  assert.ok(acceptance(work).some(reason => reason.startsWith('AC-1: integration:flag-declared needs trusted passing evidence')), 'unproven before the answer');
-  assert.ok((work.autoDispatch?.producers ?? []).some(request => request.state === 'requested' && request.proofs?.includes('integration:flag-declared')), 'a producer session is requested until the question is answered');
+  // Proofs gate nothing since GY-1235 (no acceptance gate, no producer request); the answer is evidence.
+  assert.equal(currentEvidence(work, 'integration:flag-declared'), undefined, 'unproven before the answer');
   asked.length = 0;
 
   // The loop's producer launcher puts the question to the control plane before any session starts.
@@ -148,9 +147,8 @@ test('integration:closed-question-evidence — one criterion is judged end to en
   assert.equal(answer.state[0].sha256, createHash('sha256').update(flagSource).digest('hex'));
   assert.deepEqual(asked[0].criteria, ['yes', 'no', 'cannot tell']);
 
-  // The gate is satisfied by the answer, and the producer request for the proof is withdrawn.
+  // The answer is the proof's current evidence, and no producer request stands for the proof.
   assert.equal(currentEvidence(work, 'integration:flag-declared')?.id, record.id);
-  assert.ok(!acceptance(work).some(reason => reason.startsWith('AC-1:')), acceptance(work).join('\n'));
   assert.ok(!(work.autoDispatch?.producers ?? []).some(request => request.state === 'requested' && request.proofs?.includes('integration:flag-declared')), 'no producer session is requested for a decided proof');
   const recorded = (await events(work)).find(row => row.kind === 'closed-question.answered');
   assert.equal(recorded.actor, producer.id);
@@ -181,8 +179,7 @@ test('integration:low-confidence-escalates — an answer below the threshold is 
   assert.equal(record.closedQuestion!.probability, 0.62);
   assert.equal(record.closedQuestion!.threshold, 0.9);
   assert.match(record.closedQuestion!.escalation!.reason, /0\.62/);
-  assert.equal(currentEvidence(work, 'integration:flag-declared'), undefined);
-  assert.ok(acceptance(work).some(reason => reason.startsWith('AC-1: integration:flag-declared needs trusted passing evidence')), 'the gate is not satisfied');
+  assert.equal(currentEvidence(work, 'integration:flag-declared'), undefined, 'the proof is not satisfied');
   const escalated = (await events(work)).find(row => row.kind === 'closed-question.escalated');
   assert.match(escalated.payload.details.evidence.closedQuestion.escalation.reason, /probability 0\.62/);
 
@@ -223,7 +220,7 @@ test('integration:answer-is-evidence-not-approval — an answer cannot satisfy a
   const smuggled = { id: randomUUID(), proof: 'manual:format-audit', sha: head, baseSha: base, policyRevision: work.policyRevision, producer: 'responder:in-house-judge', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at: new Date().toISOString(),
     closedQuestion: { criterion: 'AC-2', question: auditQuestion.question, criteria: auditQuestion.criteria, pass: 'yes', stateHash: 'a'.repeat(64), state: [], responder: { id: 'in-house-judge', version: '2026.09.1' }, answer: 'yes', probability: 0.99, threshold: 0.9, verdict: 'decided' as const } };
   assert.equal(currentEvidence({ ...work, evidence: [...work.evidence, smuggled] }, 'manual:format-audit'), undefined, 'an answer never stands in for the attest decision');
-  assert.ok(acceptance(work).some(reason => reason.startsWith('AC-2: manual:format-audit')));
+  assert.equal(currentEvidence(work, 'manual:format-audit'), undefined);
 
   // 2. A human-only decision. The worker parks the item on one; no answer resumes it.
   const parked = await claimed('human-only decision');

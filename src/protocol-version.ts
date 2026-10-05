@@ -12,6 +12,9 @@ import { execFileSync } from 'node:child_process';
  *       request that GitHub merge the candidate; merge-verify, merge-commit and merge-cancel
  *       are gone, and no execution or clock offset is issued
  *
+ * Since GY-1235 GitHub merges on every passing gate and merge-acquire is gone too: no CLI sends a
+ * merge request, so there is no exchange left to skew and the version stays 3.
+ *
  * A server that reports no protocol at all predates the exchange and is version 1.
  */
 export const MERGE_PROTOCOL = 3;

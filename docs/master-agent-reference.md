@@ -9,13 +9,13 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags bef
 
 Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`.
 
-### Speculative tips and branch protection
+### Base refreshes and branch protection
 
-**An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
+**An approval must survive a base refresh.** [Carry rules](github.md#bindings-and-carry) apply.
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`). Another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
+**A branch must never keep another item's unlanded commits.** A contaminated branch restores onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`).
 
 #### A contaminated branch
 
@@ -45,7 +45,7 @@ Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` dri
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, so it never reads as `Nothing can run KIND`.
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, so it never reads as `Nothing can run KIND`. Every poll and renewal also upserts the executor's row in `executor_presence` (never an event), so a restarted or redeployed control plane reads the fleet live at once; an empty fleet is judged only on evidence — a poll heard, or rows in that table older than the 120s window (an empty table counts once it has been recording that long, from a marker its first read writes) — never by process age.
 
 A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 
