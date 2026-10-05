@@ -33,8 +33,8 @@ pushing on lease loss; an expired or superseded epoch does not authorize more wo
 Register the assigned host/path/branch before submission. Do not reuse another
 assignment's worktree or quietly remove historical reservations.
 
-Run `sync GY-N` before every push. It merges the base branch (`git fetch origin &&
-git merge origin/BASE`; never rebase) and lists every file outside the item's
+Run `sync GY-N` before every push. It merges the base branch (`git fetch --no-tags origin
+&& git merge origin/BASE`; never rebase; tags are not fetched, so a new tag never fails sync) and lists every file outside the item's
 plannedFiles that no longer matches origin/BASE. Files outside plannedFiles must match
 origin/BASE byte-for-byte: restore them, never re-resolve a merge in favour of your
 branch. `sync GY-N --restore` restores every such file to origin/BASE in one new
