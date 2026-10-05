@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mergeStallAttention } from '../src/cli/master-status.js';
 import type { GitHubMergeQueueState } from '../src/merge-queue.js';
 import type { Observation, Work } from '../src/model.js';
-import { actOnRepeatedRefusal, repeatedMergeRefusalMs, staleObservationReason } from '../src/daemon/cycle-delivery.js';
+import { actOnRepeatedRefusal, mergeStep, repeatedMergeRefusalMs, staleObservationReason } from '../src/daemon/cycle-delivery.js';
+import { mergeObservationWait } from '../src/daemon/decisions.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { MasterConfig } from '../src/master.js';
@@ -142,5 +143,92 @@ test('unit:stale-observation-refusal-keeps-position — a repeated refusal whose
     const { state, calls, cycle } = harness();
     await actOnRepeatedRefusal(cycle, item(gates([staleObservationReason])), mergeKey, reason, new Date(clock - 60_000).toISOString());
     assert.deepEqual([calls, Object.keys(state.actions)], [{ refused: [], observed: [] }, []]);
+  }
+});
+
+// GY-1202: the follow-ups of GY-1099's review. The stale wait never asked the guarded merge, so it
+// acts only on a wait standing on freshness alone; the server's own freshness refusal of a candidate
+// whose gates passed when read is stale-only too; and the wait's `since` is persisted and survives
+// observations that land already stale.
+test('unit:stale-wait-escalation-bounded — a stale wait with another failing reason only waits; a server freshness refusal of an all-passing candidate is observed; the wait since is persisted and carried across stale observations', async () => {
+  const clock = Date.parse('2026-10-04T16:00:00.000Z');
+  const candidate = { sha: head, baseSha: base, pr: 578, branch: 'graphyard/gy-806-1', author: 'worker' };
+  const gates = (merge: string[]) => ['build', 'review', 'test', 'acceptance', 'merge'].map(name => {
+    const reasons = name === 'merge' ? merge : [];
+    return { name, passed: !reasons.length, reasons };
+  });
+  const item = (merge: string[], observedAt = clock - 150_000) => ({ id: 'work-806', key: 'GY-806', stage: 'merge', candidate, policyRevision: 1, violations: [], queue: { sequence: 4 },
+    submission: {}, gates: gates(merge), observation: { at: new Date(observedAt).toISOString(), candidate, merged: false } }) as unknown as Work;
+  const run = async (work: Work, actions: Record<string, unknown> = {}, merge?: () => Promise<unknown>) => {
+    const state = emptyDaemonState({ url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig);
+    Object.assign(state.actions, actions);
+    const calls = { refused: [] as string[], observed: [] as string[], merged: 0, persisted: [] as (string | undefined)[] };
+    const effects = {
+      persist: async (saved: typeof state) => { calls.persisted.push(saved.actions[`wait:merge:${work.id}`]?.since); },
+      refuseMerge: async (_: Work, text: string) => { calls.refused.push(text); },
+      observeCandidate: async (observed: Work) => { calls.observed.push(observed.key); },
+      snapshot: async () => ({ work: [work] }),
+      merge: merge ?? (async () => { calls.merged++; return { pending: true }; }),
+    };
+    await mergeStep({ config: { autoMerge: true }, state, effects, now: () => clock, clock, snapshot: { jobs: [], work: [work] }, performed: [], open: [work],
+      isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    return { state, calls };
+  };
+  const mergeKey = `merge:work-806:${head}:${base}:1`;
+  const longAgo = new Date(clock - repeatedMergeRefusalMs - 60_000).toISOString();
+  const waiting = (work: Work, since?: string) => ({ [`wait:merge:${work.id}`]: { kind: 'merge', work: 'GY-806', principal: null, state: 'done', detail: mergeObservationWait(work)!, attempts: 1, epoch: null, cycle: 1, at: longAgo, ...(since ? { since } : {}) } });
+
+  // Stale plus a mergeability reason: the merge was never asked, so it only waits — no rework, no report.
+  {
+    const work = item([staleObservationReason, 'Pull request is not mergeable against the current base']);
+    const { state, calls } = await run(work, waiting(work, longAgo));
+    assert.deepEqual([calls.refused, calls.observed, calls.merged], [[], [], 0]);
+    assert.equal(Object.keys(state.actions).some(key => key.includes(':repeated:')), false);
+  }
+  // Stale only: observed ahead of the backlog after ten minutes, as GY-1099 does.
+  {
+    const work = item([staleObservationReason]);
+    const { calls } = await run(work, waiting(work, longAgo));
+    assert.deepEqual([calls.refused, calls.observed], [[], ['GY-806']]);
+  }
+  // A wait record without `since` is re-recorded once with it, through persist.
+  {
+    const work = item([staleObservationReason]);
+    const { state, calls } = await run(work, waiting(work));
+    assert.equal(state.actions[`wait:merge:${work.id}`].since, longAgo);
+    assert.ok(calls.persisted.includes(longAgo), 'the backfilled since is persisted');
+  }
+  // An observation that landed already stale changes the detail but not the wait: since is carried.
+  {
+    const earlier = item([staleObservationReason], clock - 400_000), work = item([staleObservationReason]);
+    const { state, calls } = await run(work, waiting(earlier, longAgo));
+    assert.equal(state.actions[`wait:merge:${work.id}`].since, longAgo);
+    assert.equal(state.actions[`wait:merge:${work.id}`].detail, mergeObservationWait(work));
+    assert.deepEqual(calls.observed, ['GY-806']);
+  }
+  // ...but not once the guarded merge has been asked since the wait began.
+  {
+    const earlier = item([staleObservationReason], clock - 400_000), work = item([staleObservationReason]);
+    const asked = { [mergeKey]: { kind: 'merge', work: 'GY-806', principal: null, state: 'waiting', detail: 'pending', attempts: 1, epoch: null, cycle: 2, at: new Date(clock - 60_000).toISOString() } };
+    const { state, calls } = await run(work, { ...waiting(earlier, longAgo), ...asked });
+    assert.equal(state.actions[`wait:merge:${work.id}`].since, new Date(clock).toISOString());
+    assert.deepEqual(calls.observed, []);
+  }
+  // A wait that ended without a merge attempt (fresh observation, another gate failing) is cleared, so a
+  // later stale wait of the same head does not inherit its since.
+  {
+    const work = item(['Pull request is not mergeable against the current base'], clock - 30_000);
+    const { state, calls } = await run(work, waiting(item([staleObservationReason]), longAgo));
+    assert.equal(state.actions[`wait:merge:${work.id}`], undefined);
+    assert.ok(calls.persisted.length, 'the cleared wait is persisted');
+  }
+  // The server refuses a candidate whose gates all passed when read, for freshness alone: observed, not reworked.
+  {
+    const work = item([], clock - 30_000);
+    const refusal = 'GY-806 merge refused: Merge authorization is no longer current';
+    const previous = { [mergeKey]: { kind: 'merge', work: 'GY-806', principal: null, state: 'failed', detail: `Guarded merge refused for GY-806: ${refusal}`, attempts: 3, epoch: null, cycle: 2, at: longAgo, since: longAgo } };
+    const { state, calls } = await run(work, previous, async () => { throw new Error(refusal); });
+    assert.deepEqual([calls.refused, calls.observed], [[], ['GY-806']]);
+    assert.equal(state.actions[`${mergeKey}:repeated:rework`], undefined);
   }
 });

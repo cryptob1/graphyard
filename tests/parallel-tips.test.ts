@@ -7,7 +7,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { observationBand } from '../src/github.js';
-import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { defaultParallelTips, describeTipWindow, maxParallelTips, mergeParallelTipsEvent, mergeQueueInsights, predictQueue, queueRef, tipValidationPrefix, windowBatchView } from '../src/merge-queue.js';
 import { server } from '../src/server.js';
 import { daemonEffects } from '../src/master-daemon.js';
@@ -314,7 +313,7 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
       const response = await fetch(`${url}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() } });
       return { status: response.status, body: await response.json() };
     };
-    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, optimistic: true, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 4, rerunFailedChecks: 1 }, 'status reports the window the control plane runs');
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 4, rerunFailedChecks: 1 }, 'status reports the window the control plane runs');
     const post = (token: string, body: object) => api('/api/merge-queue', token, { method: 'POST', body: JSON.stringify(body) });
     assert.equal((await post(tokens.worker, { parallelTips: 2 })).status, 403, 'only the master (or an operator) sets it');
     assert.equal((await post(tokens.coordinator, { parallelTips: 0 })).status, 400);
@@ -323,13 +322,13 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
     // The loop publishes the values in its own master config, once per change, through the route.
     const posted: unknown[] = [];
     const mutate = async (path: string, data: unknown) => { posted.push(data); const response = await api(`/api/${path}`, tokens.coordinator, { method: 'POST', body: JSON.stringify(data) }); assert.equal(response.status, 200, JSON.stringify(response.body)); return response.body; };
-    let configured: { batchSize?: number; optimistic?: boolean; parallelTips?: number } | undefined = { parallelTips: 2 };
+    let configured: { batchSize?: number; parallelTips?: number } | undefined = { parallelTips: 2 };
     const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
     await effects.publishMergeBatchSize!();
     await effects.publishMergeBatchSize!();
-    assert.deepEqual(posted, [{ batchSize: 4, optimistic: true, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 2, rerunFailedChecks: 1 }], 'published once, not every cycle');
+    assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 2, rerunFailedChecks: 1 }], 'published once, not every cycle');
     assert.equal(engine.parallelTips, 2, 'the control plane validates by the master\'s window at once');
-    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, optimistic: true, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 2, rerunFailedChecks: 1 });
+    assert.deepEqual((await api('/api/status', tokens.coordinator)).body.mergeQueue, { batchSize: 4, parallelTips: 2, rerunFailedChecks: 1 });
     const ledger = async (kind: string) => (await store.pool.query('SELECT payload FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq', [kind])).rows.map(row => row.payload);
     assert.deepEqual(await ledger(mergeParallelTipsEvent), [{ parallelTips: 2, previous: null }], 'recorded in the installation ledger');
     // A restarted control plane reads the published value back from the installation ledger.

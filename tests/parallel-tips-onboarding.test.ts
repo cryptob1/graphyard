@@ -48,7 +48,7 @@ test('unit:parallel-tips-onboarded — onboardingMergeQueue writes the product d
   assert.equal(onboardingParallelTips, defaultParallelTips, 'the recommended value is the product default master/profiles.ts names');
   const result = onboardingMergeQueue();
   assert.equal(result.parallelTips, onboardingParallelTips, 'onboardingMergeQueue should return parallelTips');
-  assert.ok(Array.isArray(result.optimisticExclude), 'onboardingMergeQueue should include optimisticExclude');
+  assert.deepEqual(result, { parallelTips: onboardingParallelTips }, 'and nothing else: optimistic merge and its exclude globs are retired (GY-1233)');
 });
 
 test('unit:parallel-tips-onboarded — parallelTipsAdvisories compares the declared CI concurrency limit with parallelTips × jobs per run', () => {

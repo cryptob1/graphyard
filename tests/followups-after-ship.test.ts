@@ -46,11 +46,9 @@ const followUpsOf = async (parent: string) => (await store.list()).filter(item =
 const events = async (work: Work) => (await store.pool.query('SELECT kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows as { kind: string; payload: any }[];
 const parentItem = async (title: string) => ok(operator, 'work', { title, plannedFiles: ['src/parent.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:parent'] }] }) as Promise<Work>;
 /** Delivered as the observation path records it: terminal, not closed, with its merge. */
-async function deliver(work: Work, postMerge?: 'pending' | 'pass') {
+async function deliver(work: Work) {
   const current = await reload(work.key), mergedAt = new Date().toISOString();
-  // An optimistic merge (GY-500) carries main's required suite on its merge commit, as the guard reads it.
-  const optimistic = postMerge ? { optimisticMerges: [{ lane: { files: ['src/parent.ts'] }, pr: 845, mergeSha: 'd'.repeat(40), mergedAt, postMerge: { verdict: postMerge, observedAt: mergedAt }, revert: null }] } : {};
-  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify({ ...current, stage: 'done', closure: null, candidate: { pr: 845, sha: 'c'.repeat(40), baseSha: 'b'.repeat(40) }, delivery: { mergedAt, mergeSha: 'd'.repeat(40), authorizationRevision: current.revision }, ...optimistic })]);
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify({ ...current, stage: 'done', closure: null, candidate: { pr: 845, sha: 'c'.repeat(40), baseSha: 'b'.repeat(40) }, delivery: { mergedAt, mergeSha: 'd'.repeat(40), authorizationRevision: current.revision } })]);
 }
 
 /** The loop's three control-plane calls as the dispatcher makes them (src/reviewer.ts), over the real routes. */
@@ -110,13 +108,9 @@ test('unit:followups-wait-on-parent — an approval of an unshipped parent files
   // Nothing is filed for it before it ships, however often the loop passes.
   assert.deepEqual(await shipHeldFollowUps(await store.list(), ship), []);
 
-  // Merged optimistically, it has not shipped while main's required suite is still out on the merge:
-  // a failing suite reverts it and reopens the parent, so nothing is filed yet.
-  await deliver(parent, 'pending');
-  assert.deepEqual(await shipHeldFollowUps(await store.list(), ship), [], 'an optimistic merge awaiting its post-merge suite has not shipped');
-  assert.equal((await call(operator, `work/${parent.key}/followups`, { ship: true, reason: 'too early' })).status, 409, 'and the control plane refuses to file for it');
+  assert.equal((await call(operator, `work/${parent.key}/followups`, { ship: true, reason: 'too early' })).status, 409, 'the control plane refuses to file for it before it ships');
   assert.equal(pendingFollowUpsReport(await store.list()).find(entry => entry.parent === parent.key)?.shipped, false);
-  await deliver(parent, 'pass');
+  await deliver(parent);
   // A ship the control plane keeps refusing with one unchanged client error is stopped after
   // repeatedClientErrorLimit attempts (retry-stop.ts), not asked again every pass for good.
   const runs: ShipRuns = {};
