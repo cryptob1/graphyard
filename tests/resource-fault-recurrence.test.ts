@@ -7,7 +7,7 @@ import type { HerdrAgent } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { finishedSessionGraceMs, loadedRevision, nameReclaimBoundMs, readResources, reclaimResources, resourceAttention, stuckSessionMs, type ResourceInputs } from '../src/master-resources.js';
+import { baseReclaimGates, finishedSessionGraceMs, loadedRevision, nameReclaimBoundMs, readResources, reclaimResources, resourceAttention, stuckSessionMs, type ResourceInputs } from '../src/master-resources.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -306,12 +306,16 @@ test('manual:fault-class-resources — GY-1165: unknown-status worker panes and 
   // 1. REPRODUCE: the state raises all seven instances.
   assert.deepEqual(faults(state).sort(), instances);
 
-  // 2. BASE: the base pass closed a worker pane only when Herdr reported idle, done or blocked, and a
-  // reviewer or producer pane only when a ledger record settled on its name. Each holder fails one of
-  // those gates, so two passes the grace apart closed none of them and the faults re-raised every pass.
-  const baseFinished = ['idle', 'done', 'blocked'];
-  assert.ok(held.every(([, principal]) => !baseFinished.includes(agents.find(entry => entry.name === principal)!.agent_status!)), 'every worker pane is outside the base\'s finished statuses');
-  assert.equal((await readProducerLedger(directory)).producers.filter(record => record.agentName === 'produce-claude-2').length, 0, 'the producer pane has no record to settle on');
+  // 2. BASE: the base's own pass (its gates: a worker closed only when Herdr reported idle, done or
+  // blocked, a reviewer or producer pane only when a record settled on its name), run two passes the
+  // grace apart, closes none of the seven, so the faults re-raised every pass (GY-1192).
+  const baseDirectory = await temporaryDirectory('gy-1165-base');
+  await mkdir(join(baseDirectory, '.graphyard'), { recursive: true });
+  const baseClosed: string[] = [];
+  for (const at of [t0, t0 + finishedSessionGraceMs, t0 + 2 * finishedSessionGraceMs])
+    await reclaimResources(baseDirectory, config, { work, agents }, { tmpRoot: baseDirectory, now: at, gates: baseReclaimGates, closePane: pane => { baseClosed.push(pane); } });
+  assert.deepEqual(baseClosed, [], 'the base pass closes none of the seven holders');
+  assert.deepEqual(faults({ ...state, now: t0 + 2 * finishedSessionGraceMs }).sort(), instances, 'so every instance is still raised on base');
 
   // 3. CANDIDATE: two passes the grace apart close all seven panes, and nothing earlier.
   const closed = new Set<string>();
@@ -339,4 +343,41 @@ test('manual:fault-class-resources — GY-1165: the widened reclaim still spares
   for (const at of [now, now + finishedSessionGraceMs, now + 2 * finishedSessionGraceMs])
     await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: at, closePane: pane => { closed.push(pane); } });
   assert.deepEqual(closed, []);
+});
+
+test('GY-1192: the base gates run by the GY-1165 reproduction close what the base closed — an idle worker and a producer with a settled record', async () => {
+  const directory = await temporaryDirectory('gy-1192-base-control');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  const config = { workers, producers, reviewers: [] };
+  // The positive control for the base half: the same holders, made finished in the base's own terms.
+  await saveProducerLedger(directory, { version: 1, producers: [{
+    id: randomUUID(), key: 'GY-PROD-1', pr: 1, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, group: 'group-1', proofs: ['integration:proof'],
+    profile: 'claude-producer-2', principal: 'principal-claude-producer-2', agentName: 'produce-claude-2', pane: 'w1V:pB2', requestId: 'req-prod-1', attempt: 1,
+    state: 'completed' as const, outcome: {}, requestedAt: iso(now - 3_600_000), expiresAt: iso(now + 30 * 60_000), closedAt: iso(now - 15 * 60_000),
+  } as ProducerRecord] });
+  const agents = [agent('graphyard-opencode-1', 'idle', 'w1V:pB1'), agent('produce-claude-2', 'idle', 'w1V:pB2')];
+  const work = [workerItem('graphyard-opencode-1', { startedAt: now - 3_600_000, endedAt: now - 15 * 60_000, state: 'done' })];
+  const closed: string[] = [];
+  for (const at of [now, now + finishedSessionGraceMs])
+    await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: at, gates: baseReclaimGates, closePane: pane => { closed.push(pane); } });
+  assert.deepEqual(closed.sort(), ['w1V:pB1', 'w1V:pB2']);
+});
+
+test('GY-1192: a recordless producer pane blocked or unknown waits the stuck-session bound and closes as never started; an idle one keeps the grace', async () => {
+  const directory = await temporaryDirectory('gy-1192-recordless');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  const config = { workers: [], producers: [{ name: 'claude-producer-2', agentName: 'produce-claude-2', concurrency: 3 }], reviewers: [] };
+  // A launch stuck on a trust prompt before its pending record landed, one whose runtime never reports, and a finished one.
+  const agents = [agent('produce-claude-2-0000000a', 'blocked', 'w1V:pR1'), agent('produce-claude-2-0000000b', 'unknown', 'w1V:pR2'), agent('produce-claude-2-0000000c', 'idle', 'w1V:pR3')];
+  const closed: { pane: string; reason: string }[] = [];
+  const pass = (at: number) => reclaimResources(directory, config, { work: [], agents: agents.filter(entry => !closed.some(done => done.pane === entry.pane_id)) }, { tmpRoot: directory, now: at, closePane: () => {} }).then(report => { closed.push(...report.closed); });
+  await pass(now);
+  await pass(now + finishedSessionGraceMs);
+  assert.deepEqual(closed.map(entry => entry.pane), ['w1V:pR3'], 'only the idle recordless pane closes at the grace');
+  assert.match(closed[0].reason, /left no record$/);
+  await pass(now + stuckSessionMs - 1);
+  assert.equal(closed.length, 1, 'a blocked or unknown recordless pane survives inside the stuck-session bound');
+  await pass(now + stuckSessionMs);
+  assert.deepEqual(closed.map(entry => entry.pane).sort(), ['w1V:pR1', 'w1V:pR2', 'w1V:pR3']);
+  for (const entry of closed.filter(entry => entry.pane !== 'w1V:pR3')) assert.match(entry.reason, /left no record: never started: (blocked|unknown) in Herdr for over 10 minutes/);
 });
