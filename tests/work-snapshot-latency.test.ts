@@ -58,7 +58,6 @@ function ledgerItem(index: number, now: Date): Work {
       scopeFiles: Array.from({ length: 200 }, (_, file) => ({ path: `src/generated/file-${file}.ts`, sha: 'e'.repeat(40), base: 'f'.repeat(40), status: 'unchanged' })) },
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: stage !== 'review', reasons: stage === 'review' ? ['Independent approval of the current commit is required'] : [] }],
     violations: [],
-    queueHistory: Array.from({ length: 40 }, (_, n) => ({ at: now.toISOString(), event: 'placed', sequence: n })),
   } as unknown as Work;
   if (stage !== 'done') reconcileAutoDispatch(work, [work], now);
   // Every head before the current one left its resolved requests behind.
@@ -123,10 +122,9 @@ test('integration:work-snapshot-latency — the coordination snapshot of a 100-i
   assert.equal(view.view, 'coordination'); assert.equal(view.work.length, ITEMS); assert.equal(view.jobs.length, ITEMS);
   // Bounded: history no longer grows with the ledger's age, and no event payload or per-file scope rides along.
   assert.ok(compact!.bytes * 3 < full.bytes, `coordination view ${compact!.bytes} bytes against the full ${full.bytes}`);
-  assert.ok(view.omitted.evidence > 0 && view.omitted.dispatchHistory > 0 && view.omitted.queueHistory > 0);
+  assert.ok(view.omitted.evidence > 0 && view.omitted.dispatchHistory > 0);
   for (const item of view.work as Work[]) {
     assert.ok(item.autoDispatch!.history.length <= coordinationHistoryLimit);
-    assert.ok((item.queueHistory ?? []).length <= coordinationHistoryLimit);
     assert.equal((item.observation as any).scopeFiles, undefined); assert.deepEqual(item.observation!.files, ['src/server/index.ts', 'tests/example.test.ts']);
     for (const entry of item.evidence) { assert.equal(entry.artifacts, undefined); assert.equal(entry.scopeFiles, undefined); }
     assert.ok(item.evidence.length < HEADS_PER_ITEM * 3);
@@ -137,7 +135,7 @@ test('integration:work-snapshot-latency — the coordination snapshot of a 100-i
   for (const [index, item] of (view.work as Work[]).entries()) {
     const whole = full.body.work[index] as Work;
     assert.equal(item.id, whole.id);
-    for (const field of ['stage', 'gates', 'violations', 'lease', 'candidate', 'submission', 'criteria', 'policyRevision', 'epoch', 'mergeAuthorization', 'queue', 'delivery'] as const) assert.deepEqual(item[field], whole[field], `${item.key} ${field}`);
+    for (const field of ['stage', 'gates', 'violations', 'lease', 'candidate', 'submission', 'criteria', 'policyRevision', 'epoch', 'mergeAuthorization', 'delivery'] as const) assert.deepEqual(item[field], whole[field], `${item.key} ${field}`);
     assert.deepEqual({ review: item.autoDispatch!.review, producers: item.autoDispatch!.producers }, { review: whole.autoDispatch!.review, producers: whole.autoDispatch!.producers });
     assert.deepEqual(missingProofs(item, now), missingProofs(whole, now));
     assert.deepEqual(evidenceIndependenceRefusals(item, now), evidenceIndependenceRefusals(whole, now));

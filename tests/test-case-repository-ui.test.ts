@@ -9,7 +9,6 @@ import type { Scenario } from '../src/scenarios.js';
 // @ts-expect-error the checked-in dashboard fixture is plain JavaScript
 import { fixtureApi, fixtureStatus, fixtureWork, NOW } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-import { predictQueue } from '../src/merge-queue.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import WorkDetails from '../web/pages/work-details.js';
 import { TestCasesView } from '../web/components/test-cases.js';
@@ -52,7 +51,7 @@ function dashboard(work: Work[]): Dashboard {
   return { token: 'fixture', work, status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: {} as any, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
-    queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {},
+    sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop } as unknown as Dashboard;
 }
 

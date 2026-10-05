@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHECK_NAME, LANDABLE_CHECK, GitHub, gateMerge } from '../src/github.js';
 import { mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, applyProtection } from '../src/protection.js';
-import { queueRef, type MergeEnqueueRequest } from '../src/merge-queue.js';
+import { type MergeEnqueueRequest } from '../src/merge-queue.js';
 import type { Observation, Work } from '../src/model.js';
 
 // GY-258: GitHub executes merges; Graphyard only gates them. The control plane's App publishes
@@ -139,8 +139,7 @@ async function sources(directory: string): Promise<string[]> {
 }
 
 test('unit:no-graphyard-merge-call — GitHub performs the merge: no code path calls the GitHub merge endpoint', async () => {
-  const item = work({ queue: { sequence: 1, enqueuedAt: new Date().toISOString(), policyRevision: 2,
-    speculation: { ref: queueRef('GY-42'), tip: head, base, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: new Date().toISOString() } } } as Partial<Work>);
+  const item = work();
   // The control plane's side: gating an authorized head makes no merge call either.
   const fake = fakeGitHub();
   await gateMerge(fake.github, item, requested(item));

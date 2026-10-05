@@ -83,12 +83,12 @@ test('unit:auto-dispatch-binding — a head change cancels the request for the o
   assert.equal(transitions[0].request.id, old); assert.equal(transitions[0].request.resolution, `head changed from ${H.slice(0, 12)} to ${H2.slice(0, 12)}`);
   assert.equal(item.autoDispatch!.review!.sha, H2); assert.notEqual(item.autoDispatch!.review!.id, old);
   assert.equal(item.autoDispatch!.history.length, 1); assert.equal(item.autoDispatch!.history[0].state, 'cancelled');
-  // A Graphyard-authored tip that carried the approval needs no reviewer.
-  const carry = { from: { sha: H, baseSha: B }, to: { sha: H2, baseSha: B2 }, policyRevision: 1, at, predecessor: 'GY-1', changedFiles: ['docs/x.md'], reviewedFiles: ['src/a.ts'],
+  // A Graphyard-authored base refresh that carried the approval needs no reviewer.
+  const carry = { from: { sha: H, baseSha: B }, to: { sha: H2, baseSha: B2 }, policyRevision: 1, at, predecessor: 'base branch', changedFiles: ['docs/x.md'], reviewedFiles: ['src/a.ts'],
     approval: { carried: true as const, provider: 'github' as const, reviewer: 'graphyard-reviewer[bot]', sha: H, reviewId: 9, originalSha: H, reason: 'carried' },
     evidence: [{ proof: 'unit:auto-dispatch-binding', carried: true, evidenceId: 'ev-unit:auto-dispatch-binding', producer: 'proof-runner', reason: 'disjoint' }, { proof: 'integration:auto-dispatch-review', carried: false, reason: 'touched' }, { proof: 'integration:auto-dispatch-producers', carried: false, reason: 'touched' }] };
   const tipped = work({ candidate: { sha: H2, baseSha: B2, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B2 }), evidence: [evidence('unit:auto-dispatch-binding')],
-    queue: { sequence: 1, enqueuedAt: at, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-64', tip: H2, base: B2, baseTree: sha40('7b'), predecessors: ['GY-1'], policyRevision: 1, publishedAt: at, carry } } } as Partial<Work>);
+    baseRefresh: { from: { sha: H, baseSha: B }, base: B2, baseTree: sha40('7b'), policyRevision: 1, at, head: H2, conflict: null, carry } } as Partial<Work>);
   reconcileAutoDispatch(tipped, [tipped], new Date(clock));
   assert.equal(tipped.autoDispatch!.review, null, 'a carried approval needs no reviewer');
   assert.deepEqual(tipped.autoDispatch!.producers, [], 'no proof is produced');

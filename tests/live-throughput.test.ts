@@ -288,7 +288,7 @@ test('integration:live-throughput-population — the population rule reads the r
   assert.deepEqual(coordinatorFingerprints(fast[0], deliveryActions(fast[0], now)), []);
   assert.match(coordinatorFingerprints({ ...fast[0], sessions: [{ id: 'master-1', kind: 'coordination', host: 'machine-a' }] } as unknown as Work, [])[0], /a coordination session \(master-1 on machine-a\) was recorded on it/);
   const failedThenSuperseded = actionExecution({ id: 'failed-action', kind: 'merge', work: fast[0].id, key: fast[0].key,
-    inputs: { kind: 'merge', pr: 1, sha: commit('candidate'), baseSha: commit('base'), policyRevision: 1, queuePosition: null },
+    inputs: { kind: 'merge', pr: 1, sha: commit('candidate'), baseSha: commit('base'), policyRevision: 1 },
     gate: 'merge', refusal: null, reason: '', binding: 'merge:1', requestedBy: 'graphyard', requestedAt: at(0), state: 'pending', claim: null, attempts: 1,
     resolvedAt: at(3 * minute), result: 'failed', resolution: 'provider failed', history: [
       { at: at(0), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },

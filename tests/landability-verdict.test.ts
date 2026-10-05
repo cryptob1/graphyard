@@ -2,10 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { evaluate } from '../src/model/gates.js';
-import { placeInQueue } from '../src/model/queue.js';
-import { ejectionReason } from '../src/merge-queue.js';
 import {
-  LANDABILITY_VERSION, evaluateLandability, landabilityEjection, landabilityEjections, landabilityRefusals, type LandabilityVerdict,
+  LANDABILITY_VERSION, evaluateLandability, landabilityRefusals,
 } from '../src/model/landability.js';
 import { stableJson } from '../src/model/stable-json.js';
 import type { Evidence, Observation, ScopeFile, Work } from '../src/model.js';
@@ -15,7 +13,8 @@ import type { Evidence, Observation, ScopeFile, Work } from '../src/model.js';
 // three times: GY-871 (the queue ejected files the gate excused as carried), GY-875 (the queue
 // ejected a manual proof that executed nothing, which the gate reads as unexercised) and GY-863
 // (a false revert the three-way merge settles). evaluateLandability is the one answer now; these
-// tests pin that every consumer reads it, that it is pure, and that an ejection is never sticky.
+// tests pin that every consumer reads it and that it is pure. GY-1236 removed the queue and its
+// ejections, so the gates are its consumers.
 
 const at = '2026-09-30T12:00:00.000Z';
 const now = new Date(at);
@@ -34,7 +33,7 @@ const evidence = (proof: string, head: string, overrides: Partial<Evidence> = {}
 
 interface Shape {
   key: string; head?: string; planned?: string[]; files?: string[]; scopeFiles?: ScopeFile[]; landing?: Observation['landing'];
-  proofs?: string[]; evidence?: Evidence[]; queued?: number | null; submitted?: boolean; workspace?: boolean;
+  proofs?: string[]; evidence?: Evidence[]; submitted?: boolean; workspace?: boolean;
 }
 
 function item(shape: Shape, extra: Partial<Work> = {}): Work {
@@ -50,7 +49,6 @@ function item(shape: Shape, extra: Partial<Work> = {}): Work {
     scopeFiles: shape.scopeFiles ?? files.map(path => changed(path)), landing: shape.landing ?? { base: main, files: files.map(path => changed(path)) },
     at, prState: 'open', draft: false, baseTip: main, baseTree: sha('e'), baseTipContained: true,
   } as Observation;
-  const queued = shape.queued === undefined ? 1 : shape.queued;
   return {
     id: shape.key.toLowerCase(), key: shape.key, title: shape.key, description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: proofs.map((proof, index) => ({ id: `AC-${index + 1}`, text: 'proven', proofs: [proof] })),
@@ -59,8 +57,7 @@ function item(shape: Shape, extra: Partial<Work> = {}): Work {
     workspaces: shape.workspace === false ? [] : [{ host: 'machine-a', path: `/tmp/${shape.key}`, epoch: 1, owner: 'worker', branch: candidate.branch }],
     submission: shape.submitted === false ? null : { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [],
     evidence: shape.evidence ?? proofs.map(proof => evidence(proof, head)), blocker: null, gates: [], violations: [],
-    queue: queued === null ? null : { sequence: queued, enqueuedAt: at, policyRevision: 1, speculation: null },
-    queueSequence: queued ?? 0, queueHistory: [], queueEjection: null, observation, ...extra,
+    observation, ...extra,
   } as unknown as Work;
 }
 
@@ -72,7 +69,6 @@ const gatesOf = (work: Work, all: Work[]) => {
   const gates = evaluate(work, all, now, CI).gates;
   return { build: gates.find(gate => gate.name === 'build')!, acceptance: gates.find(gate => gate.name === 'acceptance') };
 };
-const refused = (verdict: LandabilityVerdict) => verdict.verdict === 'refused';
 
 test('unit:landability-verdict-single-function — evaluateLandability returns landable or refused with {gate, reason}, and each gate family is exactly the gate it replaces', () => {
   // Landable: submitted, a workspace, an in-scope change, a trusted passing proof.
@@ -111,67 +107,49 @@ test('unit:landability-verdict-single-function — evaluateLandability returns l
   }
 });
 
-test('unit:queue-and-gates-share-verdict — ejectionReason and the landing guard eject only for a reason the verdict gives; GY-871, GY-875 and GY-863 agree', () => {
-  const queueAgrees = (work: Work, all: Work[]) => {
+test('unit:queue-and-gates-share-verdict — the build gate refuses only for a reason the verdict gives; GY-871, GY-875 and GY-863 agree', () => {
+  const agrees = (work: Work, all: Work[]) => {
     const verdict = evaluateLandability(work, all, now);
-    const reason = ejectionReason(work, CI, all, null, null, now);
-    if (reason) {
-      assert.equal(verdict.verdict, 'refused', `ejected [${reason}] while the verdict is landable`);
-      assert.ok(landabilityEjections(verdict).includes(reason), `ejected [${reason}] for a reason the verdict does not give: ${JSON.stringify(verdict)}`);
-    }
-    return { verdict, reason };
+    assert.deepEqual(gatesOf(work, all).build.reasons, landabilityRefusals(verdict, 'build'), JSON.stringify(verdict));
+    return verdict;
   };
 
-  // GY-871: a head carrying another item's speculative-tip commits. The build gate names the file as
-  // carried and sends no worker; the queue must not eject the entry over the same file.
-  const predecessor = item({ key: 'GY-P', head: sha('4'), planned: ['src/pred.ts'], files: ['src/pred.ts'], queued: 1 });
-  const carried = item({ key: 'GY-Q', files: ['src/server/routes/own.ts', 'src/pred.ts'], queued: 2,
+  // GY-871: a head carrying another item's commits. With no speculative tips (GY-1236) nothing marks
+  // them carried: the file is an ordinary out-of-scope regression of this head.
+  const predecessor = item({ key: 'GY-P', head: sha('4'), planned: ['src/pred.ts'], files: ['src/pred.ts'] });
+  const carried = item({ key: 'GY-Q', files: ['src/server/routes/own.ts', 'src/pred.ts'],
     landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/pred.ts')], foreign: [{ key: 'GY-P', pr: predecessor.candidate!.pr, head: sha('4') }] } });
-  const gy871 = queueAgrees(carried, [predecessor, carried]);
-  assert.match(landabilityRefusals(gy871.verdict, 'build')[0], /^Carried from another item's tip: 1 file .* belongs to GY-P/);
-  assert.equal(gy871.reason, null, 'a carried file ejects nothing');
-  assert.equal(landabilityEjection(gy871.verdict, 'landing'), null);
-  // An uncarried out-of-plan file is this change's own: the verdict gives the ejection, the queue takes it.
-  const stranger = item({ key: 'GY-U', files: ['src/server/routes/own.ts', 'src/stranger.ts'], queued: 2 });
-  const own = queueAgrees(stranger, [predecessor, stranger]);
-  assert.match(own.reason!, /^Landing speculative tip 777777777777 on 999999999999 would revert work outside its planned files: src\/stranger\.ts: differs from the base branch tip/);
+  assert.match(landabilityRefusals(agrees(carried, [predecessor, carried]), 'build').join('\n'), /^Out-of-scope regression: src\/pred\.ts: /m);
+  const stranger = item({ key: 'GY-U', files: ['src/server/routes/own.ts', 'src/stranger.ts'] });
+  assert.match(landabilityRefusals(agrees(stranger, [predecessor, stranger]), 'build').join('\n'), /^Out-of-scope regression: src\/stranger\.ts: differs from the base branch tip/m);
 
   // GY-875: a trusted manual proof a criterion names, failing with executed = 0, judged nothing.
-  // The acceptance gate reads it as unproven (held for its attestation); the queue must not eject.
+  // The verdict reads it as unproven (held for its attestation), never as a failure of the change.
   const manual = item({ key: 'GY-M', proofs: ['manual:review'], evidence: [evidence('manual:review', sha('7'), { result: 'fail', executed: 0 })] });
-  const gy875 = queueAgrees(manual, [manual]);
-  assert.match(landabilityRefusals(gy875.verdict, 'acceptance')[0], /^AC-1: manual:review needs trusted passing evidence, with skipped = 0/);
-  assert.equal(gy875.reason, null, 'an unexercised manual record holds the entry, it does not eject it');
-  // The same record having executed cases is an adverse conclusion: the verdict ejects, the queue follows.
+  const gy875 = agrees(manual, [manual]);
+  assert.match(landabilityRefusals(gy875, 'acceptance')[0], /^AC-1: manual:review needs trusted passing evidence, with skipped = 0/);
+  assert.deepEqual(landabilityRefusals(gy875, 'build'), [], 'an unexercised manual record returns nothing to the worker');
+  // The same record having executed cases is an adverse conclusion: the proof stands unproven, and
+  // as a manual attestation it is no mechanical failure that returns the head to its worker.
   const exercised = item({ key: 'GY-N', proofs: ['manual:review'], evidence: [evidence('manual:review', sha('7'), { result: 'fail', executed: 2 })] });
-  assert.equal(queueAgrees(exercised, [exercised]).reason, 'Proof manual:review failed on speculative tip 777777777777');
-  // A failure the newest record has answered is no refusal at all: the gate passes, so the queue
-  // does not eject over the superseded record (it did before the verdict: two answers).
+  const gy875Exercised = agrees(exercised, [exercised]);
+  assert.match(landabilityRefusals(gy875Exercised, 'acceptance')[0], /^AC-1: manual:review needs trusted passing evidence/);
+  assert.deepEqual(landabilityRefusals(gy875Exercised, 'build'), []);
+  // A failure the newest record has answered is no refusal at all.
   const retried = item({ key: 'GY-R', evidence: [evidence('unit:own-proof', sha('7'), { result: 'fail' }), evidence('unit:own-proof', sha('7'), { at: '2026-09-30T12:00:01.000Z' })] });
-  const answered = queueAgrees(retried, [retried]);
-  assert.equal(answered.verdict.verdict, 'landable');
-  assert.equal(answered.reason, null);
-  // A judged failure of a proof no criterion requires is still a failure of the change (GY-868):
-  // the build gate returns the head to its worker and the queue ejects on the same verdict reason.
+  assert.equal(agrees(retried, [retried]).verdict, 'landable');
+  // A judged failure of a proof no criterion requires is still a failure of the change (GY-868).
   const stray = item({ key: 'GY-S', evidence: [evidence('unit:own-proof', sha('7')), evidence('unit:unrequired', sha('7'), { result: 'fail' })] });
-  const strayed = queueAgrees(stray, [stray]);
-  assert.equal(strayed.reason, 'Proof unit:unrequired failed on speculative tip 777777777777');
-  assert.deepEqual(landabilityRefusals(strayed.verdict, 'build'), ['unit:unrequired, which no criterion requires, failed on 777777777777 (trusted evidence from independent-producer); the head returns to its worker before review']);
-  // A revoked proof is refused by the gate and ejects with the revocation named.
-  const revoked = item({ key: 'GY-V', evidence: [evidence('unit:own-proof', sha('7'), { revocation: { reason: 'producer withdrew it', at, actor: 'operator' } } as Partial<Evidence>)] });
-  assert.equal(queueAgrees(revoked, [revoked]).reason, 'Proof unit:own-proof was revoked on speculative tip 777777777777: producer withdrew it');
+  assert.deepEqual(landabilityRefusals(agrees(stray, [stray]), 'build'), ['unit:unrequired, which no criterion requires, failed on 777777777777 (trusted evidence from independent-producer); the head returns to its worker before review']);
 
   // GY-863: the landing guard recorded a file whose three-way merge onto the landing commit is
-  // exactly what that commit holds (mergeSha = baseSha): not a revert. Gate and queue agree it lands.
+  // exactly what that commit holds (mergeSha = baseSha): not a revert. The gate lets it land.
   const merged = item({ key: 'GY-W', scopeFiles: [changed('src/server/routes/own.ts')], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/state.ts', { mergeSha: sha('e') })] } });
-  const gy863 = queueAgrees(merged, [merged]);
-  assert.equal(gy863.verdict.verdict, 'landable', JSON.stringify(gy863.verdict));
-  assert.equal(gy863.reason, null);
+  assert.equal(agrees(merged, [merged]).verdict, 'landable');
   assert.equal(gatesOf(merged, [merged]).build.passed, true);
-  // Without the merge result the same file is a landing regression, refused and ejected by the same verdict.
+  // Without the merge result the same file is a landing regression the build gate refuses.
   const unmerged = item({ key: 'GY-X', scopeFiles: [changed('src/server/routes/own.ts')], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/state.ts')] } });
-  const revert = queueAgrees(unmerged, [unmerged]);
-  assert.match(revert.reason!, /^Landing speculative tip 777777777777 on bbbbbbbbbbbb would revert work outside its planned files: src\/state\.ts: /);
+  assert.match(landabilityRefusals(agrees(unmerged, [unmerged]), 'build').join('\n'), /^Landing regression: src\/state\.ts: /m);
   assert.equal(gatesOf(unmerged, [unmerged]).build.passed, false);
 });
 
@@ -191,9 +169,9 @@ function generated(round: number, random: () => number): { work: Work; all: Work
     dependent: [evidence(name, head, { producer: 'worker' })], skipped: [evidence(name, head, { skipped: 1 })],
     stray: [evidence(name, head), evidence('unit:stray', head, { result: 'fail' })],
   };
-  const carrier = item({ key: 'GY-C', head: sha('4'), planned: ['src/pred.ts'], files: ['src/pred.ts'], queued: 1 });
+  const carrier = item({ key: 'GY-C', head: sha('4'), planned: ['src/pred.ts'], files: ['src/pred.ts'] });
   const path = `src/file-${round}.ts`;
-  const shape: Shape = { key: 'GY-Q', proofs, evidence: records[proof], queued: random() < 0.8 ? 2 : null, submitted: random() > 0.1, workspace: random() > 0.1 };
+  const shape: Shape = { key: 'GY-Q', proofs, evidence: records[proof], submitted: random() > 0.1, workspace: random() > 0.1 };
   if (scope === 'stranger') shape.files = ['src/server/routes/own.ts', path];
   if (scope === 'carried') Object.assign(shape, { files: ['src/server/routes/own.ts', 'src/pred.ts'], landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/pred.ts')], foreign: [{ key: 'GY-C', pr: carrier.candidate!.pr, head: sha('4') }] } });
   if (scope === 'unverified') Object.assign(shape, { files: ['src/server/routes/own.ts', path], scopeFiles: [changed('src/server/routes/own.ts'), changed(path, { baseSha: undefined })] });
@@ -204,11 +182,11 @@ function generated(round: number, random: () => number): { work: Work; all: Work
   return { work, all: [carrier, work] };
 }
 
-test('unit:landability-consumers-agree — over generated work items the gates, the queue and the landing guard reach the same landable/refused answer', () => {
+test('unit:landability-consumers-agree — over generated work items the gates and the landing guard reach the same landable/refused answer', () => {
   let seed = 20260930;
   const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
-  const seen = { landable: 0, refused: 0, ejected: 0, held: 0 };
-  for (let round = 0; round < 400; round++) {
+  const seen = { landable: 0, refused: 0 };
+  for (let round = 0; round < 800; round++) {
     const { work, all } = generated(round, random);
     const verdict = evaluateLandability(work, all, now);
     const label = `${round}: ${JSON.stringify(verdict)}`;
@@ -217,27 +195,10 @@ test('unit:landability-consumers-agree — over generated work items the gates, 
     assert.equal(gates.build.passed, landabilityRefusals(verdict, 'build').length === 0, label);
     const accepted = landabilityRefusals(verdict, 'acceptance').length === 0;
     assert.equal(gates.build.passed && accepted, verdict.verdict === 'landable', label);
-    // The queue: a queued entry is ejected on landability grounds only for a reason the verdict
-    // gives, and a landable entry (clean CI, no review, no threads) is never ejected at all.
-    if (work.queue) {
-      const reason = ejectionReason(work, CI, all, null, null, now);
-      if (verdict.verdict === 'landable') assert.equal(reason, null, label);
-      if (reason && work.submission) {
-        assert.ok(landabilityEjections(verdict).includes(reason), `${label} ejected for [${reason}]`);
-        seen.ejected++;
-      } else if (refused(verdict)) seen.held++;
-    } else {
-      // An unqueued candidate the gates pass joins the queue; one the verdict refuses does not.
-      const placed = placeInQueue(work, all, now, CI, gates.build.passed && accepted);
-      assert.equal(!!placed.queue, verdict.verdict === 'landable', label);
-    }
-    // The landing guard: its ejection is a build refusal of the same verdict, never a separate answer.
-    const landing = landabilityEjection(verdict, 'landing');
-    if (landing) assert.equal(gates.build.passed, false, label);
     seen[verdict.verdict]++;
   }
   // The generator exercised every answer, so the agreement above is not vacuous.
-  assert.ok(seen.landable > 20 && seen.refused > 100 && seen.ejected > 20 && seen.held > 20, JSON.stringify(seen));
+  assert.ok(seen.landable > 20 && seen.refused > 100, JSON.stringify(seen));
 
   // The single authority is documented where coordination is described, linked rather than restated elsewhere.
   const coordination = readFileSync(new URL('../docs/coordination.md', import.meta.url), 'utf8');
@@ -271,7 +232,6 @@ test('unit:landability-pure-on-demand — the verdict is deterministic, recomput
   Object.assign(work, {
     landability: { verdict: 'landable', ...stored }, verdict: { verdict: 'landable' },
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'acceptance', passed: true, reasons: [], verdict: stored }],
-    queueEjection: { at, sequence: 1, reason: 'x', sha: sha('7'), policyRevision: 1, family: 'landability', verdict: stored },
   });
   const before = evaluateLandability(work, [work], now);
   assert.equal(before.verdict, 'refused');
@@ -282,7 +242,7 @@ test('unit:landability-pure-on-demand — the verdict is deterministic, recomput
   assert.equal(evaluateLandability(work, [work], new Date('2026-09-30T13:00:00.000Z')).verdict, 'refused', 'expiry is judged at the instant asked');
 
   // The audit: a refusal records the verdict version and the inputs it was computed from, keyed by
-  // candidate SHA and policy revision, on the gate it refuses and on any ejection it causes.
+  // candidate SHA and policy revision, on the gate it refuses.
   const stranger = item({ key: 'GY-U', files: ['src/server/routes/own.ts', 'src/stranger.ts'], evidence: [evidence('unit:own-proof', sha('7'))] });
   const verdict = evaluateLandability(stranger, [stranger], now);
   assert.deepEqual({ version: verdict.version, inputs: verdict.inputs }, {

@@ -6,7 +6,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { GitHub, processJob } from '../src/github.js';
-import { baseRefreshNeeded, ejectedTipRestore, pendingBaseRefresh, pendingRestore, staleMergeability } from '../src/merge-queue.js';
+import { baseRefreshNeeded, pendingBaseRefresh, staleMergeability } from '../src/merge-queue.js';
 import { behindBaseHold } from '../src/model/behind-base.js';
 import { neededDecision, syncConflict } from '../src/daemon/decisions.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
@@ -47,7 +47,7 @@ async function submitted(title: string) {
   work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'machine-a', path: `/tmp/trigger/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
   return engine.execute(worker, 'submit', work.id, { epoch: 1, pr: ++pullRequest }, randomUUID());
 }
-/** One observation of a candidate, approved on its own head, with a required check still running so it never enters the queue. */
+/** One observation of a candidate, approved on its own head, with a required check still running so it never reaches merge. */
 function seen(work: Work, candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { ...candidate, pr: work.submission!.pr, branch: work.workspaces[0].branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'in_progress', appId: 15368 }],
@@ -65,11 +65,6 @@ async function validated(work: Work, candidate: { sha: string; baseSha: string }
 async function onlyJob(work: Work) {
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [work.id]);
-}
-async function patch(work: Work, fields: Partial<Work>) {
-  const current = await reload(work);
-  await store.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [current.id, JSON.stringify({ ...current, ...fields })]);
-  return reload(work);
 }
 
 /**
@@ -100,10 +95,7 @@ function adapter(observation: (work: Work) => Observation, refresh?: GitHub) {
   return { called, github: {
     observe: async (work: Work) => observation(work),
     refreshCandidateBase: refresh ? (work: Work, guard: () => Promise<void>) => { called.push('refreshCandidateBase'); return refresh.refreshCandidateBase(work, guard); } : refuse('refreshCandidateBase'),
-    restoreBranch: refuse('restoreBranch'),
-    publishSpeculativeTip: refuse('publishSpeculativeTip'),
     mergeBranch: refuse('mergeBranch'),
-    updateBranch: refuse('updateBranch'),
     requestCodex: refuse('requestCodex'),
     publish: async () => {},
   } as unknown as GitHub };
@@ -178,7 +170,7 @@ test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued c
   assert.equal(neededDecision(other, { autoMerge: false })?.action, 'rework');
 });
 
-test('unit:no-other-refresh-path — reconcile, the landing check and ejection re-entry leave a clean unqueued candidate behind a moved base as it is, even when GitHub reports it conflicting', async () => {
+test('unit:no-other-refresh-path — reconcile and the landing check leave a clean candidate behind a moved base as it is, even when GitHub reports it conflicting', async () => {
   const main = sha40('c1'), head = sha40('c3');
   let work = await validated(await submitted('No other path'), { sha: head, baseSha: main });
   const before = snapshot(work), stage = work.stage;
@@ -187,7 +179,7 @@ test('unit:no-other-refresh-path — reconcile, the landing check and ejection r
     work = await reload(work);
     assert.deepEqual(snapshot(work), before, `${path}: head, review and proofs are unchanged`);
     assert.ok(stages.indexOf(work.stage) >= stages.indexOf(stage), `${path}: the stage does not move backwards (${stage} → ${work.stage})`);
-    assert.deepEqual([baseRefreshNeeded(work), pendingRestore(work), ejectedTipRestore(work, await store.list()), syncConflict(work)], [null, null, null, null], `${path}: nothing owes a refresh`);
+    assert.deepEqual([baseRefreshNeeded(work), syncConflict(work)], [null, null], `${path}: nothing owes a refresh`);
     assert.equal(behindBaseHold(work), null, `${path}: the head stays reviewable`);
     assert.notEqual(neededDecision(work, { autoMerge: false })?.action, 'rework', `${path}: no rework is asked for`);
     assert.deepEqual([(await events(work, 'base.refreshed')).length, (await events(work, 'base.conflict')).length], [0, 0], `${path}: no refresh or conflict was recorded`);
@@ -197,7 +189,7 @@ test('unit:no-other-refresh-path — reconcile, the landing check and ejection r
     await onlyJob(work);
     const job = adapter(observation);
     await processJob(engine, job.github);
-    assert.deepEqual(job.called, [], `${path}: no refresh, restore, merge or republish`);
+    assert.deepEqual(job.called, [], `${path}: no refresh or merge`);
     await settled(path);
   };
   // GitHub reads the candidate conflicting with a tip it merges onto cleanly — the stale
@@ -208,7 +200,7 @@ test('unit:no-other-refresh-path — reconcile, the landing check and ejection r
     await onlyJob(work);
     const job = adapter(observation, clean.github);
     await processJob(engine, job.github);
-    assert.ok(job.called.every(name => name === 'refreshCandidateBase'), `${path}: no restore, merge or republish (${job.called.join(', ')})`);
+    assert.ok(job.called.every(name => name === 'refreshCandidateBase'), `${path}: no merge (${job.called.join(', ')})`);
     assert.ok(clean.writes.every(write => write.includes('graphyard-merge-check/') || write === 'POST /merges'), `${path}: only the scratch branch is written (${clean.writes.join(', ')})`);
     work = await reload(work);
     assert.equal(work.observation!.conflicting, false, `${path}: the stale conflict is stored disproved`);
@@ -233,10 +225,4 @@ test('unit:no-other-refresh-path — reconcile, the landing check and ejection r
   const landing = (tip: string) => ({ landing: { base: tip, files: [], carried: [], foreign: [], examined: [] } });
   await unchanged('landing check', behind(sha40('d3'), landing(sha40('d3'))));
   await stale('landing check', sha40('d4'), behind(sha40('d4'), { ...landing(sha40('d4')), ...conflicting }));
-  // Ejection re-entry (GY-321): the candidate was ejected for a predecessor conflict, the
-  // predecessor is gone, and the same head re-enters rather than being rebuilt onto the base.
-  work = await patch(work, { queueEjection: { at: new Date().toISOString(), sequence: 1, reason: `Speculative merge of ${head.slice(0, 12)} into graphyard/gy-x conflicts and cannot be resolved by Graphyard`, sha: head, policyRevision: work.policyRevision, predecessors: ['GY-9999'] },
-    queueHistory: [{ at: new Date().toISOString(), event: 'predicted', sequence: 1, tip: sha40('c4'), predecessors: ['GY-9999'], from: head }] });
-  await unchanged('ejection re-entry', behind(sha40('d5')));
-  await stale('ejection re-entry', sha40('d6'), behind(sha40('d6'), conflicting));
 });

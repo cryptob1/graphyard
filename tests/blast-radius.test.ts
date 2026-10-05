@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
-import { predictQueue } from '../src/merge-queue.js';
 import { blastRadius } from '../src/model/blast-radius.js';
 // @ts-expect-error Dependency-free fixture script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW } from '../scripts/dashboard-fixture.mjs';
@@ -105,7 +104,7 @@ test('unit:candidate-blast-radius-summary the item view renders the summary for 
   assert.ok(withCandidate.length > 0, 'the fixture has candidates');
   for (const item of withCandidate) {
     const html = renderToStaticMarkup(createElement(WorkDetails, {
-      token: 'fixture', work, status: fixtureStatus('admin'), observedAt: NOW, jobs: [], queue: predictQueue(work, NOW), events: [], busy: false, codexAvailable: false,
+      token: 'fixture', work, status: fixtureStatus('admin'), observedAt: NOW, jobs: [], events: [], busy: false, codexAvailable: false,
       features: unknownFeatures, editingRequirements: false, setEditingRequirements: noop, action: async () => {}, api: async (path: string) => fixtureApi(path, 'admin'),
       refresh: async () => {}, setSelected: noop, setView: noop, sessionEpoch: { current: 0 }, item,
     } as any));
@@ -114,5 +113,5 @@ test('unit:candidate-blast-radius-summary the item view renders the summary for 
     for (const sentence of radius.sentences) assert.ok(html.includes(`<li>${sentence.replace(/&/g, '&amp;')}</li>`), `${item.key}: ${sentence}`);
   }
   const bare = work.find(item => !item.candidate);
-  if (bare) assert.doesNotMatch(renderToStaticMarkup(createElement(WorkDetails, { work, status: fixtureStatus('admin'), observedAt: NOW, jobs: [], queue: [], events: [], features: unknownFeatures, sessionEpoch: { current: 0 }, setSelected: noop, item: bare } as any)), /blast-radius/);
+  if (bare) assert.doesNotMatch(renderToStaticMarkup(createElement(WorkDetails, { work, status: fixtureStatus('admin'), observedAt: NOW, jobs: [], events: [], features: unknownFeatures, sessionEpoch: { current: 0 }, setSelected: noop, item: bare } as any)), /blast-radius/);
 });

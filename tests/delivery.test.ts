@@ -9,7 +9,6 @@ import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { Delivery, commonInterval, mergeSegments, serviceState, type EnvironmentDelivery, type Release } from '../src/delivery.js';
 import { server } from '../src/server.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import type { Principal, Work, Observation } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -63,14 +62,11 @@ async function delivered(mergeSha = 'e'.repeat(40)) {
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/delivery-${serial}`, branch: `graphyard/delivery-${serial}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: serial }, id());
-  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   const observation = (): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: serial, branch: `graphyard/delivery-${serial}`, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
     protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() });
   w = await engine.observe(w.id, w.revision, observation());
   w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
-  const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
   w = await engine.observe(w.id, (await reload(w)).revision, observation());
   const committed = { revision: (await engine.store.workItem(w.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);

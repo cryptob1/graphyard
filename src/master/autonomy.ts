@@ -10,7 +10,6 @@ import { localDirectory } from '../onboarding.js';
 import { broadScopeRefusals } from '../coordination.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type Work, escalationTriggers } from '../model.js';
-import { branchContamination, pendingRestore } from '../merge-queue.js';
 import { type FleetLaunchAccount, type FleetProbe, selectFleetSession } from '../fleet.js';
 import { capacityRetryAt } from '../model/capacity.js';
 import { type EscalationContext, contextFingerprint, escalationAction, handleEscalation, followPrecedent } from '../model/escalation-context.js';
@@ -644,7 +643,7 @@ export function guardBroadScope(input: { plannedFiles?: string[]; title?: string
   if (!options.allow) throw new Error(`${options.command} refused a high-conflict scope: ${refusals.map(refusal => refusal.reason).join('; ')}. Pass ${broadScopeFlag} to record the exception in the audited reason instead`);
   return `Broad scope exception (${refusals.map(refusal => refusal.scope).join(', ')}) recorded with ${broadScopeFlag}: ${reason}`;
 }
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'repair', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
@@ -708,16 +707,6 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   if (id === 'release' || id === 'unblock') {
     const work = await item(args[0]), text = reason(args.slice(1)), write = async (work: Work, attempt = 1) => call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: text }, attemptKey(attempt));
     return id === 'release' ? write(work) : unblockWithRetry(work, write, item);
-  }
-  if (id === 'repair') {
-    // The coordinator's own request (GY-127): the control plane resets a branch found carrying
-    // another item's unlanded commits to the item's own reviewed head and merges the base onto it.
-    // The command records the request; the reconciliation job runs it and master status reports it.
-    const work = await item(args[0]);
-    const contamination = branchContamination(work, (await deps.coordinator('work-snapshot')).work as Work[]);
-    if (!contamination) throw new Error(`${work.key} head ${work.candidate?.sha.slice(0, 12) ?? '(none)'} carries no other item's unlanded commits; there is nothing to repair`);
-    if (pendingRestore(work)) throw new Error(`A repair of ${work.key} is already requested; graphyard master status reports it under contamination.restore`);
-    return call(await readCredentialFile(config.credentialFile), `work/${work.id}/repair`, { reason: reason(args.slice(1)) });
   }
   if (id === 'requirements') {
     const work = await item(args[0]); if (!args[1]) throw new Error(`Use master requirements GY-N FILE [${broadScopeFlag}] REASON`);

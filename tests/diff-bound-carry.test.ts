@@ -1,8 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHub, comparePath, patchId } from '../src/github.js';
-import { ciPendingReason, queueRef, tipValidation, type MergeBatchView, type QueueSpeculation } from '../src/merge-queue.js';
-import { settleTestGate } from '../src/model/gates.js';
 import { ciCheckName, ciCheckRefusal } from '../src/model/ci-refusal.js';
 import { gateRefusalCatalogue } from '../src/model/refusal-catalogue.js';
 import { carriedApproval, currentCarry, decideCarry, describeGround, evidenceBindsCandidate, type CarryInput, type Evidence, type TipMerge, type Work } from '../src/model.js';
@@ -88,15 +86,12 @@ test('unit:diff-bound-carry — an approval and every proof carry across a base 
   assert.match(carry.approval.reason, new RegExp(`diff unchanged \\(patch-id ${id.slice(0, 12)}\\)`));
   for (const entry of carry.evidence) assert.match(entry.reason, /diff unchanged \(patch-id [0-9a-f]{12}\)/);
 
-  // The carried bindings apply to the tip; the combined tip's CI still has to pass before merge.
-  const speculation: QueueSpeculation = { ref: queueRef('GY-7'), tip: TIP, base: P, baseTree: sha40('7e'), predecessors: [], policyRevision: 1, publishedAt: at, merge, carry, reviewedHead: H };
+  // The carried bindings apply to the refreshed head.
   const work = { key: 'GY-7', candidate: { sha: TIP, baseSha: P, pr: 7, branch: 'graphyard/gy-7-1', author: 'worker' }, policyRevision: 1, policy: { checks: ['test'], review: true },
-    queue: { sequence: 1, enqueuedAt: at, policyRevision: 1, speculation } } as unknown as Work;
+    baseRefresh: { from: { sha: H, baseSha: B }, base: P, baseTree: sha40('7e'), policyRevision: 1, at, head: TIP, conflict: null, merge, carry } } as unknown as Work;
   assert.equal(currentCarry(work), carry);
   assert.equal(carriedApproval(work)?.originalSha, H);
   assert.equal(evidenceBindsCandidate(work, evidence('unit:queue', { scopeFiles: ['src/queue.ts'] })), true);
-  assert.deepEqual(tipValidation(work, work.queue!, ['Required CI check test has not passed on the current candidate']),
-    [`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: Required CI check test has not passed on the current candidate`], 'the combined-tip CI still runs before merge');
 
   // An unchanged diff decides on its own: the base's file list is not needed.
   assert.equal(decideCarry(input({ ...merge, baseChanges: null })).approval.carried, true);
@@ -133,47 +128,10 @@ test('unit:diff-bound-carry — the approval is re-required when the candidate\'
   assert.match(legacy.approval.reason, /changed none of the 2 reviewed files/);
 });
 
-test('unit:diff-bound-carry — only a CI-pending test-gate refusal is relabelled as the tip validating; any other stays on the test gate (GY-332)', () => {
-  const speculation = { ref: queueRef('GY-7'), tip: TIP, base: P, baseTree: sha40('7e'), predecessors: [], policyRevision: 1, publishedAt: at, reviewedHead: H } as unknown as QueueSpeculation;
-  const work = { key: 'GY-7', candidate: { sha: TIP, baseSha: P, pr: 7, branch: 'graphyard/gy-7-1', author: 'worker' }, policyRevision: 1, policy: { checks: ['test'], review: true } } as unknown as Work;
-  const queue = { sequence: 1, enqueuedAt: at, policyRevision: 1, speculation };
-  const pending = ciCheckRefusal('test'), other = 'Check test was reported by an untrusted app';
-  assert.equal(ciPendingReason(pending), true);
-  assert.equal(ciPendingReason(other), false);
-  // A refusal of another shape is the candidate's own: it is never wrapped as queue progress.
-  assert.equal(tipValidation(work, queue, [other]), null);
-  assert.deepEqual(tipValidation(work, queue, [pending, other]), [`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: ${pending}`]);
-  // The production lift itself (src/model/gates.ts settleTestGate): what the tip pays for leaves
-  // the test gate, what it does not stays and keeps the gate failed. Replacing the lift with the
-  // old blanket `reasons = []; passed = true` would drop `other`, failing these assertions.
-  const gate = (reasons: string[]) => ({ name: 'test', passed: reasons.length === 0, reasons });
-  const mixed = gate([pending, other]);
-  settleTestGate(mixed, tipValidation(work, queue, [pending, other]));
-  assert.deepEqual(mixed.reasons, [other], 'the test gate keeps the non-CI refusal');
-  assert.equal(mixed.passed, false, 'a retained refusal keeps the test gate failed');
-  // A batch behind the head requires nothing of its tip: `[]`, and the gate lifts only the CI-pending refusal.
-  const waiting = { batch: 2, size: 1, members: ['GY-7'], tip: null, underTest: null, state: 'waiting', step: { kind: 'wait' }, summary: '' } as unknown as MergeBatchView;
-  assert.deepEqual(tipValidation(work, { ...queue, batch: waiting }, [pending, other]), []);
-  const batchWaiting = gate([pending, other]);
-  settleTestGate(batchWaiting, tipValidation(work, { ...queue, batch: waiting }, [pending, other]));
-  assert.deepEqual(batchWaiting.reasons, [other], 'the batch-waiting path keeps the non-CI refusal too');
-  assert.equal(batchWaiting.passed, false);
-  // With the tip paying for every refusal the gate raised, the gate clears and passes; with no
-  // validation running at all, nothing is lifted.
-  const cleared = gate([pending]);
-  settleTestGate(cleared, tipValidation(work, queue, [pending]));
-  assert.deepEqual(cleared.reasons, []);
-  assert.equal(cleared.passed, true);
-  const standing = gate([other]);
-  settleTestGate(standing, tipValidation(work, queue, [other]));
-  assert.deepEqual(standing.reasons, [other], 'no tip validation, no lift');
-  assert.equal(standing.passed, false);
-});
-
 test('unit:diff-bound-carry — the CI-pending refusal is worded once and every reader matches the gate\'s wording (GY-332)', () => {
   const refusal = ciCheckRefusal('lint / node 24');
   assert.equal(ciCheckName(refusal), 'lint / node 24');
-  assert.equal(ciCheckName(`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: ${refusal}`), null, 'anchored: a wrapped refusal is not the test gate\'s own');
+  assert.equal(ciCheckName(`GY-7 waits: ${refusal}`), null, 'anchored: a wrapped refusal is not the test gate\'s own');
   const entry = (id: string) => gateRefusalCatalogue.find(candidate => candidate.id === id)!;
   assert.match(refusal, entry('check-not-passed').match);
 });

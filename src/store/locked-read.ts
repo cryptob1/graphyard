@@ -158,11 +158,10 @@ async function readWhole(db: Queryable, numbers: number[], forUpdate: boolean, i
 
 /**
  * Whether an open item's answer can turn on `other`: they name an overlapping file (planned or
- * observed on the candidate), share an exclusive resource, or both hold merge-queue entries.
+ * observed on the candidate), or share an exclusive resource.
  */
 function overlaps(work: Work, other: Work) {
   if (work.id === other.id) return true;
-  if (work.queue && other.queue) return true;
   const resources = new Set(work.exclusiveResources ?? []);
   if ((other.exclusiveResources ?? []).some(resource => resources.has(resource))) return true;
   const mine = scopesOf(work);

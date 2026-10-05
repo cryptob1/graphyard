@@ -20,7 +20,7 @@ const item = (key: string, pr: number, head: string, baseSha: string, overrides:
   policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'merge', revision: 3, policyRevision: 1, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
   stageEnteredAt: new Date(now).toISOString(), ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }],
   candidate: { sha: head, baseSha, pr, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' }, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [],
-  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], queueHistory: [], ...overrides } as unknown as Work);
+  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], ...overrides } as unknown as Work);
 
 const observed = (work: Work, at: string, approved: boolean) => ({
   candidate: work.candidate!, checks: ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: CI, id: index + 1 })),
@@ -62,10 +62,10 @@ test('unit:observation-priority-keeps-merge-and-review-fresh — at 100 open ite
 
   // A review request past half its bound joins the protected prefix, ahead of starved backlog jobs.
   const aged = all.map(work => work.key === 'GY-R7' ? { ...work, observation: { ...work.observation!, at: new Date(now - 16 * 60_000).toISOString() } } : work);
-  const plan = observationClaim(aged, 1, now);
+  const plan = observationClaim(aged, now);
   const byKey = new Map(aged.map(work => [work.id, work.key]));
   assert.deepEqual(plan.order.slice(0, plan.headCount).map(id => byKey.get(id)), ['GY-Q0', 'GY-Q1', 'GY-R7'], 'the merge path, then the aged review request');
-  assert.equal(observationClaim(all, 1, now).headCount, 2, 'fresh review requests stay behind the prefix');
+  assert.equal(observationClaim(all, now).headCount, 2, 'fresh review requests stay behind the prefix');
 
   // The default configuration: a pool of 16 and eight workers, never more than half the pool.
   const capacity = observationCapacity({});
@@ -163,7 +163,7 @@ class Provider {
 type Soak = { settledPolls: number; settledCharged: number; settledMax: number; changedPolls: number; changedCharged: number; reviewPolls: number; reviewWorstGapMs: number; chargedPerHour: number };
 
 /**
- * One simulated hour of the real observation loop over 20 queued entries and 180 review requests:
+ * One simulated hour of the real observation loop over 20 approved candidates and 180 review requests:
  * each item is observed through `GitHub.observe` against the provider when the cadence its observed
  * state earns says so, the shared per-cycle reads timed on the simulated clock. Every tenth poll of a
  * review request finds a pushed head and is paid for in full. What GitHub charged is counted per poll.
@@ -178,7 +178,7 @@ async function soak(conditional: boolean): Promise<Soak> {
   const start = Date.now(); let clock = 0;
   github.clock = () => start + clock;
   const queued = Array.from({ length: 20 }, (_, index) => { const pr = api.open(300 + index, `graphyard/gy-q${index}-1`, true);
-    return item(`GY-Q${index}`, 300 + index, pr.head, api.main, { queue: { sequence: index + 1, enqueuedAt: new Date(start - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>); });
+    return item(`GY-Q${index}`, 300 + index, pr.head, api.main); });
   const review = Array.from({ length: 180 }, (_, index) => { const pr = api.open(600 + index, `graphyard/gy-r${index}-1`, false);
     return item(`GY-R${index}`, 600 + index, pr.head, api.main, { stage: 'review', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] } as Partial<Work>); });
   let all: Work[] = [...queued, ...review];

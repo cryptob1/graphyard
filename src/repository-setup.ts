@@ -5,7 +5,6 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
-import { onboardingParallelTips } from './master/profiles.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
@@ -90,8 +89,9 @@ pushing on lease loss; an expired or superseded epoch does not authorize more wo
 Register the assigned host/path/branch before submission. Do not reuse another
 assignment's worktree or quietly remove historical reservations.
 
-Run \`sync GY-N\` before every push. It merges the base branch (\`git fetch origin &&
-git merge origin/BASE\`; never rebase) and lists every file outside the item's
+Run \`sync GY-N\` before every push. It merges the base branch (\`git fetch --no-tags
+origin && git merge origin/BASE\`; never rebase; tags are not fetched, so a new tag
+never fails sync) and lists every file outside the item's
 plannedFiles that no longer matches origin/BASE. Files outside plannedFiles must match
 origin/BASE byte-for-byte: restore them, never re-resolve a merge in favour of your
 branch. \`sync GY-N --restore\` restores every such file to origin/BASE in one new
@@ -525,17 +525,6 @@ export async function readDocumentationConfig(root: string): Promise<Documentati
   try { const { wordBudget: _budget, ...policy } = parseRepositoryConfig(await readFile(resolve(root, repositoryConfigFile), 'utf8')).documentation; return policy; }
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
 }
-
-// --- Merge-queue exclusions: the shared infrastructure onboarding names per repository (GY-503) ---
-
-/**
- * The `mergeQueue` configuration onboarding writes when a repository's master config names none:
- * the product's recommended parallel-tips value (`onboardingParallelTips`, master/profiles.ts) under
- * `mergeQueue.parallelTips`, where the operator tunes it for this repository. A later `master init`
- * keeps what is written, exactly as it keeps an operator-tuned profile, so the default is named once
- * per repository and the product hardcodes nobody's concurrency settings.
- */
-export const onboardingMergeQueue = (): { parallelTips: number } => ({ parallelTips: onboardingParallelTips });
 
 // --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
 

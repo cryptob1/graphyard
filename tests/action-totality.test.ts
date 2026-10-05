@@ -95,7 +95,7 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
   const profiles = [{ name: 'reviewer-a', runtime: 'claude', reviewerApp: 'app-a', timeoutSeconds: 1800 }];
   const graded = (probe: Work, all: Work[] = []): Work => {
     const result = evaluate(probe, [...all, probe], now, [CI_APP]);
-    return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory };
+    return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations };
   };
   // The head's mechanical proofs have passed: review follows them (GY-115), so the provider states
   // below are the ones a proven head reaches.
@@ -165,7 +165,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
   const other = await candidate();
   const grade = (probe: Work, all: Work[]): Work => {
     const result = evaluate(probe, all, now, [CI_APP]);
-    return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory };
+    return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations };
   };
   const unproven = { ...item, evidence: [] } as Work;
   const proven = {
@@ -347,7 +347,7 @@ test('unit:actionless-item-visible — an item with no action and nothing moving
     filter: null, setFilter: () => {}, selected: null, setSelected: () => {}, creating: false, setCreating: () => {},
     busy: false, setBusy: () => {}, observedAt: now.getTime(), jobs: [], query: '', setQuery: () => {}, operatorAgents: [],
     events: [], operatorAgentsError: null, features: {}, editingRequirements: false, setEditingRequirements: () => {},
-    codexAvailable: false, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {},
+    codexAvailable: false, sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {},
     action: async () => {}, setError: () => {}, signOut: () => {},
     // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
     board: boardFromStatus(computed, now.getTime(), null),

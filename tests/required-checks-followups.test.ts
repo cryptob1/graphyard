@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { routineDecision } from '../src/master-daemon.js';
-import { checkRerunHeld, ejectionReason, requiredCheckRun, tipVerdict, type RequiredCheck } from '../src/merge-queue.js';
+import { checkRerunHeld, requiredCheckRun, type RequiredCheck } from '../src/merge-queue.js';
 import { evaluate } from '../src/model/gates.js';
 import type { Work } from '../src/model.js';
 
 // GY-1060: the follow-ups of GY-430's approved review. A protection-only required check is read
-// alike by the test gate, ejection, the batch verdict and the window view; a check bound to no app
-// prefers the configured CI apps' runs; and a commit-status context counts as its run.
+// alike by the test gate and the rework rule; a check bound to no app prefers the configured CI
+// apps' runs; and a commit-status context counts as its run.
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), at = '2026-10-01T12:00:00.000Z', now = new Date(at);
 const ciAppIds = [15368];
@@ -27,8 +27,6 @@ function item(checks: Check[], requiredChecks: { name: string; appId: number | n
 }
 const testGate = (work: Work) => evaluate(work, [work], now, ciAppIds).gates.find(gate => gate.name === 'test')!;
 const passing: Check[] = [{ name: 'test', result: 'success' }, { name: 'typecheck', result: 'success' }];
-const published = (checks: Check[]) => item(checks, undefined, { queue: { sequence: 1, sha: head, baseSha: base, policyRevision: 2, enqueuedAt: at,
-  speculation: { tip: head, base, baseTree: base, predecessors: [], policyRevision: 2 } } } as unknown as Partial<Work>);
 
 test('unit:required-checks-followups — a check bound to no app prefers the configured CI apps, and a commit status counts as its run', () => {
   const secrets: RequiredCheck = { name: 'secrets', policy: false, appId: null };
@@ -53,15 +51,6 @@ test('unit:required-checks-followups — a check bound to no app prefers the con
   assert.equal(testGate(strayed).passed, true);
   // A status never satisfies a policy check: app 0 is no configured CI app.
   assert.equal(testGate(item([{ name: 'test', result: 'success', appId: 0, source: 'status' }, { name: 'typecheck', result: 'success' }], [])).passed, false);
-});
-
-test('unit:required-checks-followups — a published tip failing only a protection-only check reads as fail in its verdict, as ejection reads it', () => {
-  const failing = published([...passing, { name: 'secrets', result: 'failure' }]);
-  assert.deepEqual(tipVerdict(failing, ciAppIds), { result: 'fail', check: 'secrets' });
-  assert.match(ejectionReason(failing, ciAppIds) ?? '', /Required CI check secrets did not pass/);
-  // Not yet reported: no verdict, not a pass.
-  assert.equal(tipVerdict(published(passing), ciAppIds), undefined);
-  assert.deepEqual(tipVerdict(published([...passing, { name: 'secrets', result: 'skipped' }]), ciAppIds), { result: 'pass' }, 'GitHub accepts a skipped protection-only check');
 });
 
 test('unit:required-checks-followups — a rerun owed on a protection-only check bound to another app holds its failure', () => {

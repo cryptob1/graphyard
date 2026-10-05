@@ -1,8 +1,8 @@
 import type { Work } from './model.js';
-import { mergeAuthorized, predictQueue } from './merge-queue.js';
+import { mergeAuthorized } from './merge-queue.js';
 import { observationCadence } from './github.js';
 import { observationStarvedAfterMs } from './store/store.js';
-import { baseMoveWakes, headClaimBand, observationClaimClasses, observationClaimPlan, observationFreshnessBounds, reviewRequested, type FreshnessBand } from './observation-priority.js';
+import { baseMoveWakes, observationClaimClasses, observationClaimPlan, observationFreshnessBounds, reviewRequested, type FreshnessBand } from './observation-priority.js';
 
 /**
  * A discrete simulation of the observation scheduler (GY-1114), to size its workers against a fleet.
@@ -17,7 +17,7 @@ import { baseMoveWakes, headClaimBand, observationClaimClasses, observationClaim
  *
  * Without `advance` the fleet is fixed: every item keeps the band, claim class and cadence it starts
  * with, which models a steady-state fleet (GY-1114's AC-1) but no churn. With `advance`, a reading that
- * comes back changed may move its item on — a review request approved into the merge queue, say — and
+ * comes back changed may move its item on — a review request approved into the merge band, say — and
  * every band, claim class and cadence is read again from the new fleet, so items move between bands as
  * they would in production (GY-1178). An item entering the merge band is woken, as the loop wakes the
  * observation job of a step refused on a stale reading (daemon/cycle-delivery.ts), and its lag in a
@@ -30,7 +30,7 @@ import { baseMoveWakes, headClaimBand, observationClaimClasses, observationClaim
  * not-modified answers free — and the run reports the total as `requests`.
  */
 export interface ObservationSimulation {
-  all: Work[]; workers: number; steadyMs: number; jobMs: number; durationMs: number; batchSize?: number; seed?: number; stepMs?: number;
+  all: Work[]; workers: number; steadyMs: number; jobMs: number; durationMs: number; seed?: number; stepMs?: number;
   /** The share of readings that come back changed, and are due again at the item's unsettled cadence (a check finished, a push). */
   changedShare?: number;
   /** Replaces an item's settled cadence: how a test replays a schedule other than the production one. */
@@ -51,7 +51,7 @@ export interface ObservationSimulation {
   requestCost?: { unchanged: number; changed: number; baseMoved: number; baseMoveShared?: number };
 }
 export function simulateObservationScheduler(options: ObservationSimulation) {
-  const { all, workers, steadyMs, jobMs, durationMs, batchSize = 1, stepMs = 1000, changedShare = 0 } = options;
+  const { all, workers, steadyMs, jobMs, durationMs, stepMs = 1000, changedShare = 0 } = options;
   let seed = options.seed ?? 1114;
   // A deterministic spread: job durations between half and one and a half times `jobMs`, initial ages across a cadence.
   const random = () => { seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648; return seed / 2_147_483_648; };
@@ -59,16 +59,15 @@ export function simulateObservationScheduler(options: ObservationSimulation) {
   let fleet = all;
   // Each open item's band and cadences, read from the fleet as it stands at `at`.
   const classify = (at: number) => {
-    const date = new Date(at), headBand = headClaimBand(batchSize);
-    const merging = new Set([...predictQueue(fleet, at).filter(placement => placement.position < headBand).map(placement => placement.id), ...fleet.filter(mergeAuthorized).map(work => work.id)]);
+    const date = new Date(at), merging = new Set(fleet.filter(mergeAuthorized).map(work => work.id));
     return new Map(fleet.filter(work => work.stage !== 'done' && work.submission).map(work => {
-      const band: FreshnessBand = merging.has(work.id) || work.queue?.tips?.length ? 'merge' : reviewRequested(work, fleet, date) ? 'review' : 'steady';
+      const band: FreshnessBand = merging.has(work.id) ? 'merge' : reviewRequested(work, fleet, date) ? 'review' : 'steady';
       const settled = observationCadence(work, fleet, date, work.observation, steadyMs).ms;
       const cadenceMs = options.settledCadence ? options.settledCadence(work, band, settled) : settled;
       return [work.id, { band, cadenceMs, changedMs: observationCadence(work, fleet, date, null, steadyMs).ms }] as const;
     }));
   };
-  let classes = observationClaimClasses(fleet, batchSize, start);
+  let classes = observationClaimClasses(fleet, start);
   const initial = classify(start);
   const items = all.filter(work => initial.has(work.id)).map(work => {
     const { band, cadenceMs, changedMs } = initial.get(work.id)!;
@@ -98,7 +97,7 @@ export function simulateObservationScheduler(options: ObservationSimulation) {
         if (moved) {
           // The item moved on: the fleet is reclassified, and every open item takes its new band and cadences.
           fleet = fleet.map(work => work.id === moved.id ? moved : work);
-          classes = observationClaimClasses(fleet, batchSize, worker.until);
+          classes = observationClaimClasses(fleet, worker.until);
           const next = classify(worker.until);
           for (const item of items) {
             const reading = next.get(item.id);

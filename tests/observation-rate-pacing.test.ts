@@ -124,7 +124,7 @@ const item = (key: string, pr: number, head: string, baseSha: string, overrides:
   policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'merge', revision: 3, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }],
   candidate: { sha: head, baseSha, pr, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' }, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [],
-  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], queueHistory: [], ...overrides } as unknown as Work);
+  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], ...overrides } as unknown as Work);
 const observed = (work: Work, approved = true) => ({
   candidate: work.candidate!, checks: ['test', 'typecheck'].map((name, index) => ({ name, result: 'success', appId: CI, id: index + 1 })),
   reviews: approved ? [{ reviewer: 'independent-reviewer', sha: work.candidate!.sha, state: 'APPROVED', id: 900, submittedAt: new Date().toISOString() }] : [],
@@ -139,7 +139,8 @@ const budgetOf = (overrides: Partial<GitHubBudget> = {}) => ({ belowReserve: fal
 
 test('unit:observation-priority-under-budget — under a tight budget the queue head and in-flight merge are claimed first, then items with running sessions, then the rest; idle items wait for webhooks', () => {
   const base = sha('main-567');
-  const queue = [0, 1, 2].map(index => item(`GY-Q${index}`, 300 + index, sha(`q${index}`), base, { queue: { sequence: index + 1, enqueuedAt: new Date(Date.now() - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>));
+  // GitHub delivery is the only delivery (GY-1235): the merge path is every candidate GitHub may merge.
+  const queue = [0, 1, 2].map(index => item(`GY-Q${index}`, 300 + index, sha(`q${index}`), base));
   const settledQueue = queue.map(work => settle(work, queue));
   const flightWork = settle(item('GY-FLIGHT', 400, sha('flight'), base), settledQueue);
   const flight = { ...flightWork, stage: 'merge', gates: flightWork.gates.map(gate => ({ ...gate, passed: true, reasons: [] })), violations: [],
@@ -152,14 +153,14 @@ test('unit:observation-priority-under-budget — under a tight budget the queue 
   const all = [idle, waiting, running, flight, ...settledQueue];
   const keys = (order: string[]) => order.map(id => all.find(work => work.id === id)!.key);
 
-  const tight = keys(observationClaimOrder(all, 1, Date.now(), true));
-  // The authorized merge in flight is itself the predicted head; the head band and it come first.
+  const tight = keys(observationClaimOrder(all, Date.now(), true));
+  // The authorized merge in flight and the candidates GitHub may merge come first.
   const mergePath = tight.slice(0, tight.indexOf('GY-RUN'));
   assert.ok(mergePath.includes('GY-FLIGHT') && mergePath.includes('GY-Q0') && mergePath.every(key => key === 'GY-FLIGHT' || key.startsWith('GY-Q')), `the head band and the in-flight merge come first: ${tight.join(', ')}`);
   assert.equal(tight.indexOf('GY-WAIT'), tight.indexOf('GY-RUN') + 1, `then the running session, then everything else: ${tight.join(', ')}`);
   assert.ok(!tight.includes('GY-IDLE'), 'an idle item is left to availability order');
-  assert.equal(observationHeadCount(all, 1), mergePath.length, 'the in-flight merge counts with the head band, so no starved job overtakes it');
-  const relaxed = keys(observationClaimOrder(all, 1, Date.now(), false));
+  assert.equal(observationHeadCount(all), mergePath.length, 'the in-flight merge counts with the head band, so no starved job overtakes it');
+  const relaxed = keys(observationClaimOrder(all, Date.now(), false));
   assert.ok(relaxed.indexOf('GY-WAIT') < relaxed.indexOf('GY-RUN'), 'with budget to spare, the observation a review waits on stays ahead of running sessions');
 
   // What makes a budget tight, and what a tight budget does to an idle observation.
@@ -209,8 +210,7 @@ test('unit:budget-projection-reported — master status reports remaining, reset
 /**
  * A fleet's observation hour with the real claim order (GY-567 AC-4): `workers` paced workers
  * claim the first due job the order names, else the oldest due one (what `Store.takeJob` does).
- * The queue head comes due every 20 s, the rest of its band every 60 s, queued entries behind it
- * every 5 minutes, and review-waiting items every 30 s — the load that, ranked ahead of them,
+ * Every observed item comes due every 30 s — the load that, ranked ahead of them,
  * kept one worker from ever reading a new submission. Submissions arrive at `arrivals` and are
  * observed once; returns how long each waited for that first reading.
  */
@@ -219,9 +219,7 @@ function firstReadWaits(all: Work[], submissions: Work[], arrivals: number[], op
   let remaining = 5000;
   const pacer = new ObservationPacer();
   const works = new Map(all.map(work => [work.id, work]));
-  const queued = all.filter(work => (work as Work & { queue?: unknown }).queue);
   const cadence = new Map<string, number>(all.map(work => [work.id, firstObservationOwed(work) ? Infinity : 30_000]));
-  queued.forEach((work, index) => cadence.set(work.id, index === 0 ? 20_000 : index === 1 ? 60_000 : 300_000));
   const due = new Map<string, number>(all.map((work, index) => [work.id, index * 500]));
   const arrival = new Map(submissions.map((work, index) => [work.id, arrivals[index]]));
   const waits = new Map<string, number>();
@@ -273,13 +271,13 @@ test('unit:first-observation-not-starved — with 13 open candidates and review-
   // review-waiting items — whether or not the budget is tight.
   for (const tight of [false, true]) {
     const all = [...fleet, ...submissions];
-    const order = observationClaimOrder(all, 1, Date.now(), tight).map(id => all.find(work => work.id === id)!.key);
+    const order = observationClaimOrder(all, Date.now(), tight).map(id => all.find(work => work.id === id)!.key);
     assert.deepEqual(order.slice(0, 5), ['GY-Q00', 'GY-Q01', 'GY-NEW0', 'GY-NEW1', 'GY-NEW2'], `tight=${tight}: ${order.join(', ')}`);
   }
 
   // An hour of load: submissions arriving at 10, 25 and 40 minutes, four paced workers and one.
   const arrivals = [600_000, 1_500_000, 2_400_000];
-  const claimOrder = (works: Work[]) => observationClaimOrder(works, 1, Date.now());
+  const claimOrder = (works: Work[]) => observationClaimOrder(works, Date.now());
   for (const workers of [1, 4]) {
     const waits = firstReadWaits(fleet, submissions, arrivals, { workers, order: claimOrder });
     assert.ok(waits.every(wait => wait <= 300_000), `${workers} worker(s): each submission is first observed within 5 minutes (waits ${waits.join(', ')} ms)`);

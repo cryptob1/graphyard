@@ -414,7 +414,6 @@ test('unit:session-request-carries-project-memory — master status shows projec
       undefined,
       undefined,
       'graphyard',
-      { batchSize: 5 },
       { projectMemory: memory }
     );
 

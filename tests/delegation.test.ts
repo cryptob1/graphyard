@@ -11,7 +11,6 @@ import {
 } from '../src/delegation.js';
 import { mergeAuthorized } from '../src/merge-queue.js';
 import { evidenceProves } from '../src/model/mechanical-proofs.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { currentEvidence, sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
@@ -72,26 +71,10 @@ async function candidate(actor: Principal, title: string, slice?: SliceId) {
   return engine.observe(work.id, work.revision, observation(work));
 }
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
-// The merge queue is global and strictly ordered, so a scenario that needs merge
-// authority has to hold its head. Earlier scenarios in this shared store leave
-// their proven candidates queued; returning those to their workers frees the slot
-// without touching any history.
-async function queueHeadFor(work: Work) {
-  for (const item of await store.list())
-    if (item.queue && item.id !== work.id && item.stage !== 'done')
-      await engine.execute(admin, 'rework', item.id, { reason: 'Scenario complete; release the merge queue slot', previousWorkerStopped: true }, id());
-}
-// A proven candidate with Graphyard's queue tip published for it: merge
-// authorization requires a published speculative tip, so delegation refusals are
-// exercised against the same merge-ready state the broker really sees.
-// Publication itself belongs to the merge-queue scenarios.
+// A proven candidate observed merge-ready, so delegation refusals are exercised
+// against the same state the broker really sees.
 async function publish(work: Work, sha = head) {
-  await queueHeadFor(work);
-  const item = await engine.observe(work.id, (await reload(work)).revision, observation(work, sha));
-  const speculation: QueueSpeculation = { ref: queueRef(item.key), tip: item.candidate!.sha, base: item.candidate!.baseSha,
-    baseTree: 'e'.repeat(40), predecessors: [], policyRevision: item.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [item.id, JSON.stringify(speculation)]);
-  return engine.observe(item.id, (await reload(item)).revision, observation(item, sha));
+  return engine.observe(work.id, (await reload(work)).revision, observation(work, sha));
 }
 async function proven(work: Work, sha = head) {
   const observed = await engine.observe(work.id, (await reload(work)).revision, observation(work, sha));

@@ -269,7 +269,7 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
  * credential, in every spelling a rule names; a spelling no rule names is unmatched, not denied.
  *
  * The one history rewrite it may make goes through `restore-branch GY-N EPOCH`, never a raw push:
- * the recovery of an ejected or contaminated tip resets the assigned branch to the item's reviewed
+ * the recovery of a contaminated branch resets the assigned branch to the item's reviewed
  * head, syncs it onto the base and pushes, and the rework the control plane authorizes must be
  * executable by the session it dispatches (GY-128). A permission glob cannot say "this ref and no
  * other", and a Claude worker runs under bypassPermissions, where a command no rule matches runs.
@@ -369,7 +369,7 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
   return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
 }
 /**
- * How a worker restores its assigned branch after an ejected or contaminated tip, as the exact
+ * How a worker restores its assigned branch after it was contaminated, as the exact
  * commands a rework reason carries: fetch, reset to the item's reviewed head, sync onto the base,
  * restore-branch (the lease push of the leased branch), complete. Every one is permitted by the
  * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it

@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 2 | App, protection, queue, proofs. -->
+<!-- page: Operate Graphyard | 2 | App, protection, failed checks, proofs. -->
 # GitHub enforcement
 
 ## App permissions
@@ -10,7 +10,7 @@ Control-plane App (`src/github-permissions.ts`):
 | Actions | Read and write | rerun failed workflow jobs on the unchanged candidate (failed CI reruns) |
 | Administration | Read | inspect branch protection (pull request observation) |
 | Checks | Read and write | read CI check runs (pull request observation); publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit (the required checks) |
-| Contents | Read and write | read commits, trees and pull request files (pull request observation); push base refreshes, branch restores and main-guard revert branches onto the managed repository (branch refresh) |
+| Contents | Read and write | read commits, trees and pull request files (pull request observation); push base refreshes and main-guard revert branches onto the managed repository (branch refresh) |
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
@@ -37,7 +37,7 @@ Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination
 
 ## Failed checks
 
-There is no Graphyard merge queue: GitHub merges each candidate whose checks and approval pass on its head ([one delivery path](delivery.md#one-delivery-path)). A failed required check is rerun once in place on the unchanged head (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure fails the test gate and returns the item for rework. A check failing only tests (`graphyard-failed-tests:`) its old base broke and the base tip fixed refreshes onto the tip (`baseBreak`), not rework.
+There is no Graphyard merge queue: GitHub merges each candidate whose checks and approval pass on its head ([one delivery path](delivery.md#one-delivery-path)). `master tip-cleanup --apply` deletes the `refs/graphyard/queue/*` tips an earlier release left. A failed required check is rerun once in place on the unchanged head (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure fails the test gate and returns the item for rework. A check failing only tests (`graphyard-failed-tests:`) its old base broke and the base tip fixed refreshes onto the tip (`baseBreak`), not rework.
 
 ### Bindings and carry
 
