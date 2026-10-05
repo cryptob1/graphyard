@@ -134,6 +134,27 @@ const finished = ['idle', 'done', 'blocked'];
  * runtime stopped reporting is no less finished than an idle one (GY-1165).
  */
 const reclaimableStatus = (agent: HerdrAgent) => agent.agent_status !== 'working';
+/**
+ * The gates the reclaim pass closes an unowned holder through. `reclaimable` is the status a holder
+ * must report; `recordless` is how long a reviewer or producer pane with no ledger record on its name
+ * must be seen that way before it closes, or null when it never does.
+ *
+ * A recordless pane that is idle or done finished, so it waits the grace. One `blocked` or `unknown`
+ * may be a launch stuck on a prompt before its record landed: it waits `stuckSessionMs`, the bound a
+ * pending session stuck on a prompt gets, and is closed as never started (GY-1192). A worker pane is
+ * not given that bound: the launcher claims the item before it creates the pane, so a worker between
+ * launch and claim already holds a live lease and is spared as owned.
+ */
+export interface ReclaimGates { reclaimable: (agent: HerdrAgent) => boolean; recordless: (agent: HerdrAgent) => number | null }
+export const reclaimGates: ReclaimGates = {
+  reclaimable: reclaimableStatus,
+  recordless: agent => agent.agent_status === 'idle' || agent.agent_status === 'done' ? finishedSessionGraceMs : stuckSessionMs,
+};
+/**
+ * The gates before GY-1165, kept so its reproduction runs the base's own pass rather than restating
+ * it: a holder closed only when Herdr reported it finished, and a recordless pane never.
+ */
+export const baseReclaimGates: ReclaimGates = { reclaimable: agent => finished.includes(agent.agent_status ?? ''), recordless: () => null };
 type Role = 'worker' | 'reviewer' | 'producer';
 const roleProfiles = (input: Pick<ResourceInputs, 'profiles'>): { role: Role; name: string; agentName: string; concurrency?: number; principal?: string }[] => [
   ...input.profiles.workers.filter(profile => profile.mode === 'launch' && profile.agentName).map(profile => ({ role: 'worker' as const, name: profile.name, agentName: profile.agentName, principal: profile.principal })),
@@ -598,8 +619,9 @@ export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => recl
 /** Wait for the /tmp pass in flight, if any: for a caller that must see it finish. */
 export const settleTmpReclaim = async () => { await tmpPass; };
 
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport> } = {}): Promise<ResourceReclaimReport> {
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport>; gates?: ReclaimGates } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
+  const gates = options.gates ?? reclaimGates;
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
   const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [] };
   // A pane is closed only once it has been seen finished and unowned by an earlier pass at least
@@ -640,12 +662,20 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       const settled = records.filter(record => record.agentName === agent.name).at(-1);
       // A session this pass just released is closed at once; any other waits out the grace, finished.
       // A holder with no record (reaped at retention, or never written) has no settle time of its
-      // own: the two passes the grace apart are its clock, so its name is never pinned (GY-1165).
+      // own: two passes its bound apart are its clock, so its name is never pinned (GY-1165). The
+      // bound is the grace when it finished, and `stuckSessionMs` when it may be a launch stuck on a
+      // prompt before its record landed (GY-1192).
       const released = report.released.some(entry => entry.name === agent.name);
-      if (!released && (!reclaimableStatus(agent) || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
+      const wait = settled ? finishedSessionGraceMs : gates.recordless(agent);
+      if (!released && (!gates.reclaimable(agent) || wait === null || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
       const first = file.seen[agent.pane_id] ?? report.at;
-      if (!released && now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id] = first; continue; }
-      const state = !settled ? 'left no record' : failed.has(identity(settled)) ? 'failed' : settled.state, resolution = settled ? failed.get(identity(settled))?.resolution ?? settled.resolution : undefined;
+      if (!released && now - Date.parse(first) < wait!) { seen[agent.pane_id] = first; continue; }
+      // A recordless pane that never finished is closed as never started, the cause the launcher's
+      // retry policy keys on, rather than as a session that merely left no record.
+      const neverStarted = !settled && wait !== finishedSessionGraceMs;
+      const state = !settled ? 'left no record' : failed.has(identity(settled)) ? 'failed' : settled.state;
+      const resolution = settled ? failed.get(identity(settled))?.resolution ?? settled.resolution
+        : neverStarted ? `${neverStartedReason}: ${agent.agent_status ?? 'unknown'} in Herdr for over ${stuckSessionMs / 60_000} minutes before any record of its launch landed` : undefined;
       try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}` }); }
       catch (error) { report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`); }
     }
@@ -688,7 +718,7 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
     for (const agent of held) {
       const profile = { role: 'worker' as const, name: worker.name, agentName: worker.agentName, principal: worker.principal };
       if (liveOwner(profile, agent.name!, { reviews: [], producers: [], work: observed.work, now })) continue;
-      if (!reclaimableStatus(agent)) continue;
+      if (!gates.reclaimable(agent)) continue;
       const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work });
       if (settled !== null && now - settled < finishedSessionGraceMs) continue;
       const first = file.seen[agent.pane_id!] ?? report.at;

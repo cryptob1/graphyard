@@ -6,6 +6,7 @@ import { GitHub } from '../src/github.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState, reconcilePendingActions, storeAction } from '../src/master-daemon.js';
 import { trackFaults } from '../src/model/fault-classes.js';
+import { conflictSince } from '../src/merge-queue.js';
 
 // GY-1087 names this file for its proof: manual:fault-class-merge. The master loop filed 4 merge
 // faults in 24 hours on 1 October 2026. They shared one cause: a merge-path step the control plane
@@ -182,7 +183,7 @@ test(`manual:fault-class-merge — ${instances[0].id}: a merge request a restart
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'action:merge').length, 1);
 });
 
-// ---- base-conflict: self-handled base refresh conflict in rework or under 30 minutes (GY-1129) ----
+// ---- base-conflict: a base refresh conflict under 30 minutes is self-handled, rework or not (GY-1129) ----
 
 const gy1129Instances = [
   { id: 'base-conflict|GY-501|2026-10-03T01:48:21.031Z', kind: 'base-conflict', subject: 'GY-501', at: '2026-10-03T01:48:21.031Z',
@@ -219,3 +220,51 @@ for (const entry of gy1129Instances) {
     assert.equal(faults(conflicting(new Date(now - 2 * 3_600_000).toISOString(), true, 'build'), now).length, 1, 'returned to build with rework requested but unhandled for two hours still counts as a merge fault');
   });
 }
+
+// ---- base-conflict: the bound runs from the first conflict on the head (GY-1200) ---------------------
+
+// Review follow-up of GY-1129: each refresh onto a new base tip re-records the conflict with a fresh
+// `at`, so on a base moving more often than 30 minutes a conflict nobody handles never aged past the
+// bound. The bound now runs from `conflictSince`, the first conflict recorded on the same head.
+test('manual:fault-class-merge — a conflict re-recorded on each new base tip still counts once its first conflict on the head is past the bound', () => {
+  const key = 'GY-1200', head = 'a'.repeat(40), branch = 'graphyard/gy-1200-1', now = Date.parse('2026-10-04T12:00:00.000Z');
+  const tips = ['1'.repeat(40), '2'.repeat(40), '3'.repeat(40), '4'.repeat(40), '5'.repeat(40)];
+  const conflict = `Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip without resolving a conflict.`;
+  // The loop's refreshes, one per base tip, every 20 minutes over 80 minutes, each conflicting; the engine carries conflictSince.
+  let record: Work['baseRefresh'] = null;
+  for (const [index, base] of tips.entries()) {
+    const refresh = { from: { sha: head, baseSha: tips[0] }, base, baseTree: '', policyRevision: 2, at: new Date(now - (tips.length - 1 - index) * 20 * 60_000).toISOString(), head: null, conflict, merge: null, carry: null };
+    record = { ...refresh, conflictSince: conflictSince(record, refresh) } as Work['baseRefresh'];
+  }
+  assert.equal(record!.at, new Date(now).toISOString(), 'the latest refresh is fresh');
+  assert.equal(record!.conflictSince, new Date(now - 80 * 60_000).toISOString(), 'the first conflict on the head is kept across refreshes');
+  const work = (refresh: Work['baseRefresh'], reworkRequested = false) => item(key, refresh!.at, {
+    stage: 'merge', reworkRequested,
+    candidate: { sha: head, baseSha: tips[0], pr: 700, branch } as Work['candidate'],
+    submission: { epoch: 1, pr: 700 } as Work['submission'],
+    observation: { candidate: { sha: head, baseSha: tips[0], pr: 700, branch }, merged: false, prState: 'open', checks: [], reviews: [], files: [], scopeFiles: [], at: refresh!.at, baseTip: refresh!.base } as unknown as Work['observation'],
+    baseRefresh: refresh,
+  });
+  const faults = (subject: Work) => cycleFaults(emptyDaemonState(config()), [subject], now, { config: config() }).filter(fault => fault.subject === key && fault.kind === 'base-conflict');
+  assert.equal(faults(work(record)).length, 1, 'an unhandled conflict re-recorded every 20 minutes counts once its first conflict is 80 minutes old');
+  assert.equal(faults(work(record, true)).length, 1, 'requesting rework does not exempt it');
+  // Not weakened the other way: a conflict first found 10 minutes ago, re-recorded once since, is still in motion.
+  const recent = { ...record!, conflictSince: new Date(now - 10 * 60_000).toISOString() } as Work['baseRefresh'];
+  assert.deepEqual(faults(work(recent)), [], 'a conflict first found within the bound is self-handled');
+  // A record that predates conflictSince reads its own time, as before.
+  const legacy = { ...record!, conflictSince: undefined } as Work['baseRefresh'];
+  assert.deepEqual(faults(work(legacy)), [], 'a record without conflictSince is bounded by its own time');
+});
+
+test('conflictSince — carried only across conflicts on the same head and policy revision', () => {
+  const head = 'b'.repeat(40), at = '2026-10-04T11:00:00.000Z', later = '2026-10-04T11:40:00.000Z';
+  const previous = { from: { sha: head, baseSha: 'c'.repeat(40) }, policyRevision: 2, at, conflict: 'conflicts', conflictSince: null };
+  const refresh = { from: { sha: head, baseSha: 'c'.repeat(40) }, policyRevision: 2, at: later, conflict: 'conflicts' };
+  assert.equal(conflictSince(previous, refresh), at, 'a record predating the field reads its own time as the first conflict');
+  assert.equal(conflictSince({ ...previous, conflictSince: '2026-10-04T10:00:00.000Z' }, refresh), '2026-10-04T10:00:00.000Z', 'an earlier first conflict is kept');
+  assert.equal(conflictSince(null, refresh), later, 'the first refresh to conflict starts the clock');
+  assert.equal(conflictSince({ ...previous, conflict: null }, refresh), later, 'a clean refresh in between restarts the clock');
+  assert.equal(conflictSince({ ...previous, from: { sha: 'd'.repeat(40), baseSha: 'c'.repeat(40) } }, refresh), later, 'a new head restarts the clock');
+  assert.equal(conflictSince({ ...previous, policyRevision: 1 }, refresh), later, 'a new policy revision restarts the clock');
+  assert.equal(conflictSince(previous, { ...refresh, conflict: null }), null, 'a clean refresh records no conflict');
+});

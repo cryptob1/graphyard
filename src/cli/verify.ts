@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { mechanicalProof } from '../model/dispatch.js';
 import type { CliCommand } from './registry.js';
 import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from './test-isolation.js';
@@ -18,7 +19,14 @@ import { abnormalTestExit, isolatedTestEnvironment, reserveTestPorts, testPortEn
  * never evidence: trusted evidence still comes only from an independent producer, and the control
  * plane requests no review until that evidence has passed on the head.
  */
-export interface ProofRun { proof: string; criteria: string[]; result: 'pass' | 'fail'; executed: number; failed: number; skipped: number; files: string[]; abnormal?: string; leftToCi?: boolean }
+export interface ProofRun { proof: string; criteria: string[]; result: 'pass' | 'fail'; executed: number; failed: number; skipped: number; files: string[]; abnormal?: string; leftToCi?: boolean; exercise?: BaseExercise; unexercised?: string }
+/**
+ * GY-1174: the run of a passing proof against the base's sources with this change's tests. The
+ * producer later removes the criterion's behaviour and runs the proof again (GY-135); a proof that
+ * still passes against the base cannot fail there, so verify finds that misbinding before
+ * submission instead of a producer finding it after a full validation cycle.
+ */
+export interface BaseExercise { base: string; result: 'pass' | 'fail'; executed: number; reverted: string[] }
 // leftToCi marks a run the proof's own cases did not decide: every case of the proof passed, and
 // the run still failed around them — a hook, a crash or a signal from the other suites its files
 // carry (GY-853). The item's own criteria are not judged by it; CI, which runs the whole suite,
@@ -99,10 +107,56 @@ export function countProofCases(tap: string, proof: string) {
   return { executed, failed, skipped };
 }
 
-export async function verifyWorkingTree(work: { key: string; criteria: Criterion[] }, root: string, now = () => new Date()): Promise<VerifyRecord> {
+/** Test-side files: a test file or anything under tests/. They are what a proof is, not what it proves. */
+export const testSide = (file: string) => /^tests\//.test(file) || /\.test\.(ts|mts|js|mjs|cjs)$/.test(file);
+
+/** The commit the change is measured from: the merge base of HEAD with the base branch's remote tip, or null when it cannot be resolved here. */
+export function changeBase(root: string, baseBranch = 'main') {
+  try { return git(root, ['merge-base', 'HEAD', git(root, ['rev-parse', '--verify', `refs/remotes/origin/${baseBranch}^{commit}`])]); } catch { return null; }
+}
+
+/** The files this working tree changes against `base`: tracked differences and untracked files. */
+function changedFiles(root: string, base: string) {
+  const diff = git(root, ['diff', '--name-status', '--no-renames', base]).split('\n').filter(Boolean)
+    .map(line => ({ status: line[0], path: line.slice(line.indexOf('\t') + 1) }));
+  const untracked = git(root, ['ls-files', '--others', '--exclude-standard']).split('\n').filter(Boolean).map(path => ({ status: 'A', path }));
+  return [...diff, ...untracked];
+}
+
+/**
+ * Run a passing proof against the base's sources carrying this change's test-side files. It fails
+ * there when it checks something the change adds; it passes when what it checks predates the
+ * change (GY-1132), when it bypasses the changed path with hand-built inputs (GY-1131), or when it
+ * measures an aggregate that one change cannot move (GY-1142). A change with no non-test file has
+ * nothing to revert, and neither it nor a base that cannot be extracted here records one.
+ */
+export async function baseExercise(root: string, base: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<BaseExercise | null> {
+  const changes = changedFiles(root, base);
+  const reverted = changes.filter(change => !testSide(change.path)).map(change => change.path);
+  if (!reverted.length) return null;
+  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-verify-base-'));
+  const tree = join(scratch, 'tree');
+  try {
+    // An archive of the base, not a git worktree: a sandboxed worker's .git may be read-only.
+    await mkdir(tree);
+    const extract = spawnSync('sh', ['-c', 'git archive --format=tar "$1" | tar -x -C "$2"', 'sh', base, tree], { cwd: root, stdio: ['ignore', 'ignore', 'pipe'] });
+    if (extract.status !== 0) return null;
+    for (const change of changes.filter(change => testSide(change.path))) {
+      if (change.status === 'D') { await rm(join(tree, change.path), { force: true }); continue; }
+      await mkdir(dirname(join(tree, change.path)), { recursive: true });
+      await copyFile(join(root, change.path), join(tree, change.path));
+    }
+    try { await symlink(await realpath(join(root, 'node_modules')), join(tree, 'node_modules')); } catch { /* no dependencies installed */ }
+    const run = await runProof(tree, proof, files, ports);
+    return { base, result: run.result, executed: run.executed, reverted };
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+}
+
+export async function verifyWorkingTree(work: { key: string; criteria: Criterion[] }, root: string, now = () => new Date(), options: { baseBranch?: string } = {}): Promise<VerifyRecord> {
   const { runnable, outstanding } = classifyProofs(work.criteria);
   const head = git(root, ['rev-parse', 'HEAD']);
   const clean = git(root, ['status', '--porcelain']) === '';
+  const base = changeBase(root, options.baseBranch);
   const ran: ProofRun[] = [];
   for (const entry of runnable) {
     const files = await proofFiles(root, entry.proof);
@@ -111,7 +165,12 @@ export async function verifyWorkingTree(work: { key: string; criteria: Criterion
     // the item's own test failing and blocks, wherever its file sits. When every case of the proof
     // passed but the run still did not complete normally, the failure lies in the rest of the run —
     // the other suites the files carry, which a sandbox may not be able to run — and is left to CI.
-    ran.push({ proof: entry.proof, criteria: entry.criteria, ...result, ...(leftToCiRun(result) ? { leftToCi: true } : {}) });
+    const run: ProofRun = { proof: entry.proof, criteria: entry.criteria, ...result, ...(leftToCiRun(result) ? { leftToCi: true } : {}) };
+    // A passing proof must also fail without the change (GY-1174), as its producer will demand.
+    const exercise = result.result === 'pass' && base ? await baseExercise(root, base, entry.proof, files) : null;
+    if (exercise) run.exercise = exercise;
+    if (exercise?.result === 'pass') run.unexercised = `${entry.proof} does not exercise ${entry.criteria.join(', ')}: it also passed against the base ${base!.slice(0, 12)} with this change's tests and ${exercise.reverted.length} changed file(s) reverted (${exercise.reverted.slice(0, 5).join(', ')}${exercise.reverted.length > 5 ? ', …' : ''}), so it checks nothing the change adds; a producer would record it as not exercising its criterion. Bind a proof whose cases fail without the change`;
+    ran.push(run);
   }
   const record: VerifyRecord = { key: work.key, head, clean, at: now().toISOString(), ran, outstanding };
   await mkdir(join(root, '.graphyard', 'verify'), { recursive: true });
@@ -126,14 +185,16 @@ export async function selfVerification(root: string, key: string) {
     return { state: 'not-run' as const, reason: `graphyard verify ${key} was not run in this worktree; no proof was checked before submission`, ran: [], outstanding: [] };
   }
   const head = git(root, ['rev-parse', 'HEAD']);
-  const summary = { ran: record.ran.map(({ proof, criteria, result, executed, failed, skipped, abnormal, leftToCi }) => ({ proof, criteria, result, executed, failed, skipped, ...(abnormal ? { abnormal } : {}), ...(leftToCi ? { leftToCi } : {}) })),
+  const summary = { ran: record.ran.map(({ proof, criteria, result, executed, failed, skipped, abnormal, leftToCi, unexercised }) => ({ proof, criteria, result, executed, failed, skipped, ...(abnormal ? { abnormal } : {}), ...(leftToCi ? { leftToCi } : {}), ...(unexercised ? { unexercised } : {}) })),
     outstanding: record.outstanding.map(({ proof, criteria, reason }) => ({ proof, criteria, reason })), verifiedAt: record.at };
   if (record.head !== head) return { state: 'stale' as const, reason: `verified ${record.head.slice(0, 12)}, not HEAD ${head.slice(0, 12)}; run graphyard verify ${key} again`, ...summary };
   const failing = record.ran.filter(entry => entry.result !== 'pass' && !leftToCiRun(entry));
+  const unexercised = record.ran.filter(entry => entry.unexercised);
   const deferred = record.ran.filter(entry => entry.result !== 'pass' && leftToCiRun(entry));
   const clean = record.clean ? '' : ' (with uncommitted changes present when it ran)';
-  return { state: failing.length ? 'failing' as const : 'passing' as const,
+  return { state: failing.length || unexercised.length ? 'failing' as const : 'passing' as const,
     reason: failing.length ? `${failing.map(entry => entry.proof).join(', ')} did not pass on HEAD; the control plane returns this head to its worker before review`
+      : unexercised.length ? `${unexercised.map(entry => entry.proof).join(', ')} passed on HEAD and against the base without the change; a producer records such a proof as not exercising its criterion and the head returns to its worker`
       : deferred.length ? `the item's own criteria passed on HEAD${clean}; ${deferred.map(entry => entry.proof).join(', ')} did not complete in this sandbox with every case of the proof passing, so its failure is left to CI`
       : `every mechanical proof passed on HEAD${clean}`, ...summary };
 }
@@ -144,11 +205,16 @@ export const verifyCommand: CliCommand = {
   help: [
     '  verify GY-N                  Run exactly the unit and integration proofs the item\'s',
     '                                criteria name against this working tree, name the rest as',
-    '                                outstanding, and record the result complete reports',
+    '                                outstanding, and record the result complete reports.',
+    '                                A passing proof is run again against the base\'s sources',
+    '                                with this change\'s tests; one that still passes there is',
+    '                                reported unexercised and fails verify',
   ],
   run: async (context, work) => {
-    const record = await verifyWorkingTree(work, context.repositoryRoot());
+    let baseBranch = 'main';
+    try { baseBranch = String((await context.api('status')).baseBranch ?? 'main'); } catch { /* the default base branch */ }
+    const record = await verifyWorkingTree(work, context.repositoryRoot(), undefined, { baseBranch });
     context.print(record);
-    if (record.ran.some(entry => entry.result !== 'pass' && !leftToCiRun(entry))) process.exitCode = 1;
+    if (record.ran.some(entry => (entry.result !== 'pass' && !leftToCiRun(entry)) || entry.unexercised)) process.exitCode = 1;
   },
 };

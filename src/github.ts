@@ -662,6 +662,12 @@ export class GitHub {
   private immutableReads = new Map<string, Promise<any>>();
   /** The clock the shared per-cycle reads are timed on; a replay drives it. */
   clock: () => number = Date.now;
+  /**
+   * The transport every GitHub request goes through (GY-1208). It resolves the global `fetch` at call
+   * time, so production is unchanged; a fixture injects its provider here instead of replacing the
+   * process-wide `fetch`, which a concurrent caller would also reach.
+   */
+  fetch: typeof globalThis.fetch = (input, init) => globalThis.fetch(input, init);
   /** The base branch's ref, read once per observation cycle and shared by every item's observation (GY-806). */
   private sharedRef: { at: number; read: Promise<{ tip: string; tree: string }> } | null = null;
   /** The base branch's protection, read at most every `protectionShareMs` and shared (GY-806). */
@@ -924,7 +930,7 @@ export class GitHub {
       installationUrl: previous?.installationUrl ?? installationSettingsUrl(this.config.installationId), observedAt: new Date(now).toISOString(), required };
     try {
       demand(now >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit`, 502);
-      const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+      const response = await this.fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
       this.record('/app/installations', response, false);
       const refused = await this.refusal(response, 'GET /app/installations');
       if (refused) throw refused;
@@ -963,7 +969,7 @@ export class GitHub {
   async installationState(): Promise<InstallationState> {
     demand(Date.now() >= this.blockedUntil, `GitHub requests paused until ${new Date(this.blockedUntil).toISOString()} after a rate limit`, 502);
     const read = async (path: string, context: string) => {
-      const response = await fetch(`https://api.github.com${path}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+      const response = await this.fetch(`https://api.github.com${path}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
       this.record(path.replace(/\/\d+$/, ''), response, false);
       const refused = await this.refusal(response, context);
       if (refused) throw refused;
@@ -993,7 +999,7 @@ export class GitHub {
     return shortfall ? describeShortfall(shortfall, report.app, report.installationUrl) : null;
   }
   private async refreshToken() {
-      const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+      const response = await this.fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
         method: 'POST', headers: this.appHeaders(), signal: AbortSignal.timeout(15_000),
       });
       this.record('/app/installations/access_tokens', response, false, Date.now(), true, null, 'POST');
@@ -1030,7 +1036,7 @@ export class GitHub {
   }
   /** The installation's granted permissions read now with the App JWT. */
   private async installationGrants(): Promise<Record<string, string>> {
-    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    const response = await this.fetch(`https://api.github.com/app/installations/${this.config.installationId}`, { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
     this.record('/app/installations', response, false);
     const refused = await this.refusal(response, 'GET /app/installations');
     if (refused) throw refused;
@@ -1047,7 +1053,7 @@ export class GitHub {
       report.attention = [...report.attention.filter(line => !line.includes(pushShortfallMarker)),
         ...missing.map(shortfall => describePushShortfall(shortfall, report.app, report.installationUrl))];
     }
-    const response = await fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
+    const response = await this.fetch(`https://api.github.com/app/installations/${this.config.installationId}/access_tokens`, {
       method: 'POST', headers: { ...this.appHeaders(), 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions }),
     });
@@ -1168,7 +1174,7 @@ export class GitHub {
     const started = Date.now(), bearer = this.token, token = tokenIdentity(bearer);
     let response: Response;
     try {
-      response = await fetch(`https://api.github.com${path}`, {
+      response = await this.fetch(`https://api.github.com${path}`, {
         method, headers: { Authorization: `Bearer ${bearer}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28', ...(cached ? { 'If-None-Match': cached.etag } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
       });
@@ -1942,7 +1948,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     return `${this.appSlug}[bot]`;
   }
   private async appSlugFromApi(): Promise<string> {
-    const response = await fetch('https://api.github.com/app', { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
+    const response = await this.fetch('https://api.github.com/app', { headers: this.appHeaders(), signal: AbortSignal.timeout(15_000) });
     this.record('/app', response, false);
     const refused = await this.refusal(response, 'GET /app');
     if (refused) throw refused;
