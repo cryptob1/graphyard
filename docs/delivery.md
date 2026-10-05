@@ -21,8 +21,6 @@ With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: an observation th
 
 Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes. Soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run in `.github/workflows/release-candidate.yml` on each [release candidate](#release-candidates).
 
-With `GRAPHYARD_DELIVERY=github`, GitHub merges: once build, review and required checks pass, the observation enables auto-merge on that head; no proof, queue or guarded merge gates it, and UAT validates before promotion.
-
 Every 30 s the main guard reverts a merge commit failing a required check its parent passed, via a `graphyard-revert/` pull request the App merges once green, and reopens the item naming check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt with one attention line; fix main forward.
 
 ## Managed repositories
