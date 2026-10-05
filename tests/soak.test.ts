@@ -521,7 +521,9 @@ let days = 0;
 async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
-  failover?: Failover }) {
+  failover?: Failover;
+  /** GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run list and dispatch. */
+  promotion?: boolean }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -1414,7 +1416,28 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
     return api(principals.coordinator, 'POST', `work/${work.id}/decomposition`, event);
   };
+  // GY-1302: the loop's promotion drive. Main moves with every merge of the day while production
+  // moves only on its deploys, so a promotion is due all day; each dispatched candidate validates
+  // for ninety minutes and GitHub lists it only two minutes after the dispatch, so the loop's own
+  // record of its dispatch is what holds the next one back meanwhile.
+  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], violations: [] as string[], validationMs: 90 * minute, listedAfterMs: 2 * minute };
+  const promotionEffect: DaemonEffects['promotion'] = options.promotion ? {
+    ledger: async () => { promotion.ledgerReads++; return { mainSha: github.tip, promotedSha: production.sha, promotedAt: null, behind: github.tip === production.sha ? 0 : 1 }; },
+    runs: async () => {
+      promotion.runReads++;
+      return promotion.dispatches.filter(at => clock.now() - at >= promotion.listedAfterMs).reverse()
+        .map(at => ({ status: clock.now() < at + promotion.validationMs ? 'in_progress' : 'completed', createdAt: new Date(at).toISOString(), event: 'workflow_dispatch' }));
+    },
+    dispatch: async () => {
+      const now = clock.now(), last = promotion.dispatches.at(-1);
+      if (github.tip === production.sha) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while production runs main`);
+      if (last !== undefined && now < last + promotion.validationMs) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while the candidate of +${Math.round((last - dayStart) / minute)} min is in validation`);
+      if (last !== undefined && now - last < 120 * minute) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
+      promotion.dispatches.push(now);
+    },
+  } : undefined;
   const effects: DaemonEffects = {
+    ...(promotionEffect ? { promotion: promotionEffect } : {}),
     agents: () => headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(),
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
     ...(headless ? { adoptRuns: () => adoptRuns(headless.root, { approver: async owner => ({ options: approverRunOptions('', String(owner.context.decision), {}, 30 * minute),
@@ -2406,7 +2429,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
+  return { promotion, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
@@ -2446,7 +2469,7 @@ const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit });
+  const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit, promotion: true });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, baseFailure, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
@@ -2464,6 +2487,17 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease: a dead worker lapses, it is not refused');
   assert.deepEqual([...observed].sort(), [...systemInvariants].sort(), 'every invariant was observed, not merely left unread');
+  // GY-1302: the loop drove promotion all day over a moving main: at most one dispatch per
+  // promoteEveryMinutes window, none while a candidate was in validation, and its fetches and run
+  // reads bounded by their read windows, not by the cycle count.
+  const { promotion } = day;
+  if (process.env.SOAK_TRACE) console.error(`promotion: ${JSON.stringify({ ...promotion, dispatches: promotion.dispatches.map(at => Math.round((at - dayStart) / minute)) })}`);
+  // Main moves through the merges of the day's first hours and production catches it at the second
+  // deploy, so the loop promotes on that cadence and then has nothing to promote.
+  assert.ok(promotion.dispatches.length >= 2 && promotion.dispatches.length <= Math.ceil(hours / 2), `the loop promoted every two hours while main moved: ${promotion.dispatches.length} over ${hours} h`);
+  assert.deepEqual(promotion.violations, [], 'never twice in a window, never while a candidate is in validation, never when production runs main');
+  assert.ok(promotion.ledgerReads <= Math.ceil(hours * hour / (5 * minute)) + 2 * basePlan.loopRestarts.length + 2, `fetches once per five-minute read window (${promotion.ledgerReads} over ${cycles} cycles)`);
+  assert.ok(promotion.runReads <= Math.ceil(hours * hour / minute) + 2 * basePlan.loopRestarts.length + 2 && promotion.runReads < cycles, `run reads at most once a minute (${promotion.runReads} over ${cycles} cycles)`);
   // GY-806: webhooks drove observation all day — every woken job claimed ahead of the polled ones
   // and re-observed within the minute of its delivery, and no poll skipped outside a refresh.
   const { webhook } = day;

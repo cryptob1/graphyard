@@ -295,6 +295,13 @@ export const promotionWorkflow = 'release-candidate.yml';
 export const defaultPromoteEveryMinutes = 120;
 /** How long a read of the workflow's runs is reused, so a candidate in UAT for hours costs one GitHub request a minute, not one a cycle. */
 export const promotionRunsReadMs = 60_000;
+/**
+ * How long a read of the base branch tip and the last promotion record is reused. That read fetches
+ * from the remote, so it runs once in this window rather than every cycle (at the default 20-second
+ * interval, that would be about 4,300 fetches a day). A promotion waits at most this long for a move
+ * of main, and `behind` in `master status` is at most this old.
+ */
+export const promotionLedgerReadMs = 5 * 60_000;
 /** Run states of a release candidate still being cut or validated. */
 const runningStates = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
 
@@ -321,11 +328,15 @@ const later = (...times: (string | null | undefined)[]) => times.filter((time): 
  */
 export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number }): Promise<{ state: PromotionState; dispatched: boolean }> {
   const at = new Date(options.now).toISOString(), everyMs = options.everyMinutes * 60_000;
-  const ledger = await reads.ledger();
-  const base = { checkedAt: at, ...ledger, inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null };
   const settle = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean) => ({ ...state, reason,
     nextDueAt: due && state.lastDispatchAt ? new Date(Math.max(options.now, Date.parse(state.lastDispatchAt) + everyMs)).toISOString() : due ? at : null });
-  if (options.everyMinutes <= 0) return { state: settle(base, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false), dispatched: false };
+  const kept = { mainSha: previous?.mainSha ?? null, promotedSha: previous?.promotedSha ?? null, promotedAt: previous?.promotedAt ?? null, behind: previous?.behind ?? null, ledgerReadAt: previous?.ledgerReadAt ?? null };
+  const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null };
+  // Off reads nothing at all: no fetch, no GitHub request.
+  if (options.everyMinutes <= 0) return { state: settle({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false), dispatched: false };
+  const fresh = kept.ledgerReadAt && options.now - Date.parse(kept.ledgerReadAt) < promotionLedgerReadMs;
+  const ledger = fresh ? kept : { ...await reads.ledger(), ledgerReadAt: at };
+  const base = { checkedAt: at, ...ledger, ...carried };
   if (!ledger.mainSha) return { state: settle(base, 'The base branch tip could not be read, so nothing is promoted', false), dispatched: false };
   if (ledger.mainSha === ledger.promotedSha) return { state: settle(base, 'Production runs the base branch tip; nothing to promote', false), dispatched: false };
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
@@ -371,7 +382,7 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
       return { mainSha, promotedSha, promotedAt, behind };
     },
     runs: async () => {
-      const listed = JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', promotionWorkflow, '--limit', '20', '--json', 'status,createdAt,event']));
+      const listed = JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', promotionWorkflow, '--limit', '50', '--json', 'status,createdAt,event']));
       return Array.isArray(listed) ? listed.filter(entry => typeof entry?.status === 'string' && typeof entry?.createdAt === 'string' && typeof entry?.event === 'string') : [];
     },
     dispatch: async () => { await run('gh', ['workflow', 'run', promotionWorkflow, '--repo', config.repository, '--ref', config.baseBranch, '-f', 'promote=true']); },

@@ -157,6 +157,8 @@ export const promotionStateSchema = z.object({
   promotedAt: z.string().nullable(),
   /** First-parent merges on the base branch production does not run yet; null when unknown. */
   behind: z.number().int().min(0).nullable(),
+  /** When the base branch tip and the promotion record were last fetched; reused for `promotionLedgerReadMs`. */
+  ledgerReadAt: z.string().nullable().default(null),
   inFlight: z.boolean(),
   runsReadAt: z.string().nullable(),
   dispatchedAt: z.string().nullable(),
