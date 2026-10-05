@@ -342,7 +342,7 @@ export const actionOnlyLookback = 20;
  * ledger — differs from `work` only in action-queue bookkeeping. A writer that read the item at
  * that revision may then still write: what it read is what it would read now.
  */
-async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, same = sameBesideActions): Promise<boolean> {
+export async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, same = sameBesideActions): Promise<boolean> {
   const behind = work.revision - revision;
   if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
   const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
