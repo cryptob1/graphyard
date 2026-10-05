@@ -2,7 +2,7 @@
 import { type AttentionItem, agentOwner } from '../master.js';
 import { classified, noteFault } from '../model/fault-classes.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, liveProcess, message, type StepCost } from './state.js';
-import type { LatencyBudget, SilenceReport } from './metrics.js';
+import { approverWait, type LatencyBudget, type SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
 
@@ -232,7 +232,7 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
     ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`), ...classified('loop-failures') });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
-    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`), ...classified('loop-silence') });
+    ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`), ...classified(approverWait(silence.longest) ? 'decision-unanswered' : 'loop-silence') });
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
     ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step'), ...classified('delivery-budget') });
   return items;

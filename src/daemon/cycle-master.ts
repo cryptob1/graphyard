@@ -1,5 +1,5 @@
 // Concern: the master-session step (GY-898) — launch, adopt, supervise, rotate and wake the loop's own master session.
-import { detectExhaustion } from '../model/capacity.js';
+import { detectExhaustion, detectRetryingExhaustion } from '../model/capacity.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
 import { actionableSubjects } from './metrics.js';
@@ -8,6 +8,7 @@ import { message } from './state.js';
 import { emptyMasterSession, type MasterSessionState } from './state.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
+import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
@@ -68,14 +69,19 @@ export async function masterSessionStep(cycle: Cycle) {
     if (handle && handle.pane_id === master.pane && !exitedInPane) {
       master.misses = 0;
       await isolate('failover', null, 'master-session', async () => {
-        // A stopped session's own output is read for the provider's limit notice — the failover
-        // step's exact detection — before the budget is judged: an exhausted session is not a
-        // budget one, even though both are stopped.
-        const output = stoppedStates.includes(handle.agent_status ?? '') && effects.sessionOutput
-          ? await Promise.resolve(effects.sessionOutput(handle)).catch(() => null) : null;
-        const signal = output ? detectExhaustion(output, clock) : null;
+        // The session's own output is read for the provider's limit notice — the failover step's
+        // exact detection — before the budget is judged: an exhausted session is not a budget one,
+        // even though both are stopped. A session Herdr still reports working counts only when its
+        // runtime prints its retry marker beside the notice (GY-973, GY-1223): an OpenCode master
+        // retrying a spent account forever would otherwise spin until its budget rotation. A working
+        // master's screen is read at most once per workingOutputReadMs, as worker panes are; its
+        // times are kept on the session record, so a relaunched master is read at once.
+        const stopped = stoppedStates.includes(handle.agent_status ?? '');
+        const due = outputReadDue(master, herdr.agents, handle, stopped, clock);
+        const output = due && effects.sessionOutput ? await Promise.resolve(effects.sessionOutput(handle)).catch(() => null) : null;
+        const signal = output ? (stopped ? detectExhaustion(output, clock) : detectRetryingExhaustion(output, clock)) : null;
         if (signal) {
-          rotated = await rotateMasterSession(cycle, 'exhausted', `${master.agentName} stopped on its provider's limit notice: ${signal.reason}${signal.resetsAt ? `; resets ${signal.resetsAt}` : ''}`, signal.resetsAt);
+          rotated = await rotateMasterSession(cycle, 'exhausted', `${master.agentName} ${stopped ? 'stopped' : 'is retrying'} on its provider's limit notice: ${signal.reason}${signal.resetsAt ? `; resets ${signal.resetsAt}` : ''}`, signal.resetsAt);
           return;
         }
         // A guarded merge in flight on an open item defers the rotation, at most masterMergeDeferralMs: the merge is not cut short.

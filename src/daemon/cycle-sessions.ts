@@ -24,6 +24,31 @@ export { idleLeaseMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptT
 export const sessionExhaustion = (output: string, stopped: boolean, runtime: string | null | undefined, now: number): ExhaustionSignal | null =>
   stopped ? detectRuntimeExhaustion(output, runtime, now) : detectRetryingExhaustion(output, now);
 
+/**
+ * How often the loop reads the screen of a session its host still reports working (GY-1223). A
+ * stopped session is read every cycle — it waits for a person — but a working one is read only for
+ * its runtime's retry banner (GY-973), and a fleet of them is one Herdr screen read each per cycle:
+ * once a minute bounds that while a session retrying on a spent account is still found in a minute.
+ */
+export const workingOutputReadMs = 60_000;
+/** When each working pane's screen was last read, per loop state: a relaunched session is a new pane, read at once. */
+const workingReads = new WeakMap<object, Map<string, number>>();
+/**
+ * Whether `agent`'s screen is due a read this cycle: always when stopped, and once per
+ * `workingOutputReadMs` while working. Panes no longer listed are forgotten.
+ */
+export function outputReadDue(state: object, agents: readonly HerdrAgent[], agent: HerdrAgent, stopped: boolean, clock: number) {
+  if (stopped) return true;
+  const reads = workingReads.get(state) ?? new Map<string, number>();
+  workingReads.set(state, reads);
+  const listed = new Set(agents.map(candidate => candidate.pane_id ?? candidate.name ?? ''));
+  for (const pane of reads.keys()) if (!listed.has(pane)) reads.delete(pane);
+  const pane = agent.pane_id ?? agent.name ?? '', last = reads.get(pane);
+  if (last !== undefined && clock - last < workingOutputReadMs && clock >= last) return false;
+  reads.set(pane, clock);
+  return true;
+}
+
 export async function closeStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
   // Whether a live lease of `principal` is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
@@ -101,7 +126,12 @@ export async function closeStep(cycle: Cycle) {
     // quota wording: a worker's prose about a quota (a disk's) is not its provider's notice (GY-421).
     // A session Herdr still reports working counts only when its runtime prints its retry marker
     // beside the notice (GY-973): OpenCode retries a spent account forever and never stops.
-    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => { try { const output = await effects.sessionOutput!(agent); return output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), runtime, clock) : null; } catch { return null; } };
+    // A working session's screen is read at most once per workingOutputReadMs (GY-1223).
+    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => {
+      const isStopped = stoppedStates.includes(agent.agent_status ?? '');
+      if (!outputReadDue(state, agents, agent, isStopped, clock)) return null;
+      try { const output = await effects.sessionOutput!(agent); return output ? sessionExhaustion(output, isStopped, runtime, clock) : null; } catch { return null; }
+    };
     const onNotice = (agent: HerdrAgent) => stoppedStates.includes(agent.agent_status ?? '') ? 'stopped on' : 'is retrying on';
     /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
     const profileRuntime = (role: string, profile: string) =>

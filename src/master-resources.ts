@@ -67,6 +67,13 @@ export interface ResourceInputs {
   loop: { lagMs: number | null; stalledAfterMs: number; detail: string } | null;
   /** `movedAt`: when the checkout first moved onto code the loop has not loaded (epoch ms), absent when it has not. */
   revision: { behind: number; loaded: string; checkout: string; movedAt?: number } | null;
+  /**
+   * The restart the loop's self-upgrade still owes, from the daemon cursor (state.upgrade.pending)
+   * and the time of its latest attempt (GY-1198): absent or null when none is owed or the cursor is unread.
+   */
+  upgrade?: { from: string | null; to: string; code: boolean; attemptedAt: number | null } | null;
+  /** The reclaim pass's seen-unowned map (pane → first seen), from .graphyard/resource-reclaims.json; absent or null when unread. */
+  reclaimSeen?: Record<string, string> | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
   /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
   tmp?: TmpInodes | null;
@@ -149,6 +156,7 @@ export const tenthOf = (bound: number) => Math.max(1, Math.ceil(bound / 10));
 export const reviewLedgerBound = sessionLedgerBound;
 export const producerLedgerBound = sessionLedgerBound;
 
+const sameCommit = (a: string, b: string) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 const settledAt = (record: { closedAt?: string; idleSince?: string; requestedAt: string }) => Date.parse(record.closedAt ?? record.idleSince ?? record.requestedAt);
 const finished = ['idle', 'done', 'blocked'];
 /**
@@ -268,9 +276,19 @@ export const resourceRegistry: ResourceDefinition[] = [
       if (!input.agents) return { id: profile.name, used: null, bound: profileConcurrency(profile), detail: 'Herdr could not be read', reclaimable: 0 };
       const held = input.agents.filter(agent => isProfileSession(profile, agent.name));
       const stale = held.filter(agent => agent.agent_status !== 'working' && !liveOwner(profile, agent.name!, input));
-      const overdue = stale.filter(agent => { const at = holderSettledAt(profile, agent.name!, input); return at === null || input.now - at >= nameReclaimBoundMs; });
+      // A pane the reclaim pass has seen unowned runs on the pass's own clock (GY-1198): it closes
+      // the pane on a later pass, once per cycle, so the reclaim is under way until the pane has
+      // stood seen-unowned for the bound. A holder the pass has not seen, or with no pane it could
+      // close, keeps the settling clock.
+      const seenAt = (agent: HerdrAgent) => { const first = agent.pane_id ? input.reclaimSeen?.[agent.pane_id] : undefined; const at = first ? Date.parse(first) : NaN; return Number.isFinite(at) ? at : null; };
+      const overdue = stale.filter(agent => {
+        const seen = seenAt(agent);
+        if (seen !== null) return input.now - seen >= nameReclaimBoundMs;
+        const at = holderSettledAt(profile, agent.name!, input); return at === null || input.now - at >= nameReclaimBoundMs;
+      });
+      const late = (agent: HerdrAgent) => seenAt(agent) !== null ? `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of the reclaim pass first seeing it unowned` : `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of settling`;
       return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: stale.length, overdue: overdue.length,
-        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of settling` : stale.includes(agent) ? ', no live session, reclaim under way' : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
+        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, ${late(agent)}` : stale.includes(agent) ? `, no live session, reclaim under way${seenAt(agent) !== null ? ` (seen unowned since ${new Date(seenAt(agent)!).toISOString()})` : ''}` : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
     }),
   },
   {
@@ -300,7 +318,7 @@ export const resourceRegistry: ResourceDefinition[] = [
   {
     id: 'github-budget', title: 'GitHub App request budget', unit: 'requests',
     bound: 'the installation token\'s hourly core rate limit, as GitHub reports it on GET /rate_limit',
-    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal it reads as spent until the pause ends', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
+    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal its usage is unread (the pause is the remediation under way, counted once as an observation fault) until the pause ends, when the read resumes', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
     reclaim: 'GitHub restores the budget at the reset time it reports; the client pauses every request until then once it is spent',
     remedy: 'lower observation load (fewer open candidates, a longer job interval) until the reset; every merge waits on fresh observations',
     warnBelow: tenthOf, symptoms: [/GitHub requests paused until/, /rate limited; requests paused/],
@@ -319,7 +337,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'loaded-revision', title: 'Loop loaded-code revision', unit: 'commits behind',
     bound: 'zero: the loop must run the code its checkout holds',
     usage: 'commits the coordinator checkout moved past the one the running loop process loaded, from the checkout\'s HEAD reflog and the process start time; a move that touches no loaded code (src/, scripts/, bin/, package.json) counts none, as the self-upgrade restarts nothing for it', owner: 'the master loop process and the coordinator checkout',
-    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts`,
+    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor holds a claim)`,
     remedy: 'graphyard master restart so the loop runs the code the checkout holds',
     warnBelow: () => 0, symptoms: [],
     // A move the self-upgrade is still within its bound for is the upgrade under way (GY-1196):
@@ -329,8 +347,15 @@ export const resourceRegistry: ResourceDefinition[] = [
       if (!revision) return [{ id: '', used: null, bound: 0, detail: 'no running loop process, or its start could not be read', reclaimable: 0 }];
       const bound = upgradeBoundMs(input.loop);
       const pending = revision.behind > 0 && revision.movedAt !== undefined && input.now - revision.movedAt < bound;
-      return [{ id: '', used: pending ? 0 : revision.behind, bound: 0, reclaimable: 0,
-        detail: `the loop loaded ${revision.loaded.slice(0, 12)}; the checkout is at ${revision.checkout.slice(0, 12)}${pending ? ` (${revision.behind} commits behind since ${new Date(revision.movedAt!).toISOString()}; the self-upgrade has until ${new Date(revision.movedAt! + bound).toISOString()})` : ''}` }];
+      // A restart the self-upgrade owes onto this checkout and retried within the bound is the
+      // upgrade under way too (GY-1198): a claim held across every cycle refuses it, and the
+      // cursor keeps it owed until a quiet instant; only one not attempted within the bound counts.
+      const owed = input.upgrade?.code === true && sameCommit(input.upgrade.to, revision.checkout) ? input.upgrade : null;
+      const restarting = !pending && revision.behind > 0 && owed?.attemptedAt != null && input.now - owed.attemptedAt < bound;
+      return [{ id: '', used: pending || restarting ? 0 : revision.behind, bound: 0, reclaimable: 0,
+        detail: `the loop loaded ${revision.loaded.slice(0, 12)}; the checkout is at ${revision.checkout.slice(0, 12)}${pending ? ` (${revision.behind} commits behind since ${new Date(revision.movedAt!).toISOString()}; the self-upgrade has until ${new Date(revision.movedAt! + bound).toISOString()})`
+          : restarting ? ` (${revision.behind} commits behind; the self-upgrade's owed restart onto it is under way, last attempted ${new Date(owed!.attemptedAt!).toISOString()} and retried each cycle until ${new Date(owed!.attemptedAt! + bound).toISOString()})`
+          : owed ? ` (the self-upgrade owes a restart onto it, ${owed.attemptedAt === null ? 'with no attempt recorded' : `last attempted ${new Date(owed.attemptedAt).toISOString()}`})` : ''}` }];
     },
   },
   {
@@ -694,6 +719,19 @@ export function mergeReclaimSeen(fresh: Record<string, string>, read: Record<str
   return merged;
 }
 export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
+/** The reclaim pass's reports and its seen-unowned map, read once (GY-1198). */
+export async function readReclaimState(root: string): Promise<{ reports: ResourceReclaimReport[]; seen: Record<string, string> }> { const file = await readReclaimFile(root); return { reports: file.reports, seen: file.seen }; }
+/**
+ * The restart the loop's self-upgrade owes, from the daemon cursor (GY-1198): its pending move and
+ * the latest attempt the upgrade recorded (its `upgrade:<release>` action), or null when none is owed.
+ */
+export function owedUpgrade(state: { upgrade?: { pending: { from: string | null; to: string; code: boolean } | null } | null; actions?: Record<string, { at: string }> } | null): ResourceInputs['upgrade'] {
+  const pending = state?.upgrade?.pending;
+  if (!pending) return null;
+  const attempts = Object.entries(state!.actions ?? {}).filter(([key]) => key.startsWith('upgrade:') && key !== 'upgrade:refused' && key !== 'upgrade:unit')
+    .map(([, action]) => Date.parse(action.at)).filter(Number.isFinite);
+  return { from: pending.from, to: pending.to, code: pending.code, attemptedAt: attempts.length ? Math.max(...attempts) : null };
+}
 
 /**
  * Gives every reclaimable resource back, and records what it took. Within the bounds the registry
@@ -1032,9 +1070,12 @@ const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>()
 const minimumInstallationLimit = 5000;
 /**
  * The App installation's core budget, read at most once a minute; `/rate_limit` costs nothing
- * against it. The client pauses every request once a rate limit refuses one (src/github.ts), and
- * only a rate limit pauses it, so a live pause is the budget spent: it reads as used to its bound
- * until the pause ends, and no request is made while it lasts.
+ * against it. The client pauses every request once a rate limit refuses one (src/github.ts) until
+ * the reset GitHub reported: that pause is the remediation under way, healing itself at the reset,
+ * and the observation class already counts it once. No request is made while it lasts, so its
+ * usage is unread rather than fabricated at the bound (GY-1278): the reading names the pause and
+ * its reset, faults nothing and leaves the plane healthy. Once the pause ends the real read
+ * resumes, and a budget still spent then reads exhausted as before.
  */
 export async function readGitHubBudget(github: object | null, now = Date.now()): Promise<PlaneReading | null> {
   if (!github) return null;
@@ -1043,7 +1084,7 @@ export async function readGitHubBudget(github: object | null, now = Date.now()):
     const until = client.blockedUntil ?? 0;
     if (until <= now) return null;
     const bound = budgetCache.get(github)?.reading.bound ?? minimumInstallationLimit;
-    return { used: bound, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is spent until then` };
+    return { used: null, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is read again once the pause ends at that reset` };
   };
   const pause = paused();
   if (pause) return pause;
