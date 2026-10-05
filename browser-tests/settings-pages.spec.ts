@@ -104,8 +104,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   await expect(table.locator('[data-account-row="claude-b"] [data-chip]')).toHaveText('Idle');
   await expect(table.locator('[data-account-row="spare"] [data-chip]')).toHaveText('No role');
   await expect(table.locator('[data-account-row="opencode-a"]')).toContainText('in 2d 22h');
-  await expect(main.locator('[data-role-launch="worker"]')).toHaveText('Workers');
-  await expect(main.locator('[data-role-launch="worker"]')).toHaveAttribute('title', 'next: claude-b now');
+  await expect(main.locator('[data-role-launch="worker"]')).toContainText('Workers: can launch now — next: claude-b now');
   await expect(main.locator('[data-role-launch="worker"]')).toBeVisible();
 
   expect(errors, 'no console error on any settings page').toEqual([]);

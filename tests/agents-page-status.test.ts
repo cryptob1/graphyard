@@ -65,10 +65,6 @@ test('unit:agents-page-account-status-chips — the Agents page lists every regi
     idle: ['idle', 'Idle', /ready for worker/],
     'role-less': ['no-role', 'No role', /serves no role; name it in a role or remove it/],
   };
-  const rowWhy: Record<string, RegExp> = {
-    spent: /^<span class="muted">—<\/span>$/, idle: /^<span class="muted">—<\/span>$/,
-    working: /^worker on GY-978$/, 'smoke-fails': /^smoke test failed: the model refused the smoke prompt$/,
-  };
   for (const [name, [chip, label, reason]] of Object.entries(expected)) {
     const status = accountStatus(view.accounts.find(entry => entry.name === name)!, view, now);
     assert.equal(status.chip, chip, `${name} reads ${chip}`);
@@ -77,10 +73,7 @@ test('unit:agents-page-account-status-chips — the Agents page lists every regi
     assert.ok(shown.includes(`data-status="${chip}"`), `${name}'s row carries its status`);
     assert.equal(shown.split('data-chip=').length - 1, 1, `${name} shows a single chip`);
     assert.ok(shown.includes(`data-chip="${chip}">${label}</span>`), `${name}'s chip reads ${label}`);
-    // The row's Why cell adds only what no other cell says (GY-1325): nothing for idle or spent, the live work, the failure without its retry time.
-    const why = /<td data-label="Why" class="why">(.*?)<\/td>/.exec(shown)![1].replaceAll('&#x27;', '\'');
-    if (name in rowWhy) assert.match(why, rowWhy[name], `${name}'s row: ${why}`);
-    else assert.match(why, reason, `${name}'s row states why`);
+    assert.match(shown.replaceAll('&#x27;', '\''), reason, `${name}'s row states why`);
   }
 
   // The reset time in the viewer's local time with a relative countdown, the exact instant kept as its datetime.

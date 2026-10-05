@@ -118,7 +118,7 @@ export const policyText = (policy: RolePolicy | undefined) => {
 
 /** One account's status chip: its label, drawn in its tone, with the reason as its title. */
 export const StatusChip = ({ status }: { status: AccountStatus }) =>
-  <span className={`status-chip tone-${chipTones[status.chip]}`} data-chip={status.chip}>{status.label}</span>;
+  <span className={`status-chip tone-${chipTones[status.chip]}`} title={status.reason} data-chip={status.chip}>{status.label}</span>;
 
 type FleetPlan = NonNullable<FleetView['plans']>[number];
 
@@ -234,7 +234,7 @@ export function RoleLaunches({ fleet, now }: { fleet: FleetView; now: number }) 
   const ready = launches.filter(launch => launch.canLaunch), blocked = launches.filter(launch => !launch.canLaunch);
   return <div className="role-launches">
     {ready.length > 0 && <p className="role-launch-ready">{ready.map((launch, index) => <Fragment key={launch.role}>{index > 0 && ' · '}
-      <span className="role-chip" data-role-launch={launch.role} data-can-launch="yes" title={`next: ${launch.account} now`}>{roleLabels[launch.role] ?? launch.role}</span></Fragment>)}: {blocked.length ? 'can launch' : 'all can launch'}</p>}
+      <span className="role-chip" data-role-launch={launch.role} data-can-launch="yes" title={`next: ${launch.account} now`}><span aria-hidden="true">{roleLabels[launch.role] ?? launch.role}</span><span className="sr-only">{launch.text}</span></span></Fragment>)}: {blocked.length ? 'can launch' : 'all can launch'}</p>}
     {blocked.length > 0 && <ul>{blocked.map(launch => <li key={launch.role} data-role-launch={launch.role} data-can-launch="no">
       <span className="status-chip tone-bad">Cannot launch</span> {launch.text}</li>)}</ul>}
   </div>;

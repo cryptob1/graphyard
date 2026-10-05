@@ -197,14 +197,14 @@ test('unit:fleet-launch-summary-compact — every role that can launch is one ch
   assert.equal(blocked.split('Cannot launch').length - 1, 1);
   assert.match(blocked, /<li data-role-launch="master" data-can-launch="no">.*master: none can launch — at its concurrency limit \(1 of 1 live\); next: launch-a when one of its sessions ends<\/li>/);
   assert.equal(blocked.split('class="role-chip"').length - 1, 5, 'the other five are chips');
-  assert.ok(blocked.includes('<span class="role-chip" data-role-launch="worker" data-can-launch="yes" title="next: launch-a now">Workers</span>'), 'a chip names its next account in its title');
-  assert.ok(blocked.includes('</span>: can launch</p>'));
+  assert.ok(blocked.includes('<span class="role-chip" data-role-launch="worker" data-can-launch="yes" title="next: launch-a now"><span aria-hidden="true">Workers</span><span class="sr-only">Workers: can launch now — next: launch-a now</span></span>'), 'a chip names its next account in its title');
+  assert.ok(blocked.includes('</span></span>: can launch</p>'));
   // No blocked role: one line of chips, and no "Cannot launch" anywhere.
   const clear = render(declutterFleet(names, roles));
   assert.ok(!clear.includes('Cannot launch'), 'no Cannot launch text');
   assert.equal(clear.split('data-can-launch="no"').length - 1, 0);
   assert.equal(clear.split('class="role-launch-ready"').length - 1, 1, 'one line');
-  assert.ok(clear.includes('Escalation handlers</span> · ') && clear.includes('</span>: all can launch</p>'), 'every role a chip on the one line');
+  assert.ok(clear.includes('Escalation handlers: can launch now — next: launch-a now</span></span> · ') && clear.includes('</span></span>: all can launch</p>'), 'every role a chip on the one line');
 });
 
 test('unit:fleet-spent-collapsed — accounts read working, then idle, then spent or ineligible, and six spent accounts back on the same day render as one collapsed summary row naming all six', () => {
