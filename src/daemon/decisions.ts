@@ -267,8 +267,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // requested changes, and the loop never asked again because both keyed on the head alone. Since
   // GY-407 the binding rides the request's input, so the server's refusal match sees it too.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
-  // A head GitHub reports conflicting with the base, or one the merge queue ejected because its
-  // speculative merge conflicts, is not waited on either (GY-191): nothing but a sync can move it,
+  // A head GitHub reports conflicting with the base is not waited on either (GY-191): nothing but a sync can move it,
   // so the loop asks for that round at once, naming the base tip it conflicts with.
   const sync = work.reworkRequested ? null : syncConflict(work);
   if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
@@ -293,7 +292,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   if (research) return { action: 'rework', ...research };
   // The guarded merge refused this very candidate for the same reason past the loop's bound, and
   // no carried approval was there to re-require (GY-831): nothing the control plane holds re-binds
-  // it, so the candidate returns to a worker rather than holding the queue head.
+  // it, so the candidate returns to a worker rather than holding its merge.
   const refused = work.reworkRequested ? null : repeatedMergeRefusal(work);
   if (refused) return { action: 'rework', reason: `${work.key}: the guarded merge refused candidate ${refused.sha.slice(0, 12)} on every attempt since ${refused.since} with the same reason: ${refused.reason.slice(0, 1200)}. Nothing the control plane holds re-binds it, so the candidate returns to a worker.`, binding: `${refused.sha}:merge-refused` };
   // An unexercised `manual:` proof is answered by an attestation carrying its exercise record

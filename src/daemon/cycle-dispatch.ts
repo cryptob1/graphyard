@@ -336,8 +336,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   }
 
   // 4b. A base branch that moved under an in-flight candidate GitHub reports conflicting with it
-  //     (GY-292: a clean one keeps its head, CI, review and proofs, and only the queue head is
-  //     brought onto the base, by its speculative tip). Nobody is asked to do anything first: the
+  //     (GY-292: a clean one keeps its head, CI, review and proofs). Nobody is asked to do anything first: the
   //     control plane tries the merge into the candidate's own branch and decides what the review
   //     and each proof carry (see merge-queue.ts `baseRefreshNeeded`). The cycle reports what
   //     that refresh did — or the conflict that stopped it — so the pass is an action rather

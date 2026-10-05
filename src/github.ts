@@ -354,7 +354,7 @@ export function reserveDecision(band: CadenceBand, budget: Pick<GitHubBudget, 'r
 /**
  * Pacing the aggregate spend (GY-567). The reserve above gates each job on what is left, but not
  * how fast the workers together spend it: on 2026-09-26 four workers spent ~600 requests a minute,
- * drained the hour in half of it and the queue head read stale for the other half. So every worker
+ * drained the hour in half of it and every merge candidate read stale for the other half. So every worker
  * waits for one shared pace before it claims a job: the budget above the reserve, less what jobs
  * in flight are expected to spend, spread evenly over the time to the reset. Jobs start at most
  * one per `estimate / rate`, so the spend above the reserve reaches zero at the reset and never
@@ -1223,8 +1223,7 @@ export class GitHub {
     try {
       const path = `/branches/${encodeURIComponent(this.config.base)}/protection`;
       const p = shared ? await this.sharedProtectionRead(path) : await this.request(path);
-      // `strict` must be off: a queued tip is deliberately behind the base branch, and the merge
-      // queue supersedes that setting with a published tip that already contains its validated base.
+      // `strict` must be off: a candidate that merges cleanly merges on the base it was built on (GY-191).
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
         && p.required_status_checks.checks?.some((c: any) => c.context === CHECK_NAME && c.app_id === this.config.appId);
       const classic = [...(p.required_status_checks?.checks ?? []).map((c: any) => ({ name: c?.context, appId: c?.app_id ?? null })),
@@ -1632,8 +1631,7 @@ export class GitHub {
   }
   /**
    * The provider's PR diff is taken against the merge base. The regression guard needs every
-   * file outside the planned scope compared with the commit the candidate is bound to (the base
-   * branch tip, or the predicted base of a published speculative tip), so those paths are looked
+   * file outside the planned scope compared with the commit the candidate is bound to, so those paths are looked
    * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
    * refuses rather than passes. The judgement is shared (`compareScopeOf`), so the soak world
    * runs the identical code.
@@ -1699,7 +1697,7 @@ export class GitHub {
   }
   /**
    * A review is requested for any head that merges cleanly against the current base, contained or
-   * not: the merge queue integrates and re-tests the combined tip before merging (GY-191). A head
+   * not: GitHub integrates it with the base when it merges (GY-191). A head
    * behind the base that GitHub does not report mergeable is refused before any write; it goes back
    * to its worker for a sync.
    */
@@ -1802,9 +1800,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     demand(Array.isArray(files), `GitHub did not list the files changed between ${from.slice(0, 12)} and ${to.slice(0, 12)}`, 502);
     if (files.length >= compareFileCap) return null;
     const paths = (listed: any[]) => listed.flatMap((file: any) => [file.filename, ...(typeof file.previous_filename === 'string' ? [file.previous_filename] : [])]).filter((path: unknown): path is string => typeof path === 'string');
-    // A comparison lists what `to` changed against the merge base. A predicted base that moved
-    // backwards or sideways — the entry between this one and its new base was ejected — has changes
-    // on the `from` side too, and a tip rebuilt onto it no longer holds them; both sides are listed.
+    // A comparison lists what `to` changed against the merge base. A base that moved backwards or
+    // sideways has changes on the `from` side too, which a head brought onto it no longer holds;
+    // both sides are listed.
     if (comparison.status === 'behind' || comparison.status === 'diverged') {
       const reverse = await this.request(`/compare/${to}...${from}`);
       demand(Array.isArray(reverse?.files), `GitHub did not list the files changed between ${to.slice(0, 12)} and ${from.slice(0, 12)}`, 502);
@@ -2458,8 +2456,7 @@ async function decideLandingMerges(github: LandingGitHub, plannedFiles: string[]
 }
 /**
  * The provider's PR diff is taken against the merge base. The regression guard needs every
- * file outside the planned scope compared with the commit the candidate is bound to (the base
- * branch tip, or the predicted base of a published speculative tip), so those paths are looked
+ * file outside the planned scope compared with the commit the candidate is bound to, so those paths are looked
  * up there by blob identity. Paths beyond the lookup budget stay uncompared, which the guard
  * refuses rather than passes.
  */

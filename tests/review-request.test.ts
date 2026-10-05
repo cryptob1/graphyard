@@ -118,33 +118,6 @@ test('unit:conflicting-candidate-reworked — a behind-base candidate GitHub rep
   assert.deepEqual(approvers, [decisionId], 'an independent approver is launched for it within the cycle');
 });
 
-test('unit:queue-ejection-reworked — a candidate the merge queue ejected on a conflicting speculative merge is sent back through a rework decision and an approver', async () => {
-  // As `advanceQueue` records it when `publishSpeculativeTip` raises SpeculativeConflict.
-  const reason = `Speculative merge of ${H.slice(0, 12)} into main conflicts and cannot be resolved by Graphyard`;
-  const ejected = (extra: Partial<Work> = {}) => item({ evidence: proven(), observation: observation({ baseTip: B2 }), queue: null,
-    queueEjection: { at: iso(-60_000), sequence: 12, reason, sha: H, policyRevision: 1 }, ...extra } as Partial<Work>);
-  const work = ejected();
-  const decision = routineDecision(work, { autoMerge: true }, clock);
-  assert.equal(decision?.action, 'rework');
-  assert.equal(decision?.binding, `${H}:queue-conflict:12:${B2}`);
-  assert.match(decision!.reason, /merge queue ejected candidate .*conflicts/);
-  // An ejection for another reason, or for an earlier head, is not a conflict on this one.
-  assert.equal(routineDecision(ejected({ queueEjection: { at: iso(-60_000), sequence: 12, reason: `Required CI check test did not pass on speculative tip ${H.slice(0, 12)}`, sha: H, policyRevision: 1 } } as Partial<Work>), { autoMerge: true }, clock), null);
-  assert.equal(routineDecision(ejected({ queueEjection: { at: iso(-60_000), sequence: 12, reason, sha: sha40('a9'), policyRevision: 1 } } as Partial<Work>), { autoMerge: true }, clock), null);
-
-  const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
-  await runCycle(config(), emptyDaemonState(config()), loopEffects(work, decided, approvers), () => clock);
-  assert.deepEqual(decided.map(entry => entry.action), ['rework']);
-  assert.match(decided[0].reason, new RegExp(`base branch tip ${B2.slice(0, 12)}`));
-  assert.deepEqual(approvers, [decisionId]);
-
-  // GY-252: the record's typed conflict flag decides, not the wording of its reason. A reworded
-  // conflict is still reworked; a flagged non-conflict whose reason reads like one is not.
-  const flagged = ejected({ queueEjection: { at: iso(-60_000), sequence: 12, reason: 'the tip could not be built', sha: H, policyRevision: 1, conflict: { base: B2 }, predecessors: [] } } as Partial<Work>);
-  assert.equal(routineDecision(flagged, { autoMerge: true }, clock)?.binding, `${H}:queue-conflict:12:${B2}`);
-  assert.equal(routineDecision(ejected({ queueEjection: { at: iso(-60_000), sequence: 12, reason, sha: H, policyRevision: 1, conflict: null } } as Partial<Work>), { autoMerge: true }, clock), null);
-});
-
 test('unit:no-actor-item-surfaced — a submitted item with no review, producer or rework request and no named wait is named in master status after five minutes', () => {
   const now = new Date(clock);
   // Proven, with no dispatch record: the review request a reviewer answers was never raised.

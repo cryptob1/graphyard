@@ -202,9 +202,9 @@ export function protectionPlan(current: any, config: { repository: string; baseB
   const reviews = current?.required_pull_request_reviews, checks = current?.required_status_checks;
   const observed = { requiredApprovals: Number(reviews?.required_approving_review_count ?? 0), requireLastPushApproval: reviews?.require_last_push_approval === true, dismissStaleReviews: reviews?.dismiss_stale_reviews === true };
   const blockers = [
-    // The merge queue lands published speculative tips that are deliberately behind the base branch,
-    // so GitHub's "require branches to be up to date" setting must stay off (see assertMergeProtection).
-    ...(checks?.strict === false ? [] : ['Require branches to be up to date before merging is enabled; the merge queue requires it off']),
+    // A candidate that merges cleanly is reviewed, proven and merged on the base it was built on
+    // (GY-191), so GitHub's "require branches to be up to date" setting must stay off (see assertMergeProtection).
+    ...(checks?.strict === false ? [] : ['Require branches to be up to date before merging is enabled; Graphyard requires it off']),
     ...(Array.isArray(checks?.checks) && checks.checks.some((check: any) => check?.context === CHECK_NAME && check?.app_id === config.githubAppId) ? [] : [`Required check ${CHECK_NAME} is not bound to Graphyard App ${config.githubAppId}`]),
     ...(current?.enforce_admins?.enabled === true ? [] : ['Administrator enforcement is disabled']),
     ...(current?.allow_force_pushes?.enabled === true ? ['Force pushes are allowed on the managed base branch'] : []),

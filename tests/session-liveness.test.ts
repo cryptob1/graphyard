@@ -16,7 +16,6 @@ import {
 import { runtimeEndedSessionStates, runtimeEndedStates } from '../src/harness.js';
 import { closureHandle, dispatchEffects, emptyDispatchCursor, launchedSessionHandle, reconcileSessionLiveness, runDispatchTick, sessionHandleKey, type DispatchEffects } from '../src/auto-dispatch.js';
 import { stoppedStates } from '../src/master-daemon.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { masterConfigSchema, profileSessions } from '../src/master.js';
 import { sessionReport } from '../src/cli/master-status.js';
 import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
@@ -137,10 +136,6 @@ async function delivered(sessionId: string) {
   await engine.execute(coordinator, 'session', item.id, { id: sessionId, kind: 'review', runtime: 'claude', host: 'host-1', agentName: 'review-claude',
     pane: `pane-${sessionId}`, role: 'review', head, subject: `${item.key}: review ${head.slice(0, 12)}`, state: 'running' }, randomUUID());
   item = await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
-  // One candidate is in the queue at a time; nothing else in this file is waiting behind it.
-  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [item.id]);
-  const speculation: QueueSpeculation = { ref: queueRef(item.key), tip: head, base, baseTree: sha40('7e'), predecessors: [], policyRevision: item.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [item.id, JSON.stringify(speculation)]);
   item = await engine.observe(item.id, (await reload(item)).revision, approved());
   const committed = { revision: (await engine.store.workItem(item.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);

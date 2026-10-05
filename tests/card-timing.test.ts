@@ -9,7 +9,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { predictQueue } from '../src/merge-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
@@ -43,7 +42,7 @@ function dashboard(work: Work[], observedAt = NOW, overrides: Partial<Dashboard>
     filter: null, setFilter: noop, selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop,
     observedAt, jobs: [], query: '', setQuery: noop, operatorAgents: [], operatorAgentsError: null, features: {} as any,
     events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
-    queue: predictQueue(work, observedAt), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'),
+    sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'),
     refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, ...overrides,
   };
   // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.

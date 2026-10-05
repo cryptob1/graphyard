@@ -137,8 +137,8 @@ export const mergeBaseDismissalWaitBoundMs = 30 * 60_000;
 /**
  * GY-1140. Whether a merge-base dismissal is still in motion: GitHub dismissed the approval of the
  * current candidate because the merge base changed, and that dismissal is inside `mergeBaseDismissalWaitBoundMs`.
- * The control plane handles this on its own (the merge queue republishes the speculative tip onto the
- * base branch tip, or the merge broker restores the approval on the unchanged head), so the dismissal
+ * The control plane handles this on its own (it restores the approval on the unchanged head, or
+ * requests a fresh review of a head that lacks the base tip), so the dismissal
  * is a step in motion, not a review-convergence fault (GY-1136, counted 2.4 minutes after dismissal).
  * A dismissal that stands past the bound counts.
  */

@@ -1,10 +1,11 @@
-// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, browser, harness.
+// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, tip-cleanup, browser, harness.
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { agentOwner, listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection, readWorkflows } from '../../protection.js';
+import { cleanupTipRefs } from '../../tip-cleanup.js';
 import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
@@ -61,6 +62,11 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     const workflows = readWorkflows(root);
     if (values.apply) return print(await applyProtection(master, snapshot.work, undefined, workflows));
     return print({ ...protectionPlan(readProtection(master), master, snapshot.work, undefined, workflows), apply: false, next: 'Rerun with --apply to reconcile branch protection with these policies' });
+  }
+  // The one-time cleanup of the speculative-tip refs the removed merge queue left behind (GY-1236).
+  if (id === 'tip-cleanup') {
+    const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
+    return print(cleanupTipRefs(master, { apply: !!values.apply }));
   }
   if (id === 'browser') {
     const { values, positionals } = parseArgs({ args, options: { 'dry-run': { type: 'boolean' } }, allowPositionals: true });

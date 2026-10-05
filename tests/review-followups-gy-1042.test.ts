@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { ejectedCheckLift } from '../src/merge-queue.js';
 import { boundLockedCache, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, type Queryable } from '../src/store/locked-read.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -55,7 +54,7 @@ const triage: Triage[] = [
   { findings: [42], path: 'src/store/locked-read.ts', status: 'addressed',
     resolution: 'A call takes every cache hit into its own map before it caches anything it fetches, so the bounded cache evicting a hit while this call caches its misses no longer sends it to a whole read under the lock.' },
   { findings: [45], path: 'src/merge-queue.ts', status: 'addressed',
-    resolution: 'ejectedCheckLift counts a predecessor closed without merging (isClosed) as departed, so a rerun passing cannot restore a speculative tip that still carries its unlanded commits.' },
+    resolution: 'ejectedCheckLift counts a predecessor closed without merging (isClosed) as departed, so a rerun passing cannot restore a speculative tip that still carries its unlanded commits. GY-1236 removed the speculative tips and ejections themselves.' },
 ];
 
 test('manual:review-followups-triaged GY-1042 — each follow-up listed in the description is addressed in code, or declined with a recorded reason (AC-1)', () => {
@@ -185,20 +184,4 @@ test('unit:projection-contract — an open item\'s projection leaves out its per
     await assert.rejects(engine.execute(worker, 'submit', focus.id, { epoch: focus.epoch, pr: 7002 }, randomUUID()), error => error === stop);
   } finally { engine.submissionObserver = null; }
   assert.deepEqual(peers.find(item => item.id === peer.id)?.observation?.scopeFiles, scopeFiles, 'the landing check saw the peer\'s scope files');
-});
-
-test('unit:closed-predecessor-departed — an ejection is not lifted on a tip built behind a predecessor closed without merging (GY-1042 finding 45)', () => {
-  const head = 'a'.repeat(40), base = 'b'.repeat(40);
-  const work = {
-    id: randomUUID(), key: 'GY-2', stage: 'build', queue: null, policyRevision: 1, policy: { checks: ['test'], review: true },
-    candidate: { sha: head, baseSha: base, pr: 2 },
-    observation: { candidate: { sha: head, baseSha: base, pr: 2 }, merged: false, prState: 'open', requiredChecks: [],
-      checks: [{ name: 'test', result: 'failure', appId: 15368, id: 1 }, { name: 'test', result: 'success', appId: 15368, id: 2 }] },
-    queueEjection: { sha: head, policyRevision: 1, check: { name: 'test', runId: 1, tip: head } },
-    queueHistory: [{ event: 'predicted', tip: head, predecessors: ['GY-1'] }],
-  } as unknown as Work;
-  const predecessor = (closure: object | null) => ({ id: randomUUID(), key: 'GY-1', stage: 'done', queue: null, closure }) as unknown as Work;
-  assert.equal(ejectedCheckLift(work, [predecessor(null), work], [15368])?.check, 'test', 'behind a delivered predecessor the passing rerun lifts');
-  assert.equal(ejectedCheckLift(work, [predecessor({ kind: 'obsolete', reason: 'not wanted', ref: null, by: 'operator', at: new Date().toISOString(), from: 'review' }), work], [15368]), null,
-    'behind a predecessor closed without merging the ejection stands');
 });

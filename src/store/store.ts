@@ -135,16 +135,6 @@ export class Store {
   async workItem(id: string): Promise<Work | undefined> {
     return (await this.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document;
   }
-  /**
-   * The live merge-queue entries, which is all a queue position is computed from (GY-1052): the
-   * filter is `queueOrder`'s own, a queue entry on an item not done, so `queuePlacement` over this
-   * equals it over the whole fleet. Selected through the work index, so no unqueued item's
-   * document is read; a settled item has no queue (`settledSql`), so none is read either.
-   */
-  async queuedWork(): Promise<Work[]> {
-    return (await this.pool.query(`SELECT w.document FROM work_index i JOIN work_items w ON w.id=i.id
-      WHERE i.stage IS DISTINCT FROM 'done' AND jsonb_typeof(w.document->'queue')='object' ORDER BY i.number`)).rows.map(row => row.document);
-  }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
@@ -180,10 +170,10 @@ export class Store {
     return (await this.pool.query(`SELECT seq, work_id, actor, kind, ${resolvedPayloadSql()} AS payload, created_at FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300`, [id ?? null])).rows;
   }
   /**
-   * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the
-   * merge-queue head and its batch, then items whose next action waits on an observation; the
-   * unnamed keep the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
-   * The first `headCount` named ids (the queue-head band) always come first; after them any job due
+   * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the items
+   * GitHub may merge now, then items whose next action waits on an observation; the unnamed keep
+   * the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
+   * The first `headCount` named ids (the merge path) always come first; after them any job due
    * for longer than `starvedAfterMs` is claimed before the rest of the named list, so a job the list
    * never names is still claimed within that bound (2026-09-26: an item whose only refusal was a stale
    * observation waited 40 minutes behind review-waiting items that came due again every cycle).

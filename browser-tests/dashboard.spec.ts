@@ -750,43 +750,6 @@ test('validation view reports failures honestly and bounds request history', asy
   await expect(page.locator('.scenario-card')).toHaveCount(20);
 });
 
-test('merge queue shows each entry with its position in line, and its predicted tip under Technical details', async ({ page }) => {
-  const enqueuedAt = new Date(Date.now() - 45 * 60_000).toISOString();
-  const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40), tipSha = 'c'.repeat(40);
-  const entry = (overrides: Record<string, unknown>) => ({ ...work, stage: 'merge', evidence: [], observation: null, ...overrides });
-  const head = entry({ id: 'queue-head', key: 'GY-10', title: 'Head of the queue', candidate: { pr: 10, sha: headSha, baseSha, branch: 'graphyard/gy-10-1', author: 'worker' },
-    observation: { baseTip: baseSha, candidate: { sha: headSha, baseSha } }, gates: [{ name: 'merge', passed: true, reasons: [] }],
-    queue: { sequence: 1, enqueuedAt, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-10', tip: headSha, base: baseSha, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 1, publishedAt: enqueuedAt } } });
-  const next = entry({ id: 'queue-next', key: 'GY-11', title: 'Behind the head', candidate: { pr: 11, sha: tipSha, baseSha: headSha, branch: 'graphyard/gy-11-1', author: 'worker' },
-    observation: { baseTip: baseSha, candidate: { sha: tipSha, baseSha: headSha } }, gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-10 is ahead'] }],
-    queue: { sequence: 2, enqueuedAt, policyRevision: 1, speculation: { ref: 'refs/graphyard/queue/gy-11', tip: tipSha, base: headSha, baseTree: 'd'.repeat(40), predecessors: ['GY-10'], policyRevision: 1, publishedAt: enqueuedAt } } });
-  await page.route('**/api/**', async route => {
-    const path = new URL(route.request().url()).pathname;
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role: 'admin' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] }
-      : path.endsWith('/work-snapshot') ? { work: [head, next], now: new Date().toISOString() } : path.endsWith('/work') ? [head, next]
-      : path.endsWith('/board') ? boardFromStatus([head, next] as any, Date.now(), null) : [] });
-  });
-  await page.goto('/'); await login(page);
-  // GY-161: the queue is the Merge step of each moving row, in plain words, with the row's own clock.
-  await expect(row(page, 'GY-10').locator('.steps-label')).toHaveText('Merging · Graphyard is merging it');
-  await expect(row(page, 'GY-11').locator('.steps-label')).toHaveText('Merging · 2nd in line, after GY-10');
-  for (const key of ['GY-10', 'GY-11']) {
-    await expect(row(page, key).locator('[data-step="merge"]')).toHaveAttribute('data-state', 'current');
-    await expect(row(page, key).locator('.status-age')).toHaveCount(1);
-  }
-  await row(page, 'GY-11').click();
-  // The item page says where it is in line; the predicted base and tip are under Technical details.
-  const drawer = itemPage(page, 'Behind the head');
-  await expect(drawer.locator('.status-sentence')).toHaveText('Merging · 2nd in line, after GY-10.');
-  await technicalDetails(page);
-  await expect(drawer.getByRole('heading', { name: 'Merge queue' })).toBeVisible();
-  await expect(drawer).toContainText('Position 2 of 2');
-  await expect(drawer).toContainText(`Predicted base ${headSha.slice(0, 8)}`);
-  await expect(drawer).toContainText(`predicted tip ${tipSha.slice(0, 8)}`);
-  await expect(drawer).toContainText('Merge queue position 2 of 2: GY-10 is ahead');
-  await expect(drawer).toContainText('refs/graphyard/queue/gy-11');
-});
-
 const prHref = 'https://github.com/fixture/repository/pull/1', commitHref = `https://github.com/fixture/repository/commit/${work.candidate!.sha}`;
 const cardPrLink = (page: Page) => page.getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });
 const detailPrLink = (page: Page) => itemPage(page).getByRole('link', { name: 'PR #1, open pull request for GY-1 in GitHub' });

@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyReworkReason, deriveFacts, gateFactStep, mergeReadyGate, recentDelivered } from '../src/flow-analytics.js';
-import { queueSequencingReason } from '../src/merge-queue.js';
 import { nearestRankPercentiles, pipelineSpeedSummary } from '../src/pipeline-speed.js';
 import type { Work } from '../src/model.js';
 // @ts-expect-error Dependency-free report script.
@@ -98,7 +97,7 @@ const snapshot = (workId: string, key: string, over: Record<string, any>) => ({
   id: workId, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['scripts/delivery-causes.mjs'],
   stage: 'building', createdAt: '2026-09-26T04:00:00.000Z', updatedAt: over.at ?? '2026-09-26T04:00:00.000Z', stageEnteredAt: over.at ?? '2026-09-26T04:00:00.000Z',
   epoch: 1, gates: fullGates('build', ['Worker has not submitted implementation for this attempt']), violations: [], workspaces: [], sessions: [],
-  policy: { checks: ['test'], review: true }, ready: true, queue: null, reworkRequested: false, blocker: null, ...over,
+  policy: { checks: ['test'], review: true }, ready: true, reworkRequested: false, blocker: null, ...over,
 });
 const fullRow = (workId: string, kind: string, at: string, work: Record<string, any>) => ({ seq: String(seq++), work_id: workId, actor: 'graphyard', kind, created_at: at, payload: { work } });
 
@@ -107,7 +106,7 @@ const eventsA = [
   fullRow(A, 'submit', '2026-09-26T06:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T06:00:00.000Z', submission: { epoch: 1, pr: 400 }, candidate: { pr: 400, sha: sha40('a1'), baseSha: sha40('base') }, gates: fullGates('test', ['Required check test has not finished']) })),
   fullRow(A, 'rework', '2026-09-26T06:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T06:30:00.000Z', reworkRequested: true, gates: fullGates('build', ['Worker has not submitted implementation for this attempt']) })),
   fullRow(A, 'claim', '2026-09-26T07:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T07:00:00.000Z', candidate: { pr: 400, sha: sha40('a2'), baseSha: sha40('base') }, gates: fullGates('test', ['Required check test is running for the new head']) })),
-  // The GitHub observation rows: the reconciliation pass records the review, queue and merge-gate
+  // The GitHub observation rows: the reconciliation pass records the review and merge-gate
   // transitions on `github.observed` rows — the routine kinds the server excludes unless the read
   // names routine=include (src/events-history.ts `eventSelection`).
   fullRow(A, 'github.observed', '2026-09-26T07:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T07:30:00.000Z', gates: fullGates('review', ['Independent approval of the current commit is required']) })),
@@ -116,7 +115,7 @@ const eventsA = [
   // A routine heartbeat whose snapshot repeats the standing gates, candidate and submission:
   // included in the read, yet no new gate fact — routine volume must not disturb the fold.
   fullRow(A, 'heartbeat', '2026-09-26T08:45:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T08:45:00.000Z', submission: { epoch: 1, pr: 400 }, candidate: { pr: 400, sha: sha40('a3'), baseSha: sha40('base') }, gates: fullGates('acceptance', ['required proof outstanding']) })),
-  fullRow(A, 'github.observed', '2026-09-26T09:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:00:00.000Z', queue: { sequence: 1 }, gates: fullGates('merge', ['Merge queue position 1 of 1: the entry is queued']) })),
+  fullRow(A, 'github.observed', '2026-09-26T09:00:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:00:00.000Z', candidate: { pr: 400, sha: sha40('a3'), baseSha: sha40('base') }, gates: fullGates('none', []) })),
   fullRow(A, 'github.observed', '2026-09-26T09:30:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:30:00.000Z', gates: fullGates('merge', ['GitHub observation missing or older than two minutes']) })),
   fullRow(A, 'github.observed', '2026-09-26T09:45:00.000Z', snapshot(A, 'GY-901', { at: '2026-09-26T09:45:00.000Z', gates: fullGates('merge', ['the merge is held for the approver: decision d9 for GY-901 awaits its independent approval']) })),
 ];
@@ -171,8 +170,8 @@ const fakeApi = async (path: string) => {
   throw new Error(`unexpected api path ${path}`);
 };
 
-const analytics = { recentDelivered, classifyReworkReason, deriveFacts, gateFactStep, mergeReadyGate, queueSequencingReason, pipelineSpeedSummary, nearestRankPercentiles, pageLimit: 300, reworkPages: 10, pageWalkBound: 24 };
-const helpers = { deriveFacts, gateFactStep, mergeReadyGate, queueSequencingReason };
+const analytics = { recentDelivered, classifyReworkReason, deriveFacts, gateFactStep, mergeReadyGate, pipelineSpeedSummary, nearestRankPercentiles, pageLimit: 300, reworkPages: 10, pageWalkBound: 24 };
+const helpers = { deriveFacts, gateFactStep, mergeReadyGate };
 
 test('unit:rework-causes-classified — every rework round of the fixture ledger lands in one of the nine causes, with the marker that decided it', async () => {
   // The layered classifier: the GY-879 causes by their recorded markers, first match wins.

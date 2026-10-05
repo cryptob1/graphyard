@@ -43,7 +43,7 @@ A failing check is [rerun](github.md#failed-checks) once in place (`mergeQueue.r
 
 | Band | Cadence
 | --- | ---
-| `merge` | near queue head, gates passing: 20 s
+| `merge` | every gate passing, GitHub may merge it: 20 s
 | `active` | awaiting check, review, base refresh, rework: 1 min
 | `steady` | unchanged: 5 min, stretched by fleet bound; review requests ≤ 10 min
 | `idle` | awaiting dispatch/escalation: 5 min, stretched if unchanged

@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
 import { GitHub, CHECK_NAME, scopeLookupBudget, compareFileCap } from '../src/github.js';
-import { Refusal, SpeculativeConflict, type Work } from '../src/model.js';
-import type { QueuePlacement, QueueSpeculation } from '../src/merge-queue.js';
+import { Refusal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free inspection script.
 import { evaluateEnforcement } from '../scripts/verify-enforcement.mjs';
@@ -166,10 +165,10 @@ test('final verification refuses gate changes after the initial collection', asy
 test('App binding is mandatory even when a check with the correct name is required', async () => {
   const f = fixture(); f.protection(false); assert.equal(await f.github.protection(), false);
 });
-test('a base branch that still requires branches to be up to date cannot carry the merge queue', async () => {
+test('a base branch that still requires branches to be up to date is not verified protection', async () => {
   const f = fixture(); assert.equal(await f.github.protection(), true);
   f.requireUpToDate(true);
-  assert.equal(await f.github.protection(), false, 'a queued tip is behind the base branch by design, so `strict` would block every landing');
+  assert.equal(await f.github.protection(), false, '`strict` must be off');
 });
 test('observing a merge preserves the tested pre-merge base candidate', async () => {
   const f = fixture(); f.pr.merged = true; f.pr.base.sha = 'c'.repeat(40);
@@ -285,130 +284,11 @@ test('draft and closed PRs expose actionable review waits without requesting pro
   }
 });
 
-const predictedBase = 'c'.repeat(40), speculativeTip = 'd'.repeat(40);
-function placement(overrides: Partial<QueuePlacement> = {}): QueuePlacement {
-  return { id: 'task-id', key: 'GY-41', position: 1, size: 2, sequence: 2, enqueuedAt: '2026-09-17T00:00:00.000Z', waitMs: 0,
-    predecessors: ['GY-40'], predictedBase, tip: null, base: { sha: base, tree: `f${'b'.repeat(39)}` }, binding: null, current: false, publishable: true, reasons: [], ...overrides };
-}
-function queued(work: Work, speculation: QueueSpeculation | null = null) {
-  (work as any).queue = { sequence: 2, enqueuedAt: '2026-09-17T00:00:00.000Z', policyRevision: work.policyRevision, speculation };
-  return work;
-}
+const movedBase = 'c'.repeat(40), mergedHead = 'd'.repeat(40);
 
-test('the speculative tip is merged onto the candidate branch and published under a Graphyard-owned ref', async () => {
-  const f = fixture(); queued(f.work);
-  f.mutations['/merges'] = () => ({ sha: speculativeTip });
-  const speculation = await f.github.publishSpeculativeTip(f.work, placement());
-  assert.equal(speculation.tip, speculativeTip);
-  assert.equal(speculation.base, predictedBase);
-  assert.equal(speculation.baseTree, `f${'c'.repeat(39)}`);
-  assert.equal(speculation.ref, 'refs/graphyard/queue/gy-41');
-  assert.deepEqual(speculation.predecessors, ['GY-40']);
-  const merge = f.calls.find(call => call.path === '/merges')!;
-  // Built on the scratch branch, then the candidate branch is moved to it in one push (GY-1087).
-  assert.deepEqual(merge.body, { base: 'graphyard-merge-check/gy-41', head: predictedBase, commit_message: 'Graphyard speculative tip for GY-41 behind GY-40' });
-  assert.deepEqual(f.calls.filter(call => call.path === '/git/refs/heads/graphyard/task').map(call => [call.method, call.body]), [['PATCH', { sha: speculativeTip, force: true }]]);
-  const ref = f.calls.find(call => call.path === '/git/refs/graphyard/queue/gy-41')!;
-  assert.equal(ref.method, 'PATCH'); assert.deepEqual(ref.body, { sha: speculativeTip, force: true });
-});
-
-test('a candidate branch that already contains the predicted base keeps its head as the tip', async () => {
-  const f = fixture(); queued(f.work);
-  f.mutations['/merges'] = () => null;
-  const speculation = await f.github.publishSpeculativeTip(f.work, placement());
-  assert.equal(speculation.tip, head, 'GitHub reported nothing to merge, so the head is already the predicted tip');
-});
-
-test('a conflicting speculative merge is reported as a conflict rather than a transport failure', async () => {
-  const f = fixture(); queued(f.work);
-  f.mutations['/merges'] = () => { throw new Refusal('GitHub POST /repos/owner/repo/merges failed (409)', 502); };
-  await assert.rejects(f.github.publishSpeculativeTip(f.work, placement()), (error: Error) => error instanceof SpeculativeConflict && /conflicts and cannot be resolved/.test(error.message));
-  f.mutations['/merges'] = () => { throw new Refusal('GitHub POST /repos/owner/repo/merges failed (502)', 502); };
-  await assert.rejects(f.github.publishSpeculativeTip(f.work, placement()), (error: Error) => !(error instanceof SpeculativeConflict));
-});
-
-test('a head that moved since the prediction refuses publication instead of merging a different commit', async () => {
-  const f = fixture(); queued(f.work); f.pr.head.sha = 'e'.repeat(40);
-  await assert.rejects(f.github.publishSpeculativeTip(f.work, placement()), /changed before speculative prediction/);
-  assert.ok(f.calls.every(call => call.method === 'GET'));
-});
-
-test('observation binds a published speculative tip to its validated base and records the real base branch', async () => {
-  const f = fixture();
-  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: head, base: predictedBase, baseTree: 'basetree'.padEnd(40, '0'), predecessors: ['GY-40'], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
-  const observation = await f.github.observe(f.work);
-  assert.equal(observation.candidate.baseSha, predictedBase, 'the candidate stays bound to the commit it was validated on');
-  assert.equal(observation.baseTip, base, 'the real base-branch head is recorded separately');
-  assert.equal(observation.baseTree, `f${'b'.repeat(39)}`);
-  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: 'e'.repeat(40), base: predictedBase, baseTree: 'basetree'.padEnd(40, '0'), predecessors: [], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
-  const superseded = await f.github.observe(f.work);
-  assert.equal(superseded.candidate.baseSha, base, 'a speculation for another commit cannot rebind this head');
-});
-
-/** A queue entry after Graphyard rebound it: the PR still targets a base branch that has moved on. */
-function boundToSpeculativeTip(f: ReturnType<typeof fixture>) {
-  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: head, base: predictedBase, baseTree: `f${'c'.repeat(39)}`, predecessors: ['GY-40'], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
-  f.work.candidate!.baseSha = predictedBase;
-  return f;
-}
-
-test('a published queue tip whose required check failed is observed with its docs word counts and those of its base (GY-574)', async () => {
-  const f = boundToSpeculativeTip(fixture()), request = f.github.request.bind(f.github);
-  const pages: Record<string, Record<string, string>> = { [head]: { 'README.md': '9'.repeat(40), 'docs/a.md': '1'.repeat(40) }, [predictedBase]: { 'README.md': '9'.repeat(40), 'docs/a.md': '0'.repeat(40) } };
-  const words: Record<string, number> = { ['9'.repeat(40)]: 5, ['1'.repeat(40)]: 9, ['0'.repeat(40)]: 3 };
-  // The project's graphyard.json at the tip configures the budget and the paths it counts (AC-3); AGENTS.md is documentation it does not budget.
-  const config = { documentation: { paths: ['docs/', 'README.md', 'AGENTS.md'], changelog: null, wordBudget: { total: 12_000, perPage: 1_200, paths: ['docs/', 'README.md'] } } };
-  const configSha = 'd'.repeat(40);
-  let testResult = 'failure';
-  f.github.request = async (path, method, body) => {
-    if (path.startsWith('/git/')) f.calls.push({ path, method: method ?? 'GET', body });
-    const tree = path.match(/^\/git\/trees\/([a-f0-9]{40})\?recursive=1$/), blob = path.match(/^\/git\/blobs\/([a-f0-9]{40})$/);
-    if (tree) return { truncated: false, tree: [{ path: 'src/claims.ts', type: 'blob', sha: 'c'.repeat(40) }, { path: 'AGENTS.md', type: 'blob', sha: '1'.repeat(40) }, { path: 'graphyard.json', type: 'blob', sha: configSha }, ...Object.entries(pages[tree[1]]).map(([page, sha]) => ({ path: page, type: 'blob', sha }))] };
-    if (blob?.[1] === configSha) return { encoding: 'base64', content: Buffer.from(JSON.stringify(config)).toString('base64') };
-    if (blob) return { encoding: 'base64', content: Buffer.from(Array(words[blob[1]]).fill('word').join(' ')).toString('base64') };
-    if (path.includes('/check-runs') && !path.includes('check_name=')) return { check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: testResult, app: { id: 15368 } }] };
-    return request(path, method, body);
-  };
-  const observed = await f.github.observe(f.work);
-  assert.deepEqual(observed.docsBudget, { sha: head, base: { 'README.md': 5, 'docs/a.md': 3 }, pages: { 'README.md': 5, 'docs/a.md': 9 }, onlyFailure: true,
-    budget: { total: 12_000, perPage: 1_200, paths: ['docs/', 'README.md'], documentation: ['docs/', 'README.md', 'AGENTS.md'] } });
-  const blobReads = f.calls.filter(call => call.path.startsWith('/git/blobs/')).length;
-  assert.equal(blobReads, 4, 'each page version, and the configuration, is read once');
-  testResult = 'success';
-  const trees = f.calls.filter(call => call.path.startsWith('/git/trees/')).length;
-  assert.equal((await f.github.observe(f.work)).docsBudget, undefined, 'a passing tip carries no counts');
-  assert.equal(f.calls.filter(call => call.path.startsWith('/git/trees/')).length, trees, 'and costs no tree read');
-  testResult = 'failure'; pages[head] = {}; (f.github as any).docsCounts.clear(); (f.github as any).docsTrees.clear();
-  const unreadable = f.github.request;
-  f.github.request = async (path, method, body) => path.startsWith('/git/trees/') ? Promise.reject(new Error('tree unavailable')) : unreadable(path, method, body);
-  const bisected = await f.github.observe(f.work);
-  assert.equal(bisected.docsBudget, undefined, 'unreadable counts leave the failure to be bisected, and the observation stands');
-  assert.equal(bisected.checks[0].result, 'failure');
-});
-
-test('the required check is published on a speculative tip whose base branch has moved on', async () => {
-  const f = boundToSpeculativeTip(fixture());
-  f.work.gates = [{ name: 'merge', passed: true, reasons: [] }];
-  await f.github.publish(f.work);
-  const call = f.calls.find(c => c.method === 'PATCH')!;
-  assert.equal(call.body.conclusion, 'success', 'the live base differs from the validated base by design and must not refuse the write');
-  assert.equal(call.body.head_sha, head);
-  assert.match(call.body.output.summary, new RegExp(`base ${predictedBase}`));
-});
-
-test('a head bound to no speculation still refuses publication when the base branch moved', async () => {
-  const f = fixture(); f.work.candidate!.baseSha = predictedBase;
+test('a head whose bound base is not the base branch tip refuses publication', async () => {
+  const f = fixture(); f.work.candidate!.baseSha = movedBase;
   await assert.rejects(f.github.publish(f.work), /changed before check publication/);
-});
-
-test('Codex dispatch binds a speculative base rather than refusing the moved base branch', async () => {
-  const f = boundToSpeculativeTip(fixture()); f.work.policy.reviewProvider = 'codex';
-  const original = f.github.request;
-  f.github.request = async (path, method, body: any) => method === 'POST' ? { id: 77, body: body.body, performed_via_github_app: { id: 1234 }, user: { type: 'Bot' }, created_at: new Date().toISOString() } : original(path, method, body);
-  const request = await f.github.requestCodex(f.work, async () => {});
-  assert.equal(request.sha, head);
-  assert.equal(request.baseSha, predictedBase, 'the review is requested for the commit the tip will land on');
-  assert.match(request.body, new RegExp(`base:${predictedBase}`));
 });
 
 const reviewerApp = { id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 };
@@ -447,23 +327,10 @@ test('agent dispatch records the profile, identity and correlation marker for th
   await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /agent review policy required/);
 });
 
-test('agent dispatch binds a speculative base rather than refusing the moved base branch', async () => {
-  const f = boundToSpeculativeTip(agentFixture());
-  const original = f.github.request;
-  f.github.request = async (path, method, body: any) => method === 'POST'
-    ? { id: 457, body: body.body, performed_via_github_app: { id: 1234 }, user: { type: 'Bot' }, created_at: new Date().toISOString() }
-    : original(path, method, body);
-  const request = await f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {});
-  assert.equal(request.sha, head);
-  assert.equal(request.baseSha, predictedBase, 'the review is requested for the commit the tip will land on');
-  assert.match(request.body, new RegExp(`base:${predictedBase} policy:1`));
-  assert.ok(request.body.includes(`Review head \`${head}\` against base \`${predictedBase}\``), 'the reviewer is instructed to review the tip against its validated base');
-  // The binding is to this published tip only: a speculation for another commit, or none at all,
-  // must still refuse a candidate whose base no longer matches the live base branch.
-  f.work.queue!.speculation!.tip = 'e'.repeat(40);
+test('agent dispatch refuses a candidate whose bound base is not the base branch tip', async () => {
+  const f = agentFixture(); f.work.candidate!.baseSha = movedBase;
   await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /changed before review dispatch/);
-  queued(f.work);
-  await assert.rejects(f.github.requestAgentReview(f.work, reviewerProfile, reviewerApp, async () => {}), /changed before review dispatch/);
+  assert.ok(f.calls.every(call => call.method === 'GET'), 'nothing is posted');
 });
 
 test('agent observation resolves the registered identity and never requires native approval', async () => {
@@ -723,17 +590,6 @@ test('observation compares every out-of-scope file with the bound base by blob i
   assert.equal(await f.github.verify(f.work).then(() => true), true);
 });
 
-test('a speculative tip compares its out-of-scope files with the predicted base, not with the moved base branch', async () => {
-  const f = fixture();
-  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: head, base: predictedBase, baseTree: 'basetree'.padEnd(40, '0'), predecessors: ['GY-40'], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
-  const predecessor = 'd'.repeat(40);
-  f.files([{ filename: 'src/predecessor.ts', status: 'modified', sha: predecessor, additions: 4, deletions: 0, patch: '@@' }]);
-  f.baseBlobs({ [`${predictedBase}:src/predecessor.ts`]: predecessor, [`${base}:src/predecessor.ts`]: 'stale'.padEnd(40, '0') });
-  const observation = await f.github.observe(f.work);
-  assert.equal(observation.candidate.baseSha, predictedBase);
-  assert.deepEqual(observation.scopeFiles?.map(file => [file.path, file.baseSha]), [['src/predecessor.ts', predecessor]], 'a queued predecessor change already lives in the predicted base');
-});
-
 test('a missing blob at the bound base is a new file, and a provider failure other than absence is not', async () => {
   const f = fixture(), request = f.github.request.bind(f.github);
   assert.equal(await f.github.blobAt('src/none.ts', base), null);
@@ -759,7 +615,7 @@ test('out-of-scope lookups beyond the budget stay uncompared so the guard refuse
   assert.equal(f.calls.filter(call => call.path.startsWith('/contents/')).length, scopeLookupBudget);
 });
 
-// GY-57: the base tip comes from the branch ref; what Graphyard's merge produced is recorded with the tip.
+// GY-57: the base tip comes from the branch ref; what Graphyard's merge produced is recorded with the base refresh.
 test('unit:queue-real-base-tip — the observed base tip and tree come from refs/heads/<base>, never from the pull request\'s cached base', async () => {
   const f = fixture(); const moved = 'c'.repeat(40);
   f.branch(moved); // GitHub's pr.base.sha still says `base`: it is refreshed only when the pull request is recomputed.
@@ -774,13 +630,6 @@ test('unit:queue-real-base-tip — the observed base tip and tree come from refs
   // Real commits never change ancestry, so the client memoizes it; this fixture rewrites the answer for the same pair.
   (f.github as any).ancestry.clear();
   assert.equal((await f.github.observe(f.work)).baseTipContained, false, 'a head behind the branch does not contain its tip');
-  // A published tip keeps its validated base while the branch is tree-identical to it, and a
-  // follower's tip contains the branch by publication of the chain it sits on.
-  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: head, base: predictedBase, baseTree: `f${'c'.repeat(39)}`, predecessors: [], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
-  const carried = await f.github.observe(f.work);
-  assert.equal(carried.candidate.baseSha, predictedBase); assert.equal(carried.baseTipContained, true, 'tree-identical to the bound base');
-  queued(f.work, { ref: 'refs/graphyard/queue/gy-41', tip: head, base: predictedBase, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 1, publishedAt: '2026-09-17T00:00:00.000Z' });
-  assert.equal((await f.github.observe(f.work)).baseTipContained, false, 'a head whose bound base is neither an ancestor nor tree-identical does not contain the branch');
 });
 
 test('unit:queue-real-base-tip — a review is never requested for a head that does not contain the base tip and does not merge cleanly (GY-191)', async () => {
@@ -790,48 +639,48 @@ test('unit:queue-real-base-tip — a review is never requested for a head that d
   assert.ok(f.calls.every(call => call.method === 'GET'), 'nothing is posted');
 });
 
-test('unit:queue-real-base-tip — a speculative tip is built only on a branch that is still its predicted base or a tree-identical advance of it', async () => {
-  const f = fixture(); queued(f.work);
-  f.mutations['/merges'] = () => ({ sha: speculativeTip });
-  f.branch('e'.repeat(40)); f.commit('e'.repeat(40), { commit: { tree: { sha: 'a1'.padEnd(40, '0') } } });
-  await assert.rejects(f.github.publishSpeculativeTip(f.work, placement()), /moved before speculative prediction/);
-  assert.ok(f.calls.every(call => call.method === 'GET'), 'nothing is merged or published on a moved base');
-  f.commit('e'.repeat(40), { commit: { tree: { sha: `f${'b'.repeat(39)}` } } });
-  const speculation = await f.github.publishSpeculativeTip(f.work, placement());
-  assert.equal(speculation.tip, speculativeTip, 'an advance that keeps the tree is an earlier queue merge, and the chain still rests on it');
-});
+/** A candidate whose base failure the base branch has since repaired (GY-528): the coordinator asked for the repaired base to be merged in. */
+function requestedRefresh(f: ReturnType<typeof fixture>) {
+  f.branch(movedBase);
+  f.work.observation = { candidate: { ...f.work.candidate! }, baseTip: movedBase, baseTipContained: false, merged: false, prState: 'open', draft: false } as any;
+  f.work.baseRefreshRequest = { head, base: movedBase, policyRevision: 1, by: 'master', at: '2026-09-17T00:00:00.000Z', reason: 'the base failure is repaired' };
+  return f;
+}
 
-test('unit:queue-real-base-tip — publication records the tip\'s parents, author and the files the predicted base changed, from GitHub\'s account of the commit', async () => {
-  const f = fixture(); queued(f.work);
-  f.mutations['/merges'] = () => ({ sha: speculativeTip });
-  f.commit(speculativeTip, { parents: [{ sha: head }, { sha: predictedBase }], author: { login: 'graphyard-owner-repo[bot]', type: 'Bot' } });
+test('unit:queue-real-base-tip — a requested base refresh records the merge\'s parents, author and the files the base changed, from GitHub\'s account of the commit', async () => {
+  const f = requestedRefresh(fixture());
+  f.mutations['/merges'] = () => ({ sha: mergedHead });
+  f.commit(mergedHead, { parents: [{ sha: head }, { sha: movedBase }], author: { login: 'graphyard-owner-repo[bot]', type: 'Bot' } });
   f.compare('ahead', [{ filename: 'src/other.ts' }, { filename: 'docs/renamed.md', previous_filename: 'docs/old.md' }]);
-  const speculation = await f.github.publishSpeculativeTip(f.work, placement());
-  assert.deepEqual(speculation.merge, { from: head, parents: [head, predictedBase], author: 'graphyard-owner-repo[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/other.ts', 'docs/renamed.md', 'docs/old.md'] });
-  assert.ok(f.calls.some(call => call.path.startsWith(`/compare/${base}...${predictedBase}`)), 'the changes are listed between the bound base and the predicted base');
-  f.commit(speculativeTip, { parents: [{ sha: head }, { sha: predictedBase }], author: { login: 'worker', type: 'User' } });
-  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.authoredByApp, false, 'a tip GitHub attributes to anyone else is recorded as such');
-  f.commit(speculativeTip, { parents: [{ sha: head }, { sha: predictedBase }], author: null, commit: { tree: { sha: 't'.repeat(40) }, author: { email: '9001+graphyard-owner-repo[bot]@users.noreply.github.com' } } });
-  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.authoredByApp, true, 'an unresolved author is recognised by the App bot\'s noreply address');
+  const refresh = await f.github.refreshCandidateBase(f.work);
+  assert.deepEqual([refresh.head, refresh.base, refresh.trigger, refresh.conflict], [mergedHead, movedBase, 'base failure repaired', null]);
+  assert.deepEqual(refresh.merge, { from: head, parents: [head, movedBase], author: 'graphyard-owner-repo[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/other.ts', 'docs/renamed.md', 'docs/old.md'] });
+  assert.deepEqual(f.calls.find(call => call.path === '/merges')!.body.base, 'graphyard/task', 'the repaired base is merged into the candidate branch');
+  assert.ok(f.calls.some(call => call.path.startsWith(`/compare/${base}...${movedBase}`)), 'the changes are listed between the bound base and the base it was merged onto');
+  f.commit(mergedHead, { parents: [{ sha: head }, { sha: movedBase }], author: { login: 'worker', type: 'User' } });
+  assert.equal((await f.github.refreshCandidateBase(f.work)).merge!.authoredByApp, false, 'a merge GitHub attributes to anyone else is recorded as such');
+  f.commit(mergedHead, { parents: [{ sha: head }, { sha: movedBase }], author: null, commit: { tree: { sha: 't'.repeat(40) }, author: { email: '9001+graphyard-owner-repo[bot]@users.noreply.github.com' } } });
+  assert.equal((await f.github.refreshCandidateBase(f.work)).merge!.authoredByApp, true, 'an unresolved author is recognised by the App bot\'s noreply address');
   f.mutations['/merges'] = () => null;
-  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge, null, 'a head that already contains its base produced no merge and carries nothing');
+  const unchanged = await f.github.refreshCandidateBase(f.work);
+  assert.deepEqual([unchanged.head, unchanged.merge], [head, null], 'a head that already contains its base produced no merge and carries nothing');
 });
 
 test('unit:queue-real-base-tip — a change list at GitHub\'s compare cap is recorded as incomplete, so nothing can be carried over a diff the API may have truncated', async () => {
-  const f = fixture(); queued(f.work);
-  f.mutations['/merges'] = () => ({ sha: speculativeTip });
-  f.commit(speculativeTip, { parents: [{ sha: head }, { sha: predictedBase }], author: { login: 'graphyard-owner-repo[bot]', type: 'Bot' } });
+  const f = requestedRefresh(fixture());
+  f.mutations['/merges'] = () => ({ sha: mergedHead });
+  f.commit(mergedHead, { parents: [{ sha: head }, { sha: movedBase }], author: { login: 'graphyard-owner-repo[bot]', type: 'Bot' } });
   const changed = (count: number) => Array.from({ length: count }, (_, i) => ({ filename: `src/generated/file-${i}.ts` }));
   f.compare('ahead', changed(compareFileCap - 1));
-  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.baseChanges!.length, compareFileCap - 1, 'a list short of the cap is complete');
+  assert.equal((await f.github.refreshCandidateBase(f.work)).merge!.baseChanges!.length, compareFileCap - 1, 'a list short of the cap is complete');
   f.compare('ahead', changed(compareFileCap));
-  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.baseChanges, null, 'a list that reaches the cap cannot be told from a truncated one');
+  assert.equal((await f.github.refreshCandidateBase(f.work)).merge!.baseChanges, null, 'a list that reaches the cap cannot be told from a truncated one');
   f.compare('ahead', changed(compareFileCap + 50));
-  assert.equal((await f.github.publishSpeculativeTip(f.work, placement())).merge!.baseChanges, null, 'GitHub returns only the first page of files, so a longer diff looks exactly like one at the cap');
-  assert.ok(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${predictedBase}`)).every(call => !/[?&]page=/.test(call.path)), 'no later page is requested: it would never extend the file list');
+  assert.equal((await f.github.refreshCandidateBase(f.work)).merge!.baseChanges, null, 'GitHub returns only the first page of files, so a longer diff looks exactly like one at the cap');
+  assert.ok(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${movedBase}`)).every(call => !/[?&]page=/.test(call.path)), 'no later page is requested: it would never extend the file list');
   f.compare('ahead', changed(3));
   f.calls.length = 0;
-  const sync = (await f.github.publishSpeculativeTip(f.work, placement())).merge!;
+  const sync = (await f.github.refreshCandidateBase(f.work)).merge!;
   assert.equal(sync.baseChanges!.length, 3);
-  assert.equal(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${predictedBase}`)).length, 1, 'the comparison is read once');
+  assert.equal(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${movedBase}`)).length, 1, 'the comparison is read once');
 });

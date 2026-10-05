@@ -4,7 +4,6 @@ import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { evaluate, stages, type Gate, type Work } from '../src/model.js';
-import { predictQueue } from '../src/merge-queue.js';
 import { flowLimits } from '../src/flow-analytics.js';
 import { apiRoutes } from '../src/server/index.js';
 import { computeAttribution } from '../src/attribution.js';
@@ -49,7 +48,7 @@ function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin', features:
     token: 'fixture', work, status: fixtureStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
-    queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, role), refresh: async () => {}, action: async () => {},
+    sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, role), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop, ...overrides,
   };
   // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
@@ -96,7 +95,6 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['review (changes)', withGates(handedIn, 'review', ['Outstanding change requests must be resolved through a new review']), 'A reviewer asked for changes on PR #42', 'waiting'],
     ['test', withGates(handedIn, 'test', ['Required CI check test has not passed on the current candidate']), 'Waiting for automated checks on PR #42', 'waiting'],
     ['acceptance', { ...find('GY-16') }, 'Waiting for proof that it works — 2 of 3 proofs passed', 'waiting'],
-    ['merge', withGates(handedIn, 'merge', ['Merge queue position 2 of 3: GY-10 is ahead']), 'Queued to merge — 2nd in line, after GY-10', 'waiting'],
     ['merge (conflict)', withGates(handedIn, 'merge', ['Pull request is not mergeable against the current base']), 'Stuck: the pull request conflicts with the main branch', 'stuck'],
     ['merge (ready)', { ...withGates(handedIn, 'merge', []), stage: 'merge', gates: find('GY-18').gates }, 'Ready to merge PR #42', 'waiting'],
     ['done', { ...find('GY-18') }, 'Shipped in PR #40', 'shipped'],
@@ -136,8 +134,6 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['merge', 'GitHub has not been observed at the current candidate'],
     ['merge', 'Pull request is not mergeable against the current base'], ['merge', 'Unresolved lease-loss escalation requires operator resolution: worker vanished'],
     ['merge', 'Slice lead lead-1 ruled hold under rule R-2; delivery is blocked until the authorized recovery: redo the migration'],
-    ['merge', 'Merge queue position 2 of 2: GY-10 is ahead'], ['merge', 'Speculative tip on predicted base abcdef123456 has not been published and validated for this candidate'],
-    ['merge', 'Waiting for GY-10 to publish its speculative tip'],
   ];
   for (const [gate, reason] of reasons) {
     const plain = plainReason(reason, gate);

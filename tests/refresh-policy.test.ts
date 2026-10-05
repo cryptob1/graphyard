@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { baseRefreshNeeded, pendingBaseRefresh, queueSequencingReason } from '../src/merge-queue.js';
+import { baseRefreshNeeded, pendingBaseRefresh } from '../src/merge-queue.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { refusalAction } from '../src/model/next-action.js';
 import { checkStates, prSteps } from '../src/model/pr-steps.js';
@@ -44,7 +44,7 @@ function work(key: string, head: string, overrides: Partial<Observation> = {}): 
 /** The evaluation the engine stores after every observation. */
 function evaluated(item: Work, all: Work[]): Work {
   const result = evaluate(item, all, now, ciAppIds);
-  return { ...item, stage: result.stage, gates: result.gates, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory };
+  return { ...item, stage: result.stage, gates: result.gates };
 }
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)!;
 
@@ -59,7 +59,6 @@ test('unit:refresh-only-head-and-conflicts — main moving under three candidate
   [ready, clean, conflicting] = all.map(item => evaluated(item, all));
   all = [ready, clean, conflicting];
   assert.deepEqual([ready.stage, clean.stage, conflicting.stage], ['merge', 'review', 'review']);
-  assert.equal(ready.queue, null, 'no candidate is placed in a Graphyard merge queue');
   const snapshot = (item: Work) => ({ candidate: { ...item.candidate! }, gates: item.gates.map(entry => [entry.name, entry.passed]), evidence: item.evidence.map(entry => entry.id), stage: item.stage });
   const before = { ready: snapshot(ready), clean: snapshot(clean) };
 
@@ -92,8 +91,6 @@ test('unit:refresh-only-head-and-conflicts — main moving under three candidate
 test('unit:queue-validation-is-merge-substate — a candidate running CI on its own head is at test, reaches merge once CI passes, and returns to test when it fails; no queue validation substate remains', () => {
   const running = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }), []);
   assert.equal(running.stage, 'test', 'stage comes from the candidate\'s own gates');
-  assert.equal(running.queue, null);
-  assert.equal(gate(running, 'merge').reasons.some(reason => queueSequencingReason(reason)), false, 'no queue sequencing reason is ever given');
   assert.equal(prSteps(running, now.getTime()).current, 'test');
   assert.deepEqual(checkStates(running, ciAppIds), [{ name: 'test', state: 'running' }]);
 
