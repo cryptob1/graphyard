@@ -7,7 +7,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { canonicalThreadIds, fileFollowUpThreads, listedThreadLimit, readUnresolvedThreads, threadSection, unaccountedThreads } from '../src/review-threads.js';
+import { canonicalThreadIds, resolveFollowUpThreads, listedThreadLimit, readUnresolvedThreads, threadSection, unaccountedThreads } from '../src/review-threads.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewHistory, reviewPrompt, saveReviewerProfile, summarizeReviews, updateReviewLedger } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -380,10 +380,10 @@ test('unit:approval-accounts-for-comment-ids — canonical mapping maps only lis
     if (query.includes('comments(first:100')) return JSON.stringify({ data: { node: { comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } });
     return gh.run(command, args);
   };
-  const filing = await fileFollowUpThreads({ repository: 'owner/project', key: 'GY-64', workId: 'work-64', pr: 64, sha: H, reviewId: 77, reviewer, listed: ['PRRT_node00001', 'PRRT_rest00001', 'PRRT_plain0001'],
-    aliases: { PRRT_rest00001: ['PRRC_comment03', '4129874810'] } }, run, async () => ({ key: 'GY-900' }), new Date('2026-09-23T12:30:00Z'));
+  const filing = await resolveFollowUpThreads({ repository: 'owner/project', key: 'GY-64', pr: 64, sha: H, reviewId: 77, reviewer, listed: ['PRRT_node00001', 'PRRT_rest00001', 'PRRT_plain0001'],
+    aliases: { PRRT_rest00001: ['PRRC_comment03', '4129874810'] } }, run, new Date('2026-09-23T12:30:00Z'));
   assert.deepEqual(filing.named, ['PRRT_rest00001', 'PRRC_unlisted01']);
-  assert.deepEqual(filing.threads.map(thread => thread.id), ['PRRT_rest00001'], 'the canonical thread is filed');
+  assert.deepEqual(filing.threads.map(thread => thread.id), ['PRRT_rest00001'], 'the canonical thread is answered');
   assert.ok(filing.refused.some(entry => entry.startsWith('PRRC_unlisted01: not listed to the reviewer at launch')));
   assert.deepEqual(replies, ['PRRT_rest00001']);
   assert.deepEqual(gh.resolved, ['PRRT_rest00001'], 'the follow-up thread is resolved under its canonical ID');
