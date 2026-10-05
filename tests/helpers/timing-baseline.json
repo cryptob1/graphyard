@@ -282,6 +282,7 @@
     "tests/db-test-shutdown-order.test.ts": 590,
     "tests/decision-lifecycle.test.ts": 8784,
     "tests/decision-refusal-scope.test.ts": 982,
+    "tests/decision-supersede.test.ts": 2400,
     "tests/delegation.test.ts": 4635,
     "tests/delivery-causes.test.ts": 220,
     "tests/delivery-docs.test.ts": 396,

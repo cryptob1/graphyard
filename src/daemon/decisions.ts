@@ -6,7 +6,7 @@ import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
-import { decisionBindingMax } from '../model/approval.js';
+import { decisionBindingMax, unsettledApproval, type DecisionSituation } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
@@ -380,9 +380,10 @@ export function attestDecisions(work: Work, all: Work[], now: number): RoutineDe
  * The withdrawal reason for a merge or attest decision standing on `work` that can never apply to
  * the one now needed, or null when it is this decision (or another action). Only a merge decision
  * and an attest decision (GY-521) name what they bind: one for an earlier head is taken back if it
- * is still requested; one for another proof on this head is judged first, one attest at a time.
+ * is still requested; one for another proof on this head is judged first, one attest at a time. An approval of any action the item moved past, or one stalled, is settled by the withdrawal, never adopted (GY-1297).
  */
-export function overtakenDecision(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any }, canWithdraw: boolean): string | null {
+export function overtakenDecision(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any; action?: string; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null }, canWithdraw: boolean, now = Date.now()): string | null {
+  const settle = unsettledApproval(work, { action: decision.action, ...standing }, now); if (settle) { if (!canWithdraw) throw new Error(`${settle}, and this loop has no way to settle it: graphyard master decisions ${work.key}`); return settle; }
   if (decision.action !== 'merge' && decision.action !== 'attest') return null;
   const head = standing.input?.sha === work.candidate?.sha && standing.input?.baseSha === work.candidate?.baseSha && standing.input?.policyRevision === work.policyRevision;
   if (head && (decision.action === 'merge' || standing.input?.proof === decision.input?.proof)) return null;
@@ -750,7 +751,7 @@ export type ApprovalStep =
   | { step: 'rerequest'; detail: string }
   | { step: 'relaunch'; detail: string }
   | { step: 'exhausted'; detail: string };
-export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null } | null | undefined,
+export function approvalStep(watch: ApprovalWatch, decision: { id?: string; action?: string; state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null } | null | undefined,
   sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
   // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
@@ -762,6 +763,7 @@ export function approvalStep(watch: ApprovalWatch, decision: { state: string; ou
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
   if (decision.state !== 'requested' && decision.state !== 'approved')
     return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  if (decision.state === 'approved') { const settle = unsettledApproval({ key: watch.work }, { id: watch.decision, action: watch.action, ...decision }, now); if (settle) return { step: 'rerequest', detail: settle }; } // GY-1297: the server settles it, this cycle
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
