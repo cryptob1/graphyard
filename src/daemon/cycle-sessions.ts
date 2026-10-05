@@ -38,20 +38,27 @@ export async function closeStep(cycle: Cycle) {
       // profiles held for hours). Such a pane is closed unless a live lease of its principal is worked
       // in the worktree it stands in, and only once it has stood so for launchAppearanceMs, so a launch
       // whose runtime has not yet started is never taken for one that exited.
-      const exited = !agent.agent && agent.agent_status === 'unknown';
+      // A holder Herdr reports 'unknown' or with no status, runtime present or not, is not running
+      // either (GY-1166): it holds the name at its bound until closed, so it takes the same
+      // launchAppearanceMs confirmation. Only a status Herdr reports as working is never closed here.
+      const unrecognized = !['idle', 'done', 'blocked', 'working'].includes(agent.agent_status ?? '');
+      const seenKey = `exited:${profile.name}:${agent.pane_id}`;
+      // A sighting stands only while the pane keeps reading so: one that reports a status since starts the wait over.
+      if (!unrecognized) delete state.actions[seenKey];
+      if (agent.agent_status === 'working') continue;
+      const exited = !agent.agent && unrecognized;
       if (exited && agent.cwd ? workedHere(profile.principal, agent.cwd) : owns(profile.principal)) continue;
-      if (!exited && !['idle', 'done', 'blocked'].includes(agent.agent_status ?? '')) continue;
       const key = closeKey(profile, agent.pane_id);
       if (state.actions[key]?.state === 'done') continue;
-      if (exited) {
-        const seenKey = `exited:${profile.name}:${agent.pane_id}`, seen = state.actions[seenKey];
-        if (!seen) { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `${agent.name}'s runtime has left pane ${agent.pane_id}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
+      if (unrecognized) {
+        const seen = state.actions[seenKey];
+        if (!seen) { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `${exited ? `${agent.name}'s runtime has left pane ${agent.pane_id}` : `${agent.name} in pane ${agent.pane_id} reports ${agent.agent_status ?? 'no status'}`}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
         if (now() - Date.parse(seen.at) < launchAppearanceMs) continue;
       }
       await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `Closing ${agent.name}: no active Graphyard assignment`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
       try {
         await effects.closeSession(agent.pane_id);
-        performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${agent.name} (${exited ? 'its runtime exited' : agent.agent_status ?? 'unknown'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${agent.name} (${exited ? 'its runtime exited' : agent.agent_status ?? 'no status'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${agent.name}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       }

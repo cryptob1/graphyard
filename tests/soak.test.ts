@@ -13,6 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { GitHub, processJob } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
+import { GitHubChargeLedger } from '../src/github-charges.js';
 import { createHash } from 'node:crypto';
 import { Refusal, isClosed, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -24,6 +25,8 @@ import { dispatchFailureBlockAfter } from '../src/daemon/dispatch-failures.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
+import type { HostMemoryReading } from '../src/master-resources.js';
 import { staleObservationReason } from '../src/daemon/cycle-delivery.js';
 import { adoptHeadlessRuns } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
@@ -171,6 +174,8 @@ const basePlan = {
   // one: a pull request merged by hand a minute after it is opened lands before producer runs
   // could fail, and the spent request would never be.
   spentProducer: 1, lostRuns: 2,
+  // GY-612: the host's memory dip; only the main day carries one (memoryDay below).
+  memoryDip: null as { from: number; until: number } | null,
   // GY-756: a pull request somebody merges on GitHub by hand, a minute after it is opened, inside
   // a direct-merge window the operator opened for exactly that minute. The item is the last
   // released one, whose pull request stands unheard while it waits its turn: the minute it lands,
@@ -651,7 +656,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked'; syncs: number; syncedFor?: string; refusedSince?: number;
     scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; settlementToken?: string }
-  const sessions: Session[] = [], lost: string[] = [];
+  const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-888: every session launch the day makes carries the coordinator confinement through the
   // launcher's own logic, and the same launch where the mount namespace cannot be built is
   // refused with the reason named — never started unconfined. The fixture worktree each launch
@@ -696,6 +701,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // An earlier day's item still open in the shared store goes the simulated way: the day's own
     // five are what the real launch path and its ledger are judged on.
     if (!items.some(item => item.id === work.id)) return simulatedDispatch(work, profile, free, snapshot);
+    launches.push(clock.now());
     // The real dispatch path (GY-417): the launcher claims through the engine, launches through
     // the world's Herdr, and falls forward to the profile's next account when the preferred
     // account's runtime never comes up. The day's fourth dispatch finds the account healthy, so
@@ -724,6 +730,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
   } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
   async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
+    launches.push(clock.now());
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
@@ -1116,6 +1123,19 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     try { return await engine.requestEnqueue(principals.coordinator, match[1], data, key); }
     catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
   };
+  // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
+  const dip = plan.memoryDip;
+  const GiB = 2 ** 30;
+  let memoryReads = 0;
+  const memoryReading = (): HostMemoryReading => {
+    const elapsed = clock.now() - dayStart;
+    if (!dip || elapsed < dip.from || elapsed >= dip.until) return { totalBytes: 62 * GiB, availableBytes: 20 * GiB };
+    // The same two consumers with their ranking reversed every other read: the host's `ps` ranking
+    // moves while a dip stands, and a fault keyed on that wording would churn instances (GY-612).
+    const consumers = [{ command: 'node', processes: 3, rssBytes: 6 * GiB }, { command: 'claude', processes: 2, rssBytes: 5 * GiB }];
+    if (memoryReads++ % 2 === 1) consumers.reverse();
+    return { totalBytes: 62 * GiB, availableBytes: 2 * GiB, consumers };
+  };
   // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
   const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
   const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
@@ -1188,6 +1208,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    hostMemory: async () => memoryReading(),
     // A rework refused on a stale observation wakes the item's observation job (GY-710) through
     // the server's own resync endpoint, as `master run` wires it.
     wakeObservation: work => { wakes.push({ key: work.key, at: clock.now() }); return api(principals.coordinator, 'POST', `work/${work.id}/resync`, {}); },
@@ -1542,6 +1563,38 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   } });
   await immutableClient.attachCache(immutableCache);
   const immutable = { cycles: 0, peakLive: 0, peakRows: 0, peakBytes: 0, overBound: [] as string[], refetched: [] as string[], reads: 0 };
+  // GY-1052: the shared per-cycle reads on the real adapter, taken through `observe()` by every open item
+  // each cycle: one base-ref read per cycle, protection every five minutes, each observation binding the
+  // current tip. `send` answers from the simulated GitHub, so an `observe()` that stopped sharing its reads
+  // fails the per-cycle counts. And the cross-replica charge ledger over the day: two replicas charge what
+  // they ask of GitHub, the second restarting every three hours under a new instance id; the table must stay
+  // within two hours of rows, the restarted ids' included, and the fleet count must be the other replica's hour.
+  const cycleClient = new GitHub({ repository, base: 'main', appId: 1234, installationId: 2, privateKey: 'not-used' });
+  cycleClient.clock = () => clock.now();
+  const cycleSends = { ref: 0, protection: 0, other: 0 };
+  Object.assign(cycleClient, { token: 'fixture-token', expires: Number.MAX_SAFE_INTEGER, send: async (path: string) => {
+    const [route, query = ''] = path.replace(`/repos/${repository}`, '').split('?'), page = new URLSearchParams(query).get('page');
+    if (route === '/git/ref/heads/main') { cycleSends.ref++; return { ref: 'refs/heads/main', object: { type: 'commit', sha: github.tip } }; }
+    if (route === '/branches/main/protection' || route === '/rules/branches/main') { cycleSends.protection++; return route.endsWith('/protection') ? { required_status_checks: { strict: false, checks: [] } } : []; }
+    cycleSends.other++;
+    let match = /^\/pulls\/(\d+)(\/reviews|\/files)?$/.exec(route);
+    if (match) {
+      const pr = github.prs.get(Number(match[1]))!;
+      if (match[2] === '/reviews') return [];
+      if (match[2] === '/files') return page !== '1' ? [] : pr.files.map(filename => ({ filename, status: 'modified', sha: sha(`blob-${pr.head}-${filename}`), additions: 1, deletions: 1, patch: '@@' }));
+      return { number: pr.number, state: 'open', draft: false, merged: false, mergeable: true, merge_commit_sha: null, merged_at: null, created_at: new Date(pr.createdAt).toISOString(), user: { login: pr.author, id: 7 },
+        head: { sha: pr.head, ref: pr.branch, repo: { full_name: repository } }, base: { sha: github.tip, ref: 'main', repo: { full_name: repository } } };
+    }
+    if (/^\/commits\/[a-f0-9]{40}\/check-runs$/.test(route)) return { check_runs: [] };
+    match = /^\/compare\/([a-f0-9]{40})\.\.\.([a-f0-9]{40})$/.exec(route);
+    if (match) return { status: match[1] === match[2] ? 'identical' : 'ahead', ahead_by: 1, total_commits: 1, commits: [{ sha: match[2] }], files: [] };
+    return { sha: route.slice(-40), parents: [], commit: { tree: { sha: sha(`tree-${route.slice(-40)}`) }, message: 'change' } };
+  } });
+  const shared = { cycles: 0, observations: 0, refReads: 0, protectionReads: 0, overRead: [] as string[], stale: [] as string[], failed: [] as string[] };
+  const chargeInstallation = `soak-charges-${days}`, chargeOptions = { syncMs: 2 ** 31 - 1 };
+  const replicaA = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-a' });
+  let replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-b-0' }), chargeRestarts = 0;
+  const charged = { b: [] as number[], cycles: 0, peakRows: 0, instancesSeen: new Set<string>(), overBound: [] as string[], miscounted: [] as string[], boundaryCycles: 0 };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
   // simulated minute, and a launch the cycle handed over settles before the position advances.
@@ -1721,6 +1774,33 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
             if ((immutableSends.get(`/repos/${repository}${path}`) ?? 0) > 1) immutable.refetched.push(`+${Math.round(elapsed / minute)} min ${pr.key} ${path.split('/').slice(-2).join('/')}`);
           }
         }
+        const openPrs = [...github.prs.values()].filter(pr => pr.open && !pr.merged), sent = { ...cycleSends }, fleet = await store.list();
+        for (const pr of openPrs) {
+          const work = fleet.find(entry => entry.submission?.pr === pr.number);
+          if (!work) continue;
+          const observed = await cycleClient.observe(work, fleet).catch(error => { shared.failed.push(`+${Math.round(elapsed / minute)} min ${pr.key}: ${error instanceof Error ? error.message : error}`); return null; });
+          if (observed && observed.baseTip !== github.tip) shared.stale.push(`+${Math.round(elapsed / minute)} min ${observed.baseTip?.slice(0, 8)} for ${github.tip.slice(0, 8)}`);
+        }
+        if (openPrs.length) { shared.cycles++; shared.observations += openPrs.length; }
+        if (cycleSends.ref - sent.ref > 1) shared.overRead.push(`+${Math.round(elapsed / minute)} min ${cycleSends.ref - sent.ref} ref reads`);
+        shared.refReads = cycleSends.ref; shared.protectionReads = cycleSends.protection;
+        if (elapsed > 0 && elapsed % (3 * hour) < minute) { await replicaB.close(); replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: `replica-b-${++chargeRestarts}` }); }
+        for (let index = 0; index < cycleSends.ref - sent.ref; index++) replicaA.charge(now, 'GET /git/ref/heads/:branch', 'git');
+        for (let index = 0; index < cycleSends.protection - sent.protection; index++) replicaA.charge(now, 'GET /branches/:branch/protection', 'branches');
+        for (const _pr of openPrs) { replicaB.charge(now, 'GET /pulls/:n', 'pulls'); charged.b.push(now); }
+        await replicaB.sync(now); await replicaA.sync(now); charged.cycles++;
+        // The window is computed here from the calendar, not with the ledger's minute floor (GY-1052): the
+        // hour back from now, truncated to the start of its UTC minute, that boundary minute's charges included.
+        const windowStart = new Date(now - hour); windowStart.setUTCSeconds(0, 0);
+        const expected = charged.b.filter(at => at >= windowStart.getTime()).length;
+        if (charged.b.some(at => at >= windowStart.getTime() && at < now - hour)) charged.boundaryCycles++;
+        const counted = replicaA.fleet(now).rows.reduce((total, row) => total + row.requests, 0);
+        if (counted !== expected) charged.miscounted.push(`+${Math.round(elapsed / minute)} min counted ${counted} of ${expected}`);
+        const ledger = (await store.pool.query('SELECT count(*)::int AS n, min(minute) AS oldest, array_agg(DISTINCT instance) AS instances FROM github_charges WHERE installation=$1', [chargeInstallation])).rows[0];
+        charged.peakRows = Math.max(charged.peakRows, ledger.n);
+        for (const instance of ledger.instances ?? []) charged.instancesSeen.add(instance);
+        // Three endpoints, at most one row per endpoint, instance and minute, and every row within two hours.
+        if (ledger.n > 3 * (2 * 60 + 2) || ledger.oldest && now - ledger.oldest.getTime() > 2 * hour) charged.overBound.push(`+${Math.round(elapsed / minute)} min ${ledger.n} rows from ${ledger.oldest?.toISOString()}`);
         await immutableCache.flush(); await immutableCache.prune(); immutable.cycles++;
         const held = (await store.pool.query(`SELECT count(*)::int AS n, coalesce(sum(pg_column_size(value)), 0)::int AS bytes FROM github_cache WHERE kind = 'immutable' AND key LIKE $1`, [`${immutableScope}:%`])).rows[0];
         immutable.peakRows = Math.max(immutable.peakRows, held.n); immutable.peakBytes = Math.max(immutable.peakBytes, held.bytes);
@@ -1931,10 +2011,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
+  return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
-    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
+    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, staleMerges, restartLog };
 }
 
@@ -1964,12 +2044,18 @@ function assertLaunchesConfined(day: { confined: { role: string; key: string; di
     `the same launches are refused where the confinement cannot be built: ${day.unconfinedRefusals[0] ?? 'none'}`);
 }
 
+// GY-612: the main day starts below the host's memory floor — the way the day that item records
+// began — and recovers a quarter hour in, so the only launch it holds back is the first item's.
+// The deferred morning moves the candidates' landing heads, so the blind window moves with it to
+// where they are open under it; every other day keeps the undipped choreography.
+const memoryDay = { memoryDip: { from: 0, until: 15 * minute }, blind: { from: 150 * minute, to: 152 * minute }, notice: 150 * minute };
+
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, github806: true, plan: { blockedMerge: blockedMergeItem } });
+  const day = await simulateDay({ hours, github806: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay } });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
+  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
@@ -2002,6 +2088,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(immutable.overBound, [], 'immutable rows and bytes stayed within their bound every cycle');
   assert.deepEqual(immutable.refetched, [], 'no path still read was asked of GitHub twice');
   if (process.env.SOAK_TRACE) console.error(`immutable: ${JSON.stringify(immutable)}`);
+  // GY-1052: the shared per-cycle reads ran on the real adapter every cycle: one base-ref read per cycle
+  // however many items observed it, protection at most every five minutes, and every read bound the current tip.
+  const { shared, charges } = day;
+  assert.ok(shared.cycles > 0 && shared.observations > shared.cycles, `the shared reads ran every cycle: ${JSON.stringify(shared)}`);
+  assert.deepEqual(shared.overRead, [], 'no cycle read the base ref more than once');
+  assert.ok(shared.refReads <= shared.cycles, `one ref read per cycle at most (${shared.refReads} over ${shared.cycles})`);
+  assert.ok(shared.protectionReads <= 2 * (Math.ceil(hours * hour / (5 * minute)) + 1), `protection and branch rules every five minutes at most (${shared.protectionReads})`);
+  assert.deepEqual(shared.failed, [], 'every observation through the real adapter completed');
+  assert.deepEqual(shared.stale, [], 'every observation bound the base branch as it was');
+  // GY-1052: the charge ledger stayed within two hours of rows across restarts, and the fleet count was the other replica's hour.
+  assert.ok(charges.cycles > 0 && charges.b > 0 && charges.restarts > 0, `the charge ledger ran all day across restarts: ${JSON.stringify({ ...charges, instancesSeen: charges.instancesSeen.length })}`);
+  assert.deepEqual(charges.overBound, [], 'github_charges stayed within its two-hour bound every cycle');
+  assert.deepEqual(charges.miscounted, [], 'every sync counted the other replica\'s last hour exactly');
+  assert.ok(charges.boundaryCycles > 0, `the boundary minute held charges older than an hour that the count included (${charges.boundaryCycles} cycles)`);
   assert.ok(lanesSeen.size > 0, 'the day\'s items were evaluated into risk lanes, each checked against its change and its status row every cycle');
   // GY-883: the low-lane item's rework round ran with no approver session. Its first application
   // was refused, recorded failed and requested again on the retry interval; the second applied it,
@@ -2152,13 +2252,24 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.ancestorCompares > 0, `candidates bound behind the tip were compared from their merge base (${github.ancestorCompares} ancestor compares)`);
   assert.ok(github.blindCompares > 0, `the fault window answered compares without a usable merge base (${github.blindCompares} blind compares)`);
   assert.ok(landingRefusals.length >= 2, `the fault window caught every candidate bound behind it (${JSON.stringify(landingRefusals)})`);
-  assert.ok(landingRefusals.every(entry => entry.elapsed >= basePlan.blind.from - minute && entry.elapsed <= basePlan.blind.to + minute),
+  assert.ok(landingRefusals.every(entry => entry.elapsed >= memoryDay.blind.from - minute && entry.elapsed <= memoryDay.blind.to + minute),
     `a false landing refusal stood only inside the fault window: ${JSON.stringify(landingRefusals)}`);
   for (const entry of landingRefusals) {
     const landed = github.merges.find(merge => merge.key === entry.key);
     assert.ok(landed && github.contains(landed.sha, entry.sha), `${entry.key} landed the exact head its false refusal named (${entry.sha.slice(0, 12)})`);
   }
   assert.ok(sessions.every(session => session.syncs === 0), 'no worker was woken to sync what was never wrong');
+  // GY-612: the host's memory dipped below its floor mid-morning and recovered. No worker launched
+  // while it stood, the crossing is recorded once each way, and one memory-pressure fault stands
+  // for the whole dip even though the consumers' ranking moved between cycles.
+  const memory = state.actions[memoryActionKey];
+  assert.ok(memory, 'the memory crossing was recorded');
+  assert.equal(memory.attempts, 2, 'one record on the way down, one on the way back up');
+  assert.match(memory.detail, /^Launches resumed: /, 'the last crossing recorded is the resumption');
+  const during = (at: number) => { const elapsed = at - dayStart; return elapsed >= memoryDay.memoryDip.from && elapsed < memoryDay.memoryDip.until; };
+  assert.deepEqual(launches.filter(during).map(at => new Date(at).toISOString()), [], 'no worker launched while the host was below its floor');
+  assert.ok(launches.some(at => at - dayStart >= memoryDay.memoryDip.until), 'launching resumed once memory recovered');
+  assert.equal(state.faults.instances.filter(instance => instance.kind === 'memory-pressure').length, 1, 'one memory-pressure fault stands for the whole dip');
   // GY-887: the landability verdict rode every observation as the one `graphyard/landable` run per
   // head, written only when the verdict changed, at a bounded request cost, and every head GitHub
   // merged carried its success.
