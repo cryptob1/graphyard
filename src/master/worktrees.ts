@@ -647,6 +647,19 @@ async function moveAside(path: string, names: string[], aside: string) {
 }
 
 /**
+ * Where a reused path's unrecorded untracked files go before the clean (GY-1274): under the
+ * repository's common git dir, `graphyard-preserved/<worktree>/<time>`, outside every working tree
+ * and outliving the worktree, whose own git dir `worktree remove` and `prune` delete. This is the
+ * strict runner, not the quiet probe: a git dir that cannot be resolved rejects the release before
+ * anything changes, rather than resolving the directory inside the tree the clean then empties.
+ */
+async function keptDirectory(run: ChildRun, holderPath: string, at: string): Promise<string> {
+  const common = String(await run('git', ['-C', holderPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+  if (!common) throw new Error(`Cannot keep the untracked files of ${holderPath}: git named no common git dir for it`);
+  return resolve(common, 'graphyard-preserved', basename(holderPath), at.replace(/[:.]/g, '-'));
+}
+
+/**
  * Free the item's branch for a new attempt's worktree (GY-860 AC-1). When a session worktree
  * directly under `.graphyard/worktrees` still holds it — checked out, or stopped inside a rebase
  * naming it, a merge, a squash merge, a cherry-pick or a revert — the holder's state is
@@ -661,7 +674,7 @@ async function moveAside(path: string, names: string[], aside: string) {
  * is forced back onto the branch, with what a failed preparation left there cleaned away, and
  * returned with `reused`, so the caller skips creation instead of failing on the existing path.
  * That clean deletes only what the record holds in full (GY-1215): an untracked file it merely
- * names is first moved into `graphyard-preserved/` in that worktree's git dir, which it names.
+ * names is first moved into `graphyard-preserved/` in the common git dir, which it names.
  * `register` receives the captured state (or null when nothing holds the branch) before anything
  * is changed, so a refused registration leaves the holder as it was and nothing is released
  * unrecorded. Probes answer empty on a refusal; a step that changes the holder and fails rejects.
@@ -701,12 +714,12 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     const recorded = op === 'rebase' || op === 'merge' || op === 'cherry-pick' ? op : null;
     const tracked = `${op && !recorded ? `-- stopped inside git ${op} --\n` : ''}${await trackedDiff(run, holderPath)}`;
     const reused = resolve(holderPath) === resolve(targetPath), at = new Date().toISOString();
-    // Where a reused path's unrecorded untracked files go before the clean: outside the working tree, inside its own git dir.
-    const aside = resolve(holderPath, (await git(holderPath, 'rev-parse', '--git-path', 'graphyard-preserved')).trim(), at.replace(/[:.]/g, '-'));
+    const aside = reused ? await keptDirectory(run, holderPath, at) : '';
     const keptNote = `\n-- untracked files not recorded in full are kept under ${aside} --`;
     const heading = `${tracked ? '\n' : ''}-- untracked files --\n`;
-    // The heading and the note count toward the limit, so no file recorded in full is cut by the truncation below.
-    const untracked = await untrackedContents(git, holderPath, diffLimit - tracked.length - heading.length - (reused ? keptNote.length : 0));
+    // The heading, the note and the truncation suffix count toward the limit (GY-1274): named-only
+    // sections may still push the record past it, and the cut then lands before any file recorded in full ends.
+    const untracked = await untrackedContents(git, holderPath, diffLimit - tracked.length - heading.length - truncated.length - (reused ? keptNote.length : 0));
     const note = reused && untracked.unrecorded.length ? keptNote : '', room = diffLimit - note.length;
     const fullDiff = tracked + (untracked.text && tracked.length < diffLimit ? `${heading}${untracked.text}` : '');
     const head = (await git(holderPath, 'rev-parse', 'HEAD')).trim(), refs = (await git(holderPath, 'show-ref')).trim().slice(0, 20_000);
