@@ -8,6 +8,7 @@ import { message } from './state.js';
 import { emptyMasterSession, type MasterSessionState } from './state.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
+import { outputReadDue } from './cycle-sessions.js';
 import type { Cycle } from './cycle.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
@@ -72,9 +73,12 @@ export async function masterSessionStep(cycle: Cycle) {
         // exact detection — before the budget is judged: an exhausted session is not a budget one,
         // even though both are stopped. A session Herdr still reports working counts only when its
         // runtime prints its retry marker beside the notice (GY-973, GY-1223): an OpenCode master
-        // retrying a spent account forever would otherwise spin until its budget rotation.
+        // retrying a spent account forever would otherwise spin until its budget rotation. A working
+        // master's screen is read at most once per workingOutputReadMs, as worker panes are; its
+        // times are kept on the session record, so a relaunched master is read at once.
         const stopped = stoppedStates.includes(handle.agent_status ?? '');
-        const output = effects.sessionOutput ? await Promise.resolve(effects.sessionOutput(handle)).catch(() => null) : null;
+        const due = outputReadDue(master, herdr.agents, handle, stopped, clock);
+        const output = due && effects.sessionOutput ? await Promise.resolve(effects.sessionOutput(handle)).catch(() => null) : null;
         const signal = output ? (stopped ? detectExhaustion(output, clock) : detectRetryingExhaustion(output, clock)) : null;
         if (signal) {
           rotated = await rotateMasterSession(cycle, 'exhausted', `${master.agentName} ${stopped ? 'stopped' : 'is retrying'} on its provider's limit notice: ${signal.reason}${signal.resetsAt ? `; resets ${signal.resetsAt}` : ''}`, signal.resetsAt);

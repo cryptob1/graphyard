@@ -485,7 +485,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * wake is lost too, so the loop must ask again in the next observation window.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; containment?: { failUntil: number; slowUntil: number }; followUps?: { parents: number[]; refused: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -1315,21 +1315,36 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     wakes: [] as { at: number; cycle: number; text: string; clock?: number }[],
     ended: [] as string[], refusedEnds: [] as string[], killed: null as string | null,
     maxLive: 0, cycleOf: 0, rotations: [] as { at: number; detail: string; before: number; after: number }[],
+    // GY-1223: the master pane the day set working, every read of a master screen, the accounts each launch took and the loop held.
+    worked: null as string | null, bannerAt: null as number | null, reads: [] as { at: number; pane: string; status: string }[],
+    accounts: [] as string[], holds: [] as { account: string; resetsAt: string | null; at: number }[],
   };
   if (options.master) {
     const plan = options.master, name = config.masterAgentName!;
     // Timed on the day's schedule position, as every other fault of the day is.
     const refusing = () => elapsed >= plan.refuseRelease.from && elapsed < plan.refuseRelease.to;
+    // The registry launches the master role on its first account the loop does not hold (GY-1223).
     effects.masterSession = { launch: async () => {
       const pane = herdr.open(name, 'idle'), session = `master-registry-${master.launches.length + 1}`;
+      const account = ['claude-master', 'claude-master-b'].find(candidate => !accountHeld(candidate)) ?? 'claude-master';
       master.launches.push({ at: elapsed, pane, session });
-      return { agentName: name, pane, runtime: 'claude', account: 'claude-master', session };
+      master.accounts.push(account);
+      return { agentName: name, pane, runtime: 'claude', account, session };
     } };
     effects.endRegistrySession = async session => {
       if (refusing()) { master.refusedEnds.push(session); throw new Error('the agent registry is unreachable: timeout'); }
       master.ended.push(session);
     };
-    effects.holdAccount = async () => {};
+    effects.holdAccount = async (account, observed) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); master.holds.push({ account, resetsAt: observed.resetsAt, at: elapsed }); };
+    // GY-1223: the loop reads the master's screen every cycle it supervises it. A working master
+    // shows its own prose — which names the limit banner with no retry marker — until the day
+    // prints its runtime's retry banner; any other pane reads as no screen, as on the other days.
+    const workerOutput = effects.sessionOutput;
+    effects.sessionOutput = agent => {
+      if (agent.name !== name) return workerOutput ? workerOutput(agent) : null;
+      master.reads.push({ at: elapsed, pane: agent.pane_id ?? '', status: agent.agent_status ?? '' });
+      return screens.get(agent.pane_id ?? '') ?? '● Waiting for the next wake\n';
+    };
     const workerPrompt = effects.promptSession!;
     // A wake leaves the master idle, as a session that read master status and found nothing to do.
     effects.promptSession = async (agent, text) => agent.name === name ? void master.wakes.push({ at: elapsed, cycle: master.cycleOf, text }) : workerPrompt(agent, text);
@@ -1864,6 +1879,18 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const live = herdr.byName(config.masterAgentName!);
         if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
       }
+      // GY-1223: from `working.from` the live master works (Herdr reports it working) and its screen
+      // carries a bare limit notice it wrote itself; at `working.retryAt` its runtime prints the
+      // retry banner on its spent account and keeps retrying, still working, until the loop acts.
+      const working = options.master?.working;
+      if (working && !master.worked && elapsed >= working.from) {
+        const live = herdr.byName(config.masterAgentName!);
+        if (live?.pane_id) {
+          herdr.status(live.pane_id, 'working'); master.worked = live.pane_id;
+          screens.set(live.pane_id, `● Reading docs/master-agent-sessions.md\n\nWeekly/Monthly Limit Exhausted. Your limit will reset at ${hostWallClock(retryReset)} is the banner a working session must carry its retry marker beside\n● Working as ${config.masterAgentName}…\n`);
+        }
+      }
+      if (working && master.worked && master.bannerAt === null && elapsed >= working.retryAt) { screens.set(master.worked, retryBanner); master.bannerAt = elapsed; }
       if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       master.cycleOf = cycles;
@@ -2739,11 +2766,13 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   assert.ok(seconds < 200, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, woken only by material events with the heartbeat as the fallback, and rotated once off a spent account it keeps retrying on while working', { timeout: 600_000 }, async () => {
   // GY-898: the master-session step runs every cycle of the real loop here. The session dies at
   // minute 70, inside a window (minutes 60–100) in which the registry refuses every end, so the
   // rotation's release is owed and retried; the relaunched session passes its 90-minute budget.
-  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30 };
+  // GY-1223: the third session works from minute 200 with a bare limit notice of its own on screen,
+  // and from minute 230 its runtime retries on its spent account, still working.
+  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30, working: { from: 200 * minute, retryAt: 230 * minute } };
   const day = await simulateDay({ hours: 6, master: plan });
   const { final, violations, failures, state, master, cycles } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered with the master session in the loop');
@@ -2768,6 +2797,24 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   assert.ok(budget && budget.after >= relaunched + plan.sessionMinutes * minute && budget.before <= relaunched + (plan.sessionMinutes + 32) * minute,
     `the relaunched session rotated at its ${plan.sessionMinutes}-minute budget: ${JSON.stringify({ relaunched, rotations: master.rotations })}`);
   assert.equal(master.launches.length, master.rotations.length + 1, 'every rotation relaunched exactly one session');
+  // GY-1223: a working master is read and judged every cycle by the real loop; its own prose about
+  // the banner never rotates it, the retry banner rotates it exactly once, its account is held to
+  // the banner's reset, and no later launch takes that account before the reset.
+  const worked = master.launches.findIndex(launch => launch.pane === master.worked);
+  assert.ok(worked >= 0 && master.bannerAt !== null, `the scenario set a live master working and printed its retry banner: ${JSON.stringify({ worked: master.worked, bannerAt: master.bannerAt })}`);
+  const workingReads = master.reads.filter(read => read.pane === master.worked && read.status === 'working');
+  assert.ok(workingReads.some(read => read.at < master.bannerAt!), `the loop read the working master's own prose before the banner: ${workingReads.length} reads`);
+  assert.ok(workingReads.length <= new Set(workingReads.map(read => read.at)).size, 'a working master is read at most once a cycle');
+  const exhausted = master.rotations.filter(rotation => /\(exhausted\)/.test(rotation.detail));
+  assert.equal(exhausted.length, 1, `exactly one rotation off the spent account: ${JSON.stringify(master.rotations)}`);
+  assert.ok(exhausted[0].at >= master.bannerAt! && exhausted[0].at <= master.bannerAt! + 2 * minute, `the retrying master rotated within two cycles of its banner: ${JSON.stringify({ bannerAt: master.bannerAt, rotation: exhausted[0] })}`);
+  assert.match(exhausted[0].detail, /is retrying on its provider's limit notice/);
+  assert.ok(!master.rotations.some(rotation => rotation.at >= plan.working.from && rotation.at < master.bannerAt!), 'the working master\'s own prose about the banner rotated nothing');
+  assert.deepEqual(master.holds.map(hold => hold.account), [master.accounts[worked]], 'the spent account, and only it, was held');
+  assert.equal(master.holds[0].resetsAt, day.retryReset.toISOString(), 'the hold lasts until the banner\'s reset');
+  assert.ok(master.accounts.slice(worked + 1).length > 0 && master.accounts.slice(worked + 1).every(account => account !== master.accounts[worked]),
+    `no later master launched into the held account before its reset: ${JSON.stringify(master.accounts)}`);
+  assert.equal(master.launches[worked + 1]?.at !== undefined && master.launches[worked + 1].at <= exhausted[0].at + 3 * minute, true, 'the role relaunched within three cycles of the rotation');
   // AC-2: at most one wake per cycle, every event wake names its causes, heartbeats are spaced by
   // the configured window, and no cycle repeats the previous cycle's causes (a wake storm).
   const perCycle = new Map<number, number>();

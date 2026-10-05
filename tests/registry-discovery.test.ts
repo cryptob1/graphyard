@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { boundDaemonState, daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { workingOutputReadMs } from '../src/daemon/cycle-sessions.js';
 import type { MasterConfig, HerdrAgent } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
@@ -402,7 +403,10 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
 
     // OpenCode on a spent account: Herdr says working, the screen tail says retrying.
     harness.outputs[cfg.masterAgentName!] = `  ■⬝⬝⬝⬝⬝⬝⬝  Weekly/Monthly Limit Exhausted. Your limit will reset at 2030-01-03 08:27:35 [retrying in 4s attempt #5]${' '.repeat(96)}esc interrupt • OpenCode 1.18.32  \n`;
+    // A working master's screen is read at most once per workingOutputReadMs, as worker panes are.
     await cycle(40_000);
+    assert.equal(harness.launches.length, 1, 'the banner waits for the next due read of a working master');
+    await cycle(20_000 + workingOutputReadMs);
     assert.equal(state.master.lastEnd?.cause, 'exhausted');
     assert.match(state.master.lastEnd!.detail, /is retrying on its provider's limit notice: Weekly\/Monthly Limit Exhausted/);
     assert.deepEqual(harness.closed, ['pane-1'], 'the spinning pane is closed');
