@@ -7,13 +7,13 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { save, Store } from '../src/store.js';
 import { refusedReworkLiftsMergeRefusal } from '../src/server/decision-refusal.js';
-import { standingMergeRefusal } from '../src/merge-queue.js';
+import { repeatedMergeRefusal } from '../src/daemon/decisions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // 2026-10-01: after the guarded merge refused a candidate (a `rework` merge refusal, GY-831), the
 // loop asked for a rework decision and the independent approver refused it — nothing in the
-// candidate needed changing — but nothing lifted the merge refusal, so the entry never re-entered
-// the queue (GY-973 waited 14 hours; approval→merge p90 reached 59 hours).
+// candidate needed changing — but nothing lifted the merge refusal, so the candidate was never merged
+// (GY-973 waited 14 hours; approval→merge p90 reached 59 hours).
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const rework = { action: 'rework', input: { binding: `${head}:merge-refused` }, situation: { sha: head, baseSha: base } };
 const item = (refusal: Partial<NonNullable<Work['mergeRefusal']>> | null) => ({
@@ -21,12 +21,12 @@ const item = (refusal: Partial<NonNullable<Work['mergeRefusal']>> | null) => ({
   mergeRefusal: refusal && { sha: head, baseSha: base, policyRevision: 3, reason: 'awaits authorization', since: '2026-10-01T07:32:36Z', at: '2026-10-01T07:32:36Z', by: 'graphyard', action: 'rework', ...refusal },
 }) as unknown as Work;
 
-test('unit:refused-rework-lifts-merge-refusal — a refused rework decision lifts the rework merge refusal of exactly that candidate, so the entry may re-enter the queue', () => {
+test('unit:refused-rework-lifts-merge-refusal — a refused rework decision lifts the rework merge refusal of exactly that candidate, so its merge may proceed', () => {
   const stuck = item({});
-  assert.ok(standingMergeRefusal(stuck), 'the rework merge refusal stands before the decision');
+  assert.ok(repeatedMergeRefusal(stuck), 'the rework merge refusal stands before the decision');
   assert.equal(refusedReworkLiftsMergeRefusal(stuck, rework), true);
   stuck.mergeRefusal = null;
-  assert.equal(standingMergeRefusal(stuck), null, 'with the refusal lifted the entry may re-enter');
+  assert.equal(repeatedMergeRefusal(stuck), null, 'with the refusal lifted the candidate may merge');
   // Only a refused rework lifts it, only a rework refusal is lifted, and only for the candidate it named.
   assert.equal(refusedReworkLiftsMergeRefusal(item({}), { ...rework, action: 'resolve' }), false, 'another action lifts nothing');
   assert.equal(refusedReworkLiftsMergeRefusal(item({}), { action: 'rework', input: { binding: `${head}:ci:test` } }), false, 'a rework on another ground judges nothing of the merge refusal');
@@ -98,7 +98,7 @@ async function held(title: string, refusal: { baseSha?: string; policyRevision?:
 test('integration:refused-rework-lift-transactional — refusing the rework requested on the merge-refused ground clears the stored refusal and records merge.refusal.lifted in the same transaction as decision.declined; a request for another base or a refusal under an older policy lifts nothing', async () => {
   const lifted = await held('lifted', {}, { sha: head, baseSha: base });
   assert.equal(lifted.work.mergeRefusal, null, 'the stored item no longer carries the refusal');
-  assert.equal(standingMergeRefusal(lifted.work), null);
+  assert.equal(repeatedMergeRefusal(lifted.work), null);
   assert.deepEqual(lifted.events.map(row => row.kind), ['decision.declined', 'merge.refusal.lifted']);
   const [declined, lift] = lifted.events;
   // xmin is the id of the transaction that inserted the row: one id, one transaction.
@@ -111,7 +111,7 @@ test('integration:refused-rework-lift-transactional — refusing the rework requ
   // Requested for head H on base B1; the candidate since came back to H on B2 and was refused again.
   const otherBase = await held('other-base', { baseSha: 'f'.repeat(40) }, { sha: head, baseSha: base });
   assert.ok(otherBase.work.mergeRefusal, 'the newer refusal on another base still stands');
-  assert.ok(standingMergeRefusal(otherBase.work));
+  assert.ok(repeatedMergeRefusal(otherBase.work));
   assert.deepEqual(otherBase.events.map(row => row.kind), ['decision.declined']);
 
   // A refusal from an older policy revision held nothing: no lift is recorded for it.
@@ -124,7 +124,7 @@ test('manual:review-followups-triaged GY-1146.1 (refusal-lift-binds-policy-revis
   const revised = await held('revised-after-request', {}, { sha: head, baseSha: base }, true);
   assert.ok(revised.work.mergeRefusal, 'the refusal recorded under the newer revision still stands');
   assert.equal(revised.work.mergeRefusal!.policyRevision, revised.work.policyRevision);
-  assert.ok(standingMergeRefusal(revised.work));
+  assert.ok(repeatedMergeRefusal(revised.work));
   assert.deepEqual(revised.events.map(row => row.kind), ['decision.declined']);
   // The same refusal with no revision since the request is lifted, as GY-1073 established.
   const current = await held('current-revision', {}, { sha: head, baseSha: base });

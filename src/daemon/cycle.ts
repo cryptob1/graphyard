@@ -115,7 +115,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // What the launches handed over by earlier cycles recorded since the last one is this cycle's to report.
   const performed: DaemonAction[] = launcher.drain();
   // The merge queue batches by this loop's configuration; a failed publication is retried next cycle.
-  if (effects.publishMergeBatchSize) await timings.step('merge queue', () => effects.publishMergeBatchSize!().catch(() => undefined));
+  if (effects.publishMergeSettings) await timings.step('merge settings', () => effects.publishMergeSettings!().catch(() => undefined));
   // A launch still queued or running is not interrupted: its `started` entry is its own to settle,
   // so it is kept out of the reconciliation a restart's leftovers get.
   const inFlight = launcher.keys().flatMap(key => state.actions[key]?.state === 'started' ? [[key, state.actions[key]] as const] : []);

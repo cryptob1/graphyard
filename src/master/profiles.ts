@@ -6,8 +6,6 @@ import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { pathScopeContains } from '../model/scope.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
-import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
-import type { Work } from '../model/work.js';
 import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { doctorSettingsSchema } from './doctor-settings.js';
@@ -335,27 +333,22 @@ export const masterConfigSchema = z.object({
   // The agent environments profiles may launch on, discovered or created by master environments.
   environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
-  // The merge queue. `parallelTips` (GY-498) is how many queue positions are validated at once:
-  // speculative tips for the first that many positions all published and CI'd concurrently, each
-  // entry on its own tip, an entry whose tip and every tip ahead of it passed merging as soon as it
-  // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
-  // batches validation; it only widens the observation band and the delivery/ejection wake depth.
-  // The loop publishes these to the control plane on every change.
-  // `optimistic` and `optimisticExclude` are retired (GY-1233): GitHub delivery merges every
-  // passing candidate, so optimistic merge and its main guard are gone. Both keys are still
-  // accepted so an existing master.json loads, but parsing drops them (GY-1264): nothing reads
-  // them, and every writer re-parses before it saves, so the next master init or profile change
-  // removes them from the file instead of leaving inert settings an operator would trust.
-  // `ciConcurrency` (GY-501): the repository's concurrent Actions job limit as the operator declares
-  // it (GitHub does not report it); master protection compares it with parallelTips × jobs per run.
+  // `mergeQueue.rerunFailedChecks` (GY-516): reruns of a failed required check per sha; the loop
+  // publishes it to the control plane on every change.
+  // Retired keys are still accepted so an existing master.json loads, but parsing drops them
+  // (GY-1264): nothing reads them, and every writer re-parses before it saves, so the next master
+  // init or profile change removes them from the file instead of leaving inert settings an operator
+  // would trust. `optimistic` and `optimisticExclude` retired with optimistic merge (GY-1233);
+  // `batchSize`, `parallelTips` and `ciConcurrency` with Graphyard's own merge queue (GY-1236):
+  // GitHub merges each passing candidate, so no speculative tip is batched or validated in parallel.
   mergeQueue: z.object({
-    batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(),
+    batchSize: z.unknown().optional(),
     optimistic: z.unknown().optional(),
-    parallelTips: z.number().int().min(1).max(maxParallelTips).optional(),
-    ciConcurrency: z.number().int().min(1).max(10000).optional(),
+    parallelTips: z.unknown().optional(),
+    ciConcurrency: z.unknown().optional(),
     rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
     optimisticExclude: z.unknown().optional(),
-  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, ...kept }) => kept).optional(),
+  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, batchSize: _batchSize, parallelTips: _parallelTips, ciConcurrency: _ciConcurrency, ...kept }) => kept).optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's operator-agent identity and the approver identity for its two-party decisions. Paths only, never tokens.
@@ -386,34 +379,6 @@ export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(
   return { ...config, producers: config.producers.map(profile => profile.concurrency === undefined ? { ...profile, concurrency: automaticProducerConcurrency } : profile) };
 }
 export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'>>(config: T): T => withProducerDefaults(withReviewerDefaults(config));
-/** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
-export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
-  return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
-}
-/** The parallel-tip window under this master config: `mergeQueue.parallelTips`, or the default of 4 (GY-498). */
-export function mergeParallelTips(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
-  return config?.mergeQueue?.parallelTips ?? defaultParallelTips;
-}
-
-/** The recommended parallel-tips value onboarding writes into a new installation's master.json (GY-501): the product default every installation gets, never this repository's own config. */
-export const onboardingParallelTips = defaultParallelTips;
-
-/**
- * The merge queue as the control plane runs it (GY-330, GY-498): the batch size and parallel-tip
- * window the server reports it evaluates by (`/api/status` mergeQueue), else this master's own
- * configuration before the server reports one; the in-flight tips; throughput Insights.
- */
-export function mergeQueueWindow(master: MasterConfig, coordinator?: any) {
-  const running = coordinator?.mergeQueue;
-  return { batchSize: Number.isSafeInteger(running?.batchSize) ? running.batchSize as number : mergeBatchSize(master),
-    parallelTips: Number.isSafeInteger(running?.parallelTips) ? running.parallelTips as number : mergeParallelTips(master) };
-}
-export function mergeQueueStatus(master: MasterConfig, snapshot: { work: Work[]; now: string }, coordinator?: any) {
-  const window = mergeQueueWindow(master, coordinator);
-  return { ...window, configured: { batchSize: mergeBatchSize(master), parallelTips: mergeParallelTips(master) },
-    ...mergeQueueInsights(snapshot.work, Date.parse(snapshot.now), window.parallelTips, Array.isArray(coordinator?.ciAppIds) ? coordinator.ciAppIds : null) };
-}
-
 /** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
 export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;

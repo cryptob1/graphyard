@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
+import type { BaseRefresh } from '../src/merge-queue.js';
 import { carriedApproval, carryRefusal, currentCarry, decideCarry, evidenceBindsCandidate, refreshedCarriedApproval, type CarryInput, type Evidence, type Observation, type TipMerge, type Work } from '../src/model.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
 import { diagnose } from '../src/coordination.js';
@@ -19,6 +19,8 @@ function input(overrides: Partial<CarryInput> = {}): CarryInput {
     app: 'graphyard', ...overrides };
 }
 const states = (carry: ReturnType<typeof decideCarry>) => [carry.approval.carried, ...carry.evidence.map(entry => entry.carried)];
+/** The base refresh that brought approved head H on B onto base P as Graphyard-authored TIP, with its carry decision. */
+const refreshed = (carry: ReturnType<typeof decideCarry>): BaseRefresh => ({ from: { sha: H, baseSha: B }, base: P, baseTree: sha40('7e'), policyRevision: 1, at, head: TIP, conflict: null, merge: authored(), carry });
 
 test('unit:queue-authored-tip-carry — approval and scope-disjoint evidence carry to a Graphyard-authored two-parent tip over the approved head and a validated predecessor', () => {
   const carry = decideCarry(input());
@@ -65,10 +67,9 @@ test('unit:queue-authored-tip-carry — every refusal case requires fresh review
   assert.equal(unapproved.evidence[0].carried, true);
 });
 
-test('unit:queue-authored-tip-carry — a carried binding applies only to the exact tip and policy it was decided for, and only for the policy\'s provider', () => {
+test('unit:queue-authored-tip-carry — a carried binding applies only to the exact refreshed head and policy it was decided for, and only for the policy\'s provider', () => {
   const carry = decideCarry(input());
-  const speculation: QueueSpeculation = { ref: queueRef('GY-2'), tip: TIP, base: P, baseTree: sha40('7e'), predecessors: ['GY-1'], policyRevision: 1, publishedAt: at, merge: authored(), carry };
-  const work = { candidate: { sha: TIP, baseSha: P, pr: 2, branch: 'graphyard/gy-2-1', author: 'worker' }, policyRevision: 1, policy: { checks: ['test'], review: true }, queue: { sequence: 2, enqueuedAt: at, policyRevision: 1, speculation } } as unknown as Work;
+  const work = { candidate: { sha: TIP, baseSha: P, pr: 2, branch: 'graphyard/gy-2-1', author: 'worker' }, policyRevision: 1, policy: { checks: ['test'], review: true }, baseRefresh: refreshed(carry) } as unknown as Work;
   assert.equal(currentCarry(work), carry);
   assert.equal(carriedApproval(work)?.reviewer, 'reviewer[bot]');
   assert.equal(evidenceBindsCandidate(work, evidenceRecord('unit:queue')), true, 'the carried record binds the tip');
@@ -79,7 +80,7 @@ test('unit:queue-authored-tip-carry — a carried binding applies only to the ex
   assert.equal(currentCarry({ ...work, candidate: { ...work.candidate!, sha: sha40('e9') } }), null, 'another head is not the tip');
   assert.equal(carriedApproval({ ...work, policy: { ...work.policy, reviewProvider: 'codex' } }), null, 'a GitHub approval is not a Codex verdict');
   const agent = { ...work, policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 }] },
-    queue: { ...work.queue!, speculation: { ...speculation, carry: { ...carry, approval: { ...carry.approval, provider: 'agent', reviewerApp: 'claude-app' } } } } } as unknown as Work;
+    baseRefresh: refreshed({ ...carry, approval: { ...carry.approval, provider: 'agent', reviewerApp: 'claude-app' } as typeof carry.approval }) } as unknown as Work;
   assert.equal(carriedApproval(agent)?.reviewerApp, 'claude-app');
   assert.equal(carriedApproval({ ...agent, policy: { ...agent.policy, reviewerProfiles: [{ name: 'cursor', runtime: 'cursor', reviewerApp: 'cursor-app', timeoutSeconds: 1800 }] } } as Work), null, 'an agent approval carries only for the profile still dispatched');
 });
@@ -102,16 +103,15 @@ test('unit:queue-real-base-tip — the review launcher refuses a candidate behin
   assert.equal(diagnose(work, [work], Date.parse(at)).some(entry => entry.kind === 'base-behind'), false);
 });
 
-// ---- GY-831: a queue head whose carried approval is stale is re-reviewed or re-bound ----------
+// ---- GY-831: a refreshed head whose carried approval is stale is re-reviewed or re-bound ----------
 
-/** A queued tip over reviewed head H whose carried approval names review 800 of an earlier pull request's commit. */
+/** A base refresh of reviewed head H whose carried approval names review 800 of an earlier pull request's commit. */
 const OLD = sha40('0d1');
 function staleCarry(reviews: Observation['reviews'] = []) {
   const carry = decideCarry(input());
   carry.approval = { carried: true, provider: 'github', reviewer: 'graphyard-reviewer[bot]', sha: OLD, reviewId: 800, originalSha: OLD, reason: 'carried from the earlier pull request' };
-  const speculation: QueueSpeculation = { ref: queueRef('GY-470'), tip: TIP, base: P, baseTree: sha40('7e'), predecessors: ['GY-1'], policyRevision: 1, publishedAt: at, merge: authored(), reviewedHead: H, carry };
   const candidate = { sha: TIP, baseSha: P, pr: 371, branch: 'graphyard/gy-470-2', author: 'worker' };
-  return { key: 'GY-470', candidate, policyRevision: 1, policy: { checks: ['test'], review: true }, queue: { sequence: 1, enqueuedAt: at, policyRevision: 1, speculation },
+  return { key: 'GY-470', candidate, policyRevision: 1, policy: { checks: ['test'], review: true }, baseRefresh: refreshed(carry),
     observation: { candidate, reviews, checks: [], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], scopeFiles: [], at, prState: 'open', draft: false } } as unknown as Work;
 }
 

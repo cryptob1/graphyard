@@ -171,10 +171,9 @@ export function effectiveReviewCount(inputs: ProtectionInputs, current: any | nu
  * protection the repository already applies.
  *
  * The single setting it deliberately clears is `strict` ("require branches to be up to
- * date"). The merge queue supersedes it: a queued candidate is intentionally behind the base
- * branch while the entries ahead of it land on a speculative tip that already contains its
- * validated base, and Graphyard's own merge gate refuses every candidate while `strict` is
- * on. Leaving it enabled installs a branch on which no candidate can ever land.
+ * date"). A candidate that merges cleanly is reviewed, proven and merged on the base it was
+ * built on (GY-191): with `strict` on, every merge would send every other open candidate back for
+ * an update and a fresh round of checks, review and proofs.
  */
 export function protectionPayload(inputs: ProtectionInputs, current: any | null) {
   const existing: { context: string; app_id: number | null }[] = (current?.required_status_checks?.checks ?? []).map((check: any) => ({ context: String(check.context), app_id: check.app_id ?? null }));

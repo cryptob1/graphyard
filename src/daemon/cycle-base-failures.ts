@@ -120,7 +120,7 @@ export async function baseFailureStep(cycle: Cycle): Promise<Map<string, Set<str
       // one names the broken tip as the base, which the candidate may already contain.
       const observedSince = !!observation && observation.candidate.sha === block.sha && (Date.parse(observation.at) >= Date.parse(failure.cleared.at) || observation.baseTip === failure.cleared.baseSha);
       if (!observedSince) { settled = false; continue; }
-      if (item!.queue || observation!.baseTipContained !== false || !observation!.baseTip) continue;
+      if (observation!.baseTipContained !== false || !observation!.baseTip) continue;
       settled = false;
       if (!readyToRetry(previous, state.cycle)) continue;
       const reason = `Base branch ${config.baseBranch} failed the ${failure.check} test "${failure.test}" at ${short(failure.baseSha)} and on ${item!.key} head ${short(block.sha)}, and passes it again at ${short(failure.cleared.baseSha)}; a rerun reuses the merge commit the failure was built on, so the repaired base is merged into the branch`.slice(0, 2000);

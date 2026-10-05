@@ -38,7 +38,7 @@ function item(observedAt: string): Work {
 }
 function evaluated(work: Work): Work {
   const result = evaluate(work, [work], now, ciAppIds);
-  return { ...work, stage: result.stage, gates: result.gates, queue: result.queue };
+  return { ...work, stage: result.stage, gates: result.gates };
 }
 const githubState = { pullRequestId: 'PR_x', head: A, queue: false, mergeStateStatus: 'CLEAN', mode: 'none' as const, entryState: null, position: null, groupHead: null, at: now.toISOString() };
 
@@ -60,7 +60,6 @@ test('unit:guarded-merge-removed — the guarded merge is gone, master merge say
   assert.equal(work.gates.some(gate => gate.reasons.some(reason => /older than two minutes/.test(reason))), false);
   assert.equal(work.gates.find(gate => gate.name === 'acceptance'), undefined, 'no acceptance-proof gate');
   assert.equal(work.gates.some(gate => gate.name === 'github-delivery'), false, 'no delivery-mode marker gate');
-  assert.equal(work.queue, null);
   assert.ok(mergeAuthorized(work), 'every passing gate is the whole authorization');
   assert.equal(mergeQueueAction(work, githubState, null, now.getTime()).kind, 'enqueue');
 

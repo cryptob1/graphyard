@@ -359,30 +359,6 @@ test('integration:speed-ci-proofs — every unit:* and integration:* proof an it
   for (const fragment of ['### Proofs in CI', 'pull_request_target', 'cached', 'Manual proofs stay producer sessions']) assert.ok(docs.includes(fragment), `docs/github.md must say: ${fragment}`);
 });
 
-test('integration:speed-ci-proofs — a published queue tip is committed onto the pull-request branch, which is the push the trusted workflow runs on, so the proofs certify the exact tip the queue will land', async () => {
-  const adapter = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
-  adapter.controlPlaneLogin = async () => 'graphyard-owner-repo[bot]';
-  const calls: { path: string; method: string; body?: unknown }[] = [];
-  const predictedBase = sha40('c'), tip = sha40('d');
-  adapter.request = async (path, method = 'GET', body) => {
-    calls.push({ path, method, body });
-    if (path === '/pulls/10') return { number: 10, state: 'open', draft: false, head: { sha: H, ref: 'graphyard/gy-54-1', repo: { full_name: 'owner/repo' } }, base: { ref: 'main', sha: B } };
-    if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: B } };
-    if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { tree: { sha: `f${path.slice(10)}` }, author: { email: '1+graphyard-owner-repo[bot]@users.noreply.github.com' } }, parents: [{ sha: H }, { sha: predictedBase }], author: { login: 'graphyard-owner-repo[bot]', type: 'Bot' } };
-    if (path.startsWith('/compare/')) return { status: 'ahead', files: [] };
-    if (path === '/merges') return { sha: tip };
-    if (path.startsWith('/git/')) return { id: 1 };
-    throw new Error(`Unexpected request ${path}`);
-  };
-  const work = { id: 'w', key: 'GY-54', policy: { review: true, checks: ['test'] }, plannedFiles: ['src/'], submission: { pr: 10, epoch: 1 }, candidate: { sha: H, baseSha: B, pr: 10 }, policyRevision: 1, revision: 3, gates: [], violations: [], queue: { sequence: 2, enqueuedAt: new Date().toISOString(), policyRevision: 1, speculation: null } } as unknown as Work;
-  const speculation = await adapter.publishSpeculativeTip(work, { id: 'w', key: 'GY-54', position: 2, size: 2, sequence: 2, enqueuedAt: new Date().toISOString(), waitMs: 0, predecessors: ['GY-53'], predictedBase, tip: null, base: { sha: B, tree: `f${B.slice(1)}` }, binding: null, current: false, publishable: true, reasons: [] } as any);
-  assert.equal(speculation.tip, tip);
-  const merge = calls.find(call => call.path === '/merges')!;
-  assert.deepEqual(merge.body, { base: 'graphyard-merge-check/gy-54', head: predictedBase, commit_message: 'Graphyard speculative tip for GY-54 behind GY-53' }, 'the tip is built on the scratch branch');
-  assert.deepEqual(calls.filter(call => call.path === '/git/refs/heads/graphyard/gy-54-1').map(call => call.body), [{ sha: tip, force: true }], 'the tip is pushed onto the PR branch once: GitHub fires pull_request_target synchronize for it');
-  assert.equal(calls.find(call => call.path === '/git/refs/graphyard/queue/gy-54')?.method, 'PATCH');
-});
-
 // ---------------------------------------------------------------------------------------------
 // AC-4 — overlapping plannedFiles are built concurrently: dispatch is optimistic
 // ---------------------------------------------------------------------------------------------

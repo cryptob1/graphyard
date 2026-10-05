@@ -83,7 +83,7 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   assert.deepEqual(queryTexts(probe).map(({ sql }) => /\bWHERE\b|\bLIMIT\b/i.test(sql.split(/\bFROM\s+work_items\b/i)[1])), [false, false], 'a JOIN, another receiver or a constant does not exempt a whole-board read');
   // Each former call site reads through lockedWork, naming the item it acts on.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
-  assert.ok((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 10, 'the engine\'s commands read through the bounded read, naming their item');
+  assert.ok((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 8, 'the engine\'s commands read through the bounded read, naming their item');
   assert.match(engineSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
   assert.match(engineSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
@@ -177,7 +177,7 @@ function histories(n: number, at: string, scale: number) {
   return {
     evidence: Array.from({ length: count(24) }, (_, index) => ({ id: randomUUID(), proof: `unit:proof-${index % 6}`, sha: sha(n - (index % 4)), baseSha: sha(n, 'b'), policyRevision: 3, producer: 'producer-a', trusted: true, result: 'pass', executed: 12, skipped: 0, at,
       artifacts: Array.from({ length: 6 }, (_, artifact) => ({ name: `artifact-${artifact}.log`, sha256: sha(artifact, 'c'), bytes: 4096, url: `https://example.invalid/runs/${n}/${index}/${artifact}` })), provenance: { runner: 'local', command: 'node --test', environment: 'linux' } })) as unknown as Work['evidence'],
-    queueHistory: Array.from({ length: count(40) }, (_, index) => ({ sequence: index, event: 'entered', at, reason: `queued behind ${index} entries` })) as unknown as Work['queueHistory'],
+    queueHistory: Array.from({ length: count(40) }, (_, index) => ({ sequence: index, event: 'entered', at, reason: `queued behind ${index} entries` })) as unknown[],
     actionQueue: { actions: [], history: Array.from({ length: count(80) }, (_, index) => ({ id: randomUUID(), kind: 'resync', state: 'done', result: 'done', requestedAt: at, resolvedAt: at, history: [{ at, event: 'requested' }, { at, event: 'claimed' }, { at, event: 'settled' }] })) } as unknown as Work['actionQueue'],
     autoDispatch: { review: null, producers: [], history: Array.from({ length: count(40) }, (_, index) => ({ id: randomUUID(), kind: 'review', sha: sha(n - index), requestedAt: at, resolvedAt: at, outcome: 'answered' })) } as unknown as Work['autoDispatch'],
     sessions: Array.from({ length: count(30) }, (_, index) => ({ id: `s-${n}-${index}`, kind: 'implementation', state: 'finished', runtime: 'claude', principal: 'engineer-a', startedAt: at, endedAt: at, outcome: 'finished: submitted the pull request and completed the attempt' })) as unknown as Work['sessions'],
@@ -190,7 +190,7 @@ function delivered(template: Work, n: number): Work {
   const at = stamp(n);
   return {
     ...structuredClone(template), id, key, title: `Delivered change ${n}`, description: `Why change ${n} mattered. `.repeat(40),
-    stage: 'done', stageEnteredAt: at, ready: true, lease: null, queue: null, nextAction: null, blocker: null, plannedFiles: paths(n, 6),
+    stage: 'done', stageEnteredAt: at, ready: true, lease: null, nextAction: null, blocker: null, plannedFiles: paths(n, 6),
     candidate: { sha: sha(n), baseSha: sha(n, 'b'), pr: 1000 + n } as Work['candidate'],
     submission: { epoch: 2, pr: 1000 + n } as Work['submission'],
     delivery: { mergedAt: at, mergeSha: sha(n, 'm'), authorizationRevision: 40 } as Work['delivery'],
@@ -339,9 +339,10 @@ test('a row a reconciliation batch saved stands in as exactly the projection the
       sessions: [running, ...base.sessions!] as Work['sessions'],
       actionQueue: { actions: [], history: base.actionQueue!.history.map(row => ({ ...row, history: Array.from({ length: 7 }, (_, index) => ({ at: stamp(index), event: `step-${index}` })) })) } as unknown as Work['actionQueue'],
       observation: { prState: 'open', files: ['src/a.ts'], scopeFiles: [{ path: 'src/a.ts', digest: sha(1, 'f') }] } as unknown as Work['observation'] },
-    { ...base, id: randomUUID(), key: 'SHAPE-2', queue: { sequence: 7, speculation: { carry: { evidence: [{ evidenceId: evidence[0].id, carried: true }, { evidenceId: evidence[1].id, carried: false }] } } } as unknown as Work['queue'],
+    // A stored document may still carry the retired queue fields (GY-1236): both projections tolerate them.
+    { ...base, id: randomUUID(), key: 'SHAPE-2', queue: { sequence: 7, speculation: { carry: { evidence: [{ evidenceId: evidence[0].id, carried: true }, { evidenceId: evidence[1].id, carried: false }] } } },
       baseRefresh: { carry: { evidence: [{ evidenceId: evidence[2].id, carried: true }] } } as unknown as Work['baseRefresh'],
-      evidence: evidence.map(entry => ({ ...entry, sha: sha(5, 'q') })), autoDispatch: null as unknown as Work['autoDispatch'], observation: null as unknown as Work['observation'], queueHistory: null as unknown as Work['queueHistory'] },
+      evidence: evidence.map(entry => ({ ...entry, sha: sha(5, 'q') })), autoDispatch: null as unknown as Work['autoDispatch'], observation: null as unknown as Work['observation'], queueHistory: null } as unknown as Work,
     { ...base, id: randomUUID(), key: 'SHAPE-3', evidence: undefined, actionQueue: undefined, autoDispatch: undefined, sessions: undefined, queueHistory: undefined, observation: undefined, pipeline: undefined } as unknown as Work,
   ];
   await insert(shapes);

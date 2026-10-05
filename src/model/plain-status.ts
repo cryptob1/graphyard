@@ -26,7 +26,6 @@ const trigger: Record<string, string> = {
   'lease-loss': 'the builder lost contact', 'evidence-policy-conflict': 'a proof breaks the rules',
   'security-concern': 'a security concern', 'requirement-weakening': 'a request to weaken the requirements',
 };
-const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
 
 /**
  * One gate reason in plain words. `stuck` marks reasons that will not clear on their own:
@@ -58,9 +57,6 @@ export function plainReason(reason: string, gate: string): { text: string; stuck
     [/^Pull request is not mergeable against the current base$/, () => 'The pull request conflicts with the main branch', true],
     [/^Unresolved (\S+) escalation requires operator resolution: (.*)$/s, m => `Needs a decision about ${trigger[m[1]] ?? 'a problem'}: ${m[2]}`, true],
     [/^Slice lead (\S+) ruled \S+ under rule \S+; delivery is blocked until the authorized recovery: (.*)$/s, m => `Held by team lead ${m[1]}: ${m[2]}`, true],
-    [/^Merge queue position (\d+) of (\d+): (\S+) is ahead$/, m => `${ordinal(Number(m[1]))} in line to merge, after ${m[3]}`],
-    [/^Speculative tip on predicted base/, () => 'Being re-tested together with the changes merging ahead of it'],
-    [/^Waiting for (\S+) to publish its speculative tip$/, m => `Waiting for ${m[1]} to be re-tested first`],
   ];
   for (const [pattern, text, stuck] of rules) { const m = reason.match(pattern); if (m) return { text: text(m), stuck: !!stuck, known: true }; }
   // The ready gate's only free-text reason is a recorded blocker: a person wrote it, so it is shown as written.
@@ -175,7 +171,7 @@ export function plainStatus(work: Work, now: number): PlainStatus {
       const proof = first[0]?.raw.match(/^AC-\d+: (\S+) needs/)?.[1];
       return make(total ? `Waiting for proof that it works — ${total - open} of ${total} proofs passed` : 'Waiting for proof that it works', 'waiting', proof ? `The proof ${proof} has not passed yet` : next);
     }
-    case 'merge': return make(first.some(r => r.raw.startsWith('Merge queue position')) ? `Queued to merge — ${next!.replace(/ to merge,/, ',')}` : `Ready to merge${on} — ${next ? lowerFirst(next) : 'waiting its turn'}`, 'waiting', next);
+    case 'merge': return make(`Ready to merge${on} — ${next ? lowerFirst(next) : 'waiting its turn'}`, 'waiting', next);
     default: return make(`Ready to merge${on}`, 'waiting', null);
   }
 }

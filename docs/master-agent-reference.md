@@ -15,15 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** A contaminated branch restores onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`).
-
-#### A contaminated branch
-
-Listed under `branches.contaminated`; run `master repair GY-42`.
-
-| `master repair GY-N REASON` | Restore a contaminated branch to its reviewed head |
-
-A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
+**A branch must never keep another item's unlanded commits.** The build gate refuses their files as out-of-scope regressions; a worker restores its own branch: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-N`, then `graphyard restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 

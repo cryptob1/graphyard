@@ -3,13 +3,10 @@ import type { Observation, Work } from './model.js';
 /**
  * A candidate whose head does not contain the base branch tip by ancestry (GY-145).
  *
- * The merge queue carries a published tip onto a base branch tip whose tree is the tip's bound
- * base tree without writing anything (GY-100). GitHub compares commits, not trees: when the head
- * does not have that exact commit in its history, GitHub recomputes the merge base on every
- * merge attempt and dismisses the approval with "The merge-base changed after approval.", so the
- * merge never succeeds. A queue head in that state is republished onto the tip — a merge commit,
- * as a base refresh makes — and the merge broker refuses it until it is, naming the missing
- * ancestry. A tip whose head does contain the base tip keeps the carry as before.
+ * GitHub compares commits, not trees: when the head does not have the base branch tip in its
+ * history, GitHub recomputes the merge base on every merge attempt and may dismiss the approval
+ * with "The merge-base changed after approval.". Master status names the missing ancestry beside
+ * such a dismissal, so nobody reads it as a reviewer withdrawing a verdict.
  */
 export interface MissingAncestry { head: string; baseTip: string; boundBase: string }
 
@@ -32,7 +29,7 @@ export function missingBaseAncestry(work: Pick<Work, 'candidate' | 'observation'
 
 /** Why the head cannot merge as it stands, naming the three commits. */
 export function missingAncestryReason(missing: MissingAncestry): string {
-  return `head ${short(missing.head)} does not contain base branch tip ${short(missing.baseTip)} by ancestry (bound base ${short(missing.boundBase)} is not that commit, whatever its tree); GitHub compares commits, not trees, and would dismiss the approval as a merge-base change on the merge attempt, so the tip is republished onto ${short(missing.baseTip)} first`;
+  return `head ${short(missing.head)} does not contain base branch tip ${short(missing.baseTip)} by ancestry (bound base ${short(missing.boundBase)} is not that commit, whatever its tree); GitHub compares commits, not trees, and dismisses the approval as a merge-base change on the merge attempt`;
 }
 
 /** An approval of the current head that GitHub dismissed with its merge-base reason, as the observation recorded it. */
@@ -55,6 +52,6 @@ export function mergeBaseDismissalAttention(key: string, dismissal: MergeBaseDis
   const tip = dismissal.baseTip ? short(dismissal.baseTip) : 'unknown';
   return `${key}: GitHub dismissed ${dismissal.reviewer}'s approval of ${short(dismissal.sha)}${dismissal.reviewId !== null ? ` (review #${dismissal.reviewId})` : ''} at ${dismissal.at ?? 'an unrecorded time'} for a merge-base change${dismissal.commit ? ` attributed to commit ${short(dismissal.commit)}` : ''}; bound base ${short(dismissal.boundBase)}, base branch tip ${tip}. `
     + (dismissal.ancestry
-      ? `The ${missingAncestryReason(dismissal.ancestry)}; the approval is not re-posted before a merge attempt meanwhile`
-      : `The head contains ${tip}, so the approval is restored and re-posted through the reviewer App before the merge`);
+      ? `The ${missingAncestryReason(dismissal.ancestry)}; a fresh review of the head is requested`
+      : `The head contains ${tip}, so the approval is restored as the binding one`);
 }

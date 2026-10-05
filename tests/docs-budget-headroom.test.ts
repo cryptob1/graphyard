@@ -1,10 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { batchStep, runMergeBatches, tipVerdict } from '../src/merge-queue.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, fileDocsTrim, type ReportedAttention } from '../src/daemon/faults.js';
-import { attributeDocsOverflow, docsBudgetProof, docsHeadroom, docsOverflowReason, docsTrimTitle, docsWordBudgetOf, documentationDrift, documentationPolicySchema, parseRepositoryConfig, type DocsWordCount, type TipDocs } from '../src/model/documentation.js';
+import { docsBudgetProof, docsHeadroom, docsTrimTitle, docsWordBudgetOf, documentationDrift, documentationPolicySchema, parseRepositoryConfig, type DocsWordCount } from '../src/model/documentation.js';
 import type { Work } from '../src/model.js';
 import { writeDocumentationConfig } from '../src/repository-setup.js';
 import { spawnSync } from 'node:child_process';
@@ -14,7 +13,7 @@ import { dirname, join } from 'node:path';
 
 // GY-574: main sat at exactly its 12,000-word docs budget, so two queued items that each added a few
 // words overflowed it together on a merge-queue tip and ejected the queue head. Headroom is now kept
-// (attention plus one trim item), and an overflow is attributed to the entry that crossed the budget.
+// (attention plus one trim item).
 // The budget is each project's own configuration (graphyard.json documentation.wordBudget), never a
 // Graphyard rule: a project that configures none is not counted at all.
 
@@ -88,37 +87,6 @@ test('unit:docs-headroom-kept — at 11,700 of 12,000 words master status raises
   assert.equal(docsHeadroom(pages(11_639), budget).saturated, false);
 });
 
-/** Three entries each adding 10 words to a page of its own, on a base at the budget minus 15. */
-const base = pages(budget.total - 15);
-const holding = (keys: string[]): DocsWordCount => ({ ...base, ...Object.fromEntries(keys.map(key => [`docs/${key}.md`, 10])) });
-const total = (count: DocsWordCount) => Object.values(count).reduce((sum, words) => sum + words, 0);
-
-test('unit:docs-budget-overflow-attributed — three entries adding 10 words each on a base at the budget minus 15: entry 2 is ejected naming the words over and the pages that grew, and entry 1 merges', async () => {
-  const keys = ['GY-1', 'GY-2', 'GY-3'];
-  // The attribution: the first entry at which the running total exceeds the budget.
-  const overflow = attributeDocsOverflow(base, keys.map((key, index) => ({ key, count: holding(keys.slice(0, index + 1)) })), budget)!;
-  assert.deepEqual({ member: overflow.member, total: overflow.total, over: overflow.over, grew: overflow.grew }, { member: 'GY-2', total: 12_005, over: 5, grew: [{ page: 'docs/GY-2.md', from: 0, to: 10 }] });
-  assert.equal(attributeDocsOverflow(base, [{ key: 'GY-1', count: holding(['GY-1']) }, { key: 'GY-2', count: undefined }], budget), null, 'a missing count attributes nothing');
-
-  // The batch plan: a tip failing only the docs budget ejects the attributed entry, not the head, without bisecting.
-  const failsDocs = (landed: string[], prefix: string[]) => total(holding([...landed, ...prefix])) > budget.total ? { result: 'fail' as const, check: docsBudgetProof } : { result: 'pass' as const };
-  const step = batchStep(keys, prefix => prefix.length === 3 ? failsDocs([], prefix) : undefined, { result: 'pass' }, { base, count: holding, budget });
-  assert.equal(step.kind, 'eject');
-  assert.equal((step as { member: string }).member, 'GY-2');
-  assert.match((step as { reason: string }).reason, /unit:docs-word-budget failed: its docs change takes the budgeted documentation \(docs\/, README\.md\) to 12005 words, 5 over the 12000-word budget; pages that grew: docs\/GY-2\.md \(0 → 10\)/);
-  const run = runMergeBatches(keys, 4, failsDocs, holding, budget);
-  assert.deepEqual(run.ejected.map(entry => entry.member), ['GY-2', 'GY-3'], 'entry 2 crossed the budget; entry 3 still overflows on entry 1 alone and is attributed on its own tip');
-  assert.match(run.ejected[0].reason!, /5 over the 12000-word budget; pages that grew: docs\/GY-2\.md/);
-  assert.deepEqual(run.merged, ['GY-1'], 'entry 1 merges');
-  assert.deepEqual(run.runs, [['GY-1', 'GY-2', 'GY-3'], ['GY-1', 'GY-3'], ['GY-1']], 'no bisection run is spent on the attributed overflow');
-  // Without the counts the same failure is bisected as before, and the head is never the one ejected either way.
-  assert.deepEqual(runMergeBatches(keys, 4, failsDocs).ejected.map(entry => entry.member), ['GY-2', 'GY-3']);
-
-  // The live queue's own ejection of the attributed entry (evaluate placing and ejecting tips) is gone:
-  // since GY-1235 evaluation places nothing in the queue and GitHub merges.
-
-});
-
 /** A Git checkout whose main commit holds `files`, for counting the base branch as the loop does. */
 async function checkout(files: Record<string, string>) {
   const root = await temporaryDirectory('docs-budget');
@@ -152,13 +120,6 @@ test('unit:docs-budget-per-project — a project with no wordBudget is never che
     assert.deepEqual(filed, [], 'no trim item is filed');
     assert.equal(state.actions[docsTrimActionKey], undefined);
   }
-  // No budget on the tip: an over-large docs set is an ordinary failure, bisected as before, never attributed.
-  const unbudgetedTip = { sha: 'a'.repeat(40), base: {}, pages: { 'README.md': 100_000 }, onlyFailure: true } as unknown as TipDocs;
-  assert.deepEqual(tipVerdict({ policy: { checks: ['test'] }, candidate: { sha: 'a'.repeat(40) }, queue: { speculation: { tip: 'a'.repeat(40) } },
-    observation: { candidate: { sha: 'a'.repeat(40) }, checks: [{ name: 'test', result: 'failure', appId: 1 }], docsBudget: unbudgetedTip } } as unknown as Work), { result: 'fail', check: 'test' });
-  assert.deepEqual(batchStep(['GY-1', 'GY-2'], prefix => prefix.length === 2 ? { result: 'fail', check: docsBudgetProof } : undefined, { result: 'pass' }, { base: {}, count: () => ({ 'README.md': 100_000 }), budget: undefined }),
-    { kind: 'test', combination: ['GY-1'] }, 'without a configured budget nothing is attributed; the batch is bisected');
-
   // A project with its own budget: its own numbers, over its own paths (narrowed within its documentation paths).
   const budgeted = await checkout({
     'graphyard.json': JSON.stringify({ documentation: { paths: ['guide/', 'README.md', 'AGENTS.md'], changelog: null, wordBudget: { total: 100, perPage: 60, paths: ['guide/', 'README.md'] } } }),
@@ -176,8 +137,4 @@ test('unit:docs-budget-per-project — a project with no wordBudget is never che
   await fileDocsTrim(emptyDaemonState(config()), { persist: async () => {}, fileFaultClass: async input => { filed.push(input); return { key: 'GY-901', title: input.title, stage: 'backlog' } as unknown as Work; } }, [], status.docs, () => Date.now(), []);
   assert.equal(filed.length, 1, 'the trim item is filed against the project\'s own budget');
   assert.match(filed[0].criteria[0].text, /^The budgeted documentation \(guide\/, README\.md\) totals at most 95 words \(at least 5% under the 100-word budget\)/);
-  // The same project's overflow on a tip is attributed against its own total.
-  const overflow = attributeDocsOverflow(counted.pages, [{ key: 'GY-1', count: { ...counted.pages, 'guide/new.md': 5 } }], counted.budget)!;
-  assert.deepEqual({ member: overflow.member, over: overflow.over }, { member: 'GY-1', over: 3 });
-  assert.match(docsOverflowReason(overflow), /takes the budgeted documentation \(guide\/, README\.md\) to 103 words, 3 over the 100-word budget; pages that grew: guide\/new\.md \(0 → 5\)/);
 });

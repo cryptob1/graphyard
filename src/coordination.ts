@@ -1,4 +1,4 @@
-import { bootstrapObligations, currentEvidence, describeQueueBinding, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
+import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 import { namedPaths } from './model/scope.js';
 import { behindBaseHold } from './model/behind-base.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
@@ -192,7 +192,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   else if (refreshing) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${refreshing.baseTip.slice(0, 12)}; it stays bound to ${refreshing.boundBase.slice(0, 12)} while the control plane brings it onto the new tip`,
     'Nothing to run: the reconciliation job merges the base into this branch and decides what the review and each proof carry. No sync, no rework round, and no review or proof round is requested for the move.');
   // Behind but mergeable is not a wait: review and proofs are requested for the head as it stands
-  // and the merge queue integrates it with the base before merging (GY-191). Only a head that does
+  // and GitHub integrates it with the base when it merges (GY-191). Only a head that does
   // not merge cleanly is withheld, and that one needs a sync.
   else if (work.submission && behindBaseHold(work)) add('base-behind', `Candidate ${work.candidate?.sha.slice(0, 12)} does not contain the base branch tip ${work.observation?.baseTip?.slice(0, 12) ?? ''} and GitHub does not report it mergeable`,
     `No review is requested for it until it merges cleanly: the loop requests a sync rework for ${work.key}, or run graphyard sync ${work.key} and push.`);
@@ -203,17 +203,6 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
     for (const entry of [{ what: 'Approval', carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason }, ...refreshCarry.evidence.map(entry => ({ what: `Proof ${entry.proof}`, carried: entry.carried, reason: entry.reason }))]) {
       if (entry.carried) add('base-refresh-carried', `${entry.what} carried onto refreshed head ${head}: ${entry.reason}`, 'No fresh review or proof round is required for it.');
       else add('base-refresh-required', `${entry.what} is required afresh for refreshed head ${head}: ${entry.reason}`, entry.what === 'Approval' ? `Request an independent review of ${head}.` : `Produce trusted evidence for ${head}.`);
-    }
-  }
-  // Per queued item: which bindings were carried across the Graphyard-authored tip or a
-  // tree-identical base advance, and which must be produced afresh, each with its reason.
-  const binding = describeQueueBinding(work, all, new Date(now));
-  if (binding) {
-    const tip = binding.tip.slice(0, 12);
-    if (binding.base.carriedTo) add('queue-base-carried', `Bound base ${binding.base.sha.slice(0, 12)} carried to tree-identical base branch tip ${binding.base.carriedTo.sha.slice(0, 12)} (tree ${binding.base.tree.slice(0, 12)})`, 'Nothing is republished; the published tip lands its tested tree.');
-    for (const entry of [{ what: 'Approval', ...binding.approval }, ...binding.evidence.map(entry => ({ what: `Proof ${entry.proof}`, ...entry }))]) {
-      if (entry.state === 'carried') add('queue-binding-carried', `${entry.what} carried to tip ${tip}: ${entry.reason}`, 'No fresh review or proof round is required for it.');
-      else if (entry.state === 'required') add('queue-binding-required', `${entry.what} is required afresh for tip ${tip}: ${entry.reason}`, entry.what === 'Approval' ? `Request an independent review of ${tip}.` : `Produce trusted evidence for ${tip}.`);
     }
   }
   for (const violation of work.violations) add('violation', violation, 'An operator must investigate; do not bypass the gate.');

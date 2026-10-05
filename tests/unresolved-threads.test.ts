@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { GitHub, CHECK_NAME } from '../src/github.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { agentOwner, buildMasterStatus } from '../src/master.js';
-import { nameUnresolvedThreads, queueRef } from '../src/merge-queue.js';
+import { nameUnresolvedThreads } from '../src/merge-queue.js';
 import { unansweredRefusal, uncitedRefusals } from '../src/model/approval.js';
 import { botThreadReworkRounds, decisionReasonMax, fitDecisionReason, observedFrom, reworkDecisionReason, reworkGroundsMin, routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
 
@@ -53,7 +53,7 @@ function repository(options: { conversationResolution: boolean; threads: Thread[
   return { github, queries };
 }
 
-/** A candidate that has passed every gate but the last: approved, green, proven, and at the head of the queue with its tip published. */
+/** A candidate that has passed every gate but the last: approved, green and proven. */
 function candidate(observation: Observation | null): Work {
   const at = observation?.at ?? new Date().toISOString();
   const work = {
@@ -65,8 +65,7 @@ function candidate(observation: Observation | null): Work {
     candidate: { sha: head, baseSha: base, pr: 133, branch: 'graphyard/gy-130-2', author: 'worker' },
     submission: { epoch: 2, pr: 133 }, reworkRequested: false, scenarioRequirements: [],
     evidence: [{ id: 'e-1', proof: 'integration:consent', sha: head, baseSha: base, policyRevision: 1, producer: 'ci-runner', trusted: true, result: 'pass', executed: 4, skipped: 0, at } as Evidence],
-    queue: { sequence: 1, enqueuedAt: at, policyRevision: 1, speculation: { ref: queueRef('GY-130'), tip: head, base, baseTree, predecessors: [], policyRevision: 1, publishedAt: at } },
-    queueSequence: 1, observation, blocker: null, gates: [], violations: [],
+    observation, blocker: null, gates: [], violations: [],
   } as unknown as Work;
   return work;
 }
@@ -120,7 +119,7 @@ test('integration:threads-not-merge-blockers — unresolved threads pass the mer
 function authorized(observation: Observation, now: Date): Work {
   const work = candidate(observation);
   const result = evaluate(work, [work], now, ciAppIds);
-  Object.assign(work, { stage: result.stage, gates: result.gates, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection });
+  Object.assign(work, { stage: result.stage, gates: result.gates });
   return work;
 }
 const observation = (unresolved: { author: string; path: string; line: number | null; outdated: boolean; bot?: boolean }[], now: Date, required = false): Observation => ({

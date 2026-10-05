@@ -1,6 +1,5 @@
-// Concern: candidate session status, conflict probe, merge queue and timing failure qualification for the master status report.
+// Concern: candidate session status, conflict probe and timing failure qualification for the master status report.
 import { dataDirectory } from '../install/worktree-root.js';
-import { mergeQueueStatus } from '../master/profiles.js';
 import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { agentOwner, buildMasterStatus, type MasterConfig } from '../master.js';
 import { nameOrphanSupervisors } from './status-attention.js';
@@ -42,9 +41,8 @@ export async function buildPipelineStatus(
   masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>,
   sections: ReportSections,
 ) {
-  const mergeQueue = mergeQueueStatus(master, snapshot, coordinator);
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
-  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, mergeQueue, daemonState), snapshot.work, agentOwner),
+  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now)));
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals, master);
@@ -52,5 +50,5 @@ export async function buildPipelineStatus(
   // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
   // breach attention (GY-1232); a failed read marks its section.
   const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, sections });
-  return { mergeQueue, probe, sessions, status, delivery };
+  return { probe, sessions, status, delivery };
 }

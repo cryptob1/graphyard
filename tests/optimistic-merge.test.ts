@@ -45,9 +45,9 @@ test('unit:optimistic-merge-removed — a master.json carrying mergeQueue.optimi
     await mkdir(join(root, '.graphyard'), { recursive: true });
     await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,
       repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
-      mergeQueue: { parallelTips: 4, optimistic: true, optimisticExclude: ['**/package.json', 'tests/helpers/'] } }), { mode: 0o600 });
+      mergeQueue: { rerunFailedChecks: 2, parallelTips: 4, optimistic: true, optimisticExclude: ['**/package.json', 'tests/helpers/'] } }), { mode: 0o600 });
     const master = await loadMasterConfig(root);
-    assert.equal(master.mergeQueue?.parallelTips, 4, 'the config loads with its other merge-queue settings intact');
+    assert.equal(master.mergeQueue?.rerunFailedChecks, 2, 'the config loads with its live merge-queue setting intact');
 
     const masterApi = async (path: string) => path === 'work-snapshot' ? { work: [], now: new Date().toISOString() } : { decisions: [] };
     const report = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }) as Record<string, any>;

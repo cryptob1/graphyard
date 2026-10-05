@@ -4,9 +4,9 @@ import { exactApproval, reviewerProfileFor, type ReviewProvider } from './review
 import type { Work } from './work.js';
 
 /**
- * Binding carry across a Graphyard-authored speculative tip.
+ * Binding carry across a Graphyard-authored merge of the base into a candidate (a base refresh).
  *
- * A review and every trusted proof bind to one exact commit. When the merge queue replaces an
+ * A review and every trusted proof bind to one exact commit. When the control plane replaces an
  * approved, proven head H with a tip H' that Graphyard itself produced — a two-parent merge of H
  * and the commit H' will land on, authored by the control-plane App, with no conflict resolved —
  * the two commits are provably the same reviewed content plus already-validated history. Only
@@ -65,7 +65,7 @@ export interface RequiredApproval { carried: false; reason: string; refused?: { 
 export interface CarriedProof { proof: string; carried: boolean; evidenceId?: string; producer?: string; reason: string }
 export interface QueueCarry {
   from: { sha: string; baseSha: string }; to: { sha: string; baseSha: string }; policyRevision: number; at: string;
-  /** The queue entry whose tip is the predicted base, or the base branch itself. */
+  /** What the head was brought onto: the base branch (records from before GY-1236 may name a merge-queue entry). */
   predecessor: string;
   /** Paths the predecessor changed relative to the replaced head's bound base; null when unknown. */
   changedFiles: string[] | null;
@@ -168,32 +168,28 @@ export function decideCarry(input: CarryInput): QueueCarry {
   return { ...base, approval: note(approval), evidence: evidence.map(note), ground };
 }
 
-export type CarryBearer = Pick<Work, 'candidate' | 'queue' | 'baseRefresh' | 'policyRevision' | 'mergeRefusal'>;
+export type CarryBearer = Pick<Work, 'candidate' | 'baseRefresh' | 'policyRevision' | 'mergeRefusal'>;
 /**
  * The carry decision that applies to the current candidate, under the current policy: the one
- * decided for the published merge-queue tip the candidate is, or the one decided when the control
- * plane brought the candidate onto a moved base branch. Both are Graphyard-authored merges of the
- * same reviewed head, decided by the same rule; a queued tip is the later of the two, so it wins.
+ * decided when the control plane brought the candidate onto a moved base branch.
  */
 export function currentCarry(work: CarryBearer): QueueCarry | null {
   const candidate = work.candidate;
   if (!candidate) return null;
   const applies = (carry: QueueCarry | null | undefined) => carry && carry.to.sha === candidate.sha
     && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
-  const speculation = work.queue?.speculation;
-  if (speculation?.tip === candidate.sha) { const carried = applies(speculation.carry); if (carried) return carried; }
   const refresh = work.baseRefresh;
   if (refresh?.head === candidate.sha) { const carried = applies(refresh.carry); if (carried) return carried; }
-  // A candidate the guarded merge refused leaves the queue with its tip's record (GY-831); the
-  // refusal kept that decision, approval re-required, so its carried proofs still bind the tip.
+  // A candidate the guarded merge refused kept its decision on the refusal (GY-831), approval
+  // re-required, so its carried proofs still bind it.
   const refusal = work.mergeRefusal;
   return refusal?.sha === candidate.sha && refusal.baseSha === candidate.baseSha ? applies(refusal.carry) : null;
 }
 /**
  * True when a trusted evidence record binds the current candidate: exactly, or carried across a
  * Graphyard-authored commit. The decision names the exact record it carried, which is what lets a
- * record carried more than once — across a base refresh and then across the queue's own tip —
- * still be the one the latest decision names.
+ * record carried more than once — across two base refreshes — still be the one the latest
+ * decision names.
  */
 export function evidenceBindsCandidate(work: CarryBearer, evidence: Pick<Evidence, 'id' | 'proof' | 'sha' | 'baseSha'>): boolean {
   const candidate = work.candidate;
@@ -214,8 +210,8 @@ export function carriedApproval(work: Work): CarriedApproval | null {
 /**
  * The identity behind the approval the review gate currently accepts: the exact one, or the one
  * already carried onto this candidate. A second Graphyard-authored commit over the same reviewed
- * head decides from this, so a candidate the control plane refreshed and then queued does not lose
- * its review to the queue's own tip. The identity keeps the commit it actually approved.
+ * head decides from this, so a candidate the control plane refreshed twice does not lose its
+ * review to the second refresh. The identity keeps the commit it actually approved.
  */
 export function bindingApproval(work: Work): ApprovalIdentity | null {
   const exact = exactApproval(work);
@@ -227,14 +223,10 @@ export function bindingApproval(work: Work): ApprovalIdentity | null {
 }
 /**
  * The commit the current candidate was built from, whose review the carried approval stands for
- * (GY-831): a queue tip's own reviewed head, or the head the carry decision replaced.
+ * (GY-831): the head the carry decision replaced.
  */
 export function carriedReviewedHead(work: CarryBearer): string | null {
-  const carry = currentCarry(work);
-  if (!carry) return null;
-  const speculation = work.queue?.speculation;
-  if (speculation?.carry === carry) return speculation.reviewedHead ?? speculation.merge?.from ?? carry.from.sha;
-  return carry.from.sha;
+  return currentCarry(work)?.from.sha ?? null;
 }
 /**
  * The carried approval re-bound to a newer approval of the tip's reviewed head (GY-831), or null

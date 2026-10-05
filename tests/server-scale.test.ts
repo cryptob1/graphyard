@@ -18,7 +18,6 @@ import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { interventionReportPath } from '../src/master/report-cache.js';
-import { predictQueue } from '../src/merge-queue.js';
 import { boardFromStatus } from '../src/model/board.js';
 import { views } from '../web/pages/index.js';
 import WorkDetails from '../web/pages/work-details.js';
@@ -167,7 +166,7 @@ function dashboard(work: Work[], now: number, overrides: Partial<Dashboard> = {}
     token: 'scale', work, status, error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: now, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: unknownFeatures, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
-    queue: predictQueue(work, now), sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, ...overrides,
+    sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, ...overrides,
   };
   return { ...d, board: boardFromStatus(work, now, status) };
 }
