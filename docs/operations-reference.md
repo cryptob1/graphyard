@@ -117,8 +117,14 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`), skipping writer-held rows. Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`). Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-Each pass locks its batch rows; contended batches defer a tick; stale observation snapshots retry after 2 s.
+A tick runs every 2 s and should finish within 5 s; slower ticks log `reconciliation tick took N ms` with writes and longest lock wait. Locks, in order:
+
+1. Opening: the coordination lock, briefly, reading row versions and sweeping direct merges.
+2. Each batch evaluates up to 250 ms lock-free, planning at most 8 writes.
+3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If anything it read moved since evaluation, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
+
+Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals in flight, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.

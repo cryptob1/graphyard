@@ -1,9 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
+import type { SupervisorProbeReport } from '../src/containment-probe.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
+import { assessContainment, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import { containmentPhase } from '../src/model/containment.js';
 
@@ -182,11 +187,11 @@ for (const entry of instances) {
   });
 }
 
-test('manual:fault-class-containment — a genuinely lapsed quarantine past grace window is observed as a containment fault', () => {
+test('manual:fault-class-containment — a genuinely lapsed quarantine past the settle wait bound is observed as a containment fault', () => {
   const entry = instances[0];
   const work = standing(entry);
-  // 5 minutes after the grace window expires
-  const pastGrace = Date.parse(entry.leaseExpiresAt) + 120_000 + 300_000;
+  // 5 minutes past the settle wait bound that follows the grace window (GY-1299)
+  const pastGrace = Date.parse(entry.leaseExpiresAt) + 120_000 + containmentSettleWaitBoundMs + 300_000;
   const phase = containmentPhase(work, pastGrace);
   assert.equal(phase?.state, 'lapsed', 'quarantine must be lapsed after grace window has passed');
   const own = workFaults(work, pastGrace).filter(fault => fault.faultClass === 'containment');
@@ -196,4 +201,104 @@ test('manual:fault-class-containment — a genuinely lapsed quarantine past grac
   const cycle = containmentFaults(work, new Date(pastGrace).toISOString());
   assert.equal(cycle.length, 1);
   assert.equal(cycle[0].kind, 'containment');
+});
+
+// ---------------------------------------------------------------------------
+// GY-1299: 3 containment faults in 24 hours on 5 October 2026, after GY-1151 and GY-1155 shipped.
+//
+// None was a fence the product could not handle: each was verified gone and autosettled by the
+// loop's reclaim step within a minute of being counted. The shared cause:
+//   - a fence counted the moment its grace window ended, or the moment master status showed it
+//     verified settleable, although the reclaim step settles a verified-dead fence on its own;
+//   - the faults pass read the cycle-start snapshot, so the very cycle that settled a fence still
+//     counted it (settleQuarantine did not clear the fence from the cycle's record, as GY-1155's
+//     ended-attempt settlement does);
+//   - one fence counted under two kinds: `containment-settleable` while its grace window still ran
+//     (the item's own record shows no fault inside grace, so nothing restated the line), then the
+//     own-record `containment` hold once the window ended.
+// The candidate counts a lapsed fence only once it has stood past containmentSettleWaitBoundMs
+// after its grace window (containmentInMotion), under either kind, and the reclaim step clears a
+// fence it settled from the cycle's record. Each instance is replayed from the ledger
+// (`graphyard events GY-N`): the lease deadline from the attempt's last heartbeat (+120s), the
+// launch deadline from its ending, the settlement from its `autosettle` row.
+// ---------------------------------------------------------------------------
+
+interface Replay { id: string; subject: string; observedAt: string; epoch: number; owner: string; leaseExpiresAt: string; launchExpiresAt: string; settled: string; assessed: 'settleable' | null }
+const replays: Replay[] = [
+  { id: 'containment|GY-1147|2026-10-05T09:31:42.251Z', subject: 'GY-1147', observedAt: '2026-10-05T09:31:42.251Z', epoch: 14, owner: 'graphyard-codex-1',
+    leaseExpiresAt: '2026-10-05T09:29:17.594Z', launchExpiresAt: '2026-10-05T09:29:31.718Z', assessed: null,
+    settled: 'blocked 09:27:31 (lease released), last heartbeat 09:27:17, counted 11s past grace, autosettled 09:32:10' },
+  { id: 'containment-settleable|GY-1289|2026-10-05T12:50:59.090Z', subject: 'GY-1289', observedAt: '2026-10-05T12:50:59.090Z', epoch: 1, owner: 'graphyard-codex-2',
+    leaseExpiresAt: '2026-10-05T12:49:00.817Z', launchExpiresAt: '2026-10-05T12:49:00.000Z', assessed: 'settleable',
+    settled: 'submitted 12:47:05, last heartbeat 12:47:00, shown settleable 1.7s before grace ended, autosettled 12:52:43' },
+  { id: 'containment|GY-1289|2026-10-05T12:52:30.229Z', subject: 'GY-1289', observedAt: '2026-10-05T12:52:30.229Z', epoch: 1, owner: 'graphyard-codex-2',
+    leaseExpiresAt: '2026-10-05T12:49:00.817Z', launchExpiresAt: '2026-10-05T12:49:00.000Z', assessed: 'settleable',
+    settled: 'the same fence, 89s past grace, in the cycle whose reclaim step autosettled it at 12:52:43' },
+];
+const kindOf = (id: string) => id.slice(0, id.indexOf('|'));
+function replayed(entry: Replay): Work {
+  return { ...standing({ ...entry, settlementHash: 'c'.repeat(64) }), workspaces: [{ host: 'machine-a', path: `/srv/${entry.subject}`, epoch: entry.epoch, owner: entry.owner, branch: 'b' }] } as Work;
+}
+const assessment = (work: Work, entry: Replay): Record<string, ContainmentAssessment> => entry.assessed ? { [work.id]: {
+  key: work.key, id: work.id, epoch: entry.epoch, owner: entry.owner, at: entry.observedAt, host: 'machine-a', workspacePath: `/srv/${entry.subject}`,
+  scope: work.containmentQuarantine!.scope ?? null, settleable: true, refusals: [], attestation: '', verification: null } } : {};
+
+for (const entry of replays) {
+  test(`manual:fault-class-containment — ${entry.id} (${entry.settled}) is a fence the loop is settling, not a fault`, () => {
+    const work = replayed(entry), clock = Date.parse(entry.observedAt);
+    const observed = cycleFaults(emptyDaemonState(config()), [work], clock, { config: config(), containment: assessment(work, entry) })
+      .filter(fault => fault.faultClass === 'containment');
+    // The base counted this instance under this kind; the candidate counts neither kind inside the bound.
+    assert.deepEqual(observed.map(fault => `${fault.kind}|${fault.subject}`), [], `${entry.subject} was counted as ${kindOf(entry.id)} on the base`);
+    // Still standing past the bound, the same fence counts once, as the item's own hold, whatever master status shows.
+    const late = clock + containmentSettleWaitBoundMs + 60_000;
+    const standingLate = cycleFaults(emptyDaemonState(config()), [work], late, { config: config(), containment: assessment(work, entry) })
+      .filter(fault => fault.faultClass === 'containment');
+    assert.deepEqual(standingLate.map(fault => fault.kind), ['containment'], 'a fence standing past the bound is one containment fault');
+  });
+}
+
+test('manual:fault-class-containment — the cycle whose reclaim step settles a fence past the bound counts no fault for it', async () => {
+  // A fence lapsed well past the settle wait bound: only the reclaim step's settlement can keep it from counting.
+  const host = 'coordinator-host', path = '/srv/worktrees/GY-1289-1', scope = { unit: 'graphyard-watch-3948957.scope', pid: 3948957 };
+  const lapsed = Date.now() - containmentSettleWaitBoundMs - 5 * 60_000;
+  const iso = (at: number) => new Date(at).toISOString();
+  const item = { ...replayed(replays[2]), id: 'work-1289', key: 'GY-1289', stage: 'build', submission: null,
+    workspaces: [{ host, path, epoch: 1, owner: 'worker-a', branch: 'graphyard/gy-1289-1' }],
+    containmentQuarantine: { owner: 'worker-a', epoch: 1, at: iso(lapsed - 15 * 60_000), settlementHash: 'a'.repeat(64), launchAcknowledgedAt: iso(lapsed - 15 * 60_000),
+      launchExpiresAt: iso(lapsed), leaseExpiresAt: iso(lapsed), scope } } as unknown as Work;
+  const plane = { item: structuredClone(item), settles: 0 };
+  const probe = (): SupervisorProbeReport => ({ method: 'linux-proc-systemd', platform: 'linux', uid: 1000, workspacePath: path, held: [], inaccessible: 0, unverifiable: [],
+    processes: [], scopes: [], recordedScope: { ...scope, activeState: 'inactive' } }) as unknown as SupervisorProbeReport;
+  const directory = await temporaryDirectory('containment-fault-class');
+  try {
+    const credentialFile = join(directory, 'coordinator.token');
+    await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const worker = { name: 'claude-1', principal: 'worker-a', agentName: 'graphyard-claude-1', mode: 'launch', kind: 'claude', credentialFile: '/srv/credentials/claude-1.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+    const loopConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234,
+      hostId: host, masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [worker] });
+    const state: DaemonState = emptyDaemonState(loopConfig);
+    const effects = {
+      agents: () => [], herdr: () => ({ agents: [], available: true }),
+      credentials: async (profiles: WorkerProfile[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+      snapshot: async () => ({ work: [structuredClone(plane.item)], now: iso(Date.now()) }),
+      dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+      observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(Date.now()), reason: 'not configured', deployed: [], pending: [] }),
+      recordDeployment: async () => {}, requestSmoke: () => {}, closeSession: () => {}, persist: async () => {}, preserveWork: async () => ({ state: 'clean' }),
+      reportCapacity: async (_work: Work, event: any) => { plane.item.capacity = { exhaustions: [{ ...event, event: undefined, at: iso(Date.now()), owner: 'worker-a', recordedBy: 'coordinator' }], escalations: [] }; return structuredClone(plane.item); },
+      controlPlaneClock: async () => ({ clockOffset: { min: 0, max: 0 }, roundTripMs: 1, source: 'timed read' }),
+      containment: (work: Work[], observed: any) => assessContainment(work, { hostId: host, observedAt: observed.now, clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, probe }),
+      settleContainment: async (_work: Work, verified: ContainmentAssessment) => {
+        plane.settles++;
+        const refusals = containmentSettlementRefusals(plane.item, containmentVerificationSchema.parse(verified.verification), { now: Date.now() });
+        if (refusals.length) throw new Error(`Automatic containment settlement refused: ${refusals.join('; ')}`);
+        plane.item.containmentQuarantine = null;
+      },
+    } as unknown as DaemonEffects;
+    await runCycle(loopConfig, state, effects);
+    assert.equal(plane.settles, 1, 'the reclaim step settled the verified-dead fence');
+    assert.equal(state.actions['settle:work-1289:1']?.state, 'done');
+    assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'containment').map(instance => instance.id), [],
+      'and the faults pass of that same cycle read the fence gone, so no instance opened');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

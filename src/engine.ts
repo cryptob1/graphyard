@@ -3,8 +3,8 @@ import { hostname } from 'node:os';
 import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { Store, StaleWrite, save, rewriteDocument, lockItem, wakeJob, documentBefore, eventWorkSql } from './store.js';
-import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileItemLockSql, reconcileRereadSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
+import { Store, save, rewriteDocument, lockItem, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileRereadSql, reconcileRowLockSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
@@ -46,7 +46,7 @@ import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
-import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
+import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -253,12 +253,14 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
   const request = work.scopeRequest;
   if (!request || work.lease?.epoch === request.epoch) return null;
   work.scopeRequest = null;
-  if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+  // A blocker the worker has just reported is its own, whatever its words: only a refusal left standing is cleared.
+  if (by !== 'blocked' && work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
   return { epoch: request.epoch, paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, decision: request.decision?.state ?? null,
     refusal: request.decision?.state === 'refused' ? request.decision.reason : null, reason: scopeRequestEndedReason, by, at: now.toISOString() };
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
-const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
+// A blocker ends its attempt (GY-1008); a cleared one (`blocked GY-N EPOCH -`) keeps the lease, so its request stays open.
+const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock', 'blocked']);
 export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
@@ -503,23 +505,26 @@ export class LeaseHealth {
   }
 }
 
-/** A reconciliation batch that found the fleet moved under it, or could not take the coordination lock without waiting: it rolls back and runs again (GY-727). */
+/** A reconciliation batch that found the coordination lock held past its wait before it wrote (GY-727, GY-1290): it runs again. */
 class ReconcileContended extends Error {}
-/** One reconciliation tick's outcome (GY-1115): every candidate is evaluated or deferred. */
-export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number }
 /**
- * What another item's reconciliation reads of an item, for the commit check (GY-1115): the
- * document without its revision and time stamp, and a lease still live at `now` without its
- * expiry, so a heartbeat that only renewed a live lease never rolls a batch back.
+ * One reconciliation tick's outcome (GY-1115, GY-1290): every candidate is evaluated or deferred.
+ * `writes` counts the items its batches wrote, and `lockWaitMs` is the longest a batch waited in
+ * line for the coordination lock before writing them: the one place a tick waits on other writers.
  */
-export function contentionView(work: Work, now: Date) {
-  const { revision: _revision, updatedAt: _updatedAt, ...rest } = work;
-  const lease = rest.lease && Date.parse(rest.lease.expiresAt) > now.getTime() ? { ...rest.lease, expiresAt: 'live' } : rest.lease;
-  return stableJson({ ...rest, lease });
-}
+export interface ReconcileTick { at: string; candidates: number; evaluated: number; deferred: number; maxAttempts: number; ms: number; writes: number; lockWaitMs: number }
 
 /** One item in the reconciliation view kept between passes (GY-1124). */
 interface ReconcileEntry { number: number; work: Work; version: string; settled: boolean; face: string }
+/** A write a reconciliation batch planned (GY-1290): its evaluation of the item, on a copy, at the row version and the clock it read. */
+interface ReconcilePlan { id: string; work: Work; version: string; now: Date }
+/** One planned write, committed: whether it wrote, whether later planned items must be evaluated again, and what to keep of it once committed. */
+interface ReconcileWritten { wrote: boolean; stale: boolean; faceMoved: boolean; saved: SavedVersion[]; apply: () => void }
+/** The running pass's kept view and its readers, as one planned write needs them. */
+interface ReconcilePass {
+  fleet: Map<string, ReconcileEntry>; all: () => Work[]; view: () => void; lockWait: (ms: number) => void;
+  versionsOf: (db: PoolClient) => Promise<Map<string, string>>; moved: (versions: Map<string, string>) => string[]; reread: (db: PoolClient, ids: string[]) => Promise<boolean>;
+}
 /**
  * What other items' evaluations can read of an item (GY-1124): its document without the fields a
  * renewal moves — the revision, the update time, the lease's expiry, and an action claim's expiry
@@ -771,6 +776,7 @@ export class Engine {
   async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
     if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
     const started = new Date();
+    this.renewing++;
     try {
       const work = await this.executeCommand(actor, command, id, input, key, context);
       this.leaseHealth.record('renewed', Date.now() - started.getTime());
@@ -780,10 +786,36 @@ export class Engine {
       this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
       if (!fault || !id) throw error;
       throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
+    } finally {
+      if (--this.renewing === 0) for (const resume of this.renewalsDone.splice(0)) resume();
     }
   }
   /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
   readonly leaseHealth = new LeaseHealth();
+  /** Lease renewals in flight in this process, and the reconciliation steps waiting for them to finish (GY-1290). */
+  private renewing = 0;
+  private readonly renewalsDone: (() => void)[] = [];
+  /**
+   * The longest one reconciliation step waits for the renewals in flight (GY-1290). A renewal takes
+   * no lock a waiting step holds, so the wait ends when they do; the bound only keeps a stream of
+   * overlapping renewals from holding reconciliation back indefinitely.
+   */
+  reconcileYieldMs = 1_000;
+  /**
+   * Let a lease renewal run before reconciliation's next evaluation or write (GY-1290). Evaluation is
+   * CPU work on the one event loop every request shares: a renewal's every query round trip would
+   * otherwise resume only after the evaluation then running, so a renewal of a few round trips waited
+   * through as many evaluations. Reconciliation first lets pending I/O — an arriving request
+   * included — run, then waits until no renewal is in flight, so a renewal waits on at most the one
+   * evaluation it arrived during.
+   */
+  private async yieldToRenewals() {
+    await new Promise(resolve => setImmediate(resolve));
+    if (!this.renewing) return;
+    let timer: NodeJS.Timeout | undefined;
+    await new Promise<void>(resolve => { this.renewalsDone.push(resolve); timer = setTimeout(resolve, this.reconcileYieldMs); });
+    clearTimeout(timer);
+  }
   /**
    * Record a renewal that failed server-side inside its lease's expiry window (GY-558): a
    * `lease.renewal-failed` event naming the owner, epoch and the time the renewal arrived,
@@ -1314,7 +1346,6 @@ export class Engine {
           work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
           endAttempt(work, data.epoch, 'released', now);
           work.lease = null;
-          work.scopeRequest = null;
         }
       }
       if (command === 'scope') {
@@ -2260,28 +2291,21 @@ export class Engine {
    */
   reconcileSlowWarnMs = 5_000;
   /**
-   * Contended attempts in a row after which a reconciliation batch's next attempt waits before it
-   * runs again, doubling per further contended attempt up to `reconcileRetryBackoffCapMs` (GY-727):
-   * recovery from contention must never hold the coordination lock across a batch — that would make
-   * every mutation wait for it again — so a fleet that keeps moving under the batch is answered
-   * with a slower retry, never with a blocking one.
+   * The most writes one batch plans (GY-1290): each runs in its own transaction under the
+   * coordination lock, and every later item in the batch is evaluated against the earlier ones as
+   * planned, so the count bounds how much one surprise at write time sends back for evaluation.
    */
-  reconcileRetries = 1;
-  reconcileRetryBackoffMs = 25;
-  reconcileRetryBackoffCapMs = 400;
+  reconcileBatchWrites = 8;
   /**
-   * Attempts per batch per tick (GY-1115): a contended batch is rerun at most twice, each rerun over
-   * half the items the last attempt reached, and then deferred to the next tick. Six whole-batch
-   * attempts per batch made a busy fleet's tick take 4-6 minutes.
+   * How long a batch with writes waits in line for the coordination lock (GY-1115, GY-1290), never
+   * more than half the server's `deadlock_timeout` (`coordinationLockWithin`); it holds no row while
+   * it waits. A write that could not take it tries again, `reconcileRetryBackoffMs` later per
+   * attempt, and after `reconcileMaxAttempts` attempts the batch's unwritten items are deferred to the next pass.
    */
+  reconcileCommitLockWaitMs = 500;
   reconcileMaxAttempts = 3;
-  /**
-   * How long a batch that wrote waits in line for the coordination lock at its commit (GY-1115);
-   * well under `deadlock_timeout`, and never more than half of it on a server where that is lower
-   * (GY-1212): see `coordinationLockWithin`.
-   */
-  reconcileCommitLockWaitMs = 200;
-  /** The last reconciliation ticks, newest last (GY-1115): what each evaluated, deferred and how many attempts its worst batch took. */
+  reconcileRetryBackoffMs = 25;
+  /** The last reconciliation ticks, newest last (GY-1115): what each evaluated, deferred and wrote, and its longest wait for the coordination lock. */
   readonly reconcileTicks: ReconcileTick[] = [];
   /**
    * How long reconciliation may go without evaluating every live item (GY-1124). Between full
@@ -2357,29 +2381,23 @@ export class Engine {
    * `reconcileFullEvaluationMs` the pass evaluates every live item, for the inputs only the
    * clock moves. A pass after a heartbeat therefore reads one document and evaluates one item.
    *
-   * Each batch is its own short transaction on the background lane (a bounded share of the pool)
-   * that holds no coordination lock while it evaluates: it compares every row's version with the
-   * view and re-reads only the items that moved, then takes each item's row lock as it reaches it
-   * (`SELECT … FOR UPDATE SKIP LOCKED`, GY-274's per-batch bound retained), so a heartbeat or a
-   * request on any other item commits while the batch holds its transaction. A row a writer holds
-   * is skipped rather than waited on and tried once more at the end of the pass (GY-1115), so a
-   * batch never holds its rows and its connection behind a writer; still held then, it is owed to
-   * the next pass. Every item is evaluated against the whole fleet (dependencies, the merge queue,
-   * capacity), so a batch that wrote anything commits only after it holds the coordination lock
-   * and finds no other item moved since it evaluated in a way another item's evaluation reads: it
-   * waits for that lock only briefly, and never while its holder waits on the batch, since a
-   * mutation holding it may be waiting for one of the batch's rows, and a moved item whose only
-   * change is a live lease's renewal (a heartbeat: its revision, time stamp and lease expiry) is
-   * adopted rather than counted (GY-1115). On either failure the batch rolls back and runs again
-   * on the refreshed view, over half the items it reached. Contention recovery never holds the
-   * coordination lock across the batch — that would make every mutation wait for it again, the
-   * exact blocking GY-727 removed — so after `reconcileRetries` contended attempts in a row the
-   * next attempt waits a little longer first (doubling per further contended attempt, capped)
-   * instead. After `reconcileMaxAttempts` attempts the batch is deferred — its items owed to the
-   * next pass — and this pass continues with its remaining candidates, so sustained writes cannot
-   * starve the server steps that follow reconciliation. Between batches the locks are released
-   * and the event loop runs, so a renewal waits at most one batch however long the whole pass
-   * takes. Every batch attempts at least one item.
+   * Each batch evaluates on the background lane (a bounded share of the pool) holding no lock at
+   * all (GY-1290): one short transaction compares every row's version with the view, re-reads only
+   * the items that moved, and evaluates each item on a copy, against the whole fleet as the batch's
+   * earlier planned writes will leave it, writing nothing (`reconcileItem`'s dry run), until
+   * `reconcileBatchMs` has passed (GY-274's per-batch bound retained) or `reconcileBatchWrites`
+   * writes are planned. A heartbeat, an observation save or any request on any item, the batch's
+   * own included, commits while it evaluates. Each planned write then runs in a transaction of its
+   * own (`reconcileWrite`): it waits in line for the coordination lock like every fleet command,
+   * holding no row, then takes the item's row lock, writes the evaluation — again only if the item
+   * or another item's face moved since — and commits. A row is therefore held for one item's write,
+   * never across the batch, so a renewal never waits on the batch's evaluations or on its later
+   * writes; and nothing rolls back because another item moved: the race GY-1115 bounded — a batch
+   * holding its rows while it raced every fleet command for the coordination lock at commit with a
+   * 200 ms wait, and rolling back whenever any item moved, which observation saves did every few
+   * seconds (GY-1290) — is gone. Only a lock still held past `reconcileCommitLockWaitMs` on each of
+   * `reconcileMaxAttempts` attempts defers the batch's unwritten items, and nothing else of it, to
+   * the next pass. Between batches the event loop runs. Every batch evaluates at least one item.
    */
   private async reconcileTick() {
     const tickStarted = performance.now();
@@ -2387,24 +2405,19 @@ export class Engine {
     // document while it holds the coordination lock: warm it first, outside the lock (GY-1042).
     if (!this.lockedReadsWarm) { await warmLockedReads(this.store.pool); this.lockedReadsWarm = true; }
     const fleet = this.reconcileView;
-    let all: Work[] = [], candidates: string[] = [], next = 0, contended = 0, cap = Infinity, documentsRead = 0, full = false, wroteFace = false;
-    // The candidates in the order the pass visits them, then once more the ones a writer held when the pass reached them.
-    let order: string[] = [], skipped: string[] = [], retried = false;
-    const tick: ReconcileTick = { at: new Date().toISOString(), candidates: 0, evaluated: 0, deferred: 0, maxAttempts: 0, ms: 0 };
+    let all: Work[] = [], candidates: string[] = [], next = 0, documentsRead = 0, full = false;
+    const tick: ReconcileTick = { at: new Date().toISOString(), candidates: 0, evaluated: 0, deferred: 0, maxAttempts: 0, ms: 0, writes: 0, lockWaitMs: 0 };
     const view = () => { all = [...fleet.values()].sort((a, b) => a.number - b.number).map(entry => entry.work); };
     // Only the pass's candidates and the rows not settled now are versioned: a settled delivery that stays settled is never visited.
     const versionsOf = async (db: PoolClient) => new Map<string, string>((await db.query(reconcileVersionsSql, [candidates])).rows.map(row => [row.id, row.version]));
-    const moved = (versions: Map<string, string>, except = new Set<string>()) => [...versions].filter(([id, version]) => !except.has(id) && fleet.get(id)?.version !== version).map(([id]) => id);
-    // Read moved rows again into the view. Given `guardedAt`, a move that changed anything another item's
-    // evaluation reads adopts nothing (`adopted` false): the batch evaluated against the old row. Read
-    // again mid-pass, a row another writer moved in a way other items read is owed to them on the next
-    // pass; read for the pass's own decision (`owe` false), whether any face moved is returned instead.
-    const reread = async (db: PoolClient, ids: string[], { owe = true, guardedAt }: { owe?: boolean; guardedAt?: Date } = {}) => {
-      if (!ids.length) return { adopted: true, faceMoved: false };
+    const moved = (versions: Map<string, string>) => [...versions].filter(([id, version]) => fleet.get(id)?.version !== version).map(([id]) => id);
+    // Read moved rows again into the view. Read mid-pass, a row another writer moved in a way other items
+    // read is owed to them on the next pass; read for the pass's own decision (`owe` false), whether any
+    // face moved is returned instead.
+    const reread = async (db: PoolClient, ids: string[], { owe = true }: { owe?: boolean } = {}) => {
+      if (!ids.length) return false;
       const rows = (await db.query(reconcileRereadSql, [ids])).rows as { id: string; number: string; version: string; document: Work }[];
       documentsRead += rows.length;
-      // A stand-in from the opening read is compared as the same projection of the row read now (GY-1027).
-      if (guardedAt && rows.some(row => { const seen = fleet.get(row.id); return !seen || contentionView(seen.work, guardedAt) !== contentionView(isStandIn(seen.work) ? coordinationProjection(row.document) : row.document, guardedAt); })) return { adopted: false, faceMoved: false };
       let faceMoved = false;
       for (const row of rows) {
         const face = fleetFace(row.document), before = fleet.get(row.id)?.face;
@@ -2412,147 +2425,116 @@ export class Engine {
         fleet.set(row.id, { number: Number(row.number), work: row.document, version: row.version, settled: false, face });
       }
       view();
-      return { adopted: true, faceMoved };
+      return faceMoved;
     };
-    // Evaluated in a batch that has not committed yet: settled against the owed set only once it does.
-    let opened = false, decided = false, changed: string[] = [], config = '', written = new Set<string>(), evaluating: string[] = [], held: string[] = [], saved: SavedVersion[] = [];
+    let opened = false, decided = false, changed: string[] = [], config = '';
+    const pass: ReconcilePass = { fleet, all: () => all, view, versionsOf, moved, reread, lockWait: ms => { tick.lockWaitMs = Math.max(tick.lockWaitMs, Math.round(ms)); } };
     try {
       for (;;) {
-        const opening = !opened, batch = next;
-        written = new Set(); evaluating = []; held = []; saved = []; wroteFace = false;
-        let finished: boolean;
-        try {
-          finished = await this.store.transaction(async (db, now) => {
-            if (opening) {
-              // Versions first: a row that moves after them reads as moved, so the first batch reads it again.
-              const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
-              config = stableJson({ ciAppIds: this.ciAppIds, batch: this.mergeBatchSize, tips: this.parallelTips });
-              // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
-              full = !fleet.size || config !== this.reconcileConfig || !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs);
-              if (full) this.reconcileFullAt = now.getTime();
-              const versions = new Map(listed.map(row => [row.id, row]));
-              for (const id of [...fleet.keys()]) if (!versions.has(id)) { fleet.delete(id); this.reconcileFaceMoved = true; }
-              changed = listed.filter(row => { const entry = fleet.get(row.id); return !entry || entry.version !== row.version || entry.settled !== row.settled; }).map(row => row.id);
-              // Under the lock the pass reads no document whole (GY-1027): a row that moved is held as its
-              // stand-in — a settled delivery's summary, an open item's projection, served from the
-              // in-process cache — and the first batch reads the open ones whole, outside the lock.
-              const rows = await lockedRows(db, []);
-              for (const { number, document } of rows) {
-                const row = versions.get(document.id), entry = fleet.get(document.id);
-                if (!row || entry && entry.version === row.version && entry.settled === row.settled) continue;
-                const settled = isSettledSummary(document);
-                if (!settled) { fleet.set(document.id, { number, work: document, version: row.version, settled, face: entry?.face ?? '' }); continue; }
-                const face = fleetFace(document);
-                if (entry?.face !== face) this.reconcileFaceMoved = true;
-                fleet.set(document.id, { number, work: document, version: row.version, settled, face });
-              }
+        const opening = !opened, evaluating: string[] = [], plans: ReconcilePlan[] = [];
+        let gone = 0;
+        const finished = await this.store.transaction(async (db, now) => {
+          if (opening) {
+            // Versions first: a row that moves after them reads as moved, so the first batch reads it again.
+            const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
+            config = stableJson({ ciAppIds: this.ciAppIds, batch: this.mergeBatchSize, tips: this.parallelTips });
+            // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
+            full = !fleet.size || config !== this.reconcileConfig || !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs);
+            if (full) this.reconcileFullAt = now.getTime();
+            const versions = new Map(listed.map(row => [row.id, row]));
+            for (const id of [...fleet.keys()]) if (!versions.has(id)) { fleet.delete(id); this.reconcileFaceMoved = true; }
+            changed = listed.filter(row => { const entry = fleet.get(row.id); return !entry || entry.version !== row.version || entry.settled !== row.settled; }).map(row => row.id);
+            // Under the lock the pass reads no document whole (GY-1027): a row that moved is held as its
+            // stand-in — a settled delivery's summary, an open item's projection, served from the
+            // in-process cache — and the first batch reads the open ones whole, outside the lock.
+            const rows = await lockedRows(db, []);
+            for (const { number, document } of rows) {
+              const row = versions.get(document.id), entry = fleet.get(document.id);
+              if (!row || entry && entry.version === row.version && entry.settled === row.settled) continue;
+              const settled = isSettledSummary(document);
+              if (!settled) { fleet.set(document.id, { number, work: document, version: row.version, settled, face: entry?.face ?? '' }); continue; }
+              const face = fleetFace(document);
+              if (entry?.face !== face) this.reconcileFaceMoved = true;
+              fleet.set(document.id, { number, work: document, version: row.version, settled, face });
+            }
+            view();
+            // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
+            const swept = await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
+            if (swept.length) {
+              const after = await versionsOf(db);
+              for (const work of swept) { const entry = fleet.get(work.id); if (entry) { entry.work = work; entry.version = after.get(work.id) ?? ''; } }
+              this.reconcileFaceMoved = true;
               view();
-              // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
-              const swept = await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
-              if (swept.length) {
-                const after = await versionsOf(db);
-                for (const work of swept) { const entry = fleet.get(work.id); if (entry) { entry.work = work; entry.version = after.get(work.id) ?? ''; } }
-                this.reconcileFaceMoved = true;
-                view();
-              }
-              opened = true;
-              return false;
             }
-            if (!decided) {
-              // The rows the opening held as stand-ins, read whole outside the coordination lock; then the
-              // pass decides what it evaluates: the items whose own row moved, plus every live item when
-              // another's fleet face moved, and the lapsed, escalated and owed ones.
-              const faceMoved = (await reread(db, [...fleet].filter(([, entry]) => !entry.settled && isStandIn(entry.work)).map(([id]) => id), { owe: false })).faceMoved || this.reconcileFaceMoved;
-              this.reconcileFaceMoved = false;
-              const live = [...fleet].filter(([, entry]) => !entry.settled).sort(([, a], [, b]) => a.number - b.number).map(([id]) => id);
-              const due = full || faceMoved ? new Set(live) : new Set([
-                ...changed, ...this.reconcileOwed,
-                ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0; }),
-              ]);
-              if (full) this.reconcileConfig = config;
-              candidates = live.filter(id => due.has(id)); order = [...candidates]; tick.candidates = candidates.length;
-              this.reconcileOwed.clear();
-              for (const id of candidates) this.reconcileOwed.add(id);
-              decided = true;
-            }
-            await reread(db, moved(await versionsOf(db)));
-            const started = performance.now();
-            let done = true;
-            while (next < order.length) {
-              // Every item the batch reaches counts toward its bound, whether or not it writes.
-              if (next > batch && (next - batch >= cap || performance.now() - started >= this.reconcileBatchMs)) { done = false; break; }
-              const id = order[next++];
-              const row = (await db.query(reconcileItemLockSql, [id])).rows[0] as { version: string } | undefined;
-              // A writer holds it (or it is gone): never wait behind the writer.
-              if (!row || !fleet.has(id)) { held.push(id); continue; }
-              // Moved between the batch's read and its lock: read it again, now that nothing else can move it. An item the
-              // batch already wrote was evaluated against the old version, which the reread would hide from the commit check,
-              // so after any write a move another item's evaluation reads rolls the batch back to run again instead.
-              // A stand-in from the opening read is read whole as the batch reaches it (GY-1027).
-              if (row.version !== fleet.get(id)!.version) {
-                if (!(await reread(db, [id], { guardedAt: written.size ? now : undefined })).adopted) throw new ReconcileContended();
-              } else if (isStandIn(fleet.get(id)!.work)) await reread(db, [id]);
-              evaluating.push(id);
-              if (await this.reconcileItem(db, fleet.get(id)!.work, all, now)) written.add(id);
-            }
-            if (!written.size) return done;
-            if (!await this.coordinationLockWithin(db, this.reconcileCommitLockWaitMs)) throw new ReconcileContended();
-            const versions = await versionsOf(db);
-            if (!(await reread(db, moved(versions, written), { guardedAt: now })).adopted) throw new ReconcileContended();
-            for (const id of written) {
-              const entry = fleet.get(id);
-              if (!entry || !versions.has(id)) continue;
-              entry.version = versions.get(id)!;
-              // A write other items read (more than a lease renewal) is an input to their evaluation: the next pass covers them.
-              const face = fleetFace(entry.work);
-              if (face !== entry.face) { entry.face = face; wroteFace = true; }
-            }
-            saved = await savedVersions(db, [...written].map(id => fleet.get(id)!.work));
-            return done;
-          }, { lane: 'background', coordinationLock: opening, retryStaleWrites: false });
-          // Committed: what this batch saved stands in for its rows in the next locked read (GY-1027).
-          rememberSaved(saved);
-        } catch (error) {
-          // A batch's own items are row-locked and version-checked, so a stale write there is contention like any other.
-          if (!(error instanceof ReconcileContended) && !(error instanceof StaleWrite && !opening)) throw error;
-          // Rolled back: the batch's writes never happened, so its items are read again and it runs again.
-          for (const id of written) { const entry = fleet.get(id); if (entry) entry.version = ''; }
-          const attemptedThrough = next;
-          next = batch; contended++;
-          tick.maxAttempts = Math.max(tick.maxAttempts, contended);
-          if (contended >= this.reconcileMaxAttempts) {
-            // The rows a writer held in the last attempt keep their end-of-pass turn (GY-1212), counted there if still held.
-            const deferred = attemptedThrough - batch - held.length;
-            skipped.push(...held);
-            console.warn(`reconciliation deferred ${deferred} item(s) after ${contended} contended attempts; retrying next tick`);
-            tick.deferred += deferred;
-            next = attemptedThrough;
-            contended = 0; cap = Infinity;
-            await new Promise(resolve => setImmediate(resolve));
-            continue;
+            opened = true;
+            return false;
           }
-          // The rerun covers half the items this attempt reached: the shorter its evaluation, the less can move under it.
-          cap = Math.max(1, Math.ceil((attemptedThrough - batch) / 2));
-          // Contended past the quiet attempts, the next try waits a little longer first: the batch
-          // never takes the coordination lock across its evaluation, so a fleet that keeps moving
-          // under it is answered with a slower retry, never with one that blocks mutations (GY-727).
-          const backoff = contended > this.reconcileRetries
-            ? Math.min(this.reconcileRetryBackoffMs * 2 ** (contended - this.reconcileRetries - 1), this.reconcileRetryBackoffCapMs)
-            : 0;
-          await new Promise(resolve => setTimeout(resolve, backoff));
-          continue;
+          if (!decided) {
+            // The rows the opening held as stand-ins, read whole outside the coordination lock; then the
+            // pass decides what it evaluates: the items whose own row moved, plus every live item when
+            // another's fleet face moved, and the lapsed, escalated and owed ones.
+            const faceMoved = (await reread(db, [...fleet].filter(([, entry]) => !entry.settled && isStandIn(entry.work)).map(([id]) => id), { owe: false })) || this.reconcileFaceMoved;
+            this.reconcileFaceMoved = false;
+            const live = [...fleet].filter(([, entry]) => !entry.settled).sort(([, a], [, b]) => a.number - b.number).map(([id]) => id);
+            const due = full || faceMoved ? new Set(live) : new Set([
+              ...changed, ...this.reconcileOwed,
+              ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0; }),
+            ]);
+            if (full) this.reconcileConfig = config;
+            candidates = live.filter(id => due.has(id)); tick.candidates = candidates.length;
+            this.reconcileOwed.clear();
+            for (const id of candidates) this.reconcileOwed.add(id);
+            decided = true;
+          }
+          // Evaluation, holding no lock: each item on a copy of its current document, writing nothing.
+          await reread(db, moved(await versionsOf(db)));
+          const started = performance.now(), batch = next;
+          // Each item is evaluated against the fleet as the batch's earlier writes will leave it, as if each had been written in turn.
+          const planned = new Map<string, Work>();
+          while (next < candidates.length) {
+            if (next > batch && (plans.length >= this.reconcileBatchWrites || performance.now() - started >= this.reconcileBatchMs)) return false;
+            // The dry run awaits no I/O: between evaluations a renewal runs first (`yieldToRenewals`).
+            await this.yieldToRenewals();
+            const id = candidates[next++];
+            // Deleted since the pass opened, nothing is left to evaluate; a stand-in from the opening
+            // read is read whole as the batch reaches it (GY-1027).
+            if (!fleet.has(id)) { gone++; continue; } else if (isStandIn(fleet.get(id)!.work)) await reread(db, [id]);
+            evaluating.push(id);
+            const entry = fleet.get(id)!, copy = structuredClone(entry.work);
+            if (await this.reconcileItem(db, copy, planned.size ? all.map(work => planned.get(work.id) ?? work) : all, now, { dryRun: true })) {
+              planned.set(id, copy); plans.push({ id, work: copy, version: entry.version, now });
+            }
+          }
+          return true;
+        }, { lane: 'background', coordinationLock: opening, retryStaleWrites: false });
+        if (opening) continue;
+        // What the batch found nothing to write for is settled; each planned item is settled by its own write.
+        for (const id of evaluating) if (!plans.some(plan => plan.id === id)) this.reconcileOwed.delete(id);
+        tick.evaluated += evaluating.length - plans.length; tick.deferred += gone; tick.maxAttempts = Math.max(tick.maxAttempts, 1);
+        // Writing, each item in a transaction of its own (`reconcileWrite`), so no row is held past its own write.
+        let stale = false, attempts = 0;
+        for (let index = 0; index < plans.length;) {
+          let written: ReconcileWritten;
+          try { written = await this.reconcileWrite(plans[index], stale, pass); }
+          catch (error) {
+            // Nothing was written: the coordination lock stayed held past the wait, so the write is tried again.
+            if (!(error instanceof ReconcileContended)) throw error;
+            tick.maxAttempts = Math.max(tick.maxAttempts, ++attempts);
+            if (attempts < this.reconcileMaxAttempts) { await new Promise(resolve => setTimeout(resolve, this.reconcileRetryBackoffMs * attempts)); continue; }
+            // Out of attempts: the batch's unwritten items stay owed to the next pass, and the pass goes on.
+            console.warn(`reconciliation deferred ${plans.length - index} item(s) after ${attempts} attempts found the coordination lock held past ${this.reconcileCommitLockWaitMs} ms; retrying next tick`);
+            tick.deferred += plans.length - index;
+            break;
+          }
+          // Committed: what the write saved stands in for its row in the next locked read (GY-1027), and a
+          // face it moved is owed to the rest of the fleet.
+          written.apply(); rememberSaved(written.saved);
+          this.reconcileOwed.delete(plans[index].id);
+          if (written.faceMoved) this.reconcileFaceMoved = true;
+          tick.maxAttempts = Math.max(tick.maxAttempts, attempts + 1); tick.evaluated++; if (written.wrote) tick.writes++;
+          stale = written.stale; attempts = 0; index++;
         }
-        // Committed: what the batch evaluated is no longer owed, and a face it moved is owed to the rest of the fleet.
-        for (const id of evaluating) this.reconcileOwed.delete(id);
-        if (wroteFace) this.reconcileFaceMoved = true;
-        wroteFace = false;
-        if (!opening) { tick.maxAttempts = Math.max(tick.maxAttempts, contended + 1); tick.evaluated += evaluating.length; skipped.push(...held); }
-        contended = 0; cap = Infinity;
-        if (finished) {
-          // The rows a writer held get one more turn at the end of the pass; still held then, they stay owed to the next tick.
-          if (retried || !skipped.length) break;
-          order.push(...skipped); skipped = []; retried = true;
-        }
+        if (finished) break;
         await new Promise(resolve => setImmediate(resolve));
       }
     } catch (error) {
@@ -2560,29 +2542,58 @@ export class Engine {
       this.resetReconcileView();
       throw error;
     }
-    if (skipped.length) {
-      // Counted with any row deleted since the pass opened, which is just as absent from the pass.
-      tick.deferred += skipped.length;
-      console.warn(`reconciliation deferred ${skipped.length} item(s) a writer held at their row lock; retrying next tick`);
-    }
     this.lastReconcile = { documentsRead, evaluated: tick.evaluated, live: [...fleet.values()].filter(entry => !entry.settled).length, full };
     const elapsedMs = performance.now() - tickStarted;
     tick.ms = Math.round(elapsedMs);
     this.reconcileTicks.push(tick);
     if (this.reconcileTicks.length > 20) this.reconcileTicks.shift();
-    if (elapsedMs >= this.reconcileSlowWarnMs) console.warn(`reconciliation tick took ${Math.round(elapsedMs)} ms for ${this.lastReconcile.live} item(s) (${tick.evaluated} evaluated, ${tick.deferred} deferred, worst batch ${tick.maxAttempts} attempt(s)), over the ${this.reconcileSlowWarnMs} ms bound; find what held its batches in the server logs`);
+    if (elapsedMs >= this.reconcileSlowWarnMs) console.warn(`reconciliation tick took ${Math.round(elapsedMs)} ms for ${this.lastReconcile.live} item(s) (${tick.evaluated} evaluated, ${tick.writes} written, longest wait for the coordination lock ${tick.lockWaitMs} ms), over the ${this.reconcileSlowWarnMs} ms bound; find what held the coordination lock in the server logs`);
   }
   /**
-   * Take the coordination lock for a batch's commit, waiting in line for at most `ms` (GY-1115). A
-   * try-lock lost to every mutation queued on the lock, so under steady traffic a batch that wrote
-   * never committed. A mutation holding the lock may be waiting for one of the batch's rows, so the
-   * batch queues only when no lock holder waits on it; one that starts waiting later has its
-   * deadlock check (`deadlock_timeout`, 1 s by default) fire long after the batch's own `ms` wait
-   * gives up, so the batch, never the mutation, is the side that yields. The check and the wait are
-   * not atomic, so that ordering is what resolves a holder that starts waiting between them; it is
-   * enforced, not assumed (GY-1212): the check reads the session's `deadlock_timeout`, and the wait
-   * never exceeds half of it. A wait past that, a holder blocked
-   * on the batch, or a deadlock reported all the same aborts the batch as contended.
+   * Write one item a reconciliation batch planned, in a transaction of its own (GY-1290). It waits
+   * in line for the coordination lock holding no row, so no fleet command can move what the item
+   * reads while it writes; reads again whatever moved since the batch evaluated; and only then
+   * takes the item's row lock, which nothing but a lease renewal can hold now, for its own write.
+   * When neither the item's row nor any item's face moved since the evaluation (`stale` carries an
+   * earlier write that came out other than evaluated), the evaluation stands and is written as it
+   * is; otherwise the item is evaluated again, on its current document against the current fleet.
+   * Committing per item means a renewal waits on reconciliation for at most its own item's write:
+   * never on the batch's evaluation of other items, nor on a later write that waits for its turn.
+   */
+  private async reconcileWrite(plan: ReconcilePlan, stale: boolean, pass: ReconcilePass): Promise<ReconcileWritten> {
+    // Before its transaction, so the write holds no lock while a renewal runs.
+    await this.yieldToRenewals();
+    return this.store.transaction(async (db, now) => {
+      const waitStarted = performance.now(), locked = await this.coordinationLockWithin(db, this.reconcileCommitLockWaitMs);
+      pass.lockWait(performance.now() - waitStarted);
+      if (!locked) throw new ReconcileContended();
+      if (await pass.reread(db, pass.moved(await pass.versionsOf(db)))) stale = true;
+      const row = (await db.query(reconcileRowLockSql, [plan.id])).rows[0] as { version: string } | undefined;
+      if (!row || !pass.fleet.has(plan.id)) return { wrote: false, stale, faceMoved: false, saved: [], apply: () => {} };
+      if (row.version !== pass.fleet.get(plan.id)!.version) await pass.reread(db, [plan.id]);
+      const entry = pass.fleet.get(plan.id)!;
+      let work = plan.work;
+      if (!stale && entry.version === plan.version) await this.writeReconciled(db, work, pass.all(), plan.now);
+      else {
+        // In place: a failure from here on clears the kept view, as every rolled-back write does.
+        work = entry.work;
+        const wrote = await this.reconcileItem(db, work, pass.all(), now);
+        // Items the batch evaluated after this one read it as evaluated: if it came out otherwise, they are evaluated again too.
+        if (fleetFace(work) !== fleetFace(plan.work)) stale = true;
+        if (!wrote) return { wrote: false, stale, faceMoved: false, saved: [], apply: () => {} };
+      }
+      const version = ((await db.query('SELECT xmin::text AS version FROM work_items WHERE id = $1', [plan.id])).rows[0] as { version: string }).version, face = fleetFace(work);
+      const saved = await savedVersions(db, [work]);
+      return { wrote: true, stale, faceMoved: face !== entry.face, saved, apply: () => { Object.assign(entry, { work, version, face }); pass.view(); } };
+    }, { lane: 'background', coordinationLock: false, retryStaleWrites: false });
+  }
+  /**
+   * Take the coordination lock for one planned write, waiting in line for at most `ms` (GY-1115,
+   * GY-1290). The write's transaction holds no row lock when it asks, so no holder can be waiting
+   * on it; the check that none is (`reconcileCommitBlockingSql`) and the wait's cap at half the
+   * session's `deadlock_timeout` keep that guarantee enforced rather than assumed, should a write
+   * ever take a lock before it. A wait past `ms`, or a holder blocked on the write, is contention:
+   * the write is tried again.
    */
   private async coordinationLockWithin(db: PoolClient, ms: number) {
     const { blocking, deadlock_ms: deadlockMs } = (await db.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0];
@@ -2593,15 +2604,20 @@ export class Engine {
     await db.query('SET LOCAL lock_timeout TO DEFAULT');
     return true;
   }
-  /** One item's reconciliation inside a batch, holding the item's row lock; true when it wrote the item. */
-  private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date): Promise<boolean> {
+  /**
+   * One item's reconciliation inside a batch, holding the item's row lock; true when it wrote the
+   * item. A `dryRun` (GY-1290) evaluates `work` — a copy — with no lock and writes nothing: true
+   * when the evaluation would write, which is all the batch's lock-free phase asks.
+   */
+  private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date, { dryRun = false }: { dryRun?: boolean } = {}): Promise<boolean> {
     // A delivered item is not re-evaluated, but one still holding rows, a queue entry or an
     // action from before its delivery — every item delivered before GY-185 — is settled here
     // once, and the check that finds nothing to settle costs no evaluation.
     if (work.stage === 'done') {
       const leftover = !!work.queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
       if (!leftover || !settleDelivered(work, all, now)) return false;
-      await save(db, work, 'graphyard', 'delivery.settled', now);
+      this.reconcileWrites.set(work, { delivered: true });
+      if (!dryRun) await this.writeReconciled(db, work, all, now);
       return true;
     }
     const before = JSON.stringify(work);
@@ -2661,15 +2677,24 @@ export class Engine {
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
-    if (jsonChanged(before, work)) {
-      for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
-      if (work.submission) await wakeJob(db, work.id);
-      if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
-      return true;
-    }
-    return false;
+    if (!jsonChanged(before, work)) return false;
+    this.reconcileWrites.set(work, { ledger, ejected });
+    if (!dryRun) await this.writeReconciled(db, work, all, now);
+    return true;
+  }
+  /** What `reconcileItem`'s evaluation of a document decided to write, kept until it is written (GY-1290). */
+  private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[]; ejected: boolean }>();
+  /** Write `work` as `reconcileItem` evaluated it at `now`: its ledger entries, its dispatch transitions, the document and its wakes. */
+  private async writeReconciled(db: PoolClient, work: Work, all: Work[], now: Date) {
+    const write = this.reconcileWrites.get(work)!;
+    this.reconcileWrites.delete(work);
+    if ('delivered' in write) { await save(db, work, 'graphyard', 'delivery.settled', now); return; }
+    const { ledger, ejected } = write;
+    for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
+    await this.recordDispatch(db, work, now);
+    await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
+    if (work.submission) await wakeJob(db, work.id);
+    if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
   }
   /**
    * Save a provider observation of the item, read at `expectedRevision`.

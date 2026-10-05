@@ -178,7 +178,13 @@ test('unit:blocked-attempt-frees-slot — recording a blocker ends the attempt i
   assert.equal(partialWork?.state, 'committed', 'the CLI keeps what was not committed as a WIP commit on the attempt branch');
   assert.equal(git(worktree, 'status', '--porcelain'), '');
   assert.match(git(worktree, 'log', '-1', '--format=%s'), /^WIP: .* attempt 1 blocked$/);
+  // An open scope request of the attempt is closed with it, on the record (GY-1055).
+  held = await ok(token(implementer), 'POST', `work/${held.id}/scope`, { epoch: held.epoch, paths: ['src/unrelated/far-away.ts'], reason: 'The carry may also need this file' }) as Work;
+  assert.ok(held.scopeRequest, 'the scope request stands while the attempt holds its lease');
   const blocked = await block(held, 'The two criteria contradict each other about the retry order', { partialWork });
+  assert.equal(blocked.scopeRequest, null, 'the ended attempt\'s scope request is closed');
+  const closed = (await events(blocked)).filter(row => row.kind === 'scope.closed');
+  assert.deepEqual(closed.map(row => [row.payload.details.by, row.payload.details.paths]), [['blocked', ['src/unrelated/far-away.ts']]], 'and the history says the blocker ended it');
 
   // The same transaction: blocker recorded, lease released, attempt ended as released, work kept.
   assert.equal(blocked.blocker, 'The two criteria contradict each other about the retry order');

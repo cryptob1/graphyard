@@ -1,13 +1,16 @@
 import { z } from 'zod';
 import { Refusal, demand, itemLane, reworkNeedsApprover, type Principal, type Work } from '../model.js';
-import { assertDecisionAuthority, decisionPrecondition, requiredDecisionCapabilities } from '../model/approval.js';
+import type pg from 'pg';
+import { assertDecisionAuthority, decisionPrecondition, requiredDecisionCapabilities, situationLabel, stalledApproval, supersededSituation } from '../model/approval.js';
 import { readDecisions, type DecisionRecord } from './decision-ledger.js';
 import { applyThroughEngine, authenticated, findWork, receipt, record } from './decisions.js';
+import { withdrawDecision } from './decision-refusal.js';
 import type { Services } from './routes.js';
 
 // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): the risk lane
 // approves and applies it. Approval and application are separate transactions, so an interruption
-// between them is resumed here rather than left standing approved (GY-1110).
+// between them is resumed here rather than left standing approved (GY-1110). Any other approved
+// decision left without an outcome is settled here too (GY-1297): superseded, or resumed.
 
 /** The ledger's approver of a rework its lane applied without an approver decision (GY-883). */
 export const laneApprover = 'graphyard-risk-lane';
@@ -78,4 +81,85 @@ export async function applyLaneRework(services: Services, requested: DecisionRec
     await record(db, work, laneApprover, outcome.kind, { id: decision.id, ...outcome.details });
     return (await readDecisions(db, work)).find(entry => entry.id === decision.id)!;
   });
+}
+
+/**
+ * A withdrawal, which first settles the decision when it stands approved and unapplied (GY-1297):
+ * an approval cannot be taken back, so the loop that finds a standing approval superseded or
+ * stalled — its own request, or one a master put to an approver by hand — sends the withdrawal and
+ * gets the settlement. Settling needs no requester: the requester, or anyone with the authority to
+ * request the decision's action, may settle it, since it only records what the item already shows
+ * or applies the approval as given. One the settlement applied is refused naming that, so the loop
+ * requests nothing in its place. Taking back a requested decision stays the requester's alone.
+ */
+export async function withdrawOrSettle(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+  const named = typeof (body as any)?.decision === 'string' ? (body as any).decision as string : null;
+  const settled = named ? (await settleApprovedDecisions(services, caller, id, named)).find(decision => decision.id === named) : undefined;
+  if (settled?.state === 'applied') throw new Refusal(`Decision ${settled.id} (${settled.action}) stood approved by ${settled.approvedBy} with no outcome recorded; its application was resumed and it is applied now (${settled.outcome}), so there is nothing to withdraw`, 409);
+  if (settled) return settled;
+  // Superseded already, by another request for the item: the loop's history may predate it, and the answer is the same.
+  const superseded = named ? await services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller), work = await findWork(db, id);
+    const decision = work ? (await readDecisions(db, work)).find(entry => entry.id === named) : undefined;
+    return decision?.state === 'superseded' && mayRequest(services, actor, decision, work!) ? decision : undefined;
+  }) : undefined;
+  return superseded ?? withdrawDecision(services, caller, id, body, key);
+}
+
+/** Whether `actor` requested `decision`, or holds the authority to request its action on `work` itself. */
+function mayRequest(services: Services, actor: Principal, decision: DecisionRecord, work: Work) {
+  if (decision.requestedBy === actor.id) return true;
+  try { for (const capability of requiredDecisionCapabilities(decision.action, decision.input, work)) assertDecisionAuthority(actor, capability, work, services.repository); return true; }
+  catch (error) { if (error instanceof Refusal) return false; throw error; }
+}
+
+/**
+ * Settle the item's approved, unapplied decisions (GY-1297; `supersededSituation` and
+ * `stalledApproval` in model/approval.ts say when). One whose situation moved is recorded
+ * `superseded`, naming the head and base it was bound to and the item's current ones. One whose
+ * situation holds and that stood approved past the grace is applied through the engine under its
+ * approval — keyed by the decision, so a resumption that races the approval applies it once — and
+ * settles applied, or failed naming why: a refusal, or a fault, since a decision left approved after
+ * a fault refuses every later request of its action. The risk lane's own approvals are superseded
+ * here and resumed by `resumeLaneReworks`. `only` limits the settlement to one decision, which the
+ * caller must have requested or be able to request (the withdrawal path). Returns what it settled.
+ */
+export async function settleApprovedDecisions(services: Services, caller: Principal, id: string, only?: string): Promise<DecisionRecord[]> {
+  const found = await services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller);
+    const work = await findWork(db, id);
+    if (!work) return { superseded: [] as DecisionRecord[], stalled: [] as DecisionRecord[], work: null };
+    const history = (await readDecisions(db, work)).filter(decision => decision.state === 'approved' && (!only || (decision.id === only && mayRequest(services, actor, decision, work))));
+    const superseded = await supersedeMoved(db, work, history, actor);
+    const stalled = history.filter(decision => !superseded.some(entry => entry.id === decision.id) && decision.approvedBy !== laneApprover && stalledApproval(decision, now.getTime()));
+    return { superseded, stalled, work };
+  });
+  const settled = [...found.superseded];
+  for (const decision of found.stalled) {
+    let outcome: { kind: string; details: object };
+    const approver = { id: decision.approvedBy!, role: 'admin' } as Principal;
+    try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, approver, decision.approvalReason ?? 'approved'), resumed: true } }; }
+    catch (error) { outcome = { kind: 'decision.failed', details: { error: `Approved by ${decision.approvedBy} at ${decision.approvedAt} but its application was never recorded; resuming it ${error instanceof Refusal || error instanceof z.ZodError ? 'was refused' : 'failed'}: ${error instanceof Error ? error.message : 'unknown'}`.slice(0, 2000), resumed: true } }; }
+    settled.push(await services.engine.store.transaction(async db => {
+      // The approval's own application, or a second resumer, may have settled it meanwhile; the first outcome stands.
+      const current = (await readDecisions(db, found.work!)).find(entry => entry.id === decision.id)!;
+      if (current.state !== 'approved') return current;
+      await record(db, found.work!, approver.id, outcome.kind, { id: decision.id, ...outcome.details });
+      return (await readDecisions(db, found.work!)).find(entry => entry.id === decision.id)!;
+    }));
+  }
+  return settled;
+}
+
+/** Record `decision.superseded` for each approved decision whose situation the item has moved past, in the caller's transaction (GY-1297). */
+export async function supersedeMoved(db: pg.PoolClient, work: Work, decisions: DecisionRecord[], actor: Principal): Promise<DecisionRecord[]> {
+  const settled: DecisionRecord[] = [];
+  for (const decision of decisions) {
+    const moved = supersededSituation(decision, work);
+    if (!moved) continue;
+    const reason = `Superseded: approved for ${situationLabel(moved.bound)}, but ${work.key} is now at ${situationLabel(moved.current)}, so it can never apply to what it judged; a ${decision.action} request is judged afresh for the current candidate`;
+    await record(db, work, actor.id, 'decision.superseded', { id: decision.id, action: decision.action, reason, bound: moved.bound, current: moved.current, observedBy: { id: actor.id, role: actor.role } });
+    settled.push((await readDecisions(db, work)).find(entry => entry.id === decision.id)!);
+  }
+  return settled;
 }
