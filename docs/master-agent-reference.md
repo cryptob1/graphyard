@@ -57,13 +57,15 @@ A dead supervisor fences its item; `containment` lists survivors' pid, cmdline a
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
+An approved decision its approver never applied is applied by the loop a minute after approval (`approverSettleMs`), under that approver, not put to another; a re-request of its action applies it too. A `rework`/`recover` approval whose candidate has moved is superseded (`stale`), and the re-request is recorded for the current one.
+
 ### Producer-runtime faults
 
 A producer request spent with no attempt acting (never started, launch refused, exited at launch) requests no rework; it relaunches on an independent profile none of them ran on.
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`. A silent decision waiting on its approver session is `decision-unanswered` (`decision`), not `loop-silence`; a doctor command its allowlist refused is recorded done, not a failed `loop` action.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`. A silent decision waiting on its approver session is `decision-unanswered` (`decision`), not `loop-silence`; one `approved but unapplied` (with its `approvedAt`) awaits the loop's apply, so it is `loop-silence`; a doctor command its allowlist refused is recorded done, not a failed `loop` action.
 
 ## Pipeline speed
 

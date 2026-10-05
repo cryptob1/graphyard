@@ -729,7 +729,9 @@ export function withheldDecision(work: Work, config: ReviewCapConfig, now: numbe
  * session: it can die, drop its prompt, hit an account limit, decline, or hang. Each cycle therefore
  * reads the decision back from the control plane and the session back from Herdr, and takes the one
  * step that follows. Launches are bounded, so a decision no session will judge ends as an escalation
- * and an actionable silence rather than as a relaunch every few minutes forever.
+ * and an actionable silence rather than as a relaunch every few minutes forever. A judged decision is
+ * never put to another approver: once its own approver had the settle window to apply it, the loop
+ * applies it (GY-1298).
  */
 export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxApproverLaunches = 3, maxApproverCloses = 3, maxDecisionRequests = 3;
 /**
@@ -743,14 +745,8 @@ export const maxLostApproverRuns = 3;
 /** Whether the watch's last run was lost and its launch is still given back (see `maxLostApproverRuns`). */
 export const lostRunRefunded = (watch: Pick<ApprovalWatch, 'run' | 'lostRuns'>) =>
   watch.run?.result?.ok === false && watch.run.result.reason === 'lost' && watch.lostRuns < maxLostApproverRuns;
-export type ApprovalStep =
-  | { step: 'wait'; detail: string }
-  | { step: 'settled'; detail: string }
-  | { step: 'refused'; detail: string }
-  | { step: 'rerequest'; detail: string }
-  | { step: 'relaunch'; detail: string }
-  | { step: 'exhausted'; detail: string };
-export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null } | null | undefined,
+export type ApprovalStep = { step: 'wait' | 'settled' | 'refused' | 'rerequest' | 'relaunch' | 'exhausted' | 'apply'; detail: string };
+export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null; approvedBy?: string | null; approvedAt?: string | null; refusal?: { approver: string; reason: string } | null } | null | undefined,
   sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
   // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
@@ -762,6 +758,8 @@ export function approvalStep(watch: ApprovalWatch, decision: { state: string; ou
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
   if (decision.state !== 'requested' && decision.state !== 'approved')
     return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  const approved = decision.state === 'approved' ? `${label} was approved by ${decision.approvedBy ?? 'its approver'} at ${decision.approvedAt ?? 'an unrecorded time'}` : null, approvedAt = Date.parse(decision.approvedAt ?? '');
+  if (approved) return now - approvedAt < approverSettleMs ? { step: 'wait', detail: `${approved}; its approver is applying it` } : { step: 'apply', detail: `${approved} and never applied` };
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;

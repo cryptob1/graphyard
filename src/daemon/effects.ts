@@ -224,6 +224,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
+  /** GY-1298. Applies an approved decision whose approver ended before applying it, or supersedes it when the candidate it judged moved; returns it as it then stands. */
+  applyDecision?: (work: Work, decision: string, reason: string) => Promise<{ id: string; state: string; outcome?: string | null }>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
   containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
   /** Bounds this host's clock against the control plane with a light timed read just before containment is assessed (GY-811). */
@@ -507,6 +509,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
+  const applyDecision: DaemonEffects['applyDecision'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'apply', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   // One coordinator read of the decision ledger's kinds after the last seq the loop saw (GY-1142).
   const decisionChanges: DaemonEffects['decisionChanges'] = async after => {
@@ -729,7 +732,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get decide() { return current().operatorAgent ? decide : undefined; },
     get approver() { return current().operatorAgent ? approver : undefined; },
     get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
-    get withdraw() { return current().operatorAgent ? withdraw : undefined; },
+    get withdraw() { return current().operatorAgent ? withdraw : undefined; }, get applyDecision() { return current().operatorAgent ? applyDecision : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     get decisionChanges() { return current().operatorAgent ? decisionChanges : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);

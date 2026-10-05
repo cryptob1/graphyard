@@ -619,15 +619,15 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   // The step behind each of those cycles, as a pure judgement over one watch. A session that is
   // still working is waited for up to the bound and replaced past it; a history or an inventory
   // that cannot be read concludes nothing; and an approval the server has not applied yet is the
-  // approver's to resume, so its session is supervised exactly like a request's.
+  // loop's to apply, never a session to replace (GY-1298).
   const at = waiting.now();
   const watch = approvalWatchSchema.parse({ work: 'GY-410', action: 'rework', decision, agentName: session, requestedAt: waiting.iso(at), launchedAt: waiting.iso(at), launches: 1 });
   const working = { agents: [{ name: session, pane_id: 'pane-9', agent_status: 'working' }], available: true };
   assert.equal(approvalStep(watch, { state: 'requested' }, working, at + approverJudgeBoundMs).step, 'wait');
   const hung = approvalStep(watch, { state: 'requested' }, working, at + approverJudgeBoundMs + minute);
   assert.deepEqual([hung.step, /has not judged it for 11 minutes, past the 10-minute bound/.test(hung.detail)], ['relaunch', true]);
-  assert.equal(approvalStep({ ...watch, launches: maxApproverLaunches }, { state: 'approved' }, { agents: [], available: true }, at + minute).step, 'exhausted');
-  assert.equal(approvalStep(watch, { state: 'approved' }, { agents: [], available: true }, at + minute).step, 'relaunch');
+  assert.equal(approvalStep({ ...watch, launches: maxApproverLaunches }, { state: 'approved' }, { agents: [], available: true }, at + minute).step, 'apply');
+  assert.equal(approvalStep(watch, { state: 'approved' }, { agents: [], available: true }, at + minute).step, 'apply');
   assert.equal(approvalStep(watch, undefined, { agents: [], available: true }, at + minute).step, 'wait');
   assert.equal(approvalStep(watch, { state: 'requested' }, { agents: [], available: false }, at + minute).step, 'wait');
   assert.equal(approvalStep(watch, { state: 'applied' }, working, at + minute).step, 'settled');

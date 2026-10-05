@@ -104,6 +104,11 @@ export const silenceBudgetMs = 1_200_000;
 /** The fixed wording of a decision subject that waits on an approver session, which `approverWait` reads back. */
 export const approverWaitWording = { waiting: 'is requested and waiting for approver session', unjudged: 'is unjudged after' } as const;
 /**
+ * GY-1298. The wording of a decision its approver judged but nobody applied: the wait is the apply the
+ * loop owes, not an approver's judgement, so it is not an `approverWait` and counts against the loop.
+ */
+export const approvedUnappliedWording = 'is approved but unapplied: approved at';
+/**
  * A silent subject that is a decision with an approver (GY-1295): the wait is the approver's to end, a
  * decision fault, not the loop failing to cycle. Counted as loop silence, it filed loop items for it.
  */
@@ -129,6 +134,7 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
     // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
     if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
+      : watch.approvedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approvedUnappliedWording} ${watch.approvedAt}${watch.approvedBy ? ` by ${watch.approvedBy}` : ''}; the loop applies it (graphyard master decisions ${item.key})`
       : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.unjudged} ${watch.launches} approver session(s)`
         : `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.waiting} ${watch.agentName ?? '(not launched)'} to judge it`);
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
