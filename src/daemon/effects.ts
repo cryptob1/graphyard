@@ -56,6 +56,8 @@ import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
+import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -253,6 +255,10 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
+  /** Run one master browser flow as a child command (GY-949); a refusal resolves, only a child that printed no result rejects. */
+  browserFlow?: (flow: RemedyFlow) => Promise<FlowResult>;
+  /** Record the loop's attempt of a remedy on the stalled row it was applied for (`POST /api/actions/:id/remedy`). */
+  recordRemedy?: (row: string, attempt: Omit<RemedyRecord, 'at' | 'by'>) => Promise<unknown>;
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
@@ -571,6 +577,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
+    browserFlow: flow => browserFlowChild(run, root, flow),
+    recordRemedy: (row, attempt) => mutate(`actions/${row}/remedy`, attempt),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

@@ -4148,6 +4148,104 @@ test('unit:soak-invariants-hold — sessions blocked on a GitHub credential fail
   assert.ok(theirs.every(session => session.state === 'reclaimed'), 'no blocked session was left holding its lease');
 });
 
+test('unit:soak-invariants-hold — rows stalled on the App permission hold across hours of real loop cycles are remedied once per unchanged run: one browser flow and one record per run, a refused remedy escalated once and never retried, rows held together sharing one flow', { timeout: 300_000 }, async () => {
+  // GY-949: step 6b runs a browser flow for a stalled row and records it on the row. Its guarantee —
+  // once per unchanged run, never retried in a loop — rests on the record landing through the real
+  // route, the loop's own guard covering the cycles between a launch and its record, and the
+  // launcher's key; so it is driven here through the real engine, route and launcher, cycle after
+  // cycle. A stand-in executor fails each held item's dispatch row with the hold's own words while
+  // the hold stands. The first held item's remedy is refused (a pending sudo confirmation); two
+  // items held together two hours later share one flow, which grants the permission and lets their
+  // rows complete. Each flow outlives several cycles, as a real one waiting on sudo does.
+  const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
+  await moveClock(0);
+  const dayStart = clock.now();
+  const hold = (key: string) => `${key}: no observation newer than the claim was saved; its observation job is held: App graphyard-owner-project lacks Actions: write, which failed CI reruns needs to rerun failed workflow jobs on the unchanged candidate; accept the pending permission request at https://github.com/settings/installations/2; the claim woke it and leaves the row waiting for the observation`;
+  const sudo = 'Confirm access was not approved within 300s; approve the GitHub Mobile prompt (code 42) and rerun master browser installation-accept';
+  const create = async (n: number) => {
+    const work = await engine.execute(principals.operator, 'create', null, { title: `Held item ${n}`, plannedFiles: [`src/held-${days}-${n}.ts`], criteria: [{ id: 'AC-1', text: `Held item ${n} behaves`, proofs: [PROOF] }] }, id());
+    return engine.execute(principals.operator, 'ready', work.id, {}, id());
+  };
+  const items: Work[] = [await create(1)];
+  const own = () => new Set(items.map(item => item.id));
+  let granted = false, cycles = 0;
+  const flows: { flow: string; cycle: number }[] = [], records: { row: string; outcome: string; cycle: number }[] = [], refusedRecords: string[] = [];
+  const config = { ...soakConfig, workers: [] } as MasterConfig;
+  const state = emptyDaemonState(config);
+  const loop = new Launcher();
+  const effects: DaemonEffects = {
+    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock.now()).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => ({}), requestSmoke: () => {},
+    agents: () => [], credentials: async () => ({}), persist: async () => {},
+    snapshot: async () => { const read = await store.coordinationSnapshot(); return { work: read.work.filter(item => own().has(item.id)), now: read.now, jobs: read.jobs }; },
+    // The master browser flow, faked: it settles three cycles after it starts. The first answers a
+    // pending sudo confirmation; every later one grants the permission, which ends the hold.
+    browserFlow: async flow => {
+      const started = cycles;
+      flows.push({ flow, cycle: started });
+      while (cycles < started + 3) await new Promise(resolve => setTimeout(resolve, 5));
+      if (flows.length === 1) return { outcome: 'refused', verified: false, reason: sudo };
+      granted = true;
+      return { outcome: 'applied', verified: true, reason: 'Installation 2 now grants actions: read to write' };
+    },
+    recordRemedy: async (row, attempt) => {
+      try { const result = await api(principals.coordinator, 'POST', `actions/${row}/remedy`, attempt); records.push({ row, outcome: attempt.outcome, cycle: cycles }); return result; }
+      catch (error) { refusedRecords.push(error instanceof Error ? error.message : String(error)); throw error; }
+    },
+  };
+  const escalations = new Map<string, Set<string>>(), failures: string[] = [];
+  /** The executor's attempt at every claimable dispatch row of a held item: refused while the hold stands. */
+  const execute = async () => {
+    for (const item of items) {
+      const claimed = await engine.claimNextAction(principals.coordinator, { executor: 'soak-executor', host: 'soak-host', kinds: ['dispatch'], work: item.id }, id()) as { action: { id: string } | null };
+      if (!claimed.action) continue;
+      await engine.settleClaimedAction(principals.coordinator, claimed.action.id, { executor: 'soak-executor', ...(granted ? { result: 'done', reason: 'the held job resumed' } : { result: 'failed', reason: hold(item.key) }) }, id());
+    }
+  };
+  for (; clock.now() - dayStart < 6 * hour; cycles++) {
+    if (items.length === 1 && clock.now() - dayStart >= 2 * hour) items.push(await create(2), await create(3));
+    await execute();
+    try { await runCycle(config, state, effects, clock.now, loop); }
+    catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
+    for (const item of (await store.list()).filter(entry => own().has(entry.id))) {
+      if (process.env.SOAK_TRACE) console.error(`c${cycles} ${item.key} next=${item.nextAction?.kind}:${item.nextAction?.binding?.slice(0, 60)} rows=${(item.actionQueue?.actions ?? []).map(row => `${row.kind}/${row.state}/${row.attempts}/${row.remedy?.outcome ?? '-'}/${row.stall ? 'S' : ''}`).join(',')}`);
+      for (const row of (item.actionQueue?.actions ?? []).filter(row => row.kind === 'escalate' && row.binding.startsWith('stalled:')))
+        escalations.set(item.key, (escalations.get(item.key) ?? new Set()).add(row.binding));
+    }
+    await moveClock(minute);
+  }
+  await loop.idle();
+  const final = (await store.list()).filter(item => own().has(item.id));
+  const [first, second, third] = items.map(item => final.find(entry => entry.id === item.id)!);
+  // A row the escalation superseded is retired to the queue's history, its record with it.
+  const remedied = (work: Work) => [...work.actionQueue?.actions ?? [], ...work.actionQueue?.history ?? []].flatMap(row => row.remedy ? [row.remedy] : []);
+
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.ok(cycles >= 300, `the loop ran the day: ${cycles} cycles`);
+  // One flow per run: the refused run's, and the one the two rows held together share.
+  assert.deepEqual(flows.map(entry => entry.flow), ['installation-accept', 'installation-accept'], `a flow per run, never one per cycle: ${JSON.stringify(flows)}`);
+  assert.ok(flows[1].cycle - flows[0].cycle >= 100, 'the refused run was never retried while it stood');
+  // One record per run and row, each through the route, and the route was never asked for a second.
+  assert.deepEqual(records.map(entry => entry.outcome).sort(), ['applied', 'applied', 'refused']);
+  assert.deepEqual(refusedRecords, [], 'the loop never tried to record a remedy twice for one run');
+  assert.deepEqual([remedied(first).length, remedied(second).length, remedied(third).length], [1, 1, 1]);
+  assert.equal(remedied(first)[0].outcome, 'refused');
+  assert.match(remedied(first)[0].detail, /Confirm access was not approved/);
+  // The refusal was escalated once with the refusal and the remedy named; the granted rows were not escalated.
+  assert.deepEqual([...escalations.get(first.key) ?? []].length, 1, `one escalation for the refused run: ${[...escalations.get(first.key) ?? []].join(', ')}`);
+  assert.match([...escalations.get(first.key)!][0], /^stalled:[0-9a-f]+:remedy:/);
+  assert.equal(escalations.get(second.key), undefined);
+  assert.equal(escalations.get(third.key), undefined);
+  // The grant let the held rows complete: nothing of theirs is stalled any more.
+  for (const work of [second, third]) assert.ok(!(work.actionQueue?.actions ?? []).some(row => row.kind === 'dispatch' && row.stall), `${work.key}'s row is no longer stalled`);
+  // The loop's own report: one config action per flow, the refused one failed and the shared one done.
+  const reported = Object.entries(state.actions).filter(([key]) => key === 'remedy:installation-accept').map(([, action]) => action);
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0].attempts, 2);
+  for (const item of final) await api(principals.operator, 'POST', `work/${item.key}/close`, { kind: 'obsolete', reason: 'soak: the permission-hold scenario ends here' });
+});
+
 test('unit:soak-invariants-hold — attempts the loop ends with their containment fences raised are settled by the next cycle without waiting out the grace window, a 502 is retried on the cycle after it, the timed read stays one a cycle and only while such a fence stands, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-1155: the credential-blocked day with every launch fenced as `watch` fences it. The loop ends
   // each blocked attempt on its record, and its supervisor leaves the fence standing; the reclaim

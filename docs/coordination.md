@@ -40,3 +40,5 @@ The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own 
 ## Ship in under thirty minutes
 
 [Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance. `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts), launched in its own managed checkout. Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).
+
+A stalled row's attention and escalation name its reason's bound remedy (`src/stall-remedies.ts`); an unrecognised reason keeps the generic line. On an App permission hold the loop runs `master browser installation-accept` (`app-permissions` first when needed) once per unchanged run and records the outcome on the row (`POST /api/actions/:id/remedy`); a refusal escalates once and is never retried. A full role names its capacity lever: `master registry role set ROLE ACCOUNT… --concurrency N`, or a live session ending.

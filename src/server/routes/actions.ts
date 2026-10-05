@@ -97,6 +97,13 @@ export const actionRoutes = defineRoutes('actions', [
     },
   },
   {
+    // The loop's record of the remedy a stalled row's reason binds to (GY-949); see Engine.recordActionRemedy.
+    method: 'POST', path: /^\/api\/actions\/([0-9a-f]{32})\/remedy$/,
+    async handle(context, [id]) {
+      return context.services.engine.recordActionRemedy(context.actor, id, await parseJson(context, undefined, '{}'));
+    },
+  },
+  {
     // What the `resync` and `reclaim` actions run: a fresh provider reading and a reconciliation
     // pass for one item. It carries no verdict of its own — see Engine.resyncWork. The body may name
     // the instant the executor's claim was made (`since`), and the answer says whether an
