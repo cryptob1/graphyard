@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, readDurations, shardFiles } from '../../scripts/ci-tests.mjs';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
+import { hostMemoryVariable } from '../../src/master-resources.js';
+import { heldVariable, sessionVerificationSlot } from '../../src/master/verification-slots.js';
 import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
@@ -11,6 +13,10 @@ import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim
 //
 //   node --import tsx tests/helpers/run-tests.ts [FILE...]            the Node suite (default tests/*.test.ts)
 //   node --import tsx tests/helpers/run-tests.ts --browser [ARGS...]  the Playwright suite
+//   node --import tsx tests/helpers/run-tests.ts --typecheck          tsc --noEmit (npm run typecheck)
+//
+// Started from a Graphyard session, each of the three first takes a host verification slot
+// (src/master/verification-slots.ts, GY-612), waiting while every slot on the host is held.
 //
 // Three runner options select and measure the Node suite's files (GY-499), as CI's shard jobs do:
 //   --files-from LIST   run the files LIST names, one per line (an empty list runs nothing)
@@ -134,9 +140,12 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   try {
     // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
     // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
+    // A run of the suite reads no host memory (GY-612): the deferral the loop launches under is
+    // exercised by tests that stub a reading, and a host the suite itself loaded low must not flip
+    // the behaviour of tests that stub none.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : testPortEnvironment(reservation.base)), GRAPHYARD_DATA_HOME: dataHome };
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
@@ -156,8 +165,16 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   } finally { reservation.release(); }
 }
 
+/** `tsc --noEmit` under the caller's environment, marked as holding the slot this process took. */
+export async function typecheck(cwd = process.cwd(), args: string[] = []) {
+  const child = spawn(process.execPath, [fileURLToPath(import.meta.resolve('typescript/bin/tsc')), '--noEmit', ...args], { cwd, stdio: 'inherit', env: { ...process.env, [heldVariable]: '1' } });
+  return await new Promise<number>(done => child.on('close', (status, signal) => done(status ?? (signal ? 1 : 0))));
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const browser = process.argv[2] === '--browser';
-  const { code } = await runTests({ browser, args: process.argv.slice(browser ? 3 : 2) });
-  process.exitCode = code;
+  const mode = process.argv[2] === '--browser' ? 'browser' : process.argv[2] === '--typecheck' ? 'typecheck' : 'test';
+  const args = process.argv.slice(mode === 'test' ? 2 : 3);
+  const held = await sessionVerificationSlot(mode === 'typecheck' ? 'npm run typecheck' : mode === 'browser' ? 'npm run test:browser' : `npm test${args.length ? ` ${args.join(' ')}` : ''}`);
+  try { process.exitCode = mode === 'typecheck' ? await typecheck(process.cwd(), args) : (await runTests({ browser: mode === 'browser', args })).code; }
+  finally { held?.release(); }
 }

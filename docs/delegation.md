@@ -24,4 +24,4 @@ Resolutions record `escalation.resolved`.
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
 - `lease-loss` of a superseded/stopped epoch: loop's two-party decision (stale if the superseding lease lapses).
-- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind: "human"`; settles any). Nobody else resolves alone.
+- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind: "human"`; settles any).

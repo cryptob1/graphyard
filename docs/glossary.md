@@ -9,7 +9,7 @@
 
 ### 2. AI agent
 
-A model in a runtime with only its credential's authority.
+A model in a runtime, holding only its credential's authority.
 
 **Canonical usage:** name the role (*worker*, *master*, *approver*…).
 

@@ -68,7 +68,7 @@ A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; 
 
 ### Webhook liveness
 
-Hour without deliveries: `master status` points to `https://github.com/settings/apps/APP-SLUG`.
+A silent hour: `master status` points to `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
@@ -77,6 +77,10 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 ## Storage retention
 
 Receipts answer retries for a day; ledger rows store changes; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1), appending `ledger.compacted`.
+
+### Host memory
+
+Session-started `npm test`, `test:browser`, typecheck and `tsc --noEmit` wait for one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots`; CI is unbounded. Below max(10% RAM, 4 GB) available, launches defer (`escalation:dispatch:memory`; `resources` item `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
 
 ## Bootstrap mode for a self-proving change
 
@@ -92,7 +96,7 @@ An unserved merge is a [`delivery.deployment-incident`](deployment.md#production
 
 ## Merge bypass
 
-Ungated merge = permanent violation: repair access, open a follow-up item, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, file a follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -105,11 +109,11 @@ graphyard grants
 graphyard grants grant|revoke ci "integration:*,unit:*" REASON
 ```
 
-Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or prefix (`manual:gy-43/*`) (`graphyard grants` lists).
+Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` or prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`, `--apply` applies; later scans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json` (`--apply` applies); rescans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
 
 ## Scale limits
 
