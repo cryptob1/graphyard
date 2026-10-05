@@ -554,6 +554,7 @@
     "tests/attestation-carry.test.ts": 612,
     "tests/automatic-review-concurrency.test.ts": 5000,
     "tests/coordinator-os-confinement.test.ts": 1100,
+    "tests/keyring-probe-backoff.test.ts": 300,
     "tests/delivery-causes.test.ts": 461,
     "tests/diagnostician.test.ts": 2769,
     "tests/dispatch-recovers-from-jam.test.ts": 1181,
@@ -580,6 +581,7 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873
+    "tests/unblock-stale-revision.test.ts": 4873,
+    "tests/exhausted-proof-runtime.test.ts": 350
   }
 }
