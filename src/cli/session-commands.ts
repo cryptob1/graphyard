@@ -213,8 +213,10 @@ async function createSealKey(path: string, linkKey: typeof link): Promise<string
  * a waiter that judged the old lock could remove the fresh one another waiter just took, leaving
  * two holders (GY-1219). A stale lock is superseded instead: the turn passes to the next name in
  * the chain `path.lock`, `path.lock.1`, …, taken exclusively like the first, so every lock is only
- * ever removed by its own holder. The holder removes the stale locks it passed once a key has
- * landed, when a lock no longer decides anything: every later holder finds the key and keeps it.
+ * ever removed by its own holder. Whoever passed stale locks removes them once a key has landed,
+ * when a lock no longer decides anything: every later holder finds the key and keeps it. That is
+ * the holder after its turn and equally a waiter that sees the key land, so a stale lock no holder
+ * passed is not left in the seal directory (GY-1242).
  */
 async function renameUnlessLanded(scratch: string, path: string) {
   const landed = () => stat(path).then(() => true, () => false);
@@ -232,7 +234,10 @@ async function renameUnlessLanded(scratch: string, path: string) {
       } finally { await rm(lock, { force: true }); }
       return;
     }
-    if (await landed()) return;
+    if (await landed()) {
+      for (const passed of stale) await rm(passed, { force: true });
+      return;
+    }
     const lockedAt = await stat(lock).then(info => info.mtimeMs, () => undefined);
     if (lockedAt !== undefined && Date.now() - lockedAt > sealLockStaleMs) stale.push(lock);
     else if (Date.now() > deadline) throw new Error(`The sealing key lock ${lock} is still held`);
