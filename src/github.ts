@@ -16,6 +16,10 @@ import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
 import { foldDecisions } from './model/approval.js';
 import { normalMergeState, repairAudit, repairAuditEvent, repairLaneVerdict, type RepairAudit, type RepairLaneVerdict } from './master/repair-lane.js';
+import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
+import { githubDelivery } from './model/delivery-mode.js';
+import { lockedWork } from './store/locked-read.js';
+import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
 import { baseBreakRefreshNeeded, readBaseBreak, type BaseBreak } from './master/base-break-refresh.js';
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
@@ -2424,6 +2428,90 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.upsertLandable(landableCarried(work, audit.head, body.output.title, body.output.summary));
     await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: audit.head, method: autoMergeMethod() });
   }
+  /** Every check run on a commit, as the gates read a candidate's: what the main guard judges a merge commit by (GY-1250). */
+  async commitChecks(sha: string): Promise<{ name: string; result: string; appId: number; id?: number }[]> {
+    return (await this.pages(`/commits/${sha}/check-runs?filter=all`, 'check_runs')).filter(check => check.name !== CHECK_NAME && check.name !== LANDABLE_CHECK)
+      .map(check => ({ name: check.name, result: check.status === 'completed' ? check.conclusion : check.status, appId: check.app?.id, ...(Number.isSafeInteger(check.id) ? { id: check.id } : {}) }));
+  }
+  /**
+   * Main's first-parent history, newest first (GY-1250): the main guard reads the required checks
+   * on each merge commit in it, back to the last green one.
+   */
+  async mainHistory(limit = 100): Promise<MainCommit[]> {
+    const commits = await this.request(`/commits?sha=${encodeURIComponent(this.config.base)}&per_page=${limit}`);
+    demand(Array.isArray(commits), `GitHub did not list the commits on ${this.config.base}`, 502);
+    const parents = new Map<string, string | null>(commits.filter((commit: any) => typeof commit?.sha === 'string').map((commit: any) => [commit.sha, typeof commit.parents?.[0]?.sha === 'string' ? commit.parents[0].sha : null]));
+    const history: MainCommit[] = [];
+    for (let sha: string | null = commits[0]?.sha ?? null; sha && parents.has(sha); sha = parents.get(sha)!) history.push({ sha, parent: parents.get(sha)! });
+    return history;
+  }
+  /**
+   * Opens the revert of exactly the merge `mergeSha` as a pull request (GY-1250): a commit
+   * restoring the merge's first parent's tree on top of the merge, merged by GitHub onto main's tip
+   * on a `graphyard-revert/` branch, so the revert undoes that merge's change alone and keeps every
+   * later one. A conflict with a later merge is refused, with nothing left behind.
+   */
+  async openMainRevert(work: Work, mergeSha: string, reason: string): Promise<{ pr: number; head: string } | { refusal: string }> {
+    const merge = await this.request(`/commits/${mergeSha}`);
+    const parent = merge?.parents?.[0]?.sha;
+    demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${mergeSha}`, 502);
+    const subject = String(merge?.commit?.message ?? '').split('\n')[0];
+    const title = `Revert ${work.key}'s merge ${mergeSha.slice(0, 12)}: it broke main`;
+    const inverse = await this.request('/git/commits', 'POST', { message: `Revert "${subject}"\n\nThis reverts commit ${mergeSha}.\n\n${reason}`, tree: await this.commitTree(parent), parents: [mergeSha] });
+    demand(typeof inverse?.sha === 'string' && /^[a-f0-9]{40}$/.test(inverse.sha), 'GitHub returned an invalid revert commit', 502);
+    const tip = (await this.baseBranch()).tip, ref = `graphyard-revert/main-${mergeSha.slice(0, 12)}`;
+    await this.publishRef(`refs/heads/${ref}`, tip);
+    let head: string | null;
+    try { head = await this.mergeBranch(ref, inverse.sha, `${title}\n\n${reason}`); }
+    catch (error) {
+      if (!(error instanceof SpeculativeConflict)) throw error;
+      await this.request(`/git/refs/heads/${ref}`, 'DELETE').catch(() => undefined);
+      return { refusal: `the revert of ${mergeSha.slice(0, 12)} conflicts with main's tip ${tip.slice(0, 12)}: a later merge changed the same lines` };
+    }
+    if (!head) return { refusal: `main's tip ${tip.slice(0, 12)} already holds the revert of ${mergeSha.slice(0, 12)}` };
+    const existing = (await this.request(`/pulls?state=open&head=${encodeURIComponent(`${this.config.repository.split('/')[0]}:${ref}`)}`)) as any[];
+    const pull = existing?.[0] ?? await this.request('/pulls', 'POST', { title, head: ref, base: this.config.base, body: `${reason}\n\nOpened by Graphyard's main guard (GY-1250). The App merges it, bound to this head, once its own required checks pass; a revert that conflicts or fails them is closed after this one attempt.` });
+    demand(Number.isSafeInteger(pull?.number), 'GitHub did not open the revert pull request', 502);
+    return { pr: pull.number, head };
+  }
+  /** A revert pull request as the main guard reads it: merged, still open, mergeable, and its head. */
+  async revertPull(pr: number): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; head: string }> {
+    const pull = await this.request(`/pulls/${pr}`);
+    demand(typeof pull?.head?.sha === 'string', `GitHub did not return pull request #${pr}`, 502);
+    return { merged: !!pull.merged, mergeSha: typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null, open: pull.state === 'open', mergeable: typeof pull.mergeable === 'boolean' ? pull.mergeable : null, head: pull.head.sha };
+  }
+  /** Closes a revert pull request the main guard gave up on, saying why, and deletes its branch. */
+  async closeRevert(pr: number, reason: string): Promise<void> {
+    await this.request(`/issues/${pr}/comments`, 'POST', { body: reason });
+    const pull = await this.request(`/pulls/${pr}`, 'PATCH', { state: 'closed' });
+    const ref = pull?.head?.ref;
+    if (typeof ref === 'string' && ref.startsWith('graphyard-revert/')) await this.request(`/git/refs/heads/${ref}`, 'DELETE').catch(() => undefined);
+  }
+  /**
+   * Lands a revert the main guard opened, exactly at `head`, with the repair lane's bypass (GY-406):
+   * the App publishes its `Graphyard / merge` verdict naming the revert and merges head-bound, so
+   * main is restored within one CI duration instead of after another queue round. Returns the
+   * merge commit once GitHub reports the pull request merged, else null.
+   */
+  async mergeRevert(work: Work, revert: { pr: number; head: string; failing: string[] }): Promise<string | null> {
+    const pull = await this.request(`/pulls/${revert.pr}`);
+    if (pull?.merged) return typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null;
+    const state = await this.mergeQueueState(revert.pr);
+    requireCurrent(state.head === revert.head, `Revert pull request #${revert.pr} head moved from ${revert.head.slice(0, 12)} to ${state.head.slice(0, 12)}; the guard merges only the head it built`);
+    if (state.mode !== 'none') await this.dequeuePullRequest(state);
+    const existing = (await this.pages(`/commits/${revert.head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
+    const body = { name: CHECK_NAME, head_sha: revert.head, status: 'completed', conclusion: 'success', external_id: work.id,
+      output: { title: 'Main guard: revert of a merge that broke main', summary: `Revert of ${work.key}'s merge at ${revert.head}: ${revert.failing.join(', ') || 'required checks failed'} on main` } };
+    // A verdict already standing is not republished on every guard tick; the merge request below is.
+    if (!(existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
+      && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary)) {
+      await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+    }
+    await this.upsertLandable(landableCarried(work, revert.head, body.output.title, body.output.summary));
+    await this.graphql(headBoundMergeMutation, { id: state.pullRequestId, head: revert.head, method: autoMergeMethod() });
+    const merged = await this.request(`/pulls/${revert.pr}`);
+    return merged?.merged && typeof merged.merge_commit_sha === 'string' ? merged.merge_commit_sha : null;
+  }
   /**
    * GitHub's merge queue requires every required check on the merge group commit it builds, not only
    * on the pull request head. The authorized head's verdict is carried to that commit, and only
@@ -2794,6 +2882,36 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
   catch (error) { await record('repair.failed', { ...audit, error: error instanceof Error ? error.message : String(error) }); throw error; }
   return verdict;
 }
+/** How often the job loop runs the main guard (see guardGitHubMain). */
+export const mainGuardIntervalMs = 30_000;
+/**
+ * The main guard under GitHub delivery (GY-1250), run by the job loop every `mainGuardIntervalMs`
+ * (see main-guard.ts): it reads only the items it acts on — those with a revert in flight and the
+ * one whose delivery is the merge that broke main — and records each revert step on that item under
+ * `main-guard.revert.<state>`, reopening it for rework when its revert merged.
+ */
+export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>()): Promise<MainGuardTick> {
+  const pool = engine.store.pool;
+  const required: string[] = (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
+  return runMainGuard({
+    reverting: async () => (await pool.query("SELECT document FROM work_items WHERE document->'mainGuardReverts' @> '[{\"state\":\"opened\"}]'::jsonb ORDER BY number")).rows.map(row => row.document),
+    culprit: async mergeSha => (await pool.query("SELECT document FROM work_items WHERE document->'delivery'->>'mergeSha'=$1 OR document->'mainGuardReverts' @> $2::jsonb ORDER BY number DESC LIMIT 1", [mergeSha, JSON.stringify([{ mergeSha }])])).rows[0]?.document ?? null,
+    history: () => github.mainHistory(),
+    checks: sha => github.commitChecks(sha),
+    openRevert: (work, mergeSha, reason) => github.openMainRevert(work, mergeSha, reason),
+    pull: pr => github.revertPull(pr),
+    mergeRevert: (work, revert) => github.mergeRevert(work, revert),
+    closeRevert: (pr, reason) => github.closeRevert(pr, reason),
+    record: (snapshot, revert: MainGuardRevert) => engine.store.transaction(async (db, at) => {
+      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [snapshot.id])).rows[0]?.document;
+      demand(work, 'Work item not found', 404);
+      const { reopened } = applyMainGuardRevert(work, revert, at);
+      if (reopened) engine.evaluate(work, (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item), at);
+      await save(db, work, 'graphyard', `main-guard.revert.${revert.state}`, at, { revert, reopened });
+    }),
+  }, { required, ciAppIds: engine.ciAppIds, now, verdicts });
+}
+const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardFailure = new WeakMap<Engine, string>();
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
@@ -2974,6 +3092,18 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   if (readAt === undefined || Date.now() - readAt >= mergeBatchSizeRefreshMs) {
     batchSizeRead.set(engine, Date.now());
     await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
+  }
+  // Under GitHub delivery the main guard (GY-1250) runs here on the same interval: a merge that
+  // broke main is reverted and its item reopened. A failure is recorded once and retried next interval.
+  const mainGuardedAt = mainGuardRead.get(engine);
+  if (githubDelivery() && typeof github.mainHistory === 'function' && (mainGuardedAt === undefined || Date.now() - mainGuardedAt >= mainGuardIntervalMs)) {
+    mainGuardRead.set(engine, Date.now());
+    if (!mainGuardVerdicts.has(engine)) mainGuardVerdicts.set(engine, new Map());
+    const verdicts = mainGuardVerdicts.get(engine)!;
+    if (verdicts.size > historyEntries) verdicts.clear();
+    const failed = await guardGitHubMain(engine, github, new Date(), verdicts).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
+    if (failed && mainGuardFailure.get(engine) !== failed) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'main-guard.failed', JSON.stringify({ details: { error: failed, at: new Date().toISOString() } })]).catch(() => {});
+    mainGuardFailure.set(engine, failed);
   }
   // The fleet is read before the claim, so the claim order can name it (GY-492): with a backlog
   // due, the merge-queue head's job is claimed first however recently it became due, instead of

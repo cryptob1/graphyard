@@ -107,6 +107,8 @@ export interface WorldOptions {
    * reads the real word counter makes.
    */
   docs?: { budget: { total: number; perPage: number }; pages: Record<string, number> };
+  /** GY-1250: the adapter answers the main guard's reads and writes (GitHub delivery's guard runs in `processJob`). */
+  mainGuard?: boolean;
 }
 
 export class SimulatedGitHub {
@@ -186,6 +188,20 @@ export class SimulatedGitHub {
   botReviewers = new Set<string>();
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
   landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
+  /**
+   * GY-1250. Items whose next merge breaks main's `test` check, though each pull request passed CI
+   * alone (the parallel-merge fault the main guard answers), and those whose revert's own `test`
+   * fails too, so the guard must give it up after one attempt.
+   */
+  breaksMain = new Set<string>(); revertFails = new Set<string>();
+  /** Each merge that broke main, and the commits that clear it: its revert's inverse commit, or a fix made on main by hand. */
+  broken: { key: string; mergeSha: string; clearedBy: Set<string> }[] = [];
+  /** The revert pull requests the main guard opened, numbered apart from the items' own. */
+  reverts = new Map<number, { key: string; mergeSha: string; head: string; inverse: string; open: boolean; merged: { sha: string; at: number } | null; closed: string | null; closedAt: number | null; at: number }>();
+  /** Every GitHub request the main guard made, with the simulated minute it made it in. */
+  guardRequests: { kind: 'history' | 'checks' | 'open' | 'pull' | 'merge' | 'close'; at: number; sha?: string }[] = [];
+  /** CI's runs on base-branch and revert commits, reported `ciMs` after the commit. */
+  private commitRuns = new Map<string, { name: string; result: string; id: number }[]>();
   private serial = 0;
   constructor(readonly options: WorldOptions, files: string[]) {
     const paths = [...files];
@@ -490,6 +506,55 @@ export class SimulatedGitHub {
     this.tip = commit.sha;
     pr.merged = { sha: commit.sha, at: now }; pr.open = false; pr.autoMerge = false;
     this.merges.push({ key: pr.key, pr: pr.number, sha: commit.sha, at: now, state, mode });
+    // GY-1250: only the item's first merge breaks main; its rework round's merge does not.
+    if (this.breaksMain.delete(pr.key)) this.broken.push({ key: pr.key, mergeSha: commit.sha, clearedBy: new Set() });
+  }
+
+  // ---- GY-1250: CI on main and the main guard's revert pull requests. ----
+  /** CI's runs on a base-branch or revert commit by `now`: `test` fails while it holds a merge that broke main and nothing that clears it. */
+  commitChecks(commit: string, now: number) {
+    const at = this.commits.get(commit)?.at;
+    if (at === undefined || now - at < this.options.ciMs) return [];
+    if (!this.commitRuns.has(commit)) {
+      const red = this.broken.some(entry => this.contains(commit, entry.mergeSha) && ![...entry.clearedBy].some(clear => this.contains(commit, clear)));
+      this.commitRuns.set(commit, ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: name === 'test' && red ? 'failure' : 'success', id: ++this.serial })));
+    }
+    return this.commitRuns.get(commit)!;
+  }
+  /** Main's first-parent history, newest first, as the commits listing pages it. */
+  mainHistory(limit: number) {
+    const history: { sha: string; parent: string | null }[] = [];
+    for (let at: string | undefined = this.tip; at && history.length < limit; at = this.commits.get(at)!.parents[0]) history.push({ sha: at, parent: this.commits.get(at)!.parents[0] ?? null });
+    return history;
+  }
+  /** The revert of exactly `mergeSha` opened as a pull request onto main's tip: the merge's inverse, merged with the tip. */
+  openRevert(key: string, mergeSha: string) {
+    const merge = this.commits.get(mergeSha)!, parent = this.commits.get(merge.parents[0])!, now = clock.now();
+    const inverse = this.record({ sha: sha('inverse', mergeSha), tree: parent.tree, parents: [mergeSha], files: parent.files, at: now, message: `Revert ${mergeSha.slice(0, 12)}` }, new Map(parent.contents));
+    // A revert whose own checks fail does not clear the merge: its head stays red.
+    const entry = this.broken.find(item => item.mergeSha === mergeSha);
+    if (entry && !this.revertFails.has(key)) entry.clearedBy.add(inverse.sha);
+    const head = this.record({ sha: sha('revert-head', this.tip, inverse.sha), tree: sha('tree', 'revert', this.tip, inverse.sha), parents: [this.tip, inverse.sha], files: this.files, at: now, message: `Revert ${key}'s merge` }, this.mergedContents(inverse.sha, this.tip, merge.changed ?? []));
+    const number = 90_000 + this.reverts.size;
+    this.reverts.set(number, { key, mergeSha, head: head.sha, inverse: inverse.sha, open: true, merged: null, closed: null, closedAt: null, at: now });
+    return { pr: number, head: head.sha };
+  }
+  /** The App merges the revert at `head`: its change lands on main's tip. */
+  mergeRevertPull(number: number, head: string) {
+    const revert = this.reverts.get(number)!;
+    if (!revert.open || revert.head !== head) throw new Error(`Revert pull request #${number} is not open at ${head.slice(0, 12)}`);
+    const now = clock.now(), message = `Merge pull request #${number} from graphyard-revert/main-${revert.mergeSha.slice(0, 12)}`;
+    const changed = this.commits.get(revert.mergeSha)!.changed ?? [];
+    const commit = this.record({ sha: sha('commit', this.tip, head, message), tree: sha('tree', this.tip, head, message), parents: [this.tip, head], files: this.files, at: now, message, changed }, this.mergedContents(head, this.tip, changed));
+    this.tip = commit.sha;
+    revert.merged = { sha: commit.sha, at: now }; revert.open = false;
+    return commit.sha;
+  }
+  /** A fix somebody lands on main by hand for a merge whose revert could not merge: main is green from it on. */
+  fixForward(mergeSha: string) {
+    const commit = this.commit(`Fix main forward after ${mergeSha.slice(0, 12)}`, this.files, clock.now(), [this.tip], undefined, { changed: [] });
+    this.broken.find(entry => entry.mergeSha === mergeSha)?.clearedBy.add(commit.sha);
+    return commit;
   }
 
   /** The required suite on a base-branch commit, as CI's push run reports it `ciMs` after the commit landed. */
@@ -730,6 +795,26 @@ export class SimulatedGitHub {
       async dequeuePullRequest(state: GitHubMergeQueueState) { const pr = world.prs.get(Number(state.pullRequestId.slice(3)))!; pr.autoMerge = false; },
       async publishGroupCheck() {},
       async rerunFailedJobs(checkRunId: number) { return world.rerun(checkRunId); },
+      // GY-1250: the main guard's surface, each call one GitHub request the soak counts.
+      ...(options.mainGuard ? {
+        async mainHistory(limit = 100) { world.guardRequests.push({ kind: 'history', at: clock.now() }); return world.mainHistory(limit); },
+        async commitChecks(commit: string) {
+          world.guardRequests.push({ kind: 'checks', at: clock.now(), sha: commit });
+          return world.commitChecks(commit, clock.now()).map(run => ({ name: run.name, result: run.result, appId: options.ciAppId, id: run.id }));
+        },
+        async openMainRevert(work: Work, mergeSha: string) { world.guardRequests.push({ kind: 'open', at: clock.now() }); return world.openRevert(work.key, mergeSha); },
+        async revertPull(number: number) {
+          world.guardRequests.push({ kind: 'pull', at: clock.now() });
+          const revert = world.reverts.get(number)!;
+          return { merged: !!revert.merged, mergeSha: revert.merged?.sha ?? null, open: revert.open, mergeable: true, head: revert.head };
+        },
+        async mergeRevert(_work: Work, revert: { pr: number; head: string }) { world.guardRequests.push({ kind: 'merge', at: clock.now() }); return world.mergeRevertPull(revert.pr, revert.head); },
+        async closeRevert(number: number, reason: string) {
+          world.guardRequests.push({ kind: 'close', at: clock.now() });
+          const revert = world.reverts.get(number)!;
+          revert.open = false; revert.closed = reason; revert.closedAt = clock.now();
+        },
+      } : {}),
     };
     return adapter as unknown as GitHub;
   }
