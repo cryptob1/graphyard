@@ -405,7 +405,7 @@ test('unit:docs-sync-checkout-writable-under-confinement — the docs-sync workt
   const { root, head } = await docsSyncRepository();
   const plan: DocsSyncPlan = { key: 'GY-42', pr: 42, branch: 'graphyard/gy-42-1', baseBranch: 'main', head, base: head, paths: ['docs/page.md'] };
   mkdirSync(join(root, '.graphyard', 'docs-sync'), { recursive: true });
-  const checkout = prepareDocsSyncCheckout(root, plan);
+  const checkout = await prepareDocsSyncCheckout(root, plan);
   assert.equal(checkout, docsSyncCheckout(root, plan));
   assert.ok(existsSync(join(checkout, 'docs', 'page.md')), 'the launcher created the detached worktree of the reviewed head');
   assert.ok(docsSyncPrompt(docsConfig(), plan, root).includes(`You start in ${checkout}`), 'the session is told it starts in that worktree');

@@ -1,6 +1,7 @@
 import { deliveredByGitHub } from './model/delivery-mode.js';
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { CHECK_NAME, LANDABLE_CHECK } from './model/work.js';
+import { isClosed } from './model/closure.js';
 import { carriedApproval, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
 import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
@@ -1164,7 +1165,8 @@ export function ejectedCheckLift(work: Work, all: Work[], ciAppIds: readonly num
   if (!rerun) return null;
   if (required.some(entry => requiredRunFailed(entry, requiredCheckRun(entry, observation.checks, ciAppIds)))) return null;
   const predicted = [...(work.queueHistory ?? [])].reverse().find(entry => entry.event === 'predicted' && entry.tip === candidate.sha);
-  const departed = (predicted?.predecessors ?? []).some(key => { const item = all.find(entry => entry.key === key); return !item || (item.stage !== 'done' && !item.queue); });
+  // A predecessor closed without merging (GY-1042) left the queue as surely as one ejected: its commits never landed.
+  const departed = (predicted?.predecessors ?? []).some(key => { const item = all.find(entry => entry.key === key); return !item || isClosed(item) || (item.stage !== 'done' && !item.queue); });
   if (departed) return null;
   const tip = candidate.sha.slice(0, 12);
   return { check: check.name, run: run!, tip: candidate.sha, reason: cancelled

@@ -1,9 +1,8 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, symlinkSync } from 'node:fs';
 import { access, constants, mkdir, readdir, rm } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Work } from './model.js';
-import type { ChildRun } from './child-runner.js';
+import { runChild, type ChildRun } from './child-runner.js';
 import type { CoordinatorConfinement, MasterConfig } from './master/profiles.js';
 import { loadMasterConfig } from './master/config.js';
 import { accountLaunch, sharedGitDirectory } from './master/environments.js';
@@ -18,18 +17,18 @@ import { failureText } from './master/worktrees.js';
 // GY-566: the docs-sync session the loop launches for a docs-only conflict; the routing and carry
 // rules it serves are in model/docs-sync.ts.
 
-type Run = (command: string, args: string[]) => string;
-const gitRun: Run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
 /**
  * The paths git itself reports conflicting when `head` is merged with `base`, from an in-memory
  * `git merge-tree` over this checkout's object store after fetching both; null when either commit
- * cannot be had or the probe fails, and [] for a clean merge.
+ * cannot be had or the probe fails, and [] for a clean merge. Every git call goes through `run`,
+ * the loop's asynchronous child runner, so a slow fetch never blocks the loop's event loop.
  */
-export function localConflictPaths(root: string, branch: string, head: string, base: string, run: Run = gitRun): string[] | null {
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]); } catch { /* a head fetched earlier still serves */ }
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', base]); } catch { /* likewise */ }
-  try { run('git', ['-C', root, 'cat-file', '-e', `${head}^{commit}`]); run('git', ['-C', root, 'cat-file', '-e', `${base}^{commit}`]); } catch { return null; }
-  try { run('git', ['-C', root, 'merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', head, base]); return []; }
+export async function localConflictPaths(root: string, branch: string, head: string, base: string, run: ChildRun): Promise<string[] | null> {
+  const git = async (...args: string[]) => run('git', ['-C', root, ...args], { timeoutMs: 60_000 });
+  try { await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`); } catch { /* a head fetched earlier still serves */ }
+  try { await git('fetch', '--quiet', '--no-tags', 'origin', base); } catch { /* likewise */ }
+  try { await git('cat-file', '-e', `${head}^{commit}`); await git('cat-file', '-e', `${base}^{commit}`); } catch { return null; }
+  try { await git('merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', head, base); return []; }
   catch (error: any) {
     if (error?.status !== 1 || typeof error.stdout !== 'string') return null;
     return [...new Set<string>(error.stdout.split('\0').slice(1).filter(Boolean))].sort();
@@ -67,7 +66,7 @@ export function docsSyncPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
 const covers = (outer: string, path: string) => { const from = relative(outer, path); return from === '' || (from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from)); };
 
 /** Remove every docs-sync checkout no visible docs-sync session owns, so a finished or failed one does not hold disk. */
-export async function reclaimDocsSyncCheckouts(root: string, visible: readonly string[], run: Run = gitRun): Promise<string[]> {
+export async function reclaimDocsSyncCheckouts(root: string, visible: readonly string[], run: ChildRun = runChild): Promise<string[]> {
   const parent = resolve(root, '.graphyard', 'docs-sync');
   let entries: string[];
   try { entries = await readdir(parent); } catch { return []; }
@@ -76,20 +75,20 @@ export async function reclaimDocsSyncCheckouts(root: string, visible: readonly s
     const at = entry.lastIndexOf('-');
     if (at <= 0 || visible.includes(docsSyncSessionName({ key: entry.slice(0, at), head: entry.slice(at + 1) }))) continue;
     const path = resolve(parent, entry);
-    try { run('git', ['-C', root, 'worktree', 'remove', '--force', path]); } catch { /* not a registered worktree any more */ }
+    try { await run('git', ['-C', root, 'worktree', 'remove', '--force', path], { timeoutMs: 60_000 }); } catch { /* not a registered worktree any more */ }
     await rm(path, { recursive: true, force: true });
     removed.push(path);
   }
-  if (removed.length) { try { run('git', ['-C', root, 'worktree', 'prune']); } catch { /* the next add prunes too */ } }
+  if (removed.length) { try { await run('git', ['-C', root, 'worktree', 'prune'], { timeoutMs: 60_000 }); } catch { /* the next add prunes too */ } }
   return removed;
 }
 
 /** Create the detached worktree of the reviewed head the session starts in, with the base tip fetched beside it and node_modules linked when the lockfiles match. */
-export function prepareDocsSyncCheckout(root: string, plan: DocsSyncPlan, run: Run = gitRun): string {
+export async function prepareDocsSyncCheckout(root: string, plan: DocsSyncPlan, run: ChildRun = runChild): Promise<string> {
   const checkout = docsSyncCheckout(root, plan);
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', plan.branch, plan.baseBranch]); } catch { /* commits fetched earlier still serve */ }
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', plan.base]); } catch { /* likewise */ }
-  run('git', ['-C', root, 'worktree', 'add', '--detach', checkout, plan.head]);
+  try { await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', plan.branch, plan.baseBranch], { timeoutMs: 60_000 }); } catch { /* commits fetched earlier still serve */ }
+  try { await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', plan.base], { timeoutMs: 60_000 }); } catch { /* likewise */ }
+  await run('git', ['-C', root, 'worktree', 'add', '--detach', checkout, plan.head], { timeoutMs: 60_000 });
   const lock = (directory: string) => { try { return readFileSync(resolve(directory, 'package-lock.json'), 'utf8'); } catch { return null; } };
   const own = lock(root);
   if (own !== null && own === lock(checkout) && existsSync(resolve(root, 'node_modules')) && !existsSync(resolve(checkout, 'node_modules')))
@@ -131,9 +130,9 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   if (!kind) { await release(`docs-sync launch for ${work.key} found no runtime`); throw new Error('No runtime is configured for a docs-sync session: name reviewer profiles or approver accounts'); }
   let checkout: string, launch: ReturnType<typeof accountLaunch>;
   try {
-    await reclaimDocsSyncCheckouts(root, herdr.agents.map(agent => agent.name ?? ''));
+    await reclaimDocsSyncCheckouts(root, herdr.agents.map(agent => agent.name ?? ''), run);
     await mkdir(resolve(root, '.graphyard', 'docs-sync'), { recursive: true });
-    checkout = prepareDocsSyncCheckout(root, plan);
+    checkout = await prepareDocsSyncCheckout(root, plan, run);
     launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: [checkout, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
     const refusal = await docsSyncCheckoutRefusal(checkout, await sessionConfinement(kind, launch.args, { directory: checkout }));
     if (refusal) throw new Error(refusal);
@@ -168,5 +167,5 @@ export interface DocsSyncEffects {
 
 export const docsSyncEffects = (root: string, run: ChildRun, register: (work: Work) => SessionRegistrar): DocsSyncEffects => ({
   docsSync: async (work, plan) => launchDocsSync(root, work, plan, await observeHerdrAgents(run), run, register(work)),
-  conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base) : null,
+  conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base, run) : null,
 });
