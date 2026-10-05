@@ -2030,9 +2030,7 @@ function assertLaunchesConfined(day: { confined: { role: string; key: string; di
 
 // GY-612: the main day starts below the host's memory floor — the way the day that item records
 // began — and recovers a quarter hour in, so the only launch it holds back is the first item's.
-// The deferred morning moves the candidates' landing heads, so the blind window moves with it to
-// where they are open under it; every other day keeps the undipped choreography.
-const memoryDay = { memoryDip: { from: 0, until: 15 * minute }, blind: { from: 150 * minute, to: 152 * minute }, notice: 150 * minute };
+const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
@@ -2222,7 +2220,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(github.ancestorCompares > 0, `candidates bound behind the tip were compared from their merge base (${github.ancestorCompares} ancestor compares)`);
   assert.ok(github.blindCompares > 0, `the fault window answered compares without a usable merge base (${github.blindCompares} blind compares)`);
   assert.ok(landingRefusals.length >= 2, `the fault window caught every candidate bound behind it (${JSON.stringify(landingRefusals)})`);
-  assert.ok(landingRefusals.every(entry => entry.elapsed >= memoryDay.blind.from - minute && entry.elapsed <= memoryDay.blind.to + minute),
+  assert.ok(landingRefusals.every(entry => entry.elapsed >= basePlan.blind.from - minute && entry.elapsed <= basePlan.blind.to + minute),
     `a false landing refusal stood only inside the fault window: ${JSON.stringify(landingRefusals)}`);
   for (const entry of landingRefusals) {
     const landed = github.merges.find(merge => merge.key === entry.key);

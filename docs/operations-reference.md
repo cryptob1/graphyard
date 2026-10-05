@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle temporary files. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else readable same-host `data_directory` volume, else an advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle temporary files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else readable same-host `data_directory` volume, else advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 
@@ -84,7 +84,7 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 
 ### Host memory
 
-Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`), naming waits; CI unbounded.
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`); CI unbounded.
 
 Below max(10% RAM, 4 GB) available, launches defer (`escalation:dispatch:memory`; a `resources` item `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
 
