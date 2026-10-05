@@ -110,7 +110,8 @@ async function removeDocsSyncCheckout(root: string, checkout: string, run: Child
  * checkout and exactly the shared Git paths the read-only mount re-exposes (readOnlyMountWrapper) —
  * the object store, the checkout's own worktree admin and the remote-tracking refs it pushes
  * through — never the whole common Git directory, whose HEAD, index and local refs are the
- * coordinator's (GY-1273).
+ * coordinator's (GY-1273). Not a pure query: it first creates the shared Git paths the confinement
+ * re-exposes (prepareConfinedGitPaths), so each one exists to be granted.
  */
 export function docsSyncWritablePaths(root: string, checkout: string): string[] {
   prepareConfinedGitPaths(root);
@@ -180,6 +181,8 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
     () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root), run, { directory: checkout, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
   } catch (error) {
     if (pane || tab) await closeFailedLaunch(pane, tab, run).catch(() => undefined);
+    // The session never started or was never registered, so its checkout is reclaimed now too.
+    await removeDocsSyncCheckout(root, checkout, run ?? runChild).catch(() => undefined);
     await release(`docs-sync launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }

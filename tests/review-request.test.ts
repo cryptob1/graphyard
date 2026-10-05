@@ -487,6 +487,8 @@ test('unit:docs-sync-unwritable-checkout-refused — a docs-sync launch whose ch
   calls.length = 0;
   await assert.rejects(launchDocsSync(root, item, relocate(planned!), { agents: [], available: true }, run, undefined, seams(async () => null)), /no herdr in this test/);
   assert.ok(calls.some(call => call[0] === 'herdr' && call.includes('tab') && call.includes('create')), 'an allowed launch reaches the herdr tab');
+  assert.ok(!existsSync(refused), 'a launch failing after the tab is created reclaims its checkout at once too');
+  assert.ok(!execFileSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).includes(refused), 'and its worktree registration with it');
 });
 
 test('unit:docs-sync-writable-grant-narrow — a docs-sync launch grants its runtime sandbox the checkout and the read-only mount\'s shared Git paths, never the whole common Git directory with the coordinator\'s HEAD and index', async () => {
