@@ -6,7 +6,8 @@ import { GitHub } from '../src/github.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState, reconcilePendingActions, storeAction } from '../src/master-daemon.js';
 import { trackFaults } from '../src/model/fault-classes.js';
-import { conflictSince } from '../src/merge-queue.js';
+import { conflictSince, type BaseRefresh } from '../src/merge-queue.js';
+import { staleRefreshRecord } from '../src/engine.js';
 
 // GY-1087 names this file for its proof: manual:fault-class-merge. The master loop filed 4 merge
 // faults in 24 hours on 1 October 2026. They shared one cause: a merge-path step the control plane
@@ -267,4 +268,23 @@ test('conflictSince — carried only across conflicts on the same head and polic
   assert.equal(conflictSince({ ...previous, from: { sha: 'd'.repeat(40), baseSha: 'c'.repeat(40) } }, refresh), later, 'a new head restarts the clock');
   assert.equal(conflictSince({ ...previous, policyRevision: 1 }, refresh), later, 'a new policy revision restarts the clock');
   assert.equal(conflictSince(previous, { ...refresh, conflict: null }), null, 'a clean refresh records no conflict');
+});
+
+test('staleRefreshRecord — conflictSince and conflictPaths survive only beside a conflict (GY-1230)', () => {
+  const head = 'b'.repeat(40), base = 'c'.repeat(40);
+  const previous: BaseRefresh = {
+    from: { sha: 'a'.repeat(40), baseSha: base }, base, baseTree: 'e'.repeat(40), policyRevision: 2, at: '2026-10-04T11:00:00.000Z',
+    head, conflict: 'conflicts', conflictSince: '2026-10-04T10:00:00.000Z', conflictPaths: ['docs/README.md'],
+  };
+  const reading = (conflict: string | null): BaseRefresh => ({
+    from: { sha: head, baseSha: base }, base, baseTree: 'f'.repeat(40), policyRevision: 2, at: '2026-10-04T11:40:00.000Z', head, conflict,
+  });
+  const clean = staleRefreshRecord(previous, reading(null));
+  assert.equal('conflictSince' in clean, false, 'a clean stale reading drops the conflict clock the head carried');
+  assert.equal('conflictPaths' in clean, false, 'a clean stale reading drops the conflicted paths the head carried');
+  const conflicted = staleRefreshRecord(previous, reading('conflicts'));
+  assert.equal(conflicted.conflictSince, previous.conflictSince, 'beside a conflict the first conflict on the head is kept');
+  assert.deepEqual(conflicted.conflictPaths, previous.conflictPaths, 'beside a conflict the conflicted paths are kept');
+  const elsewhere = staleRefreshRecord({ ...previous, head: 'd'.repeat(40) }, reading('conflicts'));
+  assert.equal(elsewhere.conflictSince, undefined, 'a record for another head carries nothing onto the reading');
 });

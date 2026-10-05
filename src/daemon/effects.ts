@@ -12,7 +12,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
 import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -137,9 +137,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
    * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
-   * `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and `mergeQueue.optimisticExclude`
-   * (GY-503) to the control plane, whose merge queue batches and validates its window by the first
-   * two, lets disjoint entries past it by the third and judges shared infrastructure by the last;
+   * and `mergeQueue.rerunFailedChecks` to the control plane, whose merge queue batches and
+   * validates its window by the first two and reruns a failed required check by the last;
    * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
@@ -265,8 +264,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
   research?: { cwd: string; runner?: Runner };
-  /** Splitting broad items before dispatch (GY-1126): records a decomposition run's start, decision or failure as the coordinator; the run uses `research`'s checkout and runner. */
-  recordDecomposition?: (work: Work, event: DecompositionEvent) => Promise<unknown>;
+  recordDecomposition?: (work: Work, event: DecompositionEvent) => Promise<unknown>; // GY-1126: a split run's start, decision or failure, as the coordinator; runs in `research`'s checkout and runner
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
@@ -583,9 +581,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
-    recordResearch: (work, event) => mutate(`work/${work.id}/research`, event),
+    recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
     research: { cwd: root },
-    recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
     migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
@@ -706,7 +703,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
+      const config = { batchSize: mergeBatchSize(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
       if (published === publishedMergeQueue) return;
       await mutate('merge-queue', config);

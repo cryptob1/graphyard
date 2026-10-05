@@ -44,7 +44,6 @@ import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { deliverSplitParent } from './decomposition.js';
-import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
@@ -294,12 +293,6 @@ export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeR
 /** The violation an observed merge records when no valid execution covered it. */
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /**
- * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
- * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
- * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
- * still counts.
- */
-/**
  * The refresh record a stale mergeability reading (GY-375) leaves for its head: the reading over
  * whatever the record for that same head carried onto it. `conflictSince` and `conflictPaths` are
  * kept only beside a conflict (GY-1230), so what an earlier conflict on the head recorded never
@@ -311,6 +304,12 @@ export function staleRefreshRecord(previous: BaseRefresh | null | undefined, ref
   if (!record.conflict) { delete record.conflictSince; delete record.conflictPaths; }
   return record;
 }
+/**
+ * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
+ * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
+ * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
+ * still counts.
+ */
 export function sameBesideActions(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
@@ -533,15 +532,8 @@ export class Engine {
   async loadMergeBatchSize() {
     const row = (await this.store.pool.query('SELECT (payload->>\'batchSize\')::int AS size FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeBatchSizeEvent])).rows[0];
     this.mergeBatchSize = Number.isSafeInteger(row?.size) && row.size >= 1 ? row.size : defaultMergeBatchSize;
-    const optimistic = (await this.store.pool.query('SELECT payload->\'optimistic\' AS optimistic FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [optimisticMergeEvent])).rows[0]?.optimistic;
-    this.optimisticMerge = typeof optimistic === 'boolean' ? optimistic : defaultOptimisticMerge;
     return this.mergeBatchSize;
   }
-  /**
-   * Whether an eligible entry merges optimistically, past the queue (GY-500): the master's
-   * `mergeQueue.optimistic` as it last published it, read back with the batch size; on by default.
-   */
-  optimisticMerge = defaultOptimisticMerge;
   /**
    * How many queue positions are validated at once (GY-498): the master's `mergeQueue.parallelTips`
    * as it last published it, read back from the installation ledger by `loadParallelTips`, else
@@ -565,17 +557,6 @@ export class Engine {
     const row = (await this.store.pool.query('SELECT (payload->>\'rerunFailedChecks\')::int AS reruns FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [rerunFailedChecksEvent])).rows[0];
     this.rerunFailedChecks = Number.isSafeInteger(row?.reruns) && row.reruns >= 0 && row.reruns <= maxRerunFailedChecks ? row.reruns : defaultRerunFailedChecks;
     return this.rerunFailedChecks;
-  }
-  /**
-   * The repository's shared-infrastructure globs (GY-503): the master's `mergeQueue.optimisticExclude`
-   * as it last published it, read back with the batch size; the product defaults otherwise.
-   */
-  optimisticExclude: readonly string[] = defaultOptimisticExclude;
-  /** `mergeQueue.optimisticExclude` as the master last published it (POST /api/merge-queue), read back from the installation ledger, else the defaults. */
-  async loadOptimisticExclude() {
-    const row = (await this.store.pool.query('SELECT payload->\'optimisticExclude\' AS exclude FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [optimisticExcludeEvent])).rows[0];
-    this.optimisticExclude = parseOptimisticExclude(row?.exclude) ?? defaultOptimisticExclude;
-    return this.optimisticExclude;
   }
   /**
    * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
@@ -1756,43 +1737,6 @@ export class Engine {
       return result;
     });
   }
-  /**
-   * The main guard's reading of one optimistic merge commit (GY-500): the required suite's verdict,
-   * read on the merge commit or on `on` (the revert it is re-tested on), written onto the merge and
-   * to the ledger as `optimistic.post-merge` when it changed.
-   */
-  async recordPostMerge(id: string, mergeSha: string, verdict: PostMergeVerdict, on?: string): Promise<Work> {
-    return this.store.transaction(async (db, now) => {
-      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
-      demand(work, 'Work item not found', 404);
-      demand(work.optimisticMerges?.some(entry => entry.mergeSha === mergeSha), `${work.key} has no optimistic merge ${mergeSha.slice(0, 12)}`, 409);
-      if (!applyPostMerge(work, mergeSha, verdict, now, on)) return work;
-      await save(db, work, 'graphyard', 'optimistic.post-merge', now, { mergeSha, on: on ?? mergeSha, ...verdict });
-      return work;
-    });
-  }
-  /**
-   * One step of an optimistic merge's revert (GY-500), on the culprit item: opened, refused, or
-   * merged. A merged revert reopens the item for a rework round with the failure attached
-   * (`reopenReverted`); the merge, its verdict and the revert stay on its record. Every step is
-   * saved under its own event (`optimistic.revert.opened`, `.refused`, `.merged`).
-   */
-  async recordOptimisticRevert(id: string, mergeSha: string, revert: OptimisticRevert): Promise<Work> {
-    return this.store.transaction(async (db, now) => {
-      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
-      demand(work, 'Work item not found', 404);
-      demand(work.optimisticMerges?.some(entry => entry.mergeSha === mergeSha), `${work.key} has no optimistic merge ${mergeSha.slice(0, 12)}`, 409);
-      const delivered = work.stage === 'done';
-      if (!applyRevert(work, mergeSha, revert, now)) return work;
-      if (delivered && work.stage !== 'done') {
-        const all = await lockedWork(db, [work.id]);
-        this.evaluate(work, all.map(item => item.id === work.id ? work : item), now);
-        await this.recordDispatch(db, work, now);
-      }
-      await save(db, work, 'graphyard', `optimistic.revert.${revert.state}`, now, { mergeSha, revert, ...(work.reopened && work.stage !== 'done' ? { reopened: work.reopened } : {}) });
-      return work;
-    });
-  }
   /** The latest merge request the coordinator recorded for the item, or null (GY-258). */
   async enqueueRequest(id: string, db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> } = this.store.pool): Promise<MergeEnqueueRequest | null> {
     return (await db.query("SELECT payload->'details' AS request FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested' ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.request ?? null;
@@ -2185,18 +2129,10 @@ export class Engine {
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
     // The queue is validated by the parallel-tip window (GY-498): entries carry the tips they merge
     // behind, ejection is decided by prefix attribution, and the test and merge gates read the
-    // window's validation instead of the batch's combined tip. An entry eligible past all of it
-    // (GY-500) evaluates with the optimistic lane instead.
-    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, optimistic: this.optimisticMerge, optimisticExclude: this.optimisticExclude, parallelTips: this.parallelTips });
+    // window's validation instead of the batch's combined tip.
+    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, parallelTips: this.parallelTips });
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
-    // The optimistic lane (GY-500) the merge gate just passed on: an unqueued candidate authorized
-    // to merge holds it, with the time it first did. A merged head keeps the lane it merged on.
-    if (!work.observation?.merged) {
-      const lane = work.stage === 'merge' && !work.queue && work.gates.every(gate => gate.passed) && !work.violations.length
-        ? optimisticEligibility(work, all, { enabled: this.optimisticMerge, gatesPass: true, exclude: this.optimisticExclude }) : null;
-      work.optimistic = lane?.eligible ? currentLane(work, lane.lane, now) : null;
-    }
     if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;
     else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
       work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };
@@ -2768,14 +2704,6 @@ export class Engine {
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
           if (repairLane) work.repairLane = repairLane;
-          // A head merged on its optimistic lane (GY-500) is guarded after the merge: its merge
-          // commit's required suite is read by the main guard, which reverts it if main broke.
-          const lane = work.optimistic;
-          if (lane && lane.head === observation.candidate.sha) {
-            work.optimisticMerges = [...(work.optimisticMerges ?? []), { lane, pr: observation.candidate.pr, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt!, postMerge: null, revert: null }];
-            await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'optimistic.merged',
-              JSON.stringify({ details: { head: lane.head, baseSha: lane.baseSha, baseTip: lane.baseTip, files: lane.files, baseChanges: lane.baseChanges, laneAt: lane.at, pr: observation.candidate.pr, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, at: now.toISOString() } })]);
-          }
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',

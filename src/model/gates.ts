@@ -45,8 +45,8 @@ export function settleTestGate(test: Gate, validating: string[] | null): void {
 }
 
 /**
- * `mergeQueue` names the settings the queue evaluates by: `batchSize`, the parallel-tip `parallelTips`
- * window (GY-498) and `optimistic` (GY-500). Without it the queue is validated batch by batch (GY-330),
+ * `mergeQueue` names the settings the queue evaluates by: `batchSize` and the parallel-tip
+ * `parallelTips` window (GY-498). Without it the queue is validated batch by batch (GY-330),
  * as every caller that names no settings expects.
  */
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
@@ -117,8 +117,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // configured reviewer's verdict on this exact head. Only a branch whose protection still requires
   // conversation resolution — drift from the desired protection — makes a merge GitHub will
   // refuse; that is named here, thread by thread, and kept out of the queue until the protection
-  // is reconciled. An entry eligible for optimistic merge (GY-500, `mergeQueue.optimistic`) never
-  // joins: its merge gate carries no queue reason and it merges head-bound on its own head.
+  // is reconciled.
   const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
   const threads = current ? conversationProtectionRefusal(work) : null;
   const queueState = github ? { queue: null, queueSequence: work.queueSequence ?? 0, ejection: null, history: work.queueHistory ?? [], reasons: [] as string[] }
