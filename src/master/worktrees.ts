@@ -1,7 +1,7 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir, open } from 'node:fs/promises';
+import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir, open, cp } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -604,29 +604,51 @@ async function trackedDiff(run: ChildRun, path: string): Promise<string> {
 
 /**
  * Each untracked file by path and content, within `budget` characters: the record alone can then
- * restore it, not only name it. A binary file, a symlink or anything past the budget is named only.
+ * restore it, not only name it. A binary file, a symlink or anything past the budget is named
+ * only, and returned in `unrecorded` (GY-1215): the record cannot restore those, so whoever is
+ * about to clean the worktree must keep them. A section recorded in full ends within the budget.
  */
-async function untrackedContents(git: BranchGit, path: string, budget: number): Promise<string> {
+async function untrackedContents(git: BranchGit, path: string, budget: number): Promise<{ text: string; unrecorded: string[] }> {
   const paths = (await git(path, 'ls-files', '--others', '--exclude-standard', '-z')).split('\0').filter(Boolean);
-  const sections: string[] = [];
+  const sections: string[] = [], unrecorded: string[] = [];
   let used = 0;
   for (const name of paths) {
     const file = resolve(path, name), info = await lstat(file).catch(() => null);
-    let section = `-- untracked file ${name} --`;
+    let section = `-- untracked file ${name} --`, whole = false;
     if (info?.isSymbolicLink()) section = `-- untracked symlink ${name} --`;
     else if (info?.isFile() && used + section.length < budget) {
       const handle = await open(file, 'r');
       try {
-        const room = Math.min(info.size, budget - used - section.length);
+        const room = Math.min(info.size, budget - used - section.length - 1);
         const { buffer, bytesRead } = await handle.read(Buffer.alloc(room), 0, room, 0);
-        const bytes = buffer.subarray(0, bytesRead);
+        const bytes = buffer.subarray(0, bytesRead), text = bytes.toString('utf8');
         if (bytes.includes(0)) section = `-- untracked binary file ${name} (${info.size} bytes) --`;
-        else section += `\n${bytes.toString('utf8')}${bytesRead < info.size ? `\n… ${info.size - bytesRead} more bytes not recorded` : ''}`;
+        else {
+          section += `\n${text}${bytesRead < info.size ? `\n… ${info.size - bytesRead} more bytes not recorded` : ''}`;
+          // Bytes that are not UTF-8 do not survive the record either.
+          whole = bytesRead === info.size && Buffer.from(text, 'utf8').equals(bytes);
+        }
       } finally { await handle.close(); }
     }
+    if (!whole) unrecorded.push(name);
     sections.push(section); used += section.length + 1;
   }
-  return sections.join('\n');
+  return { text: sections.join('\n'), unrecorded };
+}
+
+/**
+ * Move the untracked files a record names but does not hold out of a worktree about to be cleaned
+ * (GY-1215), into `aside`, keeping their relative paths. A file that cannot be kept rejects, so
+ * the clean that would delete it never runs.
+ */
+async function moveAside(path: string, names: string[], aside: string) {
+  for (const name of names) {
+    const from = resolve(path, name), to = resolve(aside, name);
+    if (!await lstat(from).catch(() => null)) continue;
+    await mkdir(dirname(to), { recursive: true });
+    try { await rename(from, to); }
+    catch { await cp(from, to, { recursive: true, verbatimSymlinks: true }); }
+  }
 }
 
 /**
@@ -642,7 +664,10 @@ async function untrackedContents(git: BranchGit, path: string, budget: number): 
  * is unlocked and pruned. A holder that is the new attempt's own path (the same epoch allocated
  * again after a failed attempt) keeps its worktree: it is forced back onto the branch, with what a
  * failed preparation left there cleaned away, and returned with `reused`, so the caller skips
- * creation instead of failing on the existing path. `register` receives the captured state (or
+ * creation instead of failing on the existing path. That clean deletes only what the record holds
+ * in full (GY-1215): an untracked file the record merely names — binary, a symlink, or past the
+ * record's limit — is first moved into `graphyard-preserved/` in that worktree's git dir, a
+ * directory the record names. `register` receives the captured state (or
  * null when nothing holds the branch) before anything is changed, so a refused registration
  * leaves the holder as it was and nothing is released unrecorded. Probes answer empty on a
  * refusal; a step that changes the holder and fails rejects the release.
@@ -681,19 +706,25 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     const diffLimit = 100_000, truncated = `\n… truncated to ${diffLimit} characters`;
     const recorded = op === 'rebase' || op === 'merge' || op === 'cherry-pick' ? op : null;
     const tracked = `${op && !recorded ? `-- stopped inside git ${op} --\n` : ''}${await trackedDiff(run, holderPath)}`;
-    const untracked = tracked.length < diffLimit ? await untrackedContents(git, holderPath, diffLimit - tracked.length) : '';
-    const fullDiff = tracked + (untracked ? `${tracked ? '\n' : ''}-- untracked files --\n${untracked}` : '');
+    const reused = resolve(holderPath) === resolve(targetPath), at = new Date().toISOString();
+    // Where a reused path's unrecorded untracked files go before the clean: outside the working tree, inside its own git dir.
+    const aside = resolve(holderPath, (await git(holderPath, 'rev-parse', '--git-path', 'graphyard-preserved')).trim(), at.replace(/[:.]/g, '-'));
+    const keptNote = `\n-- untracked files not recorded in full are kept under ${aside} --`;
+    const heading = `${tracked ? '\n' : ''}-- untracked files --\n`;
+    // The heading and the note count toward the limit, so no file recorded in full is cut by the truncation below.
+    const untracked = await untrackedContents(git, holderPath, diffLimit - tracked.length - heading.length - (reused ? keptNote.length : 0));
+    const note = reused && untracked.unrecorded.length ? keptNote : '', room = diffLimit - note.length;
+    const fullDiff = tracked + (untracked.text && tracked.length < diffLimit ? `${heading}${untracked.text}` : '');
     const preserved: PreservedWorktree = {
       path: holderPath,
       head: (await git(holderPath, 'rev-parse', 'HEAD')).trim(),
       branchTip,
       op: recorded,
       refs: (await git(holderPath, 'show-ref')).trim().slice(0, 20_000),
-      // The suffix counts toward the limit, so a truncated diff still fits the ledger's schema.
-      diff: fullDiff.length > diffLimit ? `${fullDiff.slice(0, diffLimit - truncated.length)}${truncated}` : fullDiff,
-      at: new Date().toISOString(),
+      // The suffix and the note count toward the limit, so a truncated diff still fits the ledger's schema.
+      diff: `${fullDiff.length > room ? `${fullDiff.slice(0, room - truncated.length)}${truncated}` : fullDiff}${note}`,
+      at,
     };
-    const reused = resolve(holderPath) === resolve(targetPath);
     await register(preserved);
     const letGo = async (args: string[]) => { await run('git', ['-C', holderPath, ...args]); };
     if (op === 'rebase') await letGo(['rebase', '--abort']);
@@ -705,7 +736,8 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     if (op && op !== 'rebase' && op !== 'merge') await letGo(['reset', '--merge']);
     if (op === 'merge --squash') await unlink(resolve(holderPath, (await git(holderPath, 'rev-parse', '--git-path', 'SQUASH_MSG')).trim())).catch(() => {});
     if (reused) {
-      // The same epoch's own path: anything a failed preparation left there is in the record, and the session starts clean.
+      // The same epoch's own path: what a failed preparation left there is in the record or moved aside, and the session starts clean.
+      await moveAside(holderPath, untracked.unrecorded, aside);
       await letGo(['checkout', '--quiet', '--force', branch]);
       await letGo(['clean', '-fd', '--quiet']);
     } else await letGo(['checkout', '--detach', '--quiet']);
