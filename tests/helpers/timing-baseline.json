@@ -388,6 +388,7 @@
     "tests/loop-silence-owner.test.ts": 1282,
     "tests/machine-backlog-routes.test.ts": 2271,
     "tests/machine-backlog-triage.test.ts": 1320,
+    "tests/main-guard.test.ts": 1400,
     "tests/managed-worktree-root.test.ts": 3729,
     "tests/master-agent-envs.test.ts": 2582,
     "tests/master-autonomy.test.ts": 3883,
