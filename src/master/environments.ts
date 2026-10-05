@@ -70,8 +70,7 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
   const notices = runtimeLimitNotices(runtime);
   const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
   for (let index = lines.length - 1; index >= 0; index--) {
-    // The banner itself, with whatever the terminal drew in front of it removed. Right-aligned
-    // status text is padded out to the terminal width: a run of spaces is one gap, as in findExhaustion.
+    // The banner, with what the terminal drew before it removed and its padding collapsed (as in findExhaustion).
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');
     if (line.length > exhaustionNoticeMaxLength) continue;
     const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
