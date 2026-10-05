@@ -21,7 +21,7 @@ import { classified } from '../model/fault-classes.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import { requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
-import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
+import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import type { ProjectMemory } from '../model/project-memory.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.

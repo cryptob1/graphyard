@@ -307,9 +307,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
 
   if (work.violations.length) return make('escalate', `${key} carries ${work.violations.length} violation(s): ${work.violations[0]}`,
     { kind: 'escalate', trigger: 'violation', detail: work.violations[0] }, `violation:${work.violations[0]}`);
-  if (work.candidate && !work.observation?.merged) return make('merge', `${key} has passed every gate on ${short(work.candidate.sha)} and is authorized to merge`,
-    { kind: 'merge', pr: work.candidate.pr, sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null },
-    `merge:${work.candidate.sha}:${work.candidate.baseSha}:${work.policyRevision}`);
+  // GitHub merges a candidate whose every gate passed on its head (docs/delivery.md): no executor
+  // step runs it, and the merged observation records the delivery.
+  if (work.candidate && !work.observation?.merged) return waits({ kind: 'session', on: 'github', detail: `${key} has passed every gate on ${short(work.candidate.sha)}; GitHub merges it on its branch protection and the merged observation records the delivery` });
   if (work.candidate) return waits({ kind: 'settled', on: null, detail: `${key} merged as ${short(work.observation?.mergeSha)} and no gate refuses it; the delivery record follows on the next reading` });
   // Open, released, nothing refusing and no candidate: the gates have not been evaluated at all.
   // Every other path above named something, so there is no rule left to reach — the item would

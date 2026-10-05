@@ -234,7 +234,7 @@ test('integration:unpublishable-queue-entry-exit — a queued entry whose pull r
   // The durable loop names it too, once, and never offers it to the guarded merge.
   const merges: string[] = [];
   const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: await store.list(), now }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    merge: async work => { merges.push(work.key); return { result: 'merge requested' }; }, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: now, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: now, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
   const cycle = await runCycle(config, emptyDaemonState(config), effects);
   const escalation = cycle.actions.find(action => action.kind === 'escalation' && action.work === stuck.key)!;
   assert.match(escalation.detail, new RegExp(`graphyard master decide ${stuck.key} merge REASON`));

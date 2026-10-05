@@ -239,7 +239,6 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
       closeSession: () => {},
       dispatch: async () => {},
       requestProof: () => {},
-      merge: async work => { merged.push(work.key); return { result: 'merged', merged: true }; },
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {},
       requestSmoke: () => {},

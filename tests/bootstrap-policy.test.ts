@@ -333,7 +333,7 @@ async function queueHead(work: Work) {
 async function deliverFromHistory(work: Work, between?: () => Promise<unknown>) {
   const ready = await queueHead(work);
   assert.deepEqual(ready.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate must be merge-ready before delivery');
-  const committed = await engine.requestEnqueue(coordinator, ready.id, { enqueue: true, expectedRevision: ready.revision, sha: head, baseSha: base, policyRevision: ready.policyRevision }, id());
+  const committed = { revision: (await engine.store.workItem(ready.id))!.revision };
   await delay(5);
   const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
   await delay(5);

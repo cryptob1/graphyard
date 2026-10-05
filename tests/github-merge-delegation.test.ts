@@ -1,19 +1,12 @@
-import { before, after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
-import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { CHECK_NAME, LANDABLE_CHECK, GitHub, gateMerge } from '../src/github.js';
-import { masterConfigSchema, mergeExecutor, type MasterConfig } from '../src/master.js';
 import { mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, applyProtection } from '../src/protection.js';
-import { queueRef, type MergeEnqueueRequest, type QueueSpeculation } from '../src/merge-queue.js';
-import type { Observation, Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { queueRef, type MergeEnqueueRequest } from '../src/merge-queue.js';
+import type { Observation, Work } from '../src/model.js';
 
 // GY-258: GitHub executes merges; Graphyard only gates them. The control plane's App publishes
 // `Graphyard / merge` on the exact head and puts an authorized, requested pull request in GitHub's
@@ -146,56 +139,31 @@ async function sources(directory: string): Promise<string[]> {
   return (await Promise.all(entries.map(entry => entry.isDirectory() ? sources(join(directory, entry.name)) : /\.(ts|tsx|mjs|js)$/.test(entry.name) ? [join(directory, entry.name)] : []))).flat();
 }
 
-test('unit:no-graphyard-merge-call — the merge step requests the merge and GitHub performs it: no code path calls the GitHub merge endpoint', async () => {
-  const directory = await temporaryDirectory('merge-delegation');
-  try {
-    const credentialFile = join(directory, 'coordinator.token');
-    await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
-      repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-    const item = work({ queue: { sequence: 1, enqueuedAt: new Date().toISOString(), policyRevision: 2,
-      speculation: { ref: queueRef('GY-42'), tip: head, base, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: new Date().toISOString() } } } as Partial<Work>);
-    const gh: string[][] = [];
-    const run = async (_command: string, args: string[]) => {
-      gh.push(args);
-      if (args[1] === 'view') return JSON.stringify({ headRefOid: head, baseRefName: 'main', state: 'OPEN', isDraft: false });
-      if (args[1]?.includes('/git/ref/heads/')) return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: base } });
-      if (/\/commits\/[a-f0-9]{40}$/.test(args[1] ?? '')) return JSON.stringify({ sha: base, commit: { tree: { sha: 'e'.repeat(40) } } });
-      throw new Error(`Unexpected gh ${args.join(' ')}`);
-    };
-    const mutations: { path: string; data: any }[] = [];
-    const mutation = async (path: string, data: any) => { mutations.push({ path, data }); return { key: 'GY-42', revision: 9, enqueue: { ...data, at: new Date().toISOString() } }; };
-    const outcome = await mergeExecutor(config, async () => ({ work: [item], now: new Date().toISOString() }), mutation, { principal: 'master', instance: 'daemon-1' }, randomUUID(), run as any)(item);
-    assert.equal(outcome.pending, true, 'the merge step is pending until GitHub merges and the merged observation delivers it');
-    assert.equal(outcome.enqueued, true);
-    assert.deepEqual(mutations.map(entry => entry.path), ['work/work-42/merge-acquire'], 'the step records one request and nothing else');
-    assert.equal(mutations[0].data.enqueue, true);
-    assert.equal(mutations[0].data.sha, head);
-    assert.equal(gh.some(args => args.includes('--method') || args.some(arg => /\/merge(\?|$)/.test(arg))), false, `no gh call mutates GitHub or names the merge endpoint: ${JSON.stringify(gh)}`);
+test('unit:no-graphyard-merge-call — GitHub performs the merge: no code path calls the GitHub merge endpoint', async () => {
+  const item = work({ queue: { sequence: 1, enqueuedAt: new Date().toISOString(), policyRevision: 2,
+    speculation: { ref: queueRef('GY-42'), tip: head, base, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: new Date().toISOString() } } } as Partial<Work>);
+  // The control plane's side: gating an authorized head makes no merge call either.
+  const fake = fakeGitHub();
+  await gateMerge(fake.github, item, requested(item));
+  assert.equal(fake.calls.some(call => /\/merge(\?|$)/.test(call.path)), false);
+  assert.equal(fake.named('mergePullRequest').length, 0);
 
-    // The control plane's side: gating an authorized head makes no merge call either.
-    const fake = fakeGitHub();
-    await gateMerge(fake.github, item, requested(item));
-    assert.equal(fake.calls.some(call => /\/merge(\?|$)/.test(call.path)), false);
-    assert.equal(fake.named('mergePullRequest').length, 0);
-
-    // And nowhere in the shipped source: no REST merge endpoint, and no GraphQL mergePullRequest that
-    // is not bound to the authorized head (GitHub refuses auto-merge on a clean pull request, so a
-    // clean one without a queue is merged at once with expectedHeadOid; branch protection still applies).
-    const root = fileURLToPath(new URL('..', import.meta.url));
-    const files = [...await sources(join(root, 'src')), ...await sources(join(root, 'scripts')), ...await sources(join(root, 'bin'))];
-    const offenders: string[] = [];
-    for (const file of files) {
-      const text = await readFile(file, 'utf8');
-      text.split('\n').forEach((line, index) => {
-        // A harness deny rule names the endpoint to forbid it; that is not a call.
-        if (/Bash\(gh api \*pulls\/\*\/merge\*\)/.test(line)) return;
-        if (/\bmergePullRequest\s*\(input: \{ pullRequestId: \$id, expectedHeadOid: \$head, mergeMethod: \$method \}\)/.test(line)) return;
-        if (/pulls\/\$\{[^}]+\}\/merge\b|pulls\/\d+\/merge\b|\bmergePullRequest\s*\(/.test(line)) offenders.push(`${file.slice(root.length)}:${index + 1}`);
-      });
+  // And nowhere in the shipped source: no REST merge endpoint, and no GraphQL mergePullRequest that
+  // is not bound to the authorized head (GitHub refuses auto-merge on a clean pull request, so a
+  // clean one without a queue is merged at once with expectedHeadOid; branch protection still applies).
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const files = [...await sources(join(root, 'src')), ...await sources(join(root, 'scripts')), ...await sources(join(root, 'bin'))];
+  const offenders: string[] = [];
+  for (const file of files) {
+    const text = await readFile(file, 'utf8');
+    text.split('\n').forEach((line, index) => {
+      // A harness deny rule names the endpoint to forbid it; that is not a call.
+      if (/Bash\(gh api \*pulls\/\*\/merge\*\)/.test(line)) return;
+      if (/\bmergePullRequest\s*\(input: \{ pullRequestId: \$id, expectedHeadOid: \$head, mergeMethod: \$method \}\)/.test(line)) return;
+      if (/pulls\/\$\{[^}]+\}\/merge\b|pulls\/\d+\/merge\b|\bmergePullRequest\s*\(/.test(line)) offenders.push(`${file.slice(root.length)}:${index + 1}`);
+    });
     }
     assert.deepEqual(offenders, [], 'no source line calls the GitHub merge endpoint unbound to the head');
-  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('unit:protection-configures-merge-queue — master protection plans and applies the base branch merge queue with Graphyard / merge required from the App', async () => {
@@ -237,63 +205,4 @@ test('unit:protection-configures-merge-queue — master protection plans and app
   assert.deepEqual(writes.map(write => write.args.slice(0, 4)), [['api', '--method', 'POST', 'repos/owner/project/rulesets']], 'only the merge queue ruleset is written');
   assert.deepEqual(JSON.parse(writes[0].input!), ruleset);
   assert.match(applied.result, /merge queue requiring Graphyard \/ merge/);
-});
-
-// ---- Delivery from GitHub's merge, against a real engine ----------------------------------------
-const operator: Principal = { id: 'operator', role: 'admin' };
-const worker: Principal = { id: 'implementer', role: 'worker' };
-const coordinator: Principal = { id: 'master', role: 'coordinator' };
-const ci: Principal = { id: 'ci', role: 'producer', proofs: ['integration:claim-safety'] };
-let pg: EmbeddedPostgres, store: Store, engine: Engine;
-let serial = 0;
-before(async () => {
-  const port = Number(process.env.GRAPHYARD_MERGE_DELEGATION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 258);
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-delegation-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await pg.initialise(); await pg.start(); await pg.createDatabase('merge_delegation_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_delegation_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'test/repository');
-});
-after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
-
-/** An item at the merge stage with every gate passing, the way the queue head reaches it. */
-async function authorized() {
-  const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Delegated merge ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
-  w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
-  w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/delegation-${n}`, branch: `graphyard/delegation-${n}` }, randomUUID());
-  w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, randomUUID());
-  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
-  const observation = (): Observation => ({ candidate: { sha: head, baseSha: base, pr: n, branch: `graphyard/delegation-${n}`, author: 'implementer' },
-    checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
-    protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() });
-  w = await engine.observe(w.id, w.revision, observation());
-  w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
-  const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
-  w = await engine.observe(w.id, (await store.list()).find(item => item.id === w.id)!.revision, observation());
-  assert.equal(w.stage, 'merge', JSON.stringify(w.gates.filter(gate => !gate.passed)));
-  return { w, observation };
-}
-
-test('GitHub-executed merge: a requested, authorized head is delivered from the merged observation; a merge nobody requested is not', async () => {
-  const { w, observation } = await authorized();
-  const request = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha: head, baseSha: base, policyRevision: w.policyRevision, executor: 'daemon-1' }, randomUUID());
-  assert.equal(request.enqueue.sha, head);
-  assert.equal(request.execution, undefined, 'no merge execution is issued');
-  assert.equal((await engine.enqueueRequest(w.id))?.sha, head);
-  assert.equal((await store.list()).find(item => item.id === w.id)?.mergeExecution ?? null, null);
-  // The request is refused for a head that is not authorized.
-  await assert.rejects(engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha: moved, baseSha: base, policyRevision: w.policyRevision }, randomUUID()), /no longer current/);
-  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  const current = (await store.list()).find(item => item.id === w.id)!;
-  const delivered = await engine.observe(w.id, current.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'f'.repeat(40) });
-  assert.equal(delivered.stage, 'done', JSON.stringify(delivered.violations));
-  assert.equal(delivered.delivery?.mergeSha, 'f'.repeat(40), 'the delivery is recorded from merge_commit_sha');
-
-  const other = await authorized();
-  await delay(5); const unrequestedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  const latest = (await store.list()).find(item => item.id === other.w.id)!;
-  const refused = await engine.observe(other.w.id, latest.revision, { ...other.observation(), merged: true, mergedAt: unrequestedAt, mergeSha: '9'.repeat(40) });
-  assert.notEqual(refused.stage, 'done');
-  assert.ok(refused.violations.includes(unauthorizedMergeViolation), 'a merge Graphyard never requested is recorded as unauthorized');
 });

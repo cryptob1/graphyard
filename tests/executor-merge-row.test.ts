@@ -15,7 +15,7 @@ test('manual:review-followups-triaged — the executor merge row names an outcom
     const handlers = controlPlaneHandlers(() => config, {
       snapshot: async () => ({ work: [work], now: new Date().toISOString() }), mutate: refuse, agents: () => [],
       workerCredentials: refuse, producerCredentials: refuse, dispatchWorker: refuse, launchReview: refuse, launchProducer: refuse,
-      merge: async () => outcome, observeDeployment: refuse,
+      observeDeployment: refuse,
     });
     return handlers.merge!({ work: work.id, key: work.key } as any, { id: 'executor-a', host: 'unit-host' } as any);
   };

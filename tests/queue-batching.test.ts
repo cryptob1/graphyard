@@ -265,7 +265,7 @@ test('the master publishes mergeQueue.batchSize from its config, and the control
     const posted: string[] = [];
     const mutate = async (path: string, data: unknown) => { posted.push(path); const response = await api(`/api/${path}`, tokens.coordinator, { method: 'POST', body: JSON.stringify(data) }); assert.equal(response.status, 200, JSON.stringify(response.body)); return response.body; };
     let configured: number | undefined = 1;
-    const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured === undefined ? undefined : { batchSize: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
+    const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured === undefined ? undefined : { batchSize: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate });
     await effects.publishMergeBatchSize!();
     await effects.publishMergeBatchSize!();
     assert.deepEqual(posted, ['merge-queue'], 'published once, not every cycle');

@@ -185,7 +185,6 @@ test('unit:session-end-closes-pane — one session of every pane-opening role is
     const wired = daemonEffects(root, config, {
       snapshot: async () => ({ work: items.map(entry => ({ ...entry, sessions: [...(entry.sessions ?? [])] })), now: iso() }),
       mutate: record as never,
-      executor: { principal: 'graphyard-master', instance: 'pane-reclaim' },
       run: herdr.run,
     });
     // The plane's merge and plane-health answers: no candidate here is ever merged, the dispatch
@@ -200,7 +199,6 @@ test('unit:session-end-closes-pane — one session of every pane-opening role is
       return { epoch, path, base: config.baseBranch, branch };
     };
     const plane: Partial<DaemonEffects> = {
-      merge: async () => ({ result: 'merged', merged: true }),
       planeHealth: async () => null,
       dispatch: async (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, herdr.run, snapshot.work, prepare, undefined, undefined, snapshot.now),
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),

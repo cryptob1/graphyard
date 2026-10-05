@@ -101,7 +101,7 @@ function stubDispatch(items: () => Work[], log: string[], overrides: Partial<Dis
 function daemonEffects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): DaemonEffects {
   return { agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: iso(0) }), closeSession: pane => { log.push(`close:${pane}`); }, dispatch: async item => { log.push(`dispatch:${item.key}`); },
-    requestProof: item => { log.push(`proof:${item.key}`); }, merge: async item => { log.push(`merge:${item.key}`); return { result: 'merge requested' }; },
+    requestProof: item => { log.push(`proof:${item.key}`); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {},
     persist: async () => {}, ...overrides };
 }

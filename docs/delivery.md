@@ -19,7 +19,12 @@ Graphyard's own deployment runs main → frozen candidate → uat → that exact
 
 The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): build, docs check, Node and browser suites, each bounded so the set finishes under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance and recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA: each [release candidate](#release-candidates), or a dispatched `sha` or `rc-*` tag alone.
 
-With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are neither requested nor counted against the loop's silence; UAT validates before promotion.
+### One delivery path
+
+1. **CI and review.** A pull request's required checks run in CI, and the independent reviewer approves its exact head.
+2. **GitHub merges into main.** Once build, review and required checks pass on that head, the observation that saw it enables auto-merge; GitHub merges on its branch protection, and the merged observation records the delivery. No merge authorization, execution, proof, queue or observation age stands in between; a merge of a head whose gates had not passed is held as a violation.
+3. **UAT end-to-end.** Each [release candidate](#release-candidates) is deployed to UAT and validated end to end.
+4. **Promotion.** Only a validated candidate is promoted to production.
 
 To keep main green, every 30 s the main guard reverts a merge commit failing a required check its parent passed via a `graphyard-revert/` pull request the App merges once its checks pass, and reopens the item naming the check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt with one attention line naming merge, check and revert PR; nothing waits on it: fix main forward.
 

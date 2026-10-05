@@ -112,7 +112,7 @@ Herdr runs sessions; Graphyard remains the source of ownership truth.
 ${launchAuthorization}
 
 A dedicated master coordinator must keep cycling: status, dispatch ready work,
-shepherd review and proof collection, guarded merge, then deployment verification.
+shepherd review, reconcile what GitHub merged, then deployment verification.
 Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
 external blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment

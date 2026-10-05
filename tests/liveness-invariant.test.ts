@@ -347,21 +347,18 @@ test('unit:liveness-violations-detected — a pending producer request or a runn
   assert.equal(requested.obligation!.dueAt, new Date(Date.parse(requestedAt) + 120 * 60_000).toISOString());
 });
 
-test('unit:unknown-merge-reconciled-from-github — a merge GitHub made on the coordinator\'s request is delivered even when a lagging read still showed the pull request open and the request was repeated before the merged observation arrived', async () => {
+test('unit:unknown-merge-reconciled-from-github — a merge GitHub made of a passing head is delivered even when a lagging read still showed the pull request open before the merged observation arrived', async () => {
   let w = await candidate('pass', {}, true);
   // Published at the head of the merge queue, as the queue leaves a candidate it is about to merge.
   await setDocument(w, 'queue,speculation', { ref: `refs/graphyard/queue/${w.key.toLowerCase()}`, tip: head(w), base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
   w = await engine.observe(w.id, (await reload(w)).revision, observation(w));
   assert.ok(w.gates.every(gate => gate.passed), `authorized to merge: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);
-  const requested = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
   // GitHub merges; its replica still answers open.
   await new Promise(resolve => setTimeout(resolve, 5));
   const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
   await new Promise(resolve => setTimeout(resolve, 5));
-  // Another reading on the same lagging replica, and the merge step asking again on it.
+  // Another reading on the same lagging replica.
   await engine.observe(w.id, (await reload(w)).revision, observation(w));
-  const again = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: (await reload(w)).revision, sha: head(w), baseSha: base, policyRevision: w.policyRevision }, id());
-  assert.deepEqual(again.enqueue, requested.enqueue, 'the standing request is returned, not a second one');
   const merged = await engine.observe(w.id, (await reload(w)).revision, observation(w, { merged: true, mergedAt, mergeSha: sha(`merge-${w.key}`) }));
   assert.equal(merged.stage, 'done', `delivered: ${merged.violations.join('; ')}`);
   assert.ok(!merged.violations.some(entry => entry.startsWith('Merge observed without a prior authorization')), 'no false unauthorized-merge violation');

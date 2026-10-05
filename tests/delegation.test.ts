@@ -9,13 +9,24 @@ import {
   leadMay, leadPermittedActions, leadRulingActions, mergeOrder, producerIndependenceRefusal, recordIntake, recordLeadRuling,
   routineIntakeOrigins, sessionKind, slices, validateDelegationPrincipals,
 } from '../src/delegation.js';
-import { assertMergeCandidate, currentMergeCandidates } from '../src/master.js';
+import { mergeAuthorized } from '../src/merge-queue.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GitHub merges (GY-1235): what GitHub may merge is every gate passing on the item as it stands,
+// in the merge order the delegation computes. These stand in for the guarded broker's selection.
+function currentMergeCandidates(work: Work[], observedAt: string) {
+  const order = mergeOrder(work, Date.parse(observedAt));
+  const rank = (item: Work) => order.indexOf(item.key) + 1 || Number.MAX_SAFE_INTEGER;
+  return work.filter(mergeAuthorized).sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
+}
+function assertMergeCandidate(work: Work, _observedAt: string) {
+  if (!mergeAuthorized(work)) throw new Error(`${work.key} does not pass every gate for GitHub to merge it`);
+}
 
 // Each test is named for the proof it produces, so acceptance evidence maps to
 // one executed case per required proof.
@@ -180,7 +191,6 @@ test('integration:lead-enforcement — violating lead actions are refused server
   for (const [command, body] of [['claim', {}], ['evidence', proof()], ['ready', {}], ['submit', { epoch: 1, pr: 1 }],
     ['requirements', { expectedPolicyRevision: 1, reason: 'lead rewrite', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], plannedFiles: [], exclusiveResources: [] }]] as const)
     await assert.rejects(engine.execute(lead, command as never, item.id, body, id()), /Slice leads cannot perform lifecycle mutations/, command);
-  await assert.rejects(engine.requestEnqueue(lead, item.id, { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Coordinator permission/);
   // A lead identity that also holds producer credentials cannot self-prove its slice.
   const leadProducer: Principal = { ...lead, role: 'producer', proofs: ['unit:works'] };
   await assert.rejects(engine.execute(leadProducer, 'evidence', item.id, proof(), id()), /slice-lead authority/);
@@ -265,7 +275,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(sentBack.gates.find(gate => gate.name === 'merge')!.passed, false);
   assert.match(sentBack.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /delivery is blocked until the authorized recovery/);
   assert.deepEqual(currentMergeCandidates([sentBack], observedAt), [], 'the guarded broker cannot select a sent-back item');
-  assert.throws(() => assertMergeCandidate(sentBack, observedAt), /all-gates-passing merge authorization/);
+  assert.throws(() => assertMergeCandidate(sentBack, observedAt), /does not pass every gate/);
   assert.equal((await reload(ready)).mergeAuthorization, null);
   // Re-evaluation never quietly reissues authorization while the hold stands.
   let held = await reload(ready);
@@ -281,7 +291,6 @@ test('integration:lead-enforcement — violating lead actions are refused server
     await recordLeadRuling(store, lead, ready.id, { action, ruleId: 'rules/plan-v1#retry', reason: `Attempted ${action}` }, id());
   held = await reload(ready);
   assert.equal(held.leadHold!.action, 'send-back', 'only the operator rework lifecycle clears a send-back');
-  await assert.rejects(engine.requestEnqueue(coordinator, ready.id, { enqueue: true, expectedRevision: held.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Merge authorization is no longer current/);
   await assert.rejects(engine.execute(lead, 'rework', ready.id, { reason: 'Clearing my own hold', previousWorkerStopped: true }, id()), /Slice leads cannot perform lifecycle mutations/);
   // The held item is reported as a slice bottleneck naming the ruling.
   const blocked = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'product')!;
@@ -386,8 +395,6 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   item = await engine.observe(item.id, item.revision, observation(item));
   // Delivery stays behind the guarded broker: gates refuse, and only a coordinator may acquire.
   assert.equal(item.gates.find(gate => gate.name === 'acceptance')!.passed, false);
-  await assert.rejects(engine.requestEnqueue(workerA, item.id, { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /Coordinator permission/);
-  await assert.rejects(engine.requestEnqueue(coordinator, item.id, { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }, id()), /authorization/i);
   // Control-plane truth never depends on the session runtime.
   for (const module of ['model.ts', 'engine.ts', 'store.ts', 'delegation.ts', 'server.ts'])
     assert.doesNotMatch(await readFile(new URL(`../src/${module}`, import.meta.url), 'utf8'), /herdr/i, module);
@@ -531,7 +538,7 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   assert.equal(revoked.mergeAuthorization, null);
   assert.notEqual(revoked.stage, 'merge');
   assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at), [], 'the guarded broker refuses it independently');
-  assert.throws(() => assertMergeCandidate(revoked, revoked.observation!.at), /all-gates-passing merge authorization/);
+  assert.throws(() => assertMergeCandidate(revoked, revoked.observation!.at), /does not pass every gate/);
   // Re-proving it requires a producer still independent of every implementer.
   await assert.rejects(engine.execute({ ...reviewer, role: 'producer', proofs: ['unit:works'] }, 'evidence', revoked.id, proof(), id()), /distinct from its implementers/);
   revoked = await engine.execute({ id: 'second-proof-runner', role: 'producer', proofs: ['unit:works'], sessionKind: 'ai' }, 'evidence', revoked.id, proof(), id());
@@ -903,14 +910,12 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   // standing request no longer binds an authorized head and GitHub is told to dequeue it.
   let pending = await candidate(workerB, 'escalation-withdraws-requested-merge', 'product');
   pending = await proven(pending);
-  await engine.requestEnqueue(coordinator, pending.id, { enqueue: true, expectedRevision: pending.revision, sha: head, baseSha: base, policyRevision: pending.policyRevision }, id());
   const heldBack = (await recordLeadRuling(store, lead, pending.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of agreed scope' }, id())).work;
   assert.equal(heldBack.mergeAuthorization, null, 'a blocking ruling withdraws the authorization in its own transaction');
   assert.equal(heldBack.mergeExecution ?? null, null, 'no merge execution exists to fence');
   const fenced = (await recordLeadRuling(store, lead, pending.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Dependency review reopened', trigger: 'security-concern' }, id())).work;
   assert.equal(fenced.mergeAuthorization, null);
   assert.deepEqual(currentMergeCandidates([fenced], fenced.observation!.at), [], 'the withdrawn item is never selected again');
-  await assert.rejects(engine.requestEnqueue(coordinator, pending.id, { enqueue: true, expectedRevision: fenced.revision, sha: head, baseSha: base, policyRevision: fenced.policyRevision }, id()), /Merge authorization is no longer current/);
 
   // The resolution itself is append-only history with its audit reason.
   const audit = (await store.events(ready.id)).find(event => event.kind === 'resolve');

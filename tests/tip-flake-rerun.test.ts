@@ -214,7 +214,7 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
   };
   let configured: number | undefined = 0;
   const posted: unknown[] = [];
-  const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: { rerunFailedChecks: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), executor: {} as any,
+  const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: { rerunFailedChecks: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }),
     mutate: async (path: string, data: unknown) => { posted.push(data); const response = await api(path, tokens.coordinator, data); assert.equal(response.status, 200, JSON.stringify(response.body)); return response.body; } });
   try {
     assert.equal((await api('merge-queue', tokens.worker, { rerunFailedChecks: 0 })).status, 403, 'only the master (or an operator) sets it');

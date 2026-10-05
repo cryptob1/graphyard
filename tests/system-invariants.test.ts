@@ -148,7 +148,6 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
 
 function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
   return { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    merge: async () => ({ result: 'merge requested' }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, ...overrides };
 }
@@ -171,7 +170,6 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
     agents: () => [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }],
     herdr: () => ({ agents: [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }], available: true }),
     // The guarded merge is accepted but GitHub never merges: the stall the merge-stall invariant names.
-    merge,
     controlPlane: async () => ({ build: { commit: index < 2 ? 'build-1' : 'build-2', protocol: 1 } }) as any,
     faultClassPolicy: { threshold: 1, windowHours: 24 },
     fileFaultClass: async (input: any) => {

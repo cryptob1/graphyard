@@ -5,8 +5,8 @@ import { demand, type Principal, type Work } from './model.js';
 import type { Store } from './store.js';
 import { save, wakeJob } from './store.js';
 import { settleDelivered } from './model/actions.js';
-import { reconciliationRefusalPrefix } from './merge-queue.js';
-import { unauthorizedMergeViolation, type OperatorAuthorizedDelivery } from './engine.js';
+import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './merge-queue.js';
+import type { OperatorAuthorizedDelivery } from './engine.js';
 import { isStandIn, lockedWork } from './store/locked-read.js';
 
 /**

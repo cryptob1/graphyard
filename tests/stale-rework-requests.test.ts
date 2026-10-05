@@ -48,7 +48,7 @@ function effects(snapshot: Awaited<ReturnType<DaemonEffects['snapshot']>>, decid
     agents: () => [], herdr: () => ({ agents: [], available: true }),
     credentials: async () => ({}),
     snapshot: async () => snapshot,
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: snapshot.now, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     decide: async (_work, action, reason) => { decided.push({ action, reason }); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },

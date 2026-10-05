@@ -57,7 +57,7 @@ The supervisor that launches sessions and reports their liveness.
 | --- | --- | --- | --- |
 | `admin` | Human operator | Any decision | Share with an AI session |
 | `operator-agent` | Master and approver | Add intent; request or approve decisions | Approve its own request; merge |
-| `coordinator` | Master loop | Dispatch, guarded merge | Implement, produce evidence |
+| `coordinator` | Master loop | Dispatch, reconcile merges | Implement, produce evidence |
 | `slice-lead` | Slice lead | Rule on its slice, escalate | Implement, merge |
 | `worker` | Worker | Claim, heartbeat, register, submit | Satisfy an acceptance gate |
 | `producer` | CI, runner, observer | Evidence for granted proofs | Prove its own work |

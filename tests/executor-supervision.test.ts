@@ -502,7 +502,7 @@ test('integration:killed-worker-work-preserved: a worker killed outright keeps i
       agents.push({ name: profile.agentName, pane_id: `pane-${dispatched.length}`, pid: child.pid! });
       dispatched.push({ work: work.key, epoch: claimed.epoch });
     },
-    requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     sessionOutput: () => '',
     reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,

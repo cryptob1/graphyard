@@ -239,7 +239,7 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   // guarded merge; the waiting candidate is offered as before.
   const merges: string[] = [];
   const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [stuck, waiting], now: at }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    merge: async work => { merges.push(work.key); return { result: 'merge requested' }; }, observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
   const state = emptyDaemonState(config);
   const cycle = await runCycle(config, state, effects);
   assert.deepEqual(merges, ['GY-82']);

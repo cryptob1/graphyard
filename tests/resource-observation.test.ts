@@ -190,7 +190,7 @@ async function refusal(effects: { agents: HerdrAgent[]; launchReview: () => Prom
   const handlers = controlPlaneHandlers(() => master('https://graphyard.example'), {
     snapshot: async () => ({ work: [reviewItem], now: iso(Date.now()) }), mutate: async () => ({}), agents: () => effects.agents,
     workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}),
-    launchReview: effects.launchReview, launchProducer: async () => ({}), merge: async () => ({}), observeDeployment: async () => ({}) as any,
+    launchReview: effects.launchReview, launchProducer: async () => ({}), observeDeployment: async () => ({}) as any,
   });
   const step = await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async () => ({ action: reviewRow }), settle: async (_action, result, reason) => { recorded.push(`${result}: ${reason}`); }, handlers: { 'request-review': handlers['request-review'] } });
   assert.equal(step.result, 'failed');

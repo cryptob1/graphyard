@@ -149,24 +149,12 @@ async function carriesAttestation(config: MasterConfig, work: Work, decision: st
     return ((await response.json()) as { decisions?: { id: string; action: string }[] }).decisions?.some(entry => entry.id === decision && entry.action === 'attest') ?? false;
   } catch { return true; }
 }
-/** With automatic merging off, the guarded merge runs only for a candidate an approver agent approved. */
+/** The applied two-party merge decision for exactly the current candidate, if one stands. */
 export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
   return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
     && decision.input.sha === work.candidate.sha && decision.input.baseSha === work.candidate.baseSha && decision.input.policyRevision === work.policyRevision) ?? null;
 }
 
-/**
- * With automatic merging off, an approver agent's merge decision for the exact candidate stands in
- * for the operator: a named item without one is refused, and `--all` keeps only approved ones.
- */
-export async function approvedMerges(selected: Work[], decisions: (work: Work) => Promise<{ decisions: Parameters<typeof approvedMerge>[1] }>, single: boolean) {
-  const approved: Work[] = [];
-  for (const work of selected) {
-    if (approvedMerge(work, (await decisions(work)).decisions)) approved.push(work);
-    else if (single) throw new Error(`${work.key} has no approved merge decision for its current candidate; request one with graphyard master decide ${work.key} merge REASON`);
-  }
-  return approved;
-}
 /**
  * A roster rotation, previewed against the principals the server authenticates now. It may add
  * principals and rotate tokens; it may never drop a live principal or change its role. The

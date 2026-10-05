@@ -342,7 +342,7 @@ const wave = 10;
 async function sent(call: (effects: DaemonEffects) => Promise<unknown>) {
   const bodies: Record<string, unknown>[] = [];
   const live = daemonEffects('/nonexistent/gy-1266', burstConfig(), { snapshot: async () => ({ work: [], now: iso(burstClock) }),
-    mutate: async (_path, data) => { bodies.push(data as Record<string, unknown>); return {}; }, executor: { principal: 'coordinator-1', instance: 'gy-1266' } });
+    mutate: async (_path, data) => { bodies.push(data as Record<string, unknown>); return {}; }});
   await call(live);
   return bodies[0] ?? {};
 }

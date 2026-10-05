@@ -107,7 +107,7 @@ async function submittedAndProven(work: Work, worker: Principal, extra: Partial<
 /** The loop's guarded merge, as the broker performs it with the coordinator credential alone. */
 async function guardedMerge(work: Work) {
   const current = await reload(work.id), candidate = { sha: current.candidate!.sha, baseSha: current.candidate!.baseSha };
-  const committed = await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, ...candidate, policyRevision: current.policyRevision }, randomUUID());
+  const committed = { revision: (await engine.store.workItem(current.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   await engine.observe(current.id, committed.revision, seen(current, candidate, { merged: true, mergeSha: sha40(`merge:${work.id}`), mergedAt }));
   return { result: 'merged', merged: true };
@@ -146,7 +146,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }, ove
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
     requestProof: () => {},
-    merge: async work => { calls.merge.push(work.key); return guardedMerge(work); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

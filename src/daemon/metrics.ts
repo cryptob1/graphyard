@@ -2,14 +2,12 @@
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
 import { routableScopeRequest, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
-import { deliveredByGitHub } from '../model/delivery-mode.js';
-import { unexercisedFindings } from '../model/mechanical-proofs.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
 import { type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
 import { decisionKey } from './reconcile.js';
-import { boundDetail, mergeableCandidate, namePaths, routineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -138,26 +136,10 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // silence it filed a loop fault for a wait no cycle could end (GY-393).
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed' && (!context.assessments || context.assessments[item.id]?.settleable))
       add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
-    if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
     if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} conflicts with the moved base and is waiting for the control plane to try bringing its candidate onto it`);
-    // The same heads step 5 shepherds: one a verdict stands against is going back to a worker,
-    // so nothing asks for its proofs and nothing is waiting on them.
-    // A head the build gate refuses is owed no proof: the control plane requests producers only past
-    // that gate and cancels them when it closes, so the wait is the build's, not the loop's (GY-402).
-    // A proof a producer request pending for the head names is that request's to answer, bounded by
-    // the producer timeout like every obligation the control plane holds (GY-404).
-    // A proof recorded on the head as not exercising its criterion is owed no producer either: no
-    // path re-produces a proof on an unchanged head, so it waits on the rework decision that sends
-    // the head back — the routine decision above counts that wait as its own subject (GY-1092, GY-727).
-    // GY-1266: so is any head the routine decision sends back to a worker, and under GitHub delivery
-    // no head is owed a proof at all — CI runs the unit tests, UAT the end-to-end ones, and the control
-    // plane requests no producer — so a missing proof there was a silence no cycle could end.
-    if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && decision?.action !== 'rework' && !deliveredByGitHub(item) && config.run.proofWorkflow && buildPasses(item)) {
-      const owned = producerOwnedProofs(item, now, (config.run.producerTimeoutMinutes ?? 120) * 60_000);
-      for (const finding of unexercisedFindings(item)) owned.add(finding.proof);
-      const outstanding = missingProofs(item, new Date(now)).filter(proof => !proof.startsWith('manual:') && !owned.has(proof));
-      if (outstanding.length) add('proof', item, `${item.key} is missing trusted evidence for ${outstanding.join(', ')}`);
-    }
+    // No head is owed a proof the loop asks for: CI runs the unit tests, UAT the end-to-end ones,
+    // and the control plane requests no producer (GY-1266, GY-1235). A mergeable candidate is not
+    // the loop's either: GitHub merges it on its branch protection.
   }
   for (const item of work.filter(entry => entry.stage === 'done' && entry.delivery && deploySmokeRequired(entry.policy))) {
     const outcome = deliveryState(item);
@@ -165,15 +147,6 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     else if (outcome === 'awaiting-smoke') add('smoke', item, `${item.key} is deployed at ${item.delivery!.deployment.sha.slice(0, 12)} and waiting for its smoke proof`);
   }
   return subjects;
-}
-
-const buildPasses = (item: Work) => item.gates.find(gate => gate.name === 'build')?.passed !== false;
-/** The proofs a producer request pending for the item's head still answers for, within the producer timeout. */
-function producerOwnedProofs(item: Work, now: number, timeoutMs: number) {
-  const head = item.candidate?.sha;
-  return new Set((item.autoDispatch?.producers ?? [])
-    .filter(request => request.state === 'requested' && request.sha === head && Date.parse(request.requestedAt) + timeoutMs > now)
-    .flatMap(request => request.proofs ?? []));
 }
 
 export interface SilenceEntry { key: string; kind: string; work: string | null; detail: string; since: string; idleMs: number }

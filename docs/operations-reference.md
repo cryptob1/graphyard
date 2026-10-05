@@ -62,7 +62,7 @@ Immutable, per-cycle and webhook-driven reads: [not repeated](protocol/github-we
 
 ### What a pause means for gates
 
-A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old. A merge stalled only on observation freshness is observed, not reworked or ejected ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+A `403`/`429` pauses requests; gates read the last observation until it lifts. GitHub keeps merging on its own branch protection, and the merged observation is recorded once requests resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 

@@ -56,7 +56,7 @@ test('manual:fault-class-unclassified — a proof dispatch row whose head alread
   const effects: ControlPlaneEffects = {
     snapshot: async () => ({ work: items, now: new Date().toISOString() }), mutate: async () => ({}), agents: () => [],
     workerCredentials: async () => ({}), producerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    dispatchWorker: async () => ({}), launchReview: async () => ({}), merge: async () => ({}),
+    dispatchWorker: async () => ({}), launchReview: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
     launchProducer: (work, request, profile, agents, observedAt) => launchProducer(root, work, request, profile, agents, observedAt, { run: herdr }),
   };

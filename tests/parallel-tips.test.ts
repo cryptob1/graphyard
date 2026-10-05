@@ -323,7 +323,7 @@ test('unit:parallel-speculative-tips — the master publishes mergeQueue.paralle
     const posted: unknown[] = [];
     const mutate = async (path: string, data: unknown) => { posted.push(data); const response = await api(`/api/${path}`, tokens.coordinator, { method: 'POST', body: JSON.stringify(data) }); assert.equal(response.status, 200, JSON.stringify(response.body)); return response.body; };
     let configured: { batchSize?: number; parallelTips?: number } | undefined = { parallelTips: 2 };
-    const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
+    const effects = daemonEffects(process.cwd(), () => ({ url, run: {}, mergeQueue: configured }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate });
     await effects.publishMergeBatchSize!();
     await effects.publishMergeBatchSize!();
     assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 2, rerunFailedChecks: 1 }], 'published once, not every cycle');

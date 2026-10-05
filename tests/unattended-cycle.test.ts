@@ -272,7 +272,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
 
   // The loop's own session effects, as `master run` wires them, against the simulated Herdr. An
   // exercise that asks for no decision needs no repository for the launcher to load.
-  const wired = options.host ? daemonEffects(options.host.root, options.host.master, { snapshot: async () => ({ work: [], now: iso() }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'unattended-cycle' }, run: sessions.run }) : null;
+  const wired = options.host ? daemonEffects(options.host.root, options.host.master, { snapshot: async () => ({ work: [], now: iso() }), mutate: async () => { throw new Error('not used'); }, run: sessions.run }) : null;
   const effects = (overrides: Partial<DaemonEffects> = {}): DaemonEffects => ({
     agents: () => wired ? wired.agents() : [],
     ...(wired ? { herdr: wired.herdr } : {}),
@@ -298,15 +298,6 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       recompute(target);
     },
     requestProof: () => {},
-    merge: async item => {
-      const target = find(item.id);
-      const mergeSha = hex(`merge-${target.key}-${target.epoch}`);
-      target.observation = { ...target.observation!, merged: true, mergeSha, mergedAt: iso(), at: iso() };
-      target.stage = 'done'; target.stageEnteredAt = iso();
-      target.delivery = { mergedAt: iso(), mergedAtRepository: iso(), mergeSha, authorizationRevision: target.revision };
-      recompute(target);
-      return { result: 'merged', merged: true };
-    },
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(clockStart), reason: 'No deployment endpoint is configured in this exercise', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
@@ -927,7 +918,7 @@ test('a requested round is requested once, a request the item moved past is take
   // decision is the escalation naming the two commands — not a request that fails on every retry —
   // and provisioning the identity brings the effects back on the next reload, with no restart.
   let live: MasterConfig = { ...master, operatorAgent: undefined } as MasterConfig;
-  const bare = daemonEffects(host.root, () => live, { snapshot: async () => ({ work: [], now: simulation.iso() }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'unattended-cycle' }, run: simulation.sessions.run });
+  const bare = daemonEffects(host.root, () => live, { snapshot: async () => ({ work: [], now: simulation.iso() }), mutate: async () => { throw new Error('not used'); }, run: simulation.sessions.run });
   assert.deepEqual([bare.decide, bare.approver, bare.withdraw, bare.decisions], [undefined, undefined, undefined, undefined]);
   const degraded = plane([{ key: 'GY-740', rounds: ['changes', 'pass'] }], { host });
   const degradedState = emptyDaemonState(live), degradedEffects = degraded.effects({ decide: bare.decide, approver: bare.approver, withdraw: bare.withdraw, decisions: bare.decisions });

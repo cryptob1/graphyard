@@ -215,7 +215,7 @@ test('unit:dispatch-race-guard the executor\'s dispatch proceeds on the row the 
     snapshot: async () => ({ work: [work], now: iso() }), mutate: unusable, agents: () => [],
     workerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])), producerCredentials: async () => ({}),
     dispatchWorker: async (target, profile) => { launched.push(`${target.key}:${profile.name}`); return { pane: 'pane-w' }; },
-    launchReview: unusable, launchProducer: unusable, merge: unusable, observeDeployment: unusable,
+    launchReview: unusable, launchProducer: unusable, observeDeployment: unusable,
   });
   // A system-driven item inside the release interval, with its row claimed: exactly what the hand path refuses.
   assert.match(await handlers.dispatch!(row, { id: 'executor-host-1', host: 'host-1' }), /dispatched GY-7 to claude-worker/);

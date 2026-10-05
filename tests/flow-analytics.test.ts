@@ -273,16 +273,15 @@ async function deliver(work: Work, slice: string, mergeSha: string, overrides: P
   latest = await current();
   latest = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), prState: 'open', draft: false });
   assert.ok(latest.gates.every(gate => gate.passed), `the published tip clears the merge gate: ${JSON.stringify(latest.gates.find(gate => !gate.passed)?.reasons)}`);
-  // GitHub executes the merge (GY-258): the coordinator's request binds this head, and the merged
-  // observation that follows completes the delivery.
-  const requested = await engine.requestEnqueue(coordinator, work.id, { enqueue: true, expectedRevision: latest.revision, sha: head, baseSha: base, policyRevision: latest.policyRevision }, randomUUID());
-  const mergedAt = new Date(Math.ceil((Date.parse(requested.enqueue.at) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  // GitHub merges (GY-1235): the merged observation of the head whose gates passed completes the delivery.
+  const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+  const mergedAt = new Date(Math.ceil((now + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   latest = await current();
   const delivered = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), merged: true, mergeSha, mergedAt });
   assert.equal(delivered.stage, 'done');
-  // GY-60: a merge observed without a prior request is recorded as a violation and never
-  // reaches `done`; pin the attribution so a dropped request fails here, not in the analytics.
-  assert.deepEqual(delivered.violations, [], 'the merged observation is attributed to the merge request');
+  // GY-60: a merge of a head whose gates had not passed is recorded as a violation and never
+  // reaches `done`; pin the attribution so a refused delivery fails here, not in the analytics.
+  assert.deepEqual(delivered.violations, [], 'the merged observation is attributed to the gates that passed');
   await settle(mergedAt);
   return { delivered, mergedAt, mergeSha };
 }
@@ -743,7 +742,7 @@ test('integration:flow-analytics-master-production-environment', async () => {
     return response.body;
   };
   let configured: string | undefined = 'graphyard / production';
-  const effects = daemonEffects(process.cwd(), () => ({ url, run: { productionEnvironment: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
+  const effects = daemonEffects(process.cwd(), () => ({ url, run: { productionEnvironment: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate });
   try {
     await effects.publishProductionEnvironment!();
     await effects.publishProductionEnvironment!();
@@ -1577,16 +1576,10 @@ test('manual:review-followups-triaged GY-1275.3 — a reverted delivery is named
   // Reverted work is never promoted, so it is not pending a promotion.
   assert.equal(speed.mergedToProduction['7d'].pending, 9);
   assert.match(deliverySpeedBreaches(speed)[0].text, /slowest: GY-V 26h \(reverted\)/);
-  // The live mode is read from the most recently evaluated item's github-delivery marker gate.
-  const github = { ...mergedItem('GY-G', hour, hour), updatedAt: at(0), gates: [{ name: 'github-delivery', passed: true, reasons: [] }] } as unknown as Work;
-  assert.equal(deliverySpeed([...readyItems(2), github], { now: deliveryNow }).deliveryMode, 'github');
-  assert.match(deliverySpeed([...readyItems(2), github], { now: deliveryNow }).statements[0], /^Delivery mode: GitHub merges each pull request into main/);
-  assert.equal(speed.deliveryMode, 'graphyard');
-  assert.match(speed.statements[0], /^Delivery mode: Graphyard's merge queue/);
-  // A newer closed item, or one not evaluated since, does not stand for the live mode.
-  const closedLater = { ...mergedItem('GY-X', hour, hour), updatedAt: at(-hour), closure: { reason: 'superseded' }, gates: [{ name: 'ready', passed: true, reasons: [] }] } as unknown as Work;
-  const unevaluatedLater = { ...mergedItem('GY-Y', hour, hour), updatedAt: at(-hour), gates: [] } as unknown as Work;
-  assert.equal(deliveryPathMode([github, closedLater, unevaluatedLater]), 'github');
+  // GitHub delivery is the only mode (GY-1235): the report always says so.
+  assert.equal(speed.deliveryMode, 'github');
+  assert.match(speed.statements[0], /^Delivery mode: GitHub merges each pull request into main/);
+  assert.equal(deliveryPathMode([]), 'github');
 });
 
 /**

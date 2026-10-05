@@ -76,7 +76,7 @@ function handlers() {
     snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
     mutate: async (path, body) => { const [, id, command] = path.split('/'); assert.equal(command, 'resync'); return engine.resyncWork(executor, id, body); },
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
-    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable, merge: unusable, observeDeployment: unusable,
+    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable, observeDeployment: unusable,
   });
 }
 

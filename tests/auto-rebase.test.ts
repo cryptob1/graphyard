@@ -228,7 +228,7 @@ const refreshRecord = (work: Work, to: { head: string | null; base: string }, ov
 /** The head lands through the broker exactly as the master does it, and Graphyard observes the merge. */
 async function mergeHead(work: Work, candidate: { sha: string; baseSha: string }, mergeSha: string) {
   const current = await reload(work);
-  const committed = await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: current.policyRevision }, randomUUID());
+  const committed = { revision: (await engine.store.workItem(current.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   return engine.observe(current.id, committed.revision, seen(current, candidate, { merged: true, mergeSha, mergedAt }));
 }
@@ -360,7 +360,7 @@ test('integration:loop-acts-on-stale-base — an item that is only waiting for a
   const config = { url: 'http://localhost', repository: 'owner/repo', workers: [], autoMerge: false, run: {} } as unknown as MasterConfig;
   const acted: string[] = [];
   const effects = (items: Work[]): DaemonEffects => ({
-    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => { acted.push('proof'); }, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => { acted.push('proof'); },
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => ({}), requestSmoke: () => {}, agents: () => [], credentials: async () => ({}),
     snapshot: async () => ({ work: items, now: new Date().toISOString() }), persist: async () => {},

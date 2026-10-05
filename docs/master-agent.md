@@ -88,8 +88,8 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 
 A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`), and automated proofs get rework quoting it. When only such unit or integration findings remain, the next action is `request-rework` (proof, criterion, surviving mutation), a wait the rework decision owns, not loop silence. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
-## Guarded merges
+## GitHub merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`… deploy main first`).
+A candidate whose build, review and required checks pass on its head is GitHub's to merge on its branch protection; the merged observation records the delivery ([one delivery path](delivery.md#one-delivery-path)). The loop runs no merge: its merge step only reconciles merged items, and `master merge` says so. A merge of a head whose gates had not passed is held as a violation until a two-party `master decide GY-N merge` reconciles it.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

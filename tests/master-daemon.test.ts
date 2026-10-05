@@ -57,7 +57,6 @@ function effects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): Da
     closeSession: pane => { log.push(`close:${pane}`); },
     dispatch: async item => { log.push(`dispatch:${item.key}`); },
     requestProof: item => { log.push(`proof:${item.key}`); },
-    merge: async item => { log.push(`merge:${item.key}`); return { result: 'merged', merged: true }; },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async (item, observation) => { log.push(`record:${item.key}:${observation.sha.slice(0, 4)}`); },
     requestSmoke: item => { log.push(`smoke:${item.key}`); },
@@ -302,7 +301,6 @@ test('a refused merge is recorded as the gate working and does not stop the loop
     const state = emptyDaemonState(master);
     const result = await runCycle(master, state, effects({
       snapshot: async () => ({ work: [mergeable], now: iso(0) }),
-      merge: async () => { throw new Error('GY-45 does not have a current all-gates-passing merge authorization'); },
     }), () => clock);
     const merge = result.actions.find(action => action.kind === 'merge')!;
     assert.equal(merge.state, 'failed');
@@ -637,13 +635,13 @@ test('a persistently refused merge backs off instead of calling the provider eve
     const master = config(token);
     const mergeable = submitted({ id: 'mergeable', key: 'GY-81', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
     let attempts = 0;
-    const deps = effects({ snapshot: async () => ({ work: [mergeable], now: iso(0) }), merge: async () => { attempts++; throw new Error('base branch advanced outside the merge queue'); } });
+    const deps = effects({ snapshot: async () => ({ work: [mergeable], now: iso(0) })});
     const state = emptyDaemonState(master);
     for (let cycle = 0; cycle < 8; cycle++) await runCycle(master, state, deps, () => clock + cycle * 20_000);
     assert.deepEqual([attempts < 8, attempts >= 3], [true, true], `a refusal should retry on a widening interval, not 8 times (saw ${attempts})`);
     // A new commit is a new candidate and retries immediately.
     const fresh = { ...mergeable, candidate: { ...mergeable.candidate!, sha: 'f'.repeat(40) } } as Work;
-    await runCycle(master, state, effects({ snapshot: async () => ({ work: [fresh], now: iso(0) }), merge: async () => { attempts++; return { result: 'merged', merged: true }; } }), () => clock + 8 * 20_000);
+    await runCycle(master, state, effects({ snapshot: async () => ({ work: [fresh], now: iso(0) })}), () => clock + 8 * 20_000);
     assert.equal(state.actions[candidateKey('merge', fresh)].state, 'done');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -669,7 +667,7 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     // Every write is judged by the schema exactly as the cursor file is.
     const persist = async (next: DaemonState) => { written.push(daemonStateSchema.parse(JSON.parse(JSON.stringify(next)))); };
     const deps = effects({ snapshot: async () => ({ work: [...delivered, ready, mergeable, proving], now: iso(0) }), persist,
-      merge: async () => { throw new Error(refusal); }, observeDeployment: async () => observe() });
+      observeDeployment: async () => observe() });
     const state = emptyDaemonState(master);
     // An attempt counter one short of its bound, due for a retry: the retry is attempt 1001.
     state.cycle = 40;

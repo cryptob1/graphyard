@@ -63,7 +63,8 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
   { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },
   // merge
-  { gate: 'merge', match: /^GitHub observation missing or older than two minutes$/, kind: 'resync' },
+  // Nothing gates the merge on the observation's age (GY-1235): only a reading of the current head.
+  { gate: 'merge', match: /^GitHub has not been observed at the current candidate$/, kind: 'resync' },
   // Mergeability not established: GitHub reports the head unmergeable, or has not finished
   // computing it (GY-548). Either way only a fresh read answers it.
   { gate: 'merge', match: /^(Pull request is not mergeable against the current base$|GitHub is computing mergeability against the current base)/, kind: 'resync' },

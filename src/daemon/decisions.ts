@@ -153,35 +153,6 @@ export function observationWakeDue(work: Work, wokenAt: string | null | undefine
   return now - woken >= observationWakeRetryMs;
 }
 
-/** The merge gate's refusal of an item whose last observation is missing or older than two minutes (model/gates.ts). */
-export const staleObservationMergeReason = 'GitHub observation missing or older than two minutes';
-/** The guarded merge's refusal (engine.ts) when the authorization it checks — the observation's two-minute bound among it — no longer holds. */
-export const staleMergeRefusal = /Merge authorization is no longer current/;
-/**
- * GY-710. Why the guarded merge waits for a fresh observation, or null when it may be asked. The
- * merge keeps its two-minute bound: a candidate the merge gate refuses for a stale observation is
- * not asked at all — the refusal would only restate it — and waits for the woken observation.
- */
-export function mergeObservationWait(work: Work): string | null {
-  const gate = work.gates.find(entry => entry.name === 'merge');
-  if (!gate || gate.passed || !gate.reasons.includes(staleObservationMergeReason)) return null;
-  const seen = work.observation ? `the last GitHub observation (taken at ${work.observation.at} of head ${work.observation.candidate.sha.slice(0, 12)})` : 'no GitHub observation of the item';
-  return `${work.key}: the guarded merge waits for a fresh GitHub observation — the merge gate refuses ${seen}, which is missing or older than two minutes`;
-}
-/** GY-710. Whether the last guarded merge was refused for a stale observation and the wake that refusal sent stands. */
-export function awaitingObservation(previous: { state: string; detail: string } | undefined, wake: { state: string } | undefined): boolean {
-  return previous?.state === 'failed' && staleMergeRefusal.test(previous.detail) && wake?.state === 'done';
-}
-/**
- * GY-710. Whether the observation a stale merge refusal woke has landed (newer than the wake) with every
- * gate passing: the merge is asked again at once, following the observation, not the backoff (`mergeRetryDue`).
- */
-export function mergeObservationLanded(wake: { state: string; at: string } | undefined, work: Work): boolean {
-  if (wake?.state !== 'done' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
-  const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN, woken = Date.parse(wake.at);
-  return Number.isFinite(observed) && Number.isFinite(woken) && observed > woken;
-}
-
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
@@ -355,7 +326,6 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // standing escalation would have refused the merge until somebody asked for the resolution).
   const lost = leaseLossDecision(work);
   if (lost) return lost;
-  if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
 }
 /**

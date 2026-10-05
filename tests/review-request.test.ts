@@ -235,7 +235,7 @@ function loop(work: () => Work, record: { decided: string[]; synced: DocsSyncPla
     agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     decide: async (_work, action) => { record.decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },

@@ -15,7 +15,6 @@ import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
 import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
-import { githubDelivery } from './model/delivery-mode.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
@@ -3001,10 +3000,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     batchSizeRead.set(engine, Date.now());
     await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
   }
-  // Under GitHub delivery the main guard (GY-1250) runs here on the same interval: a merge that
-  // broke main is reverted and its item reopened. A failure is recorded once and retried next interval.
+  // The main guard (GY-1250) runs here on the same interval: a merge that broke main is reverted
+  // and its item reopened. A failure is recorded once and retried next interval.
   const mainGuardedAt = mainGuardRead.get(engine);
-  if (githubDelivery() && typeof github.mainHistory === 'function' && (mainGuardedAt === undefined || Date.now() - mainGuardedAt >= mainGuardIntervalMs)) {
+  if (typeof github.mainHistory === 'function' && (mainGuardedAt === undefined || Date.now() - mainGuardedAt >= mainGuardIntervalMs)) {
     mainGuardRead.set(engine, Date.now());
     if (!mainGuardVerdicts.has(engine)) mainGuardVerdicts.set(engine, new Map());
     const verdicts = mainGuardVerdicts.get(engine)!;
@@ -3051,28 +3050,24 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   }
   const startedAt = Date.now();
   let work: Work | undefined;
-  const guard = (snapshot: Work, success: boolean) => async () => {
-    const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
+  const guard = (snapshot: Work, _success: boolean) => async () => {
+    const result = await engine.store.pool.query(`SELECT w.document FROM work_items w JOIN jobs j ON j.work_id=w.id
       WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
     const row = result.rows[0];
     requireCurrent(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
-    if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
   };
   // The merge gate's success writes — the passing check and the request that GitHub merge the head —
   // are bound to what they act on, not to the item's revision (GY-1112): the job still holds the
-  // item, which still has the same candidate, policy and all-gates authorization, every gate still
-  // passes, and the observation is fresh. Any other save (an executor claiming one of the item's
-  // action rows, a session update) changed nothing the write depends on, and refusing over it kept
-  // the blocked-auto-merge probe from ever reaching GitHub on consecutive observations.
+  // item, which still has the same candidate and policy, and every gate still passes. Any other save
+  // (an executor claiming one of the item's action rows, a session update) changed nothing the write
+  // depends on. The observation's age is not read (GY-1235): GitHub merges on its own protection.
   const mergeGuard = (snapshot: Work) => async () => {
-    const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
+    const result = await engine.store.pool.query(`SELECT w.document FROM work_items w JOIN jobs j ON j.work_id=w.id
       WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
-    const row = result.rows[0], current = row?.document as Work | undefined;
+    const current = result.rows[0]?.document as Work | undefined;
     const bound = (a: Work, b: Work) => a.candidate!.sha === b.candidate?.sha && a.candidate!.baseSha === b.candidate?.baseSha && a.candidate!.pr === b.candidate?.pr
-      && a.policyRevision === b.policyRevision && a.mergeAuthorization?.sha === b.mergeAuthorization?.sha && a.mergeAuthorization?.baseSha === b.mergeAuthorization?.baseSha
-      && a.mergeAuthorization?.policyRevision === b.mergeAuthorization?.policyRevision;
-    requireCurrent(current && bound(snapshot, current) && mergeAuthorized(current), 'Candidate, policy or merge authorization changed before publication; retry');
-    requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
+      && a.policyRevision === b.policyRevision;
+    requireCurrent(current && bound(snapshot, current) && mergeAuthorized(current), 'Candidate, policy or passing gates changed before publication; retry');
   };
   // A feature whose permission the last preflight found missing is not attempted: the job is
   // held with the operator-facing reason instead of retrying into a 403. Adapters without a
