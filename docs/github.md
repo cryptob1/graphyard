@@ -25,11 +25,11 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`graphyard master reviewer setup` creates it (Pull requests write, reads otherwise). Review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Grants recheck every five minutes and 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
+`graphyard master reviewer setup` creates it. Review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Grants recheck every five minutes and 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
 
 ## Workflow base syncs
 
-Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)), so a base sync with the base's workflow changes pushes plainly. If GitHub refuses it, `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT when it fast-forwards the branch, merges `origin/BASE` and keeps that base's workflow files (plannedFiles aside), else names differing paths; history records `sync.workflow-push` (worker, epoch).
+Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)), so base syncs carrying workflow changes push plainly. If GitHub refuses it, `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT when it fast-forwards the branch, merges `origin/BASE` and keeps that base's workflow files (plannedFiles aside), else names differing paths; history records `sync.workflow-push` (worker, epoch).
 
 ## Require the check
 
@@ -41,7 +41,7 @@ The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-he
 
 A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed rerun lapses after 15 runless minutes; an accepted one is read from its workflow run: queued or running waits on the runner queue, one not found is requested once more; lacking Actions: write, preflight diagnoses it and rerun requests hold.
 
-Once gated, the candidate's speculative tip, pushed onto the candidate branch once and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once that check's newest run on that tip passes and no other required check fails (`queue.ejection-lifted`). A tip failure a predecessor explains (its head fails too, or only it touches a named file) ejects that predecessor, not the entry. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+Once gated, the candidate's speculative tip, pushed onto the candidate branch once and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once that check's newest run on that tip passes and no other required check fails (`queue.ejection-lifted`). A failure a predecessor explains (its head fails too, or only it touches a named file) ejects it instead. It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
 
 ### Bindings and carry
 
