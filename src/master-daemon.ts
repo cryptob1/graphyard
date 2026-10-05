@@ -21,3 +21,4 @@ export { closeEndedWorkerPanes } from './daemon/cycle-reclaim.js';
 export { wakeObservationJob } from './daemon/cycle-delivery.js';
 export { deploymentPageSize, deploymentListingPages, maxDeploymentRequests, productionEnvironmentRecord, observeDeployment } from './daemon/deployment.js';
 export { daemonSummary, noteConfigReload, noteWatchdog, runDaemon } from './daemon/run.js';
+export { baseFailureStep, baseFailureAttention } from './daemon/cycle-base-failures.js';

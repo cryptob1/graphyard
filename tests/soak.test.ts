@@ -95,7 +95,9 @@ import type { DoctorEffects } from '../src/daemon/doctor.js';
  * runs are killed, then fail until the request is spent (GY-496), two flaky tips
  * rerun once (GY-516), one passing on the rerun and one failing again, and the
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
- * across the second deploy for a while. The plane also reports a held integration job in three
+ * across the second deploy for a while, and a test that breaks on main for eleven minutes (GY-528) —
+ * the candidates it fails are held without rework, one P0 item is filed, and once main is repaired
+ * each is rerun and refreshed onto it. The plane also reports a held integration job in three
  * separate windows, so the `held-jobs` fault class recurs past its threshold and the loop files one
  * recurring-fault item for it (GY-173): the diagnostician (GY-439) is wired as a fake, so the real
  * loop diagnoses the recurring item within the cycle that files it and closes it, on the approved
@@ -166,6 +168,7 @@ const basePlan = {
   // minutes. Item six hosts it because its approval lands past the day's first merges, so the base
   // move does not churn the early cadence, and the regression day reuses it.
   docsConflict: { item: 6, page: 'docs/master-agent.md', syncMs: 4 * minute },
+  baseFailure: { breaks: 183 * minute, repaired: 194 * minute },
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 10, rerunFails: 14 },
   // GY-793: item 2's worker pushes while a broken commit stands on main, so its candidate's `test`
@@ -487,8 +490,8 @@ before(async () => {
 after(async () => { clock.uninstall(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pgServer) await pgServer.stop(); });
 
 const id = () => randomUUID();
-async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json() as any;
   if (!response.ok) throw new Error(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`);
   return result;
@@ -1435,6 +1438,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // The base failure (GY-528): CI logs and the base head's run read from GitHub, reruns, and what the operator-agent files and asks for.
+    failedTests: async job => github.failedTests(job),
+    baseCheck: async check => github.baseCheck(check),
+    rerunJob: async job => { await github.rerun(job, 'loop'); },
+    fileBaseFailure: async (input, key) => { const filed = await api(principals.operatorAgent, 'POST', 'work', input, key); baseFailure.filed.push(filed); return filed; },
+    refreshCandidate: async (work, reason, key) => { baseFailure.refreshes.push(work.key); return api(principals.operatorAgent, 'POST', `work/${work.id}/refresh`, { reason, base: work.observation?.baseTip }, key); },
     hostMemory: async () => memoryReading(),
     // A rework refused on a stale observation wakes the item's observation job (GY-710) through
     // the server's own resync endpoint, as `master run` wires it.
@@ -1654,6 +1663,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     await api(principals.coordinator, 'POST', 'merge-queue', settings);
     publishedMergeQueue = published;
   };
+  const baseFailure = { filed: [] as Work[], refreshes: [] as string[] };
 
   // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
@@ -1763,7 +1773,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const chainedTips = new Set<string>();
   let peakWindow = 0;
   const seenTips = new Set<string>();
-  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0;
+  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0, broken = false, repaired = false, repairClosed = false;
   // GY-574: the documentation day records the trim filings, the loop's trim actions, and when the
   // trim item was closed with the documentation still saturated, so the once-only filing and the
   // bounded action count are what the day itself observed.
@@ -1896,6 +1906,26 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
     if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    // A test breaks on main outside Graphyard, and is repaired eleven minutes later (GY-528). Only
+    // the 24-hour main day runs it: its candidates are held without rework either way, and that
+    // day is where the filing, rerun and refresh recovery is asserted. The window is sized to the
+    // push cadence — one worker pushes every fifteen minutes — so exactly one push lands inside it
+    // (item twelve's first head) and is held, and the repair lands early enough that the refreshed
+    // candidate re-merges into the long gap before the next release's merge: every merge the day
+    // delays otherwise moves the base under a queued tip and reads as churn beside the remedy
+    // refresh itself. It stands three hours in, clear of the morning's scenarios: the memory dip
+    // holds the first launches, so items one and two push together past half an hour, and a hold
+    // there would replace the spent producer's head (GY-496) before its request is spent.
+    if (mainDay && options.hours >= 24 && !broken && elapsed >= plan.baseFailure.breaks) { broken = true; github.baseFailure.broken = github.commit('Add a test holding a fixed date against the clock', github.files).sha; }
+    if (mainDay && options.hours >= 24 && !repaired && elapsed >= plan.baseFailure.repaired) { repaired = true; github.baseFailure.repaired = github.commit('Repair the fixed-date test', github.files).sha; }
+    // Once the repair has landed and the loop has retired the base failure, the person who repaired
+    // main closes the P0 item filed for it as obsolete, naming the repair commit: an open item would keep
+    // the day stepping one minute at a time to its end, and leave work for the next day's loop.
+    const repairItem = baseFailure.filed[0];
+    if (repaired && !repairClosed && repairItem && !Object.keys(state.baseFailures).length) {
+      repairClosed = true;
+      await api(principals.operator, 'POST', `work/${repairItem.key}/close`, { kind: 'obsolete', reason: `soak: main was repaired outside Graphyard by ${github.baseFailure.repaired}` });
+    }
     // GY-793: main is briefly broken by a direct commit and fixed by the next one. Item 2's worker
     // pushes inside the window, so its candidate is built against the broken commit; the fix's own
     // run completes one CI duration after it, which is when the judgement can first name the tip
@@ -2350,7 +2380,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   engine.execute = executeAll;
   return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
+    decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory };
 }
@@ -2390,7 +2420,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const hours = Number(process.env.SOAK_HOURS ?? 24);
   const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
+  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, baseFailure, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
@@ -2518,6 +2548,28 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[basePlan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${basePlan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[basePlan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // The base failure (GY-528): the candidate its window caught was held without rework — the rework
+  // decisions above are the reviewers' three and the spent producer's — one P0 item names it, and
+  // once main was repaired its failed job was rerun once and it was refreshed onto the repaired
+  // base once, then delivered. The window is sized to hold the one push that lands inside it (see
+  // the plan comment); that several candidates share one item is the unit test's assertion.
+  const [filed, ...more] = baseFailure.filed;
+  assert.ok(filed && !more.length, `one P0 item for the failing test: ${baseFailure.filed.map(item => item.key).join(', ')}`);
+  assert.equal(filed.priority, 0);
+  const blocked = final.filter(item => item.baseRefresh?.trigger === 'base failure repaired').map(item => item.key).sort();
+  assert.ok(blocked.length >= 1 && blocked.every(key => filed.description.includes(`${key} (`)), `the base failure blocked the window's candidate(s), which its item names: ${blocked.join(', ')}; ${filed.description}`);
+  assert.deepEqual([...baseFailure.refreshes].sort(), blocked, 'each blocked candidate was refreshed onto the repaired base, once, by a Graphyard-authored merge');
+  // Each blocked candidate's failed job was rerun by the loop's remedy step exactly once — the
+  // engine's own first check-rerun (GY-516) may have run beside it, on superseded heads too.
+  const loopReruns = github.baseReruns.filter(entry => entry.by === 'loop').map(entry => entry.jobId);
+  assert.ok(new Set(loopReruns).size === blocked.length && loopReruns.length === blocked.length, `each blocked job rerun once by the loop's remedy: ${JSON.stringify(github.baseReruns)}`);
+  assert.deepEqual(Object.keys(state.baseFailures), [], 'the base failure retired once its candidates were refreshed');
+  // Distinct items: the low-lane rework (GY-883) is refused once at apply and requested again.
+  assert.deepEqual([...new Set(decideCalls.filter(call => call.action === 'rework').map(call => call.key))].sort(),
+    items.filter((_, index) => basePlan.rework.has(index + 1) || index + 1 === basePlan.spentProducer).map(item => item.key).sort(),
+    'the only rework decisions are the reviewers\' three and the spent producer\'s — no base-failure blocked candidate was sent back');
+  // GY-500: disjoint items merged optimistically and infrastructure changes queued; the one that
+  // broke main was reverted head-bound within one CI duration of its failing post-merge run, and
   // The docs-only conflict went to one docs-sync session, not a worker: its push was adopted as the
   // refresh's outcome with the approval kept, the session was closed, and the loop's records of it are bounded.
   const conflicted = items[basePlan.docsConflict.item - 1].key;

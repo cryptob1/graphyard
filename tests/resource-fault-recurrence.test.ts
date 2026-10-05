@@ -11,10 +11,10 @@ import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
+import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, readGitHubBudget, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type PlaneReading, type ResourceInputs } from '../src/master-resources.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
-import { resourceStatus } from '../src/master-status.js';
+import { attributeAttention, resourceStatus } from '../src/master-status.js';
 import * as masterResources from '../src/master-resources.js';
 import { writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -785,6 +785,42 @@ test('GY-1192: a recordless producer pane blocked or unknown waits the stuck-ses
   await pass(now + stuckSessionMs);
   assert.deepEqual(closed.map(entry => entry.pane).sort(), ['w1V:pR1', 'w1V:pR2', 'w1V:pR3']);
   for (const entry of closed.filter(entry => entry.pane !== 'w1V:pR3')) assert.match(entry.reason, /left no record: never started: (blocked|unknown) in Herdr for over 10 minutes/);
+});
+
+test('integration:resources-recurrence-reproduces-gy-1272-budget-shape — one rate-limit pause and its held subjects record no resources instance; a budget spent with no pause records one', async () => {
+  // GY-1272: at 06:36:13.546Z, three seconds after the loop restarted, one pause until 06:38:26.160Z
+  // became six resources instances: resource:github-budget and five held subjects whose own lines
+  // named the pause. Four held subjects' symptom lines are rebuilt here beside the pause.
+  const at = Date.parse('2026-10-05T06:36:13.546Z');
+  const until = Date.parse('2026-10-05T06:38:26.160Z');
+  const held = ['installation', 'GY-711', 'GY-1052', 'GY-1241'].map(subject => ({ subject, role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names',
+    text: `${subject}'s observe action is stalled — GitHub requests paused until ${iso(until)} after a rate/access refusal` }));
+  const client = (blockedUntil: number, core: { limit: number; remaining: number } | null) => ({ blockedUntil, apiRequest: async () => {
+    if (!core) throw new Error('rate limited; requests paused');
+    return { resources: { core: { ...core, reset: Math.floor(until / 1000) } } };
+  } });
+  /** The resources-class instances the loop records from one budget reading and the held lines. */
+  const instances = (github: PlaneReading, lines = held) => {
+    const readings = readResources(inputs({ now: at, plane: { writable: true, writeError: null, database: null, github } }));
+    return classifyAttention([...resourceAttention(readings), ...attributeAttention(lines, readings)]).filter(item => item.faultClass === 'resources').map(item => item.subject).sort();
+  };
+
+  // REPRODUCE against base: base's pause branch read the budget used to its bound by construction.
+  const base = { used: 5000, bound: 5000, detail: `the GitHub client paused every request until ${iso(until)} after a rate-limit refusal; the budget is spent until then` };
+  assert.deepEqual(instances(base), ['GY-1052', 'GY-1241', 'GY-711', 'installation', 'resource:github-budget'], 'base records the pause once per held subject plus the budget');
+
+  // CANDIDATE: the same pause is the remediation under way, and records nothing in the resources class.
+  const paused = (await readGitHubBudget(client(until, null), at))!;
+  assert.equal(paused.used, null);
+  assert.match(paused.detail!, new RegExp(`paused every request until ${iso(until).replace(/\./g, '\\.')}`));
+  assert.deepEqual(instances(paused), []);
+  // The pause still counts once, in the observation class, from the plane's own githubBudget.paused.
+  assert.equal(classifyAttention([{ subject: 'github', text: `GitHub requests are paused until ${iso(until)}`, role: 'control plane', approvedBy: null, human: false, humanOnly: null, next: '' }])[0].faultClass, 'observation');
+
+  // A budget GET /rate_limit reads spent with no pause in force still records the one instance.
+  const spent = (await readGitHubBudget(client(at - 1, { limit: 5000, remaining: 0 }), at))!;
+  assert.deepEqual([spent.used, spent.bound], [5000, 5000]);
+  assert.deepEqual(instances(spent, []), ['resource:github-budget']);
 });
 
 /**

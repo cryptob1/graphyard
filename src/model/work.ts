@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { BaseRefresh, LandingCheck, MergeRefusal, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
+import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -181,7 +181,7 @@ export interface Work extends Create {
    * under it, or refused to because the merge conflicts. Decided and written by Graphyard
    * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
    */
-  baseRefresh?: BaseRefresh | null; mergeRefusal?: MergeRefusal | null; // mergeRefusal: the guarded merge's refusal of this candidate (GY-831, merge-queue.ts)
+  baseRefresh?: BaseRefresh | null; baseRefreshRequest?: BaseRefreshRequest | null; mergeRefusal?: MergeRefusal | null; // baseRefreshRequest: the standing request to merge a repaired base in (GY-528); mergeRefusal: the guarded merge's refusal (GY-831)
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
