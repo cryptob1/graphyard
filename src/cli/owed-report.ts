@@ -109,3 +109,23 @@ export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { k
     ? { ...row, decision: `the independent approver's judgement of ${row.key}'s routed scope request`, resolve: routed(row.key)! } : row), items,
     counted: items.length + scopeRequests.filter(item => !rowAttention(item.subject)).length };
 }
+
+type DecisionHistoryRow = { id: string; action: string; state: string; requestedAt?: string; outcome?: string | null };
+/**
+ * GY-1294. A release decision the server settled `stale` — the item revision moved between the
+ * request and its approver's read — releases nothing, and an item in backlog shows no other sign
+ * that it waits: five diagnosed root-cause fixes sat there for 2–23 hours, each behind a stale
+ * release nobody asked for again. While the item is still in backlog and that stale release is
+ * its latest — no later release requested, approved or applied — the release is owed, and it is
+ * named so, as owed decision attention with how long it has waited, never left silent. Null for
+ * any other item.
+ */
+export function staleReleaseAttention(work: { key: string; stage: string; ready?: boolean }, decisions: readonly DecisionHistoryRow[], now: number): AttentionItem | null {
+  if (work.stage !== 'backlog' || work.ready) return null;
+  const release = decisions.filter(decision => decision.action === 'release').at(-1);
+  if (release?.state !== 'stale') return null;
+  const waited = release.requestedAt ? Math.max(0, now - Date.parse(release.requestedAt)) : 0;
+  const next = `graphyard master release ${work.key}, or graphyard master decide ${work.key} release REASON then graphyard master approver ${work.key} DECISION`;
+  return { subject: work.key, text: `${work.key} sits in backlog behind release decision ${release.id}, which went stale: ${release.outcome ?? 'the item revision moved before its approver read it'} — no executor may run it; the release of ${work.key} has been owed for ${elapsed(waited)}`,
+    ...agentOwner('master', next, 'approver') };
+}

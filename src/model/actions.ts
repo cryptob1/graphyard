@@ -4,6 +4,7 @@ import { claimOrder, yieldsTo } from './action-candidates.js';
 import { actionRecordLimit, actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
+import type { RemedyRecord } from '../stall-remedies.js';
 
 /**
  * The durable action queue.
@@ -77,6 +78,8 @@ export interface ActionRow {
    * `actionStall` recomputes it from the history so the two can never disagree.
    */
   stall?: ActionStall;
+  /** The loop's one attempt per unchanged run of the remedy its stall reason binds to (GY-949, src/stall-remedies.ts). */
+  remedy?: RemedyRecord;
   /** The executor this row already stepped aside for once since its last failure (`yieldsTo`). */
   yielded?: string;
   resolvedAt?: string; result?: 'done' | 'failed'; resolution?: string;

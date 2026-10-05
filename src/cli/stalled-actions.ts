@@ -1,4 +1,5 @@
-import { agentOwner, type AttentionItem } from '../master.js';
+import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
+import { describeRemedyRecord, stallRemedy, standingRemedy } from '../stall-remedies.js';
 import { actionStallMaxMs, actionStallRecheckMs, queueSnapshot } from '../model/action-progress.js';
 import type { Work } from '../model.js';
 
@@ -31,12 +32,31 @@ const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}
  *
  * Raised as soon as the row is classified, which is inside the idle bound the fleet applies to a
  * row nobody is acting on: a row being attempted and getting nowhere is never the quieter failure.
+ *
+ * A reason the registry binds to a remedy (GY-949, src/stall-remedies.ts) names that remedy as the
+ * next step instead — the one the loop applies itself, with what its attempt did once the row
+ * records one, or the bounded decision that owns it. Only a reason the registry does not recognise
+ * keeps the generic instruction.
  */
 export function stalledActionAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
-  return queueSnapshot(snapshot.work, new Date(snapshot.now)).stalled.map(entry => ({
-    subject: entry.key,
-    kind: 'stalled-action' as const,
-    text: `${entry.key}'s ${entry.kind} action is stalled, retried only on a widening backoff: ${entry.stall!.failures} attempts in a row failed for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s)${entry.retryAt ? `; next attempt at ${entry.retryAt}` : ''}. Nothing changes by attempting it again while that condition stands`,
-    ...agentOwner('master', `Clear what that reason names: the row rechecks ${Math.round(actionStallRecheckMs / 1000)}s after the third identical failure and twice as long after each further one, up to ${Math.round(actionStallMaxMs / 60_000)} minutes, so it is claimed within one such interval of the condition clearing and needs no forced retry. master status lists it under actions.stalled`),
-  }));
+  return queueSnapshot(snapshot.work, new Date(snapshot.now)).stalled.map(entry => {
+    const bound = stallRemedy(entry.stall!.reason);
+    const work = snapshot.work.find(item => item.id === entry.work);
+    const attempt = bound?.applies === 'loop' && work ? standingRemedy(work, entry.id, entry.stall!.reason) : null;
+    const next = !bound ? generic
+      : !attempt ? bound.next
+      : attempt.outcome === 'refused' ? `Nothing to retry: ${describeRemedyRecord(attempt)}. The loop does not apply it again for this unchanged run; the row is escalated once with the refusal and the remedy named, and clearing what the refusal names (master status shows a pending sudo code) lets the row's recheck pick the change up`
+      : `Nothing to run by hand: ${describeRemedyRecord(attempt)}. The row's recheck picks the change up; should the reason stand, the run is escalated with the remedy named rather than the remedy applied again`;
+    return {
+      subject: entry.key,
+      kind: 'stalled-action' as const,
+      text: `${entry.key}'s ${entry.kind} action is stalled, retried only on a widening backoff: ${entry.stall!.failures} attempts in a row failed for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s)${entry.retryAt ? `; next attempt at ${entry.retryAt}` : ''}. Nothing changes by attempting it again while that condition stands`,
+      // Only the suspended installation is a human's: reinstating it is an account decision on the
+      // GitHub account that owns the installation, filed as installationOwner files the same hold.
+      ...(bound?.owner === 'human' ? humanOwner('spending money or opening third-party accounts', next) : agentOwner('master', next)),
+    };
+  });
 }
+
+/** The instruction for a stall reason no registry entry recognises. */
+const generic = `Clear what that reason names: the row rechecks ${Math.round(actionStallRecheckMs / 1000)}s after the third identical failure and twice as long after each further one, up to ${Math.round(actionStallMaxMs / 60_000)} minutes, so it is claimed within one such interval of the condition clearing and needs no forced retry. master status lists it under actions.stalled`;

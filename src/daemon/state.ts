@@ -266,6 +266,8 @@ export const approvalWatchSchema = z.object({
   ended: z.array(z.string().max(300)).max(10).default([]),
   /** Set once the decision is applied: the watch is kept so the same binding is not requested again. */
   settledAt: z.string().nullable().default(null),
+  /** GY-1298. When and by whom the decision was approved while it stood unapplied, so its wait names the apply it owes, not an approver judgement. */
+  approvedAt: z.string().nullable().default(null), approvedBy: z.string().max(200).nullable().default(null),
   /** Set once every launch is spent on a decision still unjudged: the loop has escalated it. */
   exhaustedAt: z.string().nullable().default(null),
   closeAttempts: z.number().int().min(0).default(0),

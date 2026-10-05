@@ -53,6 +53,8 @@ Reviewers and producers are `awaiting acknowledgement` until 30 s active (`count
 
 **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
 
+**Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is closed and launched again at once, and the launch records the trust (a second dialog for the same request waits as unknown); any other prompt fails the session after **5 minutes**. A screen that cannot be read is no prompt: nothing is recorded or timed until a read shows one.
+
 Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
 ### Panes are closed and reclaimed

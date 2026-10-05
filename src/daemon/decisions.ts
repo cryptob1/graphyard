@@ -727,7 +727,8 @@ export type ApprovalStep =
   | { step: 'refused'; detail: string }
   | { step: 'rerequest'; detail: string }
   | { step: 'relaunch'; detail: string }
-  | { step: 'exhausted'; detail: string };
+  | { step: 'exhausted'; detail: string }
+  | { step: 'apply'; detail: string };
 export function approvalStep(watch: ApprovalWatch, decision: { id?: string; action?: string; state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null } | null | undefined,
   sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
@@ -737,8 +738,17 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
   // A refusal is the approver's considered judgement (GY-141), not a session to replace or a request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
-  if (decision.state !== 'requested' && decision.state !== 'approved') return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
-  if (decision.state === 'approved') { const settle = unsettledApproval({ key: watch.work }, { id: watch.decision, action: watch.action, ...decision }, now); if (settle) return { step: 'rerequest', detail: settle }; } // GY-1297: the server settles it, this cycle
+  // An approved decision is already judged (GY-1300): no approver session is waited on, relaunched or spent for it. A session
+  // still working on it is left its own call within the grace, and past it is put down while the server settles it (GY-1297);
+  // once the session has ended, the loop asks the control plane to apply what was approved.
+  if (decision.state === 'approved') {
+    const working = sessions.available && sessions.agents.some(agent => agent.name === watch.agentName && agent.agent_status === 'working');
+    const settle = working ? unsettledApproval({ key: watch.work }, { id: watch.decision, action: watch.action, ...decision }, now) : null;
+    if (settle) return { step: 'rerequest', detail: settle };
+    return working ? { step: 'wait', detail: `${label} is approved; approver session ${watch.agentName} is still applying it` }
+      : { step: 'apply', detail: `${label} is ${approvedUnapplied} ${decision.approvedAt ?? 'an unrecorded time'} (approved by ${decision.approvedBy ?? 'its approver'}); the loop asks the control plane to apply it` };
+  }
+  if (decision.state !== 'requested') return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
@@ -758,6 +768,7 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
 
+export const approvedUnapplied = 'approved but unapplied since'; // An approved decision with no outcome recorded (GY-1300); metrics reads it back from the watch.
 /** The launcher key of the approver launch for a decision (GY-616). */
 export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */

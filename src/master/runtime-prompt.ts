@@ -6,12 +6,17 @@
  * `rm` whose target it cannot resolve even under `--dangerously-skip-permissions` — and a session
  * that stops on one waits for a person no one will be. The loop answers the shapes it knows with
  * the answer that does nothing: a Yes/No (or proceed/cancel) menu whose "yes" runs a destructive
- * command is declined, and the session is then told how to carry on without that command. Any
- * other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
+ * command is declined, and the session is then told how to carry on without that command. A
+ * runtime's folder-trust dialog is `folder-trust`: the loop never answers it (consent-prompt.ts),
+ * it relaunches the session, whose launch records the folder's trust before the runtime starts
+ * (GY-1304). Any other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
  */
 export interface RuntimePrompt {
-  /** `destructive-command` is a known shape with a safe answer; `unknown` is everything else a blocked screen shows. */
-  kind: 'destructive-command' | 'unknown';
+  /**
+   * `destructive-command` is a known shape with a safe answer; `folder-trust` is a runtime's folder-trust
+   * dialog, which the loop answers by relaunching; `unknown` is everything else a blocked screen shows.
+   */
+  kind: 'destructive-command' | 'folder-trust' | 'unknown';
   /** The prompt's own words, collapsed to one line and bounded, as the record quotes it. */
   text: string;
   /** The keys that choose the non-destructive answer, and that answer's label; null for an unknown prompt. */
@@ -46,6 +51,14 @@ export function destructivePrompt(lines: string[]) {
   if (runtimeWarning.test(lines.join(' '))) return true;
   return lines.some(entry => { const line = entry.replace(screenFrame, ''); return destructiveCommand.test(line) || commandConfirmation.test(line) || overwriteRedirect.test(line); });
 }
+/**
+ * The trust option of a runtime's folder-trust dialog, numbered or arrow-selected: Claude Code and
+ * Antigravity both label it "Yes, I trust this folder", and a screen read may draw the menu
+ * unnumbered with "No, exit" first (`❯ No, exit` / `Yes, I trust this folder`).
+ */
+const folderTrustOption = /^[\s│┃║]*(?:[❯>›▶→]\s*)?(?:\d[.)]\s+)?Yes,? I trust this (?:folder|project|workspace)\b/i;
+/** How far above the screen's bottom a folder-trust option may sit: its menu, then a key hint below it. */
+const folderTrustLines = 4;
 const collapse = (lines: string[]) => {
   const text = lines.map(entry => entry.replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ');
   return text.length > runtimePromptTextLimit ? `${text.slice(0, runtimePromptTextLimit - 1)}…` : text;
@@ -60,6 +73,8 @@ export function classifyRuntimePrompt(screen: string | null | undefined): Runtim
   const lines = screen.split('\n').map(entry => entry.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').trimEnd());
   const filled = lines.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.trim());
   if (!filled.length) return null;
+  // A folder-trust dialog is the last thing drawn: its trust option within the bottom few lines.
+  if (filled.slice(-folderTrustLines).some(({ entry }) => folderTrustOption.test(entry))) return { kind: 'folder-trust', text: collapse(filled.slice(-folderTrustLines - 4).map(({ entry }) => entry)), keys: null, answer: null };
   // The last run of numbered options is the prompt's menu; the prompt is the lines above it.
   let end = -1;
   for (let at = filled.length - 1; at >= 0; at--) if (menuOption.test(filled[at].entry)) { end = at; break; }
