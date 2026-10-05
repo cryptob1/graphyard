@@ -32,6 +32,7 @@ import { writeProjectMemory } from '../project-memory.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
+import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { withReviewerDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
@@ -218,6 +219,13 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * became of every decision this loop requested.
    */
   decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
+  /**
+   * GY-1142. The items whose decision ledger moved after ledger seq `after`, in one read per cycle,
+   * and the seq it now stands at; `after` null reads only where it stands. `complete` false means
+   * more moved than one page holds. The loop keeps a history read on an earlier cycle only for an
+   * item this names unmoved; absent, every history is read again each cycle.
+   */
+  decisionChanges?: (after: string | null) => Promise<{ seq: string; work: string[]; complete: boolean }>;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -509,6 +517,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
+  // One coordinator read of the decision ledger's kinds after the last seq the loop saw (GY-1142).
+  const decisionChanges: DaemonEffects['decisionChanges'] = async after => {
+    const query = new URLSearchParams({ kind: decisionEventKinds.join(','), payload: 'none', routine: 'include', order: after ? 'asc' : 'desc', limit: after ? '1000' : '1', view: 'page' });
+    if (after) query.set('cursor', after);
+    const read = await asCoordinator(`events?${query}`) as { events: { seq: string; work_id: string }[]; page: { hasMore: boolean } };
+    return { seq: (after ? read.events.at(-1)?.seq : read.events[0]?.seq) ?? after ?? '0', work: [...new Set(read.events.map(event => event.work_id))], complete: !!after && !read.page.hasMore };
+  };
   /**
    * The diagnostician's effects under the live configuration (GY-439). Its first run takes the
    * registry's diagnostician role when an operator defines one, else Pi on `run.diagnostician.model`;
@@ -728,6 +743,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
+    get decisionChanges() { return current().operatorAgent ? decisionChanges : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);
     // the faults it counts are read with the coordinator's visibility, with or without that identity,
     // so an installation that has not provisioned it yet still counts every recurrence.

@@ -33,7 +33,7 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 ### Documentation that rarely conflicts
 
-Add a self-contained paragraph or section rather than rewording shared sentences. A candidate whose conflicts with the base are confined to docs/**/*.md is refreshed by docs-sync, not reworked: the base merges in, both sides kept in budget, and approval is kept when the non-docs diff is unchanged; five or more conflicts in 24 hours on one path raises an attention item.
+Add a self-contained paragraph or section rather than rewording shared sentences. A candidate whose conflicts with the base are confined to docs/**/*.md is refreshed by docs-sync, not reworked: the base merges in, both sides kept in budget, and approval is kept when the non-docs diff is unchanged; five or more conflicts in 24 hours on one path raise a master attention item in `master status` naming the path. `master status` (`conflictHotspots`) and the dashboard's flow analytics list the hotspots.
 
 ## Trusted contracts
 

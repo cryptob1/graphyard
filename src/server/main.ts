@@ -15,6 +15,7 @@ import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
+import { productionBranch } from '../release-candidate.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
@@ -67,7 +68,8 @@ export async function main(options: MainOptions = {}) {
   const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
   const build = buildIdentity();
   const provider = railwayProvider();
-  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main' });
+  // Production deploys the release branch when the release pipeline owns it (GY-1207); GRAPHYARD_PRODUCTION_BRANCH names another.
+  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || productionBranch });
   const http = server(engine, credentials, github, artifacts, { knownPrincipals, production });
   // The deployed-variables record the status route reports gains the generated-files variable the
   // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
