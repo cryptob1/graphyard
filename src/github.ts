@@ -19,7 +19,6 @@ import { githubDelivery } from './model/delivery-mode.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
-import { baseBreakRefreshNeeded, readBaseBreak, type BaseBreak } from './master/base-break-refresh.js';
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
@@ -1563,15 +1562,6 @@ export class GitHub {
         ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: unready }
         : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId)
       : await this.observeAgent(work, pr, reviews, candidateBase, unready);
-    const observedChecks: Observation['checks'] = checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
-      ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })).concat(statuses);
-    // A required check that failed only on tests the base branch broke, and the tip has since
-    // fixed, is the control plane's to answer with a refresh, not the worker's (GY-793). Read only
-    // for an open head behind the tip with a failed required check; the base it was built against
-    // is the bound one, or, for a head bound to the tip it does not contain, GitHub's recorded base.
-    const baseBreak = pr.merged || pr.state !== 'open' || contained ? null : await readBaseBreak(
-      { required: work.policy.checks, checks: observedChecks, head: pr.head.sha, built: bound !== branch.tip ? bound : typeof pr.base.sha === 'string' ? pr.base.sha : null, tip: branch.tip, at: startedAt },
-      { checkRun: (sha, name) => this.latestCheckRun(sha, name), annotations: id => this.pages(`/check-runs/${id}/annotations`) });
     // A failing published tip carries its docs counts, from which a budget overflow is attributed (GY-574).
     const docsBudget = publishedTip && !pr.merged && pr.state === 'open' ? await this.tipDocs(work, pr.head.sha, bound, checks) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
@@ -1581,7 +1571,8 @@ export class GitHub {
       candidate: { sha: pr.head.sha, baseSha: candidateBase, pr: pr.number, branch: pr.head.ref, author: pr.user.login, ...(Number.isFinite(Date.parse(pr.created_at)) ? { createdAt: pr.created_at } : {}) },
       // Canonical oldest-to-newest ordering makes legacy consumers deterministic;
       // gates also compare immutable run IDs rather than trusting response order.
-      checks: observedChecks,
+      checks: checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
+        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })).concat(statuses),
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
       // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
@@ -1599,14 +1590,7 @@ export class GitHub {
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(docsBudget ? { docsBudget } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
-      ...(baseBreak ? { baseBreak } : {}),
     };
-  }
-  /** The latest run of one check on one commit, other than this App's own, or null when it has none. */
-  private async latestCheckRun(sha: string, name: string): Promise<{ id: number; conclusion: string | null } | null> {
-    const runs = (await this.pages(`/commits/${sha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest`, 'check_runs'))
-      .filter(run => run.app?.id !== this.config.appId && Number.isSafeInteger(run.id)).sort((a, b) => b.id - a.id);
-    return runs.length ? { id: runs[0].id, conclusion: runs[0].status === 'completed' ? runs[0].conclusion : null } : null;
   }
   /**
    * The docs word counts of a published queue tip whose required checks failed (GY-574): the tip's
@@ -2283,32 +2267,6 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     } catch { return null; }
   }
   /**
-   * Brings a candidate held only by a base-branch breakage onto the base tip that fixed it (GY-793):
-   * the same merge of the tip into the candidate's own branch the merge queue makes for its tip,
-   * recorded with trigger `base breakage` and the breakage it answers, so the engine decides the
-   * carry exactly as for any refresh. A conflict writes nothing and goes back to the worker.
-   */
-  async refreshOntoFixedBase(work: Work, found: BaseBreak, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
-    const candidate = work.candidate;
-    demand(candidate && !work.queue && candidate.sha === found.head, 'An unqueued candidate held by a base-branch breakage is required');
-    const pr = await this.request(`/pulls/${candidate!.pr}`);
-    requireCurrent(pr.head.sha === candidate!.sha && pr.base.ref === this.config.base && pr.state === 'open' && pr.draft === false,
-      'Pull request changed before the base refresh; retry');
-    const branch = await this.baseBranch();
-    requireCurrent(branch.tip === found.fixedBy, `Base branch ${this.config.base} moved before the base refresh; retry`);
-    const from = { sha: candidate!.sha, baseSha: candidate!.baseSha };
-    const record = (fields: Partial<BaseRefresh>): BaseRefresh => ({ from, base: branch.tip, baseTree: branch.tree, policyRevision: work.policyRevision, at: new Date().toISOString(),
-      head: null, conflict: null, merge: null, carry: null, trigger: 'base breakage', baseBreak: found, ...fields });
-    await beforeWrite();
-    let merged: string | null;
-    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard base refresh for ${work.key} onto ${this.config.base}: its failing tests were broken on ${found.builtOn.slice(0, 12)} and fixed by ${found.fixedBy.slice(0, 12)}`); }
-    catch (error) {
-      if (!(error instanceof SpeculativeConflict)) throw error;
-      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} failed only on tests the base branch broke, but it cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} that fixed them without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` });
-    }
-    return merged ? record({ head: merged, merge: await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) }) : record({ head: candidate!.sha });
-  }
-  /**
    * Whether `head` merges cleanly onto `base`, without writing to any branch a person or a check
    * reads (GY-375): the merge is tried on a scratch branch created at `head` for this one check and
    * deleted afterwards. Returns the conflict, or null when the merge is clean.
@@ -2896,14 +2854,12 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
  * written to the candidate's branch: a test merge on a scratch branch either disproves GitHub's
  * reading, which is recorded, or confirms the conflict, which goes back to the worker.
  */
-async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null, broken: BaseBreak | null = null) {
-  // A conflict refresh's test merge creates and writes a scratch branch, and a base-breakage
-  // refresh (GY-793) writes its merge commit onto the candidate's own branch; without Contents:
-  // write the call can only 403. The candidate keeps its held base and waits for the permission instead.
+async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
+  // The refresh's test merge creates and writes a scratch branch; without Contents: write the
   // call can only 403. The candidate keeps its held base and waits for the permission instead.
   const held = hold('merge-queue');
   if (held) return { work, published: false, held };
-  const refresh = broken ? await github.refreshOntoFixedBase(work, broken, guard(work, false)) : await github.refreshCandidateBase(work, guard(work, false));
+  const refresh = await github.refreshCandidateBase(work, guard(work, false));
   const updated = await engine.bindBaseRefresh(work.id, work.revision, refresh, job.token);
   return { work: updated, published: !!refresh.head && refresh.head !== refresh.from.sha, held: null };
 }
@@ -3243,14 +3199,6 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // refresh runs before any review is dispatched and the job requeues onto the new head.
       if (baseRefreshNeeded(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
-        work = refreshed.work; held ??= refreshed.held;
-        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
-      }
-      // A required check that failed only on tests the base branch broke and its tip fixed is
-      // answered the same way (GY-793): the candidate is brought onto the tip and CI runs again.
-      const broken = baseBreakRefreshNeeded(work);
-      if (broken) {
-        const refreshed = await refreshBase(engine, github, work, job, guard, hold, broken);
         work = refreshed.work; held ??= refreshed.held;
         if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }
