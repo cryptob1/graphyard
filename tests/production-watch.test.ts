@@ -440,6 +440,6 @@ test('unit:production-watch-provider-selection — a Railway token selects the R
   const watch = new ProductionWatch(store, { provider: null, github: linearGitHub(2), build: buildIdentity({ GRAPHYARD_BUILD_SHA: sha(1) }), baseBranch: 'main', now: () => T0 + DEPLOYMENT_GRACE_MS + 60_000 });
   const report = await watch.tick(true);
   assert.equal(report.incidents[0].status, 'missing');
-  assert.doesNotMatch(report.incidents[0].reason, /RAILWAY/);
-  assert.match(report.incidents[0].reason, /No deployment list is readable: with the GitHub App configured the watch reads the GitHub deployments the host reports, which name the failing deployment$/);
+  assert.doesNotMatch(report.incidents[0].reason, /required|needs? (a )?Railway|so the provider reports/i, 'a Railway token is not presented as required');
+  assert.match(report.incidents[0].reason, /\. Configure RAILWAY_API_TOKEN \(or RAILWAY_TOKEN\) or the GitHub App: either one reads a deployment list \(Railway's, or the GitHub deployments Railway reports\) that names the failing deployment$/);
 });

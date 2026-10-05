@@ -424,7 +424,7 @@ export class ProductionWatch {
       // Unknown containment (no serving commit, or GitHub could not compare) is not evidence
       // of a miss; only a serving commit known not to contain the merge is.
       if (now - since < this.grace || contained === null) { report.pending.push(item.key); continue; }
-      await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. No deployment list is readable: with the GitHub App configured the watch reads the GitHub deployments the host reports, which name the failing deployment'}`);
+      await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) or the GitHub App: either one reads a deployment list (Railway\'s, or the GitHub deployments Railway reports) that names the failing deployment'}`);
       report.pending.push(item.key);
     }
     if (report.serving) await this.recordPending(report.serving, at);
