@@ -5,10 +5,6 @@
 
 `graphyard validation capacity` gives one condition per live request: `queued-starved` (start or repair the runner), `queued-waiting-for-slot` (add a runner), `queued-resource-held` or `awaiting-settlement` (verify the holder stopped, then `validation settle`), `unacknowledged` or `retryable` (`validation retry`), `heartbeat-missing` (leave reservations) or `collection-stalled` (check the collector).
 
-## Provider-held diagnoses
-
-A diagnosis in `daemon.diagnoses` reads `waiting` when its provider refused every run for quota (HTTP 429 or a limit notice). It is no fault and not `inFlight`; `refusedAt` is the refusal and `retryAt` the provider's reset (else an hour on). Nothing launches before `retryAt`; then one probe runs the subject refused longest ago, and the rest follow once the provider answers. Retention never prunes a `waiting` entry.
-
 ## Artifact backends, capacity and migration
 
 Artifacts live in Postgres (default) or S3 (`GRAPHYARD_ARTIFACT_BACKEND=s3` with `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, optional `_PREFIX`); only the server holds the S3 credential; every read checks the recorded SHA-256. A failed upload returns 503 (retry with the same key); over `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB) uploads return 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves up to 100 per call until `remaining` is zero; then switch every replica's backend.
