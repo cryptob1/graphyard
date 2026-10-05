@@ -84,13 +84,13 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `
-    + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria. '
-    + 'FOLLOW-UP: everything else — edge cases beyond the criteria, style, naming, hypotheticals, further hardening, and bot suggestions. '
+    + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: anything worth fixing before this merges: the head fails a stated acceptance criterion, or the changed code has a correctness, security or reliability defect, or a clear, cheap improvement it should make. The same worker fixes BLOCKING findings on this pull request; nothing is deferred to another item. '
+    + 'FOLLOW-UP: nits only — style, naming, hypotheticals and suggestions not worth a round; mention them briefly and move on. '
     + 'APPROVE when every criterion is met and no finding or thread is BLOCKING; list the FOLLOW-UP ones in the body instead of requesting changes for them. '
-    + 'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own, before the closing lines, exactly of the form "Follow-up finding: PATH:LINE — what is wrong and why"; Graphyard files those in the same backlog item as the Follow-up threads. '
-    + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. '
+    + 'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own, before the closing lines, exactly of the form "Follow-up finding: PATH:LINE — what is wrong and why"; Graphyard records them on the item and files no backlog item for them. '
+    + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. '
     + 'End the review body with three lines, exactly of the forms "Resolved threads: ID1 ID2", "Follow-up threads: ID3 ID4" and "Overridden threads: ID5 ID6": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP; the third names the threads whose finding you judged wrong, with the reason for each earlier in the body. Write "none" after a line\'s colon when it names nothing. '
-    + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and files the Follow-up threads and findings as one backlog item and resolves each thread with a reply naming that item. ';
+    + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and resolves each Follow-up thread with a reply; nits are not filed as backlog items. ';
 }
 
 /** The launch prompt's thread section: each thread with its ID, and how the verdict names the fixed, follow-up and overridden ones. `total` counts the unresolved threads when more exist than `threads` lists. */

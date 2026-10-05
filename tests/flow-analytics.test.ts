@@ -15,7 +15,8 @@ import {
   coveredUntil, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { attributionWindows } from '../src/attribution.js';
-import { createElement } from 'react';
+import { act, createElement } from 'react';
+import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import InsightsFlow, { LandedPerDay, ReplayRead, WhereTimeGoes, flowNow, readReplay } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
@@ -1479,4 +1480,132 @@ test('manual:review-followups-triaged GY-1164: each follow-up from the approved 
   const [analytics, tests] = await Promise.all([readFile(new URL('../src/flow-analytics.ts', import.meta.url), 'utf8'), readFile(new URL(import.meta.url), 'utf8')]);
   assert.doesNotMatch(analytics, /align with report\s+(?:\*\s+)?figures|count the same delivered\/merged\/gate facts as the report/, 'finding 1: the alignment claim is gone');
   assert.ok(!tests.includes('__CLIENT_' + 'INTERNALS'), 'finding 2: no test reaches into React internals');
+});
+
+/**
+ * The least of a DOM that react-dom/client needs to mount a page in Node: elements, text nodes and
+ * the globals its commit and the page's effects read (GY-1228). It renders through React's public
+ * createRoot and act, so the page's own state and effects run, and nothing reaches React internals.
+ */
+class FakeNode {
+  childNodes: FakeNode[] = []; parentNode: FakeNode | null = null;
+  constructor(readonly nodeType: number, readonly nodeName: string, readonly ownerDocument: any) {}
+  get firstChild(): FakeNode | null { return this.childNodes[0] ?? null; }
+  get lastChild(): FakeNode | null { return this.childNodes.at(-1) ?? null; }
+  get nextSibling(): FakeNode | null { const siblings = this.parentNode?.childNodes; return siblings ? siblings[siblings.indexOf(this) + 1] ?? null : null; }
+  appendChild(child: FakeNode) { child.parentNode?.removeChild(child); this.childNodes.push(child); child.parentNode = this; return child; }
+  insertBefore(child: FakeNode, before: FakeNode | null) {
+    if (!before) return this.appendChild(child);
+    child.parentNode?.removeChild(child); this.childNodes.splice(this.childNodes.indexOf(before), 0, child); child.parentNode = this; return child;
+  }
+  removeChild(child: FakeNode) { this.childNodes.splice(this.childNodes.indexOf(child), 1); child.parentNode = null; return child; }
+  addEventListener() {}
+  removeEventListener() {}
+}
+class FakeText extends FakeNode { constructor(public nodeValue: string, document: any) { super(3, '#text', document); } }
+class FakeElement extends FakeNode {
+  attributes = new Map<string, string>(); style: Record<string, string> = {}; clientWidth = 1200;
+  constructor(readonly tagName: string, document: any, readonly namespaceURI: string | null = null) { super(1, tagName.toUpperCase(), document); }
+  setAttribute(name: string, value: unknown) { this.attributes.set(name, String(value)); }
+  removeAttribute(name: string) { this.attributes.delete(name); }
+  getAttribute(name: string) { return this.attributes.get(name) ?? null; }
+  hasAttribute(name: string) { return this.attributes.has(name); }
+  set textContent(text: string) { this.childNodes = []; if (text) this.appendChild(new FakeText(text, this.ownerDocument)); }
+  get textContent(): string { return this.childNodes.map(child => child instanceof FakeText ? child.nodeValue : (child as FakeElement).textContent).join(''); }
+  get outerHTML(): string {
+    const attributes = [...this.attributes].map(([name, value]) => ` ${name}="${value}"`).join('');
+    return `<${this.tagName}${attributes}>${this.childNodes.map(child => child instanceof FakeText ? child.nodeValue : (child as FakeElement).outerHTML).join('')}</${this.tagName}>`;
+  }
+}
+/** InsightsPage mounted with `api`, once its reads have settled: the page's markup as it then stands. */
+async function mountedInsights(api: Dashboard['api'], observedAt: number) {
+  const document: any = new FakeNode(9, '#document', null);
+  Object.assign(document, {
+    createElement: (tag: string) => new FakeElement(tag, document), createElementNS: (namespace: string, tag: string) => new FakeElement(tag, document, namespace),
+    createTextNode: (text: string) => new FakeText(text, document), documentElement: new FakeElement('html', document),
+  });
+  document.body = document.documentElement.appendChild(new FakeElement('body', document));
+  const scope = globalThis as any;
+  const saved = Object.fromEntries(['IS_REACT_ACT_ENVIRONMENT', 'window', 'document', 'ResizeObserver', 'fetch'].map(name => [name, Object.getOwnPropertyDescriptor(scope, name)]));
+  Object.assign(scope, {
+    IS_REACT_ACT_ENVIRONMENT: true, document, ResizeObserver: class { observe() {} disconnect() {} },
+    window: { event: undefined, HTMLIFrameElement: class {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) },
+    // The shipping pulse reads on its own; here it reads as unavailable without touching the network.
+    fetch: async () => { throw new Error('no network in this render'); },
+  });
+  try {
+    const container = new FakeElement('div', document);
+    const root = createRoot(container as any);
+    await act(async () => root.render(createElement(InsightsFlow, { work: [], status: null, api, token: '', observedAt, setSelected: () => {} } as unknown as Dashboard)));
+    const markup = container.outerHTML;
+    await act(async () => root.unmount());
+    return markup;
+  } finally {
+    for (const [name, descriptor] of Object.entries(saved)) if (descriptor) Object.defineProperty(scope, name, descriptor); else delete scope[name];
+  }
+}
+
+test('unit:flow-page-wires-replay-read — InsightsPage passes its resolved replay read (frames, truncated, coverage, replayError) to ReplayRead', async () => {
+  const now = Date.parse('2026-10-01T12:00:00.000Z');
+  const statement = 'The steps read stopped at 2026-10-01T09:00:00.000Z on its 1-row bound.';
+  const move = { workKey: 'GY-1228', observedAt: new Date(now - 3600_000).toISOString(), detail: 'review to merge' };
+  const answering = (steps: () => Promise<any>): Dashboard['api'] => async (path: string) => path.startsWith('analytics/flow/drilldown') ? steps() : null;
+
+  // A read that stopped short: the page shows the frames it read, the truncation notice with the
+  // read's own statement, and the replay's partial-read note — none of which the unread page shows.
+  const partial = await mountedInsights(answering(async () => ({ rows: [move], truncated: false, next: null, coverage: { truncated: true, statement } })), now);
+  assert.ok(partial.includes(`<p class="notice" role="status" data-flow="replay-truncated">The recorded step changes were read only in part: ${statement}</p>`), 'coverage reaches ReplayRead');
+  assert.match(partial, /data-flow="replay" data-frames="1"/, 'frames reach ReplayRead');
+  assert.ok(partial.includes('<small>Only the first rows of the recorded history were returned.</small>'), 'truncated reaches ReplayRead');
+  assert.doesNotMatch(partial, /Reading the recorded step changes…|data-flow="replay-error"/);
+
+  // A read that stopped short with no move in what it read names the part it read.
+  const emptyPartial = await mountedInsights(answering(async () => ({ rows: [], truncated: false, next: null, coverage: { truncated: true, statement } })), now);
+  assert.ok(emptyPartial.includes('<p class="muted flow-wait">No item changed step in the part of the last 24 hours that was read.</p>'));
+
+  // A full read: no notice and no partial-read note, and an empty one says no item changed step.
+  const full = await mountedInsights(answering(async () => ({ rows: [move], truncated: false, next: null, coverage: { truncated: false, statement: null } })), now);
+  assert.match(full, /data-flow="replay" data-frames="1"/);
+  assert.doesNotMatch(full, /data-flow="replay-truncated"|Only the first rows of the recorded history/);
+  const quiet = await mountedInsights(answering(async () => ({ rows: [], truncated: false, next: null, coverage: { truncated: false, statement: null } })), now);
+  assert.ok(quiet.includes('<p class="muted flow-wait">No item changed step in the last 24 hours.</p>'));
+
+  // A failed read: the page names the error, and ReplayRead says there is no history to replay.
+  const failed = await mountedInsights(answering(async () => { throw new Error('The ledger is under load'); }), now);
+  assert.ok(failed.includes('The recorded history could not be read: The ledger is under load.'), 'the page names the failed read');
+  assert.ok(failed.includes('<p class="muted flow-wait">No recorded history to replay.</p>'), 'replayError reaches ReplayRead');
+});
+
+test('manual:review-followups-triaged GY-1228: each follow-up from the approved review of GY-1164 is addressed in code, or declined with a recorded reason (AC-1)', async () => {
+  const triage: { ids: number[]; path: string; description: string; status: 'addressed' | 'declined'; reasonOrResolution: string }[] = [
+    {
+      ids: [1, 2, 6],
+      path: 'src/flow-analytics.ts:664',
+      description: 'the rewritten pooledFlowDrilldown docstring line runs past the file\'s usual comment wrap width',
+      status: 'addressed',
+      reasonOrResolution: 'GY-1164\'s final commit reflowed the docstring before it merged; every line of it is now within the file\'s widest wrapped comment line (104 characters), checked below.',
+    },
+    {
+      ids: [4],
+      path: 'tests/flow-analytics.test.ts:1454',
+      description: 'the GY-1164 triage test asserted only its own hand-written list, not the code it describes',
+      status: 'addressed',
+      reasonOrResolution: 'The GY-1164 triage test reads src/flow-analytics.ts and this file back, asserting the alignment claim is gone and no test reaches into React internals; checked below that the read-back is still there.',
+    },
+    {
+      ids: [3, 5, 7, 8],
+      path: 'tests/flow-analytics.test.ts:843',
+      description: 'nothing renders InsightsPage after its replay read resolves, so a miswired frames/truncated/coverage/replayError prop to ReplayRead would go unnoticed',
+      status: 'addressed',
+      reasonOrResolution: 'unit:flow-page-wires-replay-read mounts InsightsPage with react-dom/client and act on a minimal DOM, so the page\'s own effect runs readReplay; it asserts the partial, empty-partial, full, empty and failed reads each reach ReplayRead as frames, truncated, coverage and replayError.',
+    },
+  ];
+  assert.deepEqual(triage.flatMap(entry => entry.ids).sort((a, b) => a - b), [1, 2, 3, 4, 5, 6, 7, 8], 'every finding is triaged once');
+  for (const entry of triage) assert.ok(['addressed', 'declined'].includes(entry.status) && entry.reasonOrResolution.length > 0);
+  const [analytics, tests] = await Promise.all([readFile(new URL('../src/flow-analytics.ts', import.meta.url), 'utf8'), readFile(new URL(import.meta.url), 'utf8')]);
+  const docstring = /\/\*\*\n((?: \*.*\n)+?) \*\/\nexport async function pooledFlowDrilldown/.exec(analytics)?.[1];
+  assert.ok(docstring, 'findings 1, 2, 6: the pooledFlowDrilldown docstring is found');
+  assert.ok(docstring.split('\n').every(line => line.length <= 104), 'findings 1, 2, 6: the docstring wraps within the file\'s comment width');
+  assert.ok(tests.includes("'finding 2: no test reaches into React internals'"), 'finding 4: the GY-1164 record reads back the code it describes');
+  assert.ok(tests.includes("test('unit:flow-page-wires-replay-read") && tests.includes('await act(async () => root.render(createElement(InsightsFlow'), 'findings 3, 5, 7, 8: the page itself is mounted and its effects run');
 });

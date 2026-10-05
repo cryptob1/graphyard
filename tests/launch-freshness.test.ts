@@ -240,6 +240,13 @@ test('unit:launch-wait-reported — master status reports each waiting launch wi
     assert.equal(attention[0].subject, 'GY-42');
     assert.match(attention[0].text, /has waited 20 min/);
     assert.match(attention[0].text, /no reviewer profile/);
+    // GY-1175: the builder sets the kind from the wait's reason, so the line never files unclassified.
+    assert.deepEqual(attention.map(entry => [entry.kind, entry.faultClass]), [['launch-review', 'session-liveness']]);
+    const reasoned = launchWaitAttention([
+      { ...rows[0], reason: 'every reviewer profile is busy: claude-reviewer: at its concurrency limit (6 running, limit 6)' },
+      { ...rows[0], reason: 'reviewer session review-opencode-1 already answered with APPROVED (review 5402739662); the control plane settles the request once it reads that verdict' },
+    ]);
+    assert.deepEqual(reasoned.map(entry => [entry.kind, entry.faultClass]), [['concurrency-starved', 'capacity'], ['review-settlement', 'review-convergence']]);
     assert.ok(20 * minute > reviewLaunchWaitAttentionMs && 5 * minute < reviewLaunchWaitAttentionMs);
 
     // What `master status` reports: the dispatcher summary carries the waits, and its attention raises the long one.
