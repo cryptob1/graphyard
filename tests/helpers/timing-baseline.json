@@ -314,6 +314,7 @@
     "tests/executor-kinds.test.ts": 1529,
     "tests/executor-release.test.ts": 6090,
     "tests/executor-supervision.test.ts": 26432,
+    "tests/exhausted-proof-runtime.test.ts": 350,
     "tests/exited-worker-pane.test.ts": 1768,
     "tests/failed-launch-pane.test.ts": 1877,
     "tests/failed-manual-proof-rework.test.ts": 1485,
@@ -584,7 +585,6 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873,
-    "tests/exhausted-proof-runtime.test.ts": 350
+    "tests/unblock-stale-revision.test.ts": 4873
   }
 }
