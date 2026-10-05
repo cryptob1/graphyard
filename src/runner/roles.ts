@@ -219,13 +219,16 @@ export function piApproverPrompt(config: { repository: string; cliPath: string }
 
 /**
  * The one definition of a live-install proof (GY-1170): a manual proof that installs Graphyard
- * onto a real Hetzner server, named `manual:…install…-live` — manual:install-hetzner-live,
- * manual:host-install-live, and any later name of that shape. A proof naming another provider
- * (railway) provisions nothing on Hetzner and is not one. The producer's .env allowlist, its
- * launch refusal and the instructions its session reads all follow from this match, so a new
- * live-install proof cannot get the instructions without the credential, or neither.
+ * onto a real Hetzner server. The match is keyed to Hetzner and fails closed (GY-1204): only
+ * manual:host-install-live, the host install that provisions a Hetzner server, and a
+ * `manual:…install…-live` name carrying a `hetzner` segment (manual:install-hetzner-live) count.
+ * A live proof for any other provider (railway, docker-host, compose) is not one, so it is never
+ * refused for want of HCLOUD_TOKEN nor handed Hetzner credentials or instructions. The producer's
+ * .env allowlist, its launch refusal and the instructions its session reads all follow from this
+ * match, so a new live-install proof cannot get the instructions without the credential, or neither.
  */
-export const liveInstallProof = (proof: string) => /^manual:(?:[a-z0-9-]+-)?install(?:-[a-z0-9-]+)?-live$/.test(proof) && !/(^|[:-])railway(-|$)/.test(proof);
+export const liveInstallProof = (proof: string) => proof === 'manual:host-install-live'
+  || (/^manual:(?:[a-z0-9-]+-)?install(?:-[a-z0-9-]+)?-live$/.test(proof) && /[:-]hetzner-/.test(proof));
 /** The .env names a live-install session cannot run without; a launch on a host lacking one is refused. */
 export const liveInstallRequiredEnv = ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY'] as const;
 /**

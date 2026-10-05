@@ -1,6 +1,8 @@
 <!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item until it ships, retrieved, promoted on demand. -->
 # Review follow-ups
 
+With `GRAPHYARD_FOLLOW_UP_ITEMS=off` in the loop's environment, no follow-up item is filed: the reviewer requests changes on the same pull request for anything worth fixing, and the nits it lists stay recorded on their item.
+
 The independent reviewer's approval may name findings beyond an item's acceptance criteria and
 judge each FOLLOW-UP. Graphyard records them against the approved item itself and holds them there
 until it ships — no work item per review, and none for an item that may still change. Once the

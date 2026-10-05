@@ -76,7 +76,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--plan NAME` names an account's provider plan (`none` clears); otherwise one host and home share a plan, as do `pi-X` and `opencode-X`. A plan's accounts share one failover budget: one exhausted bars the rest.
+`--plan NAME` names an account's provider plan (`none` clears); otherwise one host and home share a plan, as do Z.AI-keyed `pi-X` and `opencode-X` (`auth.json`-only logins need `--plan`). A plan's accounts share one failover budget: one exhausted bars the rest.
 
 `--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested, failures barred until retested; two unjudged runs bench it from that role an hour. Registry writes refuse any field that looks like a pasted key; model ids are exempt.
 
@@ -120,10 +120,10 @@ Onboarding writes and explains `mergeQueue` in `.graphyard/master.json`: `parall
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session fixing stuck and overdue work through sanctioned commands only (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merging, dispatching or submitting evidence. Each run posts per-item findings and a summary (`doctor` in `master status`); unactionable ones escalate or file deduplicated fault items. The loop itself settles submitted lapsed fences, clears covered blockers and relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session fixing stuck, overdue work by sanctioned commands (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merging, dispatching or evidencing. Each run posts per-item findings and a summary (`doctor` in `master status`); the rest escalate or file deduplicated fault items. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names missing pieces. `master run` dispatches a small item; the loop merges once protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names gaps. `master run` dispatches a small item; the loop merges once protection requires `Graphyard / merge`. `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 CI workflows should cancel superseded pull-request runs, grouped by `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled. `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`. Logins (provider, GitHub, browser profile), the App confirmation, plan approval, *Confirm access*, producer grants and the [human-only decisions](glossary.md#who-decides) stay manual.
