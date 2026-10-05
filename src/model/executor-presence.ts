@@ -36,29 +36,22 @@ import type { Work } from './work.js';
  * (`LoopRegistry`). Until this process has seen one such read (a restart, another replica), the
  * merge requests its ledger holds from the loop's `daemon-` instance stand in (`ledgerLoopMerger`).
  *
- * Presence is heard from every executor that is alive, not only from one asking for a row (GY-1288).
- * A claim poll is the usual signal, but a live executor goes minutes without one in two ordinary
- * states: inside a long handler, where it renews its claim instead, and behind a fleet restart's
- * fence (`restartExecutors`), which forbids every claim on the host for up to the restart's whole
- * wait. A renewal therefore refreshes the renewing executor, and a fenced executor sends a
- * presence-only poll (`POST /api/actions/presence`) in place of the claim it may not make. Without
- * both, the loop's own self-upgrade restart read as a dead fleet: on 5 October 2026 one restart
- * filed GY-1287 (dispatch), GY-1286 (approve-scope) and GY-1238 (request-review) as three
- * configuration faults at one instant, each naming a start command for executors that were running.
- * An executor that stands down on a moved checkout sends nothing: it really claims nothing more.
+ * Presence is heard from every executor that is alive, not only one asking for a row (GY-1288). A
+ * live executor goes minutes without a claim poll inside a long handler, where it renews its claim
+ * instead, and behind a fleet restart's fence (`restartExecutors`), where it sends a presence-only
+ * poll (`POST /api/actions/presence`); both refresh it. Without them the loop's own self-upgrade
+ * restart read as a dead fleet and filed GY-1287, GY-1286 and GY-1238 as configuration faults at
+ * one instant. An executor that stands down on a moved checkout sends nothing: it claims nothing more.
  *
  * Presence also outlives the process that heard it (GY-1289). Every poll and renewal upserts its
- * executor's row in `executor_presence` beside the engine's store — one row per executor, never an
- * event row, so an idle poll still appends nothing to the ledger (GY-185) — and the report reads
- * those rows beside the in-memory registry. A control plane replaced between two polls (a deploy,
- * a restart, another replica) therefore reads the fleet that was polling a moment before it
- * started: on 5 October 2026 the production deploy's switchover answered the loop's read with an
- * empty registry 34s after the fleet's last durable claim, and reported it dead for dispatch,
- * approve-scope and request-review at once (GY-1288). An empty fleet is judged only on evidence —
- * a poll this process heard, or durable presence older than one window — never on how long the
- * process has been up. An empty table is no evidence: a deploy creates it empty and a restore leaves
- * it so. The table therefore carries a marker of when it began recording, and an empty table proves
- * a silent fleet only once that marker is a window old.
+ * executor's row in `executor_presence` — never an event row, so an idle poll still appends nothing
+ * to the ledger (GY-185) — and the report reads those rows beside the in-memory registry, so a
+ * control plane replaced between two polls (a deploy, a restart, another replica) reads the fleet
+ * that was polling a moment before it started (GY-1288: a deploy's switchover reported a live fleet
+ * dead 34s after its last durable claim). An empty fleet is judged only on evidence — a poll this
+ * process heard, or durable presence older than one window — never on the process's age. An empty
+ * table is no evidence (a deploy creates it empty, a restore leaves it so): it carries a marker of
+ * when recording began, and proves a silent fleet only once that marker is a window old.
  */
 
 export interface ExecutorPresence { executor: string; host: string; principal: string; kinds: NextActionKind[]; seenAt: string; claims: number }
@@ -146,10 +139,9 @@ export class ExecutorRegistry {
   /** When this process first heard any executor: evidence that an empty registry means a silent fleet. */
   heardAt: string | null = null;
   /**
-   * When this registry began listening (GY-1086). Only a reader with no durable presence to consult
-   * (`executorReport` called without a reading) falls back on it: until one liveness window has
-   * passed, its empty registry is a fleet not yet heard from, not a fleet that is down. The control
-   * plane's own reads always pass the durable reading, and judge on evidence instead (GY-1289).
+   * When this registry began listening (GY-1086): the fallback, for a reader with no durable presence
+   * (`executorReport` without a reading), whose empty registry is unheard, not down, for one window.
+   * The control plane's own reads pass the durable reading and judge on evidence instead (GY-1289).
    */
   constructor(readonly since: Date = new Date()) {}
   /** One claim poll: the executor, where it runs, what it can run, and that it asked now. */
@@ -286,11 +278,9 @@ export const startExecutorFor = (kind: NextActionKind) => `start an executor tha
  * Live is the in-memory registry and the durable reading (`durablePresence`) together, so a fleet
  * polling before this process started is live on its first read (GY-1289). An empty fleet is judged
  * only on evidence that it is silent: a poll this process heard and saw lapse, or durable presence
- * older than one window — executor rows that have all lapsed, or an empty table whose recording
- * marker is a window old. With neither — no poll heard, and a durable reading that is unavailable
- * (`null`) or empty since less than a window — it judges nothing, however long the process has been up. A caller with no
- * durable store at all (`durable` omitted) keeps the in-memory rule: one liveness window of
- * listening from the registry's birth.
+ * older than one window (lapsed executor rows, or an empty table whose marker is a window old).
+ * Without either it judges nothing, however long the process has been up. A caller with no durable
+ * store (`durable` omitted) keeps the in-memory rule: one window of listening from registry birth.
  */
 export function executorReport(all: Work[], registry: ExecutorRegistry, now: Date, liveMs = executorLiveMs, loop: ReportedLoopMerger | null = null, durable?: DurablePresence | null): ExecutorReport {
   const live = mergedLive(registry, durable, now, liveMs);
