@@ -176,6 +176,4 @@ test('unit:diff-bound-carry — the CI-pending refusal is worded once and every 
   assert.equal(ciCheckName(`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: ${refusal}`), null, 'anchored: a wrapped refusal is not the test gate\'s own');
   const entry = (id: string) => gateRefusalCatalogue.find(candidate => candidate.id === id)!;
   assert.match(refusal, entry('check-not-passed').match);
-  assert.match(`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: ${refusal}`, entry('tip-validating').match);
-  assert.doesNotMatch(`Merge queue is validating speculative tip ${TIP.slice(0, 12)}: Check test was reported by an untrusted app`, entry('tip-validating').match);
 });

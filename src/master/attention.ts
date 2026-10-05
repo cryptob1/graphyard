@@ -133,7 +133,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (manual && driven && automatableProof(work, manual)) return agentOwner('control plane', `The loop's producer session produces ${manual} on the exact head; once the loop stops relaunching its request, graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`);
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
-  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', driven ? `Nothing to run by hand: the loop's merge step performs the guarded merge of ${key} once its authorization is current` : `graphyard master merge ${key}`);
+  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `Nothing to run by hand: GitHub merges ${key} once its merge gate passes`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }

@@ -400,8 +400,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
   // judged on each observation over the same snapshot; each violation is one fault of its class below.
   const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs,
-    agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
-    refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
+    agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null });
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);

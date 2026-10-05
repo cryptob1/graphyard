@@ -439,7 +439,7 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: 'Edit(./.graphyard/profiles/**)', why: 'Revise those profile files; they contain no credential, only a path to one.' },
   ];
   const deny: HarnessRule[] = [
-    { rule: 'Bash(gh pr merge:*)', why: 'Delivery happens only through graphyard master merge, which rechecks the exact candidate, every gate, and protection immediately before merging.' },
+    { rule: 'Bash(gh pr merge:*)', why: 'GitHub merges a candidate whose build, review and required checks pass on its head; no agent merges by hand.' },
     { rule: 'Bash(gh pr review:*)', why: 'The master never posts a review verdict; independent review is launched, never performed.' },
     // Scoped to the endpoints that merge, not the word (GY-1217): `*merge*` matched the whole command
     // line, so a read whose path or jq filter said `merged` or `mergeable` was refused, and a refused

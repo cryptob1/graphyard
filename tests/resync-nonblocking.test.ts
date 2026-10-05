@@ -50,7 +50,7 @@ test('unit:resync-never-blocks-executor — a resync claim wakes the observation
       return { work, since: body.since, observedAt, observed, job };
     },
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
-    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable, merge: unusable, observeDeployment: unusable,
+    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable, observeDeployment: unusable,
   });
 
   const executor = { id: 'graphyard-master@vishrog/1', host: 'vishrog' };

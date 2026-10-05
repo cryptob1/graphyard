@@ -150,7 +150,7 @@ const loopConfig = (): MasterConfig => masterConfigSchema.parse({ version: 1, ur
 function loopEffects(work: () => Work[], decided: { action: string; reason: string }[], extra: Partial<DaemonEffects> = {}): DaemonEffects {
   return { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work(), now: new Date().toISOString(), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     decide: async (_work, action, reason) => { decided.push({ action, reason }); return { id: randomUUID() }; },

@@ -188,7 +188,8 @@ test('unit:steady-state-spend-bounded — twenty unchanged candidates polled for
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client();
-  const candidates = Array.from({ length: 20 }, (_, index) => { const pr = api.open(100 + index, `graphyard/gy-${index}-1`, { approved: index >= 10 }); return item(`GY-${index}`, 100 + index, pr.head, api.main); });
+  // Ten await review; ten were approved and sent back for rework, whose next action is a worker's dispatch.
+  const candidates = Array.from({ length: 20 }, (_, index) => { const pr = api.open(100 + index, `graphyard/gy-${index}-1`, { approved: index >= 10 }); return item(`GY-${index}`, 100 + index, pr.head, api.main, { reworkRequested: index >= 10 }); });
   // The premise: every candidate has been observed once already and nothing has changed since.
   let all: Work[] = [];
   for (const candidate of candidates) all.push(evaluated(candidate, candidates, await github.observe(candidate, candidates)));
@@ -244,7 +245,8 @@ test('manual:github-budget-docs-review — the operations reference states the r
   for (const band of ['merge', 'active', 'steady', 'idle']) assert.match(reference, new RegExp(`^\\| \`${band}\` \\|`, 'm'), `the schedule table has a ${band} row`);
   assert.match(reference, /\*\*500 requests\*\* by default, `GRAPHYARD_GITHUB_RESERVE`/);
   assert.match(reference, /\*\*at most 40%\*\* \(`steadyStateShare`\)/);
-  assert.match(reference, /gates read stale until it lifts/);
+  assert.match(reference, /gates read the last observation until it lifts/);
+  assert.doesNotMatch(reference, /observation over two minutes old/, 'no gate refuses on observation age (GY-1235)');
   assert.match(reference, /`graphyard status` \(or `GET \/api\/status`\) → `githubBudget`/);
   assert.match(reference, /settings\/apps\/APP-SLUG/);
   const operations = await readFile(new URL('../docs/operations.md', import.meta.url), 'utf8');
@@ -330,15 +332,15 @@ test('integration:observation-cadence-by-state — a merge-gate candidate is obs
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client(); await serve(github);
-  // Three items in three states: proved and approved (merge gate), approved but unproven (the
-  // next action is a producer dispatch), and awaiting review (GitHub can still deliver it).
-  // The proved, approved candidate enters the queue on one observation and is bound to its tip on
-  // the next (the publication wakes the job at once); after that it is at the merge gate.
-  let merging = await submitted(api, 'At the merge gate'); merging = await job(merging, github); merging = await prove(merging); merging = await job(merging, github); merging = await job(merging, github);
+  // Three items in three states: approved and green (merge gate: GitHub's to merge, GY-1235), sent
+  // back for rework (the next action is a worker's dispatch, which nothing on GitHub can move), and
+  // awaiting review (GitHub can still deliver it).
+  let merging = await submitted(api, 'At the merge gate'); merging = await job(merging, github); merging = await job(merging, github);
   const mergeMs = await scheduledInMs(merging);
-  let idle = await submitted(api, 'Awaiting proof'); idle = await job(idle, github);
+  let idle = await submitted(api, 'Sent back for rework');
+  idle = await engine.execute(operator, 'rework', idle.id, { reason: 'Address a review finding', previousWorkerStopped: true }, randomUUID());
+  idle = await job(idle, github);
   const idleMs = await scheduledInMs(idle);
-  // A manual-only criterion: since GY-115 an unproven automatable proof holds review, which is the idle case above.
   let active = await submitted(api, 'Awaiting review', { approved: false, proofs: ['manual:budget'] }); active = await job(active, github);
   const activeMs = await scheduledInMs(active);
   const all = await store.list(); const now = new Date();
@@ -357,7 +359,7 @@ test('integration:observation-cadence-by-state — a merge-gate candidate is obs
   assert.ok(await scheduledInMs(active) >= 120_000 - 1000);
   api.pulls.get(active.submission!.pr)!.approved = true;
   active = await job(active, github);
-  assert.equal(github.budget().observations.jobs.find(entry => entry.work === active.id)?.band, 'idle', 'approved and unproven: the next action is a producer dispatch');
+  assert.equal(github.budget().observations.jobs.find(entry => entry.work === active.id)?.band, 'merge', 'approved: every gate passes and GitHub may merge it, so it joins the merge band');
   // A webhook wake observes the slow-cadence item immediately, whatever its schedule said.
   const before = idle.observation!.at;
   await webhook(idle);
@@ -375,7 +377,8 @@ test('integration:merge-path-reserve-held — below the reserve a merge-gate can
   const github = api.client(); await serve(github);
   let merging = await submitted(api, 'Landing under a low budget'); merging = await job(merging, github); merging = await prove(merging); merging = await job(merging, github); merging = await job(merging, github);
   assert.equal(merging.stage, 'merge');
-  let building = await submitted(api, 'Just submitted under a low budget');
+  // Awaiting review: a candidate GitHub cannot merge yet, so it never joins the merge path.
+  let building = await submitted(api, 'Just submitted under a low budget', { approved: false });
   assert.equal(building.stage, 'build'); assert.equal(building.observation, null);
   // The budget falls below the reserve; the next response says so, and the client reads it.
   api.remaining = 120; api.resetAt = Math.ceil(Date.now() / 1000) + 1800;

@@ -8,7 +8,8 @@ import { Engine } from '../src/engine.js';
 import { Validation, type ValidationRequest, type ValidationCandidate } from '../src/validation.js';
 import { acknowledgeAttempt } from '../src/runner-executor.js';
 import { defineScenario } from '../src/scenarios.js';
-import { type Principal, type Work, evaluate } from '../src/model.js';
+import { type Principal, type Work, currentEvidence } from '../src/model.js';
+import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import { server } from '../src/server.js';
 import { proofPreview } from '../src/coordination.js';
 import type { Definition } from '../src/validation.js';
@@ -33,6 +34,12 @@ after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 async function definitions(): Promise<Definition[]> { return (await store.pool.query('SELECT document FROM validation_definitions ORDER BY kind,id,revision DESC')).rows.map(r => r.document); }
 async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
+/**
+ * Whether the scenario proof stands proven on the item: its current evidence (bound to the pinned
+ * validation attempt) proves it. Proofs gate no merge since GY-1235, so this is read directly
+ * rather than from an acceptance gate.
+ */
+const proven = (w: Work, proof: string, now = new Date()) => { const evidence = currentEvidence(w, proof, now); return !!evidence && evidenceProves(proof, evidence); };
 /** `runnerAuthority` adds execution authority the operator pinned on the runner registration. */
 async function fixture(artifactStorage: 'external' | 'postgres' = 'external', runnerAuthority: Record<string, unknown> = {}, slice?: Work['slice']) {
   const n = ++serial, environment = { id: `preview-${n}`, revision: 1 }, runnerRef = { id: `runner-${n}`, revision: 1 }, collectorRef = { id: `collector-${n}`, revision: 1 }, builderRef = { id: `builder-${n}`, revision: 1 }, bundle = { id: `bundle-${n}`, revision: 1 }, proof = `e2e:scenario-${n}`;
@@ -115,7 +122,7 @@ test('independent pools race one runner slot and restart preserves dispatch/ACK/
     await replica.collectionAuthority(collector, command);
     assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'collecting');
     const outcome: any = await replica.result(collector, report(f, command), id()); assert.equal(outcome.passed, true);
-    assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, true);
+    assert.equal(proven(await current(f.w.id), f.proof), true);
   } finally { await cleanup(f); await second.close(); }
 });
 test('result receipts deduplicate evidence and a newer request prevents old-pass fallback', async () => {
@@ -125,9 +132,9 @@ test('result receipts deduplicate evidence and a newer request prevents old-pass
   assert.equal((await current(f.w.id)).evidence.length, 1);
   const late: any = await validation.result(collector, report(f, command), id()); assert.equal(late.accepted, false);
   await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: (await current(f.w.id)).revision }, id());
-  let w = await current(f.w.id); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); assert.equal(w.mergeAuthorization, null);
+  let w = await current(f.w.id); assert.equal(proven(w, f.proof), false);
   w = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
-  assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false, 'generic evidence cannot bypass pinned attempt');
+  assert.equal(proven(w, f.proof), false, 'generic evidence cannot bypass pinned attempt');
   await cleanup(f);
 });
 test('GY-135: a collector pass with no failing run against the stripped tree is recorded as not exercising its criterion', async () => {
@@ -143,7 +150,7 @@ test('GY-135: a collector pass with no failing run against the stripped tree is 
     const w = await current(f.w.id), evidence = w.evidence.at(-1)!;
     assert.equal(evidence.result, 'pass', label); assert.equal(evidence.trusted, false, label); assert.match(evidence.unexercised!, reason, label);
     for (const named of [f.proof, 'AC-1']) assert.ok(evidence.unexercised!.includes(named), `${label}: ${named}`);
-    assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false, `${label}: the criterion is not proven`);
+    assert.equal(proven(w, f.proof), false, `${label}: the criterion is not proven`);
     assert.ok((await store.events(f.w.id)).some(e => e.kind === 'evidence.exercise.refused'), label);
     await cleanup(f);
   }
@@ -152,7 +159,7 @@ test('GY-135: a collector pass with no failing run against the stripped tree is 
   const outcome: any = await validation.result(collector, report(f, command), id());
   assert.equal(outcome.passed, true); assert.equal(outcome.unexercised, undefined);
   const w = await current(f.w.id);
-  assert.equal(w.evidence.at(-1)!.trusted, true); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, true);
+  assert.equal(w.evidence.at(-1)!.trusted, true); assert.equal(proven(w, f.proof), true);
   await cleanup(f);
 });
 test('unacknowledged timeout is recoverable and stale ACK cannot start an old epoch', async () => {
@@ -195,7 +202,7 @@ test('empty, skipped, mismatched, unknown and incomplete reports never pass', as
   for (const change of [{ executed: 0 }, { skipped: 1 }, { artifacts: [] }, { artifactState: 'upload-failed' }, { artifactState: 'expired' }, { inventoryComplete: false }, { bundleDigest: inputs }, { executionSettled: false }, { behavior: 'blocked' }]) {
     const f = await fixture(), command = await start(f);
     const result: any = await validation.result(collector, { ...report(f, command), ...change }, id()); assert.equal(result.accepted, true); assert.equal(result.passed, false);
-    assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, false); await cleanup(f);
+    assert.equal(proven(await current(f.w.id), f.proof), false); await cleanup(f);
   }
   for (const change of [{ measurement: 'unknown' }, { coversEntireRun: false }, { attribution: 'changed' }, { attribution: 'mismatched' }, { attribution: 'unknown' }, { instance: 'wrong' }, { artifacts: [{ service: 'api', digest: inputs }] }]) {
     const f = await fixture(), command = await start(f), good = report(f, command);
@@ -275,7 +282,7 @@ test('requirement revisions invalidate reports and completed evidence; changing 
   w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Refined acceptance requirement', criteria: w.criteria.map(ac => ({ ...ac, text: 'Updated behavior assertion' })), dependencies: [], plannedFiles: [], exclusiveResources: [] }, id());
   await validation.reconcile();
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');
-  assert.equal((await current(w.id)).gates.find(g => g.name === 'acceptance')?.passed, false);
+  assert.equal(proven(await current(w.id), f.proof), false);
   const bundle = (await definitions()).find(d => d.kind === 'bundle' && d.id === f.c.bundle.id)!;
   const { revision, createdAt, createdBy, ...data } = bundle;
   await assert.rejects(validation.define(operator, { ...data, expectedRevision: revision, digest: inputs }, id()), /new scenario/); await cleanup(f);
@@ -302,8 +309,8 @@ test('result publication racing revocation across replicas cannot leave accepted
     ]);
     assert.ok(outcomes.every(r => r.status === 'fulfilled'));
     const w = await current(f.w.id);
-    assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
-    assert.equal(w.mergeAuthorization, null);
+    assert.equal(proven(w, f.proof), false);
+   
     assert.equal((await replica.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');
     const late: any = await replica.result(collector, report(f, command), id()); assert.equal(late.accepted, false);
   } finally { await cleanup(f); await second.close(); }
@@ -430,7 +437,7 @@ test('completed evidence is retained across idle ticks but revoked on definition
   const registration = (await definitions()).find(d => d.kind === 'registration' && d.id === f.builderRef.id)!;
   const { revision, createdAt, createdBy, ...data } = registration;
   await validation.define(operator, { ...data, expectedRevision: revision, enabled: false }, id());
-  assert.equal((await current(f.w.id)).gates.find(g => g.name === 'acceptance')?.passed, false);
+  assert.equal(proven(await current(f.w.id), f.proof), false);
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded'); await cleanup(f);
 });
 
@@ -479,7 +486,7 @@ test('proof previews reject generic and superseded validation passes just like g
   w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'passed');
   await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: w.revision }, id());
   w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'unmeasured');
-  assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false); await cleanup(f);
+  assert.equal(proven(w, f.proof), false); await cleanup(f);
 });
 
 
@@ -504,7 +511,7 @@ test('private artifacts bind request/attempt, authenticate reads and never enter
   assert.equal(w.evidence.at(-1)?.expiresAt, artifact.expiresAt);
   assert.deepEqual(w.evidence.at(-1)?.artifacts, [{ kind: 'report', label: 'report', mediaType: 'application/json', size: bytes.length, digest: artifact.digest,
     expiresAt: artifact.expiresAt, availability: 'available', reference: { requestId: f.r.id, artifactId: artifact.id } }]);
-  assert.equal(evaluate(w, [w], new Date(Date.now() + 8 * 86_400_000), [15368]).gates.find(g => g.name === 'acceptance')?.passed, false);
+  assert.equal(proven(w, f.proof, new Date(Date.now() + 8 * 86_400_000)), false);
   await store.pool.query("UPDATE validation_artifacts SET expires_at='2000-01-01' WHERE id=$1", [artifact.id]);
   await assert.rejects(validation.readArtifact(operator, f.r.id, artifact.id), /retention expired/);
   assert.equal(await validation.expireArtifacts(), 1); assert.equal(await validation.expireArtifacts(), 0);
@@ -528,7 +535,7 @@ test('external storage binds artifact URLs to safe public locations; private rou
     const w = await current(f.w.id);
     assert.equal(w.evidence.at(-1)?.result, 'fail');
     assert.deepEqual(w.evidence.at(-1)?.artifacts, [{ kind: 'report', label: 'report', digest, availability: 'missing' }]);
-    assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
+    assert.equal(proven(w, f.proof), false);
   } finally { await cleanup(f); }
   const ok = await fixture(), okCommand = await start(ok);
   try {

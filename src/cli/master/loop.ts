@@ -1,13 +1,11 @@
 // Concern: `graphyard master run` — wiring the durable loop and automatic dispatch to their effects.
-import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
-import { daemonExecutor, liveMasterConfig, mergeExecutor } from '../../master.js';
+import { liveMasterConfig } from '../../master.js';
 import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../../master-daemon.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../../auto-dispatch.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
 import { loopPresenceHeader } from '../../model/executor-presence.js';
 import { unhandled, type MasterSession } from './session.js';
-import { timedApi } from '../../master/timings.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 export async function loopCommand(session: MasterSession): Promise<unknown> {
@@ -22,19 +20,12 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     assertProtocol(coordinator);
     const state = await readDaemonState(root, master);
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
-    // server answers with whole documents); the guarded merge re-reads the full documents.
+    // server answers with whole documents). GitHub merges; the loop runs no merge of its own.
     const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
     // Each read also names the loop to the control plane (GY-916), which then knows the merger lives.
     const loopInterval = () => values.interval ? intervalSeconds : current().run.intervalSeconds;
     const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()) });
-    const executor = daemonExecutor(coordinator.actor.id);
-    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation, executor });
-    // The guarded merge's reads and writes are timed against the cycle that made them (GY-377);
-    // daemonEffects times its own.
-    const timedRead = timedApi(masterApi), timedMutation = timedApi(masterMutation, 'POST');
-    const guardedMerge: typeof effects.merge = work => mergeExecutor(current(), () => timedRead('work-snapshot'), timedMutation, executor, randomUUID())(work);
-    // The loop outlives deployments: every guarded merge re-reads the server's protocol first.
-    effects.merge = async work => { assertProtocol(await timedRead('status')); return guardedMerge(work); };
+    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation });
     // Automatic dispatch runs beside the cycle on a shorter cadence; it stops with the daemon.
     const dispatchCursor = await readDispatchCursor(root, master);
     const stopping = new AbortController();

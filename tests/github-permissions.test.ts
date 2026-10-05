@@ -26,7 +26,7 @@ test('shortfalls compare granted levels with the declaration, name the blocked f
     [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'] }]);
   assert.deepEqual(blockedFeatures(missing), ['merge-queue']);
   const sentence = describeShortfall(missing[0], 'graphyard-owner-repo', 'https://github.com/settings/installations/42');
-  assert.match(sentence, /^App graphyard-owner-repo lacks Contents: write \(installed with read\), which the merge queue needs to publish speculative merge-queue tips/);
+  assert.match(sentence, /^App graphyard-owner-repo lacks Contents: write \(installed with read\), which branch refresh needs to push base refreshes/);
   assert.match(sentence, /accept the pending permission request at https:\/\/github\.com\/settings\/installations\/42$/);
   // A permission that is absent altogether blocks every feature that names it, at the highest level asked.
   const bare = permissionShortfalls({ metadata: 'read' }, controlPlanePermissions);

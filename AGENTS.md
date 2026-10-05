@@ -66,7 +66,7 @@ session carries that authority.
 Graphyard autonomy contract: act without asking. Never ask a human for review, approval or confirmation, and never ask a human to run a command an agent identity may run; the control plane requests independent review, proof and approval on its own. When you genuinely cannot continue, record the blocker in Graphyard with its CLI (blocked, park, or master decide) rather than asking in chat. Stop for a human only before an irreversible destructive action.
 
 A dedicated master coordinator must keep cycling: status, dispatch ready work,
-shepherd review and proof collection, guarded merge, then deployment verification.
+shepherd review, reconcile what GitHub merged, then deployment verification.
 Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
 external blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment
@@ -119,7 +119,7 @@ launches the configured reviewer profile and a producer session for each of them
 bot reviewers in `run.awaitReviewers` (default the Codex connector) to review the
 head, so their findings are judged in the same round; the wait is named in `master
 status`, and a failed GitHub read, or one unanswered within 5 seconds, launches at once. A head change cancels those
-sessions and requests the new head afresh unless the merge queue carried the
+sessions and requests the new head afresh unless the carry rules carried the
 approval or the proof. You handle
 findings, rework and merges; you never launch reviews or producers by hand. `master
 status` shows, per candidate, what is requested, what is running and since when, and
@@ -147,8 +147,8 @@ decisions above, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
 
-Keep cycling: status, dispatch ready work, shepherd review and proof collection,
-guarded merge, then deployment verification. Repeat until both conditions hold:
+Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub
+merged, then deployment verification. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
 Graphyard; and (2) every merged change is deployed and live-verified against the exact
 deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
@@ -162,18 +162,15 @@ idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 
 Items are system-driven unless created with `"systemDriven": false`: for them
-`graphyard master run` dispatches, launches review and proof producers, requests
-merge decisions and performs the guarded merge, and the master CLI refuses those hand
-actions, naming the loop step. The loop drives an item created `"systemDriven": false`
+`graphyard master run` dispatches and launches review, and the master CLI refuses those
+hand actions, naming the loop step. The loop drives an item created `"systemDriven": false`
 the same way; opting out only also allows the hand actions, so check master status
-for the loop's pending decision or merge before taking one and never request a second.
-Check the automatic-merge preference in master status. When disabled, each merge needs
-an approved merge decision, which the loop requests; a hand
-`graphyard master decide GY-N merge` is only for an opted-out item the loop has not
-requested it for, and `graphyard master merge` refuses a candidate the approver agent
-has not approved. Otherwise opted-out items may also use `graphyard master merge --all`. The guarded merge rechecks the exact current
-candidate, every configured gate, and GitHub state immediately before merging. Unapproved decisions, stale observations, failures, and
-changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
+for the loop's pending step before taking one and never request a second.
+GitHub merges: a pull request whose build, review and required checks pass on its head
+is merged by GitHub on its branch protection, and the loop only records the delivery.
+There is no Graphyard merge to run. A merge of a head whose gates had not passed is held
+as a violation until a two-party `graphyard master decide GY-N merge` reconciles it.
+Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.
 <!-- /graphyard-master -->

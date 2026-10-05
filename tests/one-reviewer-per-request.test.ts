@@ -124,7 +124,7 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   // The stateless executor's request-review handler, launching the other profile for the same request.
   const handlers = controlPlaneHandlers(() => config, {
     snapshot: async () => ({ work: [item], now: new Date().toISOString() }), mutate: async () => ({}), agents: () => agents,
-    workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}), observeDeployment: async () => ({}) as any,
+    workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}), launchProducer: async () => ({}), observeDeployment: async () => ({}) as any,
     launchReview: (work, dispatch, herdr, observedAt) => launch('dispatcher', 'second-reviewer')(work, dispatch, herdr, observedAt),
   });
   const action = { id: 'action-1', work: item.id, key: item.key, gate: 'review', kind: 'request-review', inputs: { kind: 'request-review', provider: 'github', requestId: request.id, pr: 119, sha: H, baseSha: B, policyRevision: 3 } } as unknown as ActionRow;
