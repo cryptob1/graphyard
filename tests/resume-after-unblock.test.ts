@@ -4,7 +4,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs } from '../src/daemon/cycle-sessions.js';
+import * as cycleSessions from '../src/daemon/cycle-sessions.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -190,7 +190,9 @@ test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompt
     await runCycle(master, fresh, run.effects, () => clock + minutes(65));
     assert.equal(run.log.prompts.length, 1);
     assert.equal(run.log.capacity.length, 0, 'activity after the re-prompt means it is not handed on');
-    assert.ok(idleLeaseMs === minutes(25) && idleReclaimMs === minutes(45) && idleRepromptGraceMs === minutes(10));
+    // A namespace read, so this file still loads on a base that predates the GY-1319 bounds.
+    const bounds = cycleSessions as Record<string, unknown>;
+    assert.deepEqual([bounds.idleLeaseMs, bounds.idleReclaimMs, bounds.idleRepromptGraceMs], [minutes(25), minutes(45), minutes(10)]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
