@@ -646,25 +646,25 @@ async function moveAside(path: string, names: string[], aside: string) {
   }
 }
 
+/** Where a reused path's unrecorded untracked files go (GY-1274): `<common git dir>/graphyard-preserved/<worktree>/<time>`, which outlives the worktree's own git dir; an unresolvable git dir rejects before anything changes. */
+async function keptDirectory(run: ChildRun, holderPath: string, at: string): Promise<string> {
+  const common = String(await run('git', ['-C', holderPath, 'rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+  if (!common) throw new Error(`Cannot keep the untracked files of ${holderPath}: git named no common git dir for it`);
+  return resolve(common, 'graphyard-preserved', basename(holderPath), at.replace(/[:.]/g, '-'));
+}
+
 /**
  * Free the item's branch for a new attempt's worktree (GY-860 AC-1). When a session worktree
- * directly under `.graphyard/worktrees` still holds it — checked out, or stopped inside a rebase
- * naming it, a merge, a squash merge, a cherry-pick or a revert — the holder's state is
- * captured, the operation is ended, and its HEAD is detached, so `git worktree add` on the branch
- * succeeds. A checkout anywhere else (the coordinator's own, or an operator's) is never touched
- * here (GY-1059): `reserveReleasingHold` names it on a first attempt, and a rework leaves it to
- * the GY-1078 reclaim, which detaches a clean one as rework always did. The branch ref itself
- * never moves: a cherry-pick or revert sequence is quit where it stands rather than aborted back
- * to where it began. A stopped `git am` is left to the GY-1078 reclaim. A locked record whose
- * directory is gone, which `worktree prune` keeps, is unlocked and pruned. A holder that is the new
- * attempt's own path (the same epoch allocated again after a failed attempt) keeps its worktree: it
- * is forced back onto the branch, with what a failed preparation left there cleaned away, and
- * returned with `reused`, so the caller skips creation instead of failing on the existing path.
- * That clean deletes only what the record holds in full (GY-1215): an untracked file it merely
- * names is first moved into `graphyard-preserved/` in that worktree's git dir, which it names.
- * `register` receives the captured state (or null when nothing holds the branch) before anything
- * is changed, so a refused registration leaves the holder as it was and nothing is released
- * unrecorded. Probes answer empty on a refusal; a step that changes the holder and fails rejects.
+ * directly under `.graphyard/worktrees` holds it — checked out, or stopped inside a rebase naming
+ * it, a merge, a squash merge, a cherry-pick or a revert — its state is captured, the operation
+ * ended and its HEAD detached, so `git worktree add` succeeds. Any other checkout is never touched
+ * (GY-1059), nor a stopped `git am` (left to the GY-1078 reclaim); the branch ref never moves. A
+ * locked record whose directory is gone is unlocked and pruned. The new attempt's own path keeps
+ * its worktree, forced back onto the branch and returned with `reused`; its clean deletes only
+ * what the record holds in full, moving merely named untracked files aside (GY-1215).
+ * `register` receives the captured state (or null) before anything changes, so a refused
+ * registration leaves the holder as it was. Probes answer empty on a refusal; a step that changes
+ * the holder and fails rejects.
  */
 export async function releaseHeldBranch(root: string, branch: string, targetPath: string, run: ChildRun,
   register: (preserved: PreservedWorktree | null) => Promise<unknown> = async () => {}): Promise<{ preserved: PreservedWorktree; reused: boolean } | null> {
@@ -701,12 +701,11 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     const recorded = op === 'rebase' || op === 'merge' || op === 'cherry-pick' ? op : null;
     const tracked = `${op && !recorded ? `-- stopped inside git ${op} --\n` : ''}${await trackedDiff(run, holderPath)}`;
     const reused = resolve(holderPath) === resolve(targetPath), at = new Date().toISOString();
-    // Where a reused path's unrecorded untracked files go before the clean: outside the working tree, inside its own git dir.
-    const aside = resolve(holderPath, (await git(holderPath, 'rev-parse', '--git-path', 'graphyard-preserved')).trim(), at.replace(/[:.]/g, '-'));
+    const aside = reused ? await keptDirectory(run, holderPath, at) : '';
     const keptNote = `\n-- untracked files not recorded in full are kept under ${aside} --`;
     const heading = `${tracked ? '\n' : ''}-- untracked files --\n`;
-    // The heading and the note count toward the limit, so no file recorded in full is cut by the truncation below.
-    const untracked = await untrackedContents(git, holderPath, diffLimit - tracked.length - heading.length - (reused ? keptNote.length : 0));
+    // The heading, note and truncation suffix count toward the limit, so a cut never ends a file recorded in full (GY-1274).
+    const untracked = await untrackedContents(git, holderPath, diffLimit - tracked.length - heading.length - truncated.length - (reused ? keptNote.length : 0));
     const note = reused && untracked.unrecorded.length ? keptNote : '', room = diffLimit - note.length;
     const fullDiff = tracked + (untracked.text && tracked.length < diffLimit ? `${heading}${untracked.text}` : '');
     const head = (await git(holderPath, 'rev-parse', 'HEAD')).trim(), refs = (await git(holderPath, 'show-ref')).trim().slice(0, 20_000);
