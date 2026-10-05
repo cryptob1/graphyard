@@ -414,7 +414,6 @@
     "tests/observation-throughput.test.ts": 11730,
     "tests/onboarding.test.ts": 1390,
     "tests/one-reviewer-per-request.test.ts": 2730,
-    "tests/optimistic-exclude.test.ts": 966,
     "tests/optimistic-merge.test.ts": 993,
     "tests/orphan-supervisor.test.ts": 2076,
     "tests/overlap-scheduler.test.ts": 1647,

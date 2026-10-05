@@ -25,8 +25,7 @@ pull request and head):
 
 ## Filed once the item ships
 
-The item ships when it is delivered and, if it was merged optimistically, once main's required
-suite passes on the merge (until then a failing suite reverts it). The loop then files the held
+The item ships when it is delivered. The loop then files the held
 findings not promoted as one follow-up item, `Follow-ups from the approved review of GY-N (PR #M)`,
 depending on nothing (`POST /api/work/GY-N/followups` with `{"ship":true}`), once: a retried filing
 answers the same item, and a filing refused with one unchanged client error stops after 10
