@@ -47,7 +47,7 @@ async function syncWork({ api, print, base: serverUrl, args }: CliContext, work:
   let baseTip: string, mergeBase: string, detail = '';
   if (continuing) { baseTip = git('rev-parse', 'MERGE_HEAD'); mergeBase = git('merge-base', 'HEAD', baseTip); }
   else {
-    git('fetch', '--quiet', 'origin');
+    git('fetch', '--quiet', '--no-tags', 'origin');
     baseTip = git('rev-parse', `refs/remotes/origin/${baseBranch}`); mergeBase = git('merge-base', 'HEAD', baseTip);
     const merge = quietly('merge', '--no-commit', '--no-edit', `refs/remotes/origin/${baseBranch}`);
     detail = `${merge.stdout}${merge.stderr}`.trim();
