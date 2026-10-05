@@ -1,10 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import type { CliContext } from './context.js';
-import { syncPushBodyLimit, syncPushTooLarge, type SyncPushOutcome, type SyncPushRequest } from '../sync.js';
+import { syncPushBodyLimit, syncPushTooLarge, workflowsDirectory, type SyncPushOutcome, type SyncPushRequest } from '../sync.js';
 
 type Git = (...args: string[]) => string;
 type GitBytes = (...args: string[]) => Buffer;
+
+type Quietly = (...gitArgs: string[]) => { status: number | null; stdout: string };
+
+/** The workflow files a two-parent merge at HEAD takes from the base it merged: changed against its first parent, matching its second. */
+export function baseWorkflowChanges(quietly: Quietly, head: string): string[] {
+  if (quietly('rev-parse', '-q', '--verify', `${head}^2`).status !== 0) return [];
+  const changed = quietly('diff', '--name-only', '-z', '--no-renames', `${head}^1`, head, '--', workflowsDirectory).stdout.split('\0').filter(Boolean);
+  const fromBase = new Set(quietly('diff', '--name-only', '-z', '--no-renames', `${head}^2`, head, '--', workflowsDirectory).stdout.split('\0').filter(Boolean));
+  return changed.filter(path => !fromBase.has(path)).sort();
+}
+
+/**
+ * A merge that brings the base's workflow changes is the push GitHub may refuse for want of
+ * `workflows`; sync never pushes, so its `next` names the control-plane route up front (GY-1203).
+ */
+export const workflowPushNext = (key: string, baseBranch: string, head: string, workflows: string[]) => workflows.length
+  ? ` This merge carries origin/${baseBranch}'s workflow changes (${workflows.join(', ')}); if GitHub refuses the push "without \`workflows\` permission", run sync ${key} --push-via-control-plane ${head.slice(0, 12)} instead of retrying.`
+  : '';
 
 /** A git identity line's time, `SECONDS ±HHMM`, as the ISO 8601 date in that zone GitHub's commit API takes. */
 export function gitDateToIso(seconds: string, zone: string): string {
